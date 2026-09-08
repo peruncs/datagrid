@@ -15,6 +15,12 @@ package org.eclipse.datagrid.cluster.nodelibrary.helidon;
  */
 
 
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.HttpResponseException;
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterRestRequestController;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations;
@@ -23,6 +29,7 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfig
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetGc;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetHealth;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetHealthReady;
+import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetReplicationMetrics;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetStorageBytes;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetUpdates;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostActivateDistributorFinish;
@@ -32,13 +39,6 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfig
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostResumeUpdates;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostUpdates;
 import org.eclipse.microprofile.openapi.annotations.parameters.RequestBody;
-
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.GET;
-import jakarta.ws.rs.POST;
-import jakarta.ws.rs.Path;
-import jakarta.ws.rs.Produces;
 
 @ApplicationScoped
 @Path(StorageNodeRestRouteConfigurations.ROOT_PATH)
@@ -99,6 +99,14 @@ public class HelidonClusterController
 	public String getStorageBytes() throws HttpResponseException
 	{
 		return this.requestController.getStorageBytes();
+	}
+
+	@GET
+	@Path(GetReplicationMetrics.PATH)
+	@Produces(GetReplicationMetrics.PRODUCES)
+	public String getReplicationMetrics() throws HttpResponseException
+	{
+		return this.requestController.getReplicationMetrics();
 	}
 
 	@POST

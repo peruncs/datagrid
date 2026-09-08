@@ -14,16 +14,13 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-
-import org.apache.kafka.common.TopicPartition;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.serializer.afs.types.AWritableFile;
-import org.eclipse.serializer.chars.VarString;
-import org.eclipse.serializer.collections.EqHashTable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -66,30 +63,18 @@ public interface StoredMessageInfoManager extends AutoCloseable
         }
 
         @Override
-        public MessageInfo get() throws NodelibraryException
+        public synchronized MessageInfo get() throws NodelibraryException
         {
             this.ensureInit();
             return this.messageInfo;
         }
 
         @Override
-        public void set(final MessageInfo messageInfo) throws NodelibraryException
+        public synchronized void set(final MessageInfo messageInfo) throws NodelibraryException
         {
             this.ensureInit();
 
-            final var str = VarString.New();
-            str.add(messageInfo.messageIndex()).lf();
-            messageInfo.kafkaPartitionOffsets()
-                .forEach(
-                    entry -> str.add(entry.key().topic())
-                        .add(',')
-                        .add(entry.key().partition())
-                        .add(',')
-                        .add(entry.value().longValue())
-                        .lf()
-                );
-
-            final var buffer = ByteBuffer.wrap(str.encode());
+            final var buffer = ByteBuffer.wrap(MessageInfoCodec.serializeBytes(messageInfo));
 
             try
             {
@@ -123,8 +108,7 @@ public interface StoredMessageInfoManager extends AutoCloseable
             if (createdNew)
             {
                 LOG.debug("New message info file has been created.");
-                final EqHashTable<TopicPartition, Long> partitionOffsets = EqHashTable.New();
-                this.messageInfo = MessageInfo.New(Long.MIN_VALUE, partitionOffsets.immure());
+                this.messageInfo = MessageInfo.New(Long.MIN_VALUE);
             }
             else
             {
@@ -142,8 +126,7 @@ public interface StoredMessageInfoManager extends AutoCloseable
                 if (fileBytesBuffer.remaining() == 0)
                 {
                     LOG.debug("Previous message info file is empty");
-                    final EqHashTable<TopicPartition, Long> partitionOffsets = EqHashTable.New();
-                    this.messageInfo = MessageInfo.New(Long.MIN_VALUE, partitionOffsets.immure());
+                    this.messageInfo = MessageInfo.New(Long.MIN_VALUE);
                 }
                 else
                 {
@@ -163,7 +146,7 @@ public interface StoredMessageInfoManager extends AutoCloseable
         }
 
         @Override
-        public void close()
+        public synchronized void close()
         {
             if (this.closed)
             {

@@ -15,14 +15,15 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
+
+import java.nio.ByteBuffer;
+
 import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
-import java.nio.ByteBuffer;
-
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
-
+/** One ordered chunk of a type-dictionary or Store-binary message. */
 public interface StorageBinaryDataPacket
 {
 	public MessageType messageType();

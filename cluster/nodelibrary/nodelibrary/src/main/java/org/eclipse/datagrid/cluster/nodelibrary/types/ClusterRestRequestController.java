@@ -15,8 +15,6 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
-import java.util.function.Supplier;
-
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.BadRequestException;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.HttpResponseException;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.InternalServerErrorException;
@@ -24,9 +22,17 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfig
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.function.Supplier;
+
 import static org.eclipse.serializer.util.X.notNull;
 import static org.eclipse.serializer.util.X.unbox;
 
+/**
+ * Transport-neutral HTTP operation facade used by the framework adapters.
+ * Implementations translate storage, replication, and provider failures into
+ * the nodelibrary's HTTP exception types; adapters only supply annotations and
+ * asynchronous execution policy.
+ */
 public interface ClusterRestRequestController extends AutoCloseable
 {
 	boolean getDistributor() throws HttpResponseException;
@@ -41,6 +47,12 @@ public interface ClusterRestRequestController extends AutoCloseable
 
 	// TODO: Rename to get statistics or monitoring etc.
 	String getStorageBytes() throws HttpResponseException;
+
+	/** Returns Prometheus metrics including provider id, state, sequence, and lag. */
+	default String getReplicationMetrics() throws HttpResponseException
+	{
+		return "";
+	}
 
 	void postBackup(PostBackup.Body body) throws HttpResponseException;
 
@@ -137,16 +149,61 @@ public interface ClusterRestRequestController extends AutoCloseable
 			return this.handleRequest(() ->
 			{
 				final long storageSizeBytes = this.nodeManager.readStorageSizeBytes();
-				return String.format(
-					"""
+					return String.format(
+						"""
 						# HELP cluster_storage_used_bytes How many bytes are currently used up by the storage.
 						# TYPE cluster_storage_used_bytes gauge
 						cluster_storage_used_bytes{namespace="%s",pod="%s"} %s""",
-					this.properties.myNamespace(),
-					this.properties.myPodName(),
+						metricLabel(this.properties.myNamespace()),
+						metricLabel(this.properties.myPodName()),
 					storageSizeBytes
 				);
 			});
+		}
+
+		@Override
+		public String getReplicationMetrics() throws HttpResponseException
+		{
+			return this.handleRequest(() ->
+			{
+				final long current = this.nodeManager.getCurrentMessageIndex();
+				final long latest = this.nodeManager.getLatestMessageIndex();
+				final long lag = Math.max(0, latest - current);
+				final String transport = metricLabel(this.nodeManager.getReplicationTransport());
+				final String state = this.nodeManager.getReplicationState().name().toLowerCase(java.util.Locale.ROOT);
+				return String.format(
+					"# HELP cluster_replication_current_sequence Last committed sequence applied locally.\n" +
+					"# TYPE cluster_replication_current_sequence gauge\n" +
+					"cluster_replication_current_sequence{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_latest_sequence Latest writer sequence observed.\n" +
+					"# TYPE cluster_replication_latest_sequence gauge\n" +
+					"cluster_replication_latest_sequence{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_lag_transactions Transactions behind latest.\n" +
+					"# TYPE cluster_replication_lag_transactions gauge\n" +
+					"cluster_replication_lag_transactions{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_state Provider lifecycle state (one label is 1).\n" +
+					"# TYPE cluster_replication_state gauge\n" +
+					"cluster_replication_state{transport=\"%s\",state=\"%s\"} 1\n" +
+					"# HELP cluster_replication_ready Whether the node is ready.\n" +
+					"# TYPE cluster_replication_ready gauge\n" +
+					"cluster_replication_ready{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_healthy Whether the node is healthy.\n" +
+					"# TYPE cluster_replication_healthy gauge\n" +
+					"cluster_replication_healthy{transport=\"%s\"} %d",
+					transport, current, transport, latest, transport, lag, transport, state,
+					transport, this.nodeManager.isReady() ? 1 : 0,
+					transport, this.nodeManager.isHealthy() ? 1 : 0
+				);
+			});
+		}
+
+		private static String metricLabel(final String value)
+		{
+			return (value == null ? "unknown" : value)
+				.replace("\\", "\\\\")
+				.replace("\"", "\\\"")
+				.replace("\n", "\\n")
+				.replace("\r", "\\r");
 		}
 
 		@Override

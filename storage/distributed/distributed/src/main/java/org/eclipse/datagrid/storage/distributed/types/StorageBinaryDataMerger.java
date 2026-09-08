@@ -23,18 +23,19 @@ import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundati
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDescription;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
-import org.eclipse.serializer.util.X;
 import org.eclipse.serializer.util.logging.Logging;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/** Applies imported Store binaries and schedules object-graph refresh work. */
 public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 {
-	public static StorageBinaryDataMerger New(
+	static StorageBinaryDataMerger New(
 		final BinaryPersistenceFoundation<?> foundation,
 		final StorageConnection storage,
 		final ObjectGraphUpdateHandler objectGraphUpdateHandler
@@ -47,7 +48,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 		);
 	}
 
-	public static class Default implements StorageBinaryDataMerger
+	class Default implements StorageBinaryDataMerger
 	{
 		private final static Logger logger = Logging.getLogger(StorageBinaryDataMerger.class);
 
@@ -71,7 +72,15 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 		public synchronized void receiveData(final Binary data)
 		{
 			logger.debug("Importing data");
-			this.storage.importData(X.Enum(data.buffers()));
+			final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, data.buffers());
+			final AtomicBoolean released = new AtomicBoolean();
+			final Runnable release = () ->
+			{
+				if (released.compareAndSet(false, true))
+				{
+					StorageBinaryDataImporter.release(ownedBuffers);
+				}
+			};
 
 			final ObjectGraphUpdater updater = () ->
 			{
@@ -80,19 +89,29 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 				final ObjectMaterializer materializer = new ObjectMaterializer(this.storage.persistenceManager());
 
 				final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
-				for (final ByteBuffer buffer : data.buffers())
-				{
-					final long address = XMemory.getDirectByteBufferAddress(buffer);
-					iterator.iterateEntityRawData(
-						address,
-						address + buffer.limit(),
-						materializer
-					);
-				}
-
-				materializer.materialize();
+				try
+					{
+						for (final ByteBuffer buffer : ownedBuffers)
+						{
+							final long address = XMemory.getDirectByteBufferAddress(buffer);
+							iterator.iterateEntityRawData(address, address + buffer.limit(), materializer);
+						}
+						materializer.materialize();
+					}
+					finally
+					{
+						release.run();
+					}
 			};
-			this.objectGraphUpdateHandler.objectGraphUpdateAvailable(updater);
+			try
+			{
+				this.objectGraphUpdateHandler.objectGraphUpdateAvailable(updater);
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				release.run();
+				throw failure;
+			}
 		}
 
 		@Override

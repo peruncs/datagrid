@@ -15,14 +15,6 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.function.Consumer;
-import java.util.function.Predicate;
-
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.StorageLimitReachedException;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.UnreachableCodeException;
@@ -30,38 +22,20 @@ import org.eclipse.serializer.afs.types.AFile;
 import org.eclipse.serializer.collections.Set_long;
 import org.eclipse.serializer.collections.types.XGettingEnum;
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.types.PersistenceCommitListener;
-import org.eclipse.serializer.persistence.types.PersistenceLoader;
-import org.eclipse.serializer.persistence.types.PersistenceLocalObjectIdRegistry;
-import org.eclipse.serializer.persistence.types.PersistenceManager;
-import org.eclipse.serializer.persistence.types.PersistenceObjectIdRequestor;
-import org.eclipse.serializer.persistence.types.PersistenceObjectRegistrationListener;
-import org.eclipse.serializer.persistence.types.PersistenceObjectRegistry;
-import org.eclipse.serializer.persistence.types.PersistenceRegisterer;
-import org.eclipse.serializer.persistence.types.PersistenceRootsView;
-import org.eclipse.serializer.persistence.types.PersistenceSource;
-import org.eclipse.serializer.persistence.types.PersistenceStorer;
+import org.eclipse.serializer.persistence.types.*;
 import org.eclipse.serializer.persistence.types.PersistenceStorer.Creator;
-import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
-import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
-import org.eclipse.serializer.persistence.types.PersistenceTypeHandler;
-import org.eclipse.serializer.persistence.types.Storer;
 import org.eclipse.serializer.reference.Lazy;
-import org.eclipse.store.storage.types.Database;
-import org.eclipse.store.storage.types.StorageAdjacencyDataExporter;
-import org.eclipse.store.storage.types.StorageConfiguration;
-import org.eclipse.store.storage.types.StorageConnection;
-import org.eclipse.store.storage.types.StorageEntityCacheEvaluator;
-import org.eclipse.store.storage.types.StorageEntityTypeExportFileProvider;
-import org.eclipse.store.storage.types.StorageEntityTypeExportStatistics;
-import org.eclipse.store.storage.types.StorageEntityTypeHandler;
-import org.eclipse.store.storage.types.StorageLiveFileProvider;
-import org.eclipse.store.storage.types.StorageManager;
-import org.eclipse.store.storage.types.StorageRawFileStatistics;
-import org.eclipse.store.storage.types.StorageTypeDictionary;
+import org.eclipse.store.storage.types.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -260,6 +234,18 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 
 		@Override
+		public boolean issueStorageFlush()
+		{
+			return this.delegate.issueStorageFlush();
+		}
+
+		@Override
+		public StorageIntegrityCheckResult issueIntegrityCheck(final long nanoTimeBudget)
+		{
+			return this.delegate.issueIntegrityCheck(nanoTimeBudget);
+		}
+
+		@Override
 		public StorageRawFileStatistics createStorageStatistics()
 		{
 			return this.delegate.createStorageStatistics();
@@ -328,11 +314,10 @@ public interface ClusterStorageManager<T> extends StorageManager
 			this.delegate.accessUsageMarks(logic);
 		}
 
-		@SuppressWarnings("unchecked")
 		@Override
 		public Lazy<T> root() throws NodelibraryException
 		{
-			return (Lazy<T>)this.delegate.root();
+			return this.delegate.root();
 		}
 
 		@Override
@@ -351,7 +336,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 
 	class Default<T> implements ClusterStorageManager<T>
 	{
-		private static final Logger LOG = LoggerFactory.getLogger(Wrapper.class);
+		private static final Logger LOG = LoggerFactory.getLogger(Default.class);
 		private final StorageSizeValidation storageSizeValidation;
 		private final StorageManager delegate;
 		private final ShutdownCallback shutdownCallback;
@@ -540,6 +525,20 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 
 		@Override
+		public boolean issueStorageFlush()
+		{
+			this.validateState();
+			return this.exitOnThrow(this.delegate::issueStorageFlush);
+		}
+
+		@Override
+		public StorageIntegrityCheckResult issueIntegrityCheck(final long nanoTimeBudget)
+		{
+			this.validateState();
+			return this.exitOnThrow(() -> this.delegate.issueIntegrityCheck(nanoTimeBudget));
+		}
+
+		@Override
 		public long operationModeTime()
 		{
 			return this.delegate.operationModeTime();
@@ -661,11 +660,10 @@ public interface ClusterStorageManager<T> extends StorageManager
 			return this.delegate.unmarkUsedFor(instance);
 		}
 
-		@SuppressWarnings("unchecked")
 		@Override
 		public Lazy<T> root()
 		{
-			return (Lazy<T>)this.delegate.root();
+			return this.delegate.root();
 		}
 
 		@Override
@@ -866,6 +864,12 @@ public interface ClusterStorageManager<T> extends StorageManager
 			{
 				ClusterStorageManager.Default.this.validateState();
 				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::objectRegistry);
+			}
+
+			@Override
+			public Object objectRegistryMonitor()
+			{
+				return this.delegate.objectRegistryMonitor();
 			}
 
 			@Override

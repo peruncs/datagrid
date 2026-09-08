@@ -15,14 +15,6 @@ package org.eclipse.datagrid.storage.distributed.kafka.types;
  */
 
 
-import static org.eclipse.serializer.chars.XChars.notEmpty;
-import static org.eclipse.serializer.util.X.notNull;
-
-import java.nio.ByteBuffer;
-import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -30,11 +22,21 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
-
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacketAcceptor;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataReceiver;
+
+import java.nio.ByteBuffer;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.eclipse.serializer.chars.XChars.notEmpty;
+import static org.eclipse.serializer.util.X.notNull;
 
 public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 {
@@ -75,6 +77,8 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		private final String clientId;
 		private final StorageBinaryDataPacketAcceptor packetAcceptor;
 		private final AtomicBoolean active = new AtomicBoolean();
+		private volatile Thread thread;
+		private volatile boolean disposed;
 
 		Default(
 			final Properties kafkaProperties,
@@ -91,13 +95,14 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		}
 
 		@Override
-		public void start()
+		public synchronized void start()
 		{
-			this.active.set(true);
+			if (this.disposed) throw new IllegalStateException("Kafka client is disposed");
+			if (this.active.getAndSet(true)) return;
 
-			final Thread thread = new Thread(this::run);
-			thread.setDaemon(true);
-			thread.start();
+			this.thread = new Thread(this::run, "datagrid-kafka-reader");
+			this.thread.setDaemon(true);
+			this.thread.start();
 		}
 
 		private void run()
@@ -115,9 +120,17 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 				consumer.subscribe(Collections.singletonList(this.topicName));
 				while (this.active.get())
 				{
-					this.consume(consumer.poll(Duration.ofMillis(Long.MAX_VALUE)));
+					this.consume(consumer.poll(Duration.ofMillis(250L)));
 					consumer.commitSync();
 				}
+			}
+			catch (final RuntimeException failure)
+			{
+				if (this.active.get()) throw failure;
+			}
+			finally
+			{
+				this.active.set(false);
 			}
 		}
 
@@ -147,9 +160,25 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		}
 
 		@Override
-		public void dispose()
+		public synchronized void dispose()
 		{
+			if (this.disposed) return;
+			this.disposed = true;
 			this.active.set(false);
+			final Thread current = this.thread;
+			this.thread = null;
+			if (current != null && current != Thread.currentThread())
+			{
+				current.interrupt();
+				try
+				{
+					current.join(5_000L);
+				}
+				catch (final InterruptedException interrupted)
+				{
+					Thread.currentThread().interrupt();
+				}
+			}
 		}
 
 	}

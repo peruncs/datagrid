@@ -15,12 +15,16 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 
-import static org.eclipse.serializer.util.X.notNull;
-
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfer;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 
+import static org.eclipse.serializer.util.X.notNull;
+
+/**
+ * Persistence target decorator that mirrors each accepted Store binary to a
+ * provider-neutral distributor.
+ */
 public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binary>
 {
 	public static StorageBinaryTargetDistributing New(

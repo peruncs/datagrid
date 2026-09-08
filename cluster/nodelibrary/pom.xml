@@ -22,6 +22,8 @@
 
 	<modules>
 		<module>nodelibrary</module>
+		<module>kafka</module>
+		<module>aeron</module>
 		<module>micronaut</module>
 		<module>springboot</module>
 		<module>helidon</module>

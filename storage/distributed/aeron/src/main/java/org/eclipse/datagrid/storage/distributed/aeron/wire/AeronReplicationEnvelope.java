@@ -1,0 +1,393 @@
+package org.eclipse.datagrid.storage.distributed.aeron.wire;
+
+/*-
+ * #%L
+ * Eclipse Data Grid Storage Distributed Aeron
+ * %%
+ * Copyright (C) 2025 MicroStream Software
+ * %%
+ * This program and the accompanying materials are made
+ * available under the terms of the Eclipse Public License 2.0
+ * which is available at https://www.eclipse.org/legal/epl-2.0/
+ *
+ * SPDX-License-Identifier: EPL-2.0
+ * #L%
+ */
+
+import org.agrona.DirectBuffer;
+import org.agrona.MutableDirectBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.eclipse.datagrid.storage.distributed.types.Crc32c;
+
+import java.nio.ByteOrder;
+import java.util.UUID;
+import java.util.zip.CRC32C;
+
+/**
+ * Versioned DataGrid wire envelope carried by Aeron.
+ *
+ * <p>The envelope deliberately keeps the Eclipse Serializer output opaque:
+ * Serializer remains the canonical object-graph/binary format and this class
+ * only adds routing, ordering, chunk, and checksum metadata. The fixed
+ * 64-byte header is followed by one chunk. Aeron may fragment that message to
+ * fit the configured MTU and reassembles it before the reader sees it.</p>
+ *
+ * <p>Commit and abort markers contain no payload. Readers stage chunks by
+ * sequence and release a Store binary only after the matching commit checksum
+ * validates, so a partial or reordered transaction cannot enter the Store.</p>
+ *
+ * <p>CRC32C is an accidental-corruption and torn-frame detector, not
+ * authentication. Channel isolation or an authenticated transport remains
+ * required when replication crosses an untrusted network.</p>
+ */
+public final class AeronReplicationEnvelope
+{
+	/* decodeView is invoked by one polling thread at a time; do not re-enter CRC
+	 * computation from a callback on that thread while this instance is active. */
+	private static final ThreadLocal<CRC32C> DIRECT_CRC = ThreadLocal.withInitial(CRC32C::new);
+	private static final int CRC_SCRATCH_BYTES = 16 * 1024;
+	private static final ThreadLocal<byte[]> CRC_SCRATCH =
+		ThreadLocal.withInitial(() -> new byte[CRC_SCRATCH_BYTES]);
+	public static final int MAGIC = 0x44474152; // DGAR
+	public static final short VERSION = 1;
+	public static final int HEADER_LENGTH = 64;
+
+	public enum Kind
+	{
+		TYPE_DICTIONARY(1),
+		STORE_BINARY(2),
+		COMMIT(3),
+		ABORT(4);
+
+		private final int code;
+		Kind(final int code) { this.code = code; }
+		private static Kind fromCode(final int code)
+		{
+			for (final Kind kind : values()) if (kind.code == code) return kind;
+			throw new IllegalArgumentException("unknown envelope kind=" + code);
+		}
+	}
+
+	private AeronReplicationEnvelope()
+	{
+	}
+
+	/** Encodes one validated envelope header and its opaque payload chunk. */
+	public static byte[] encode(
+		final UUID clusterId,
+		final long epoch,
+		final long sequence,
+		final Kind kind,
+		final int payloadLength,
+		final int chunkIndex,
+		final int chunkCount,
+		final int chunkOffset,
+		final int commitCrc32c,
+		final byte[] payload
+	)
+	{
+		if (payload == null) throw new NullPointerException("payload");
+		final byte[] encoded = new byte[Math.addExact(HEADER_LENGTH, payload.length)];
+		final UnsafeBuffer target = new UnsafeBuffer(encoded);
+		encode(target, 0, clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
+			chunkOffset, commitCrc32c, new UnsafeBuffer(payload), 0, payload.length);
+		return encoded;
+	}
+
+	/**
+	 * Encodes directly into a caller-owned Agrona buffer. This is the hot-path
+	 * overload used by the publisher; it performs no temporary heap allocation.
+	 *
+	 * @param target destination buffer
+	 * @param targetOffset destination offset
+	 * @param clusterId replication cluster identity
+	 * @param epoch writer epoch
+	 * @param sequence transaction sequence
+	 * @param kind envelope kind
+	 * @param payloadLength logical, unchunked payload length
+	 * @param chunkIndex zero-based chunk index
+	 * @param chunkCount total chunk count
+	 * @param chunkOffset offset within the logical payload
+	 * @param commitCrc32c complete Store-binary CRC carried by terminal markers
+	 * @param payload source payload buffer
+	 * @param payloadOffset source offset
+	 * @param chunkLength bytes copied into the envelope
+	 * @return number of bytes written
+	 * @throws IllegalArgumentException when bounds or protocol fields are invalid
+	 */
+	public static int encode(
+		final MutableDirectBuffer target,
+		final int targetOffset,
+		final UUID clusterId,
+		final long epoch,
+		final long sequence,
+		final Kind kind,
+		final int payloadLength,
+		final int chunkIndex,
+		final int chunkCount,
+		final int chunkOffset,
+		final int commitCrc32c,
+		final DirectBuffer payload,
+		final int payloadOffset,
+		final int chunkLength
+	)
+	{
+		validate(clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
+			chunkOffset, payload, payloadOffset, chunkLength);
+		final int encodedLength = Math.addExact(HEADER_LENGTH, chunkLength);
+		if (target == null || targetOffset < 0 || targetOffset > target.capacity() - encodedLength)
+		{
+			throw new IllegalArgumentException("target buffer is too small");
+		}
+		target.putInt(targetOffset, MAGIC, ByteOrder.BIG_ENDIAN);
+		target.putShort(targetOffset + 4, VERSION, ByteOrder.BIG_ENDIAN);
+		target.putByte(targetOffset + 6, (byte)kind.code);
+		target.putByte(targetOffset + 7, (byte)0);
+		target.putLong(targetOffset + 8, epoch, ByteOrder.BIG_ENDIAN);
+		target.putLong(targetOffset + 16, sequence, ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + 24, payloadLength, ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + 28, chunkIndex, ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + 32, chunkCount, ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + 36, chunkOffset, ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + 40, crc32c(payload, payloadOffset, chunkLength), ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + 44, commitCrc32c, ByteOrder.BIG_ENDIAN);
+		target.putLong(targetOffset + 48, clusterId.getMostSignificantBits(), ByteOrder.BIG_ENDIAN);
+		target.putLong(targetOffset + 56, clusterId.getLeastSignificantBits(), ByteOrder.BIG_ENDIAN);
+		// The publisher can stage a multi-buffer chunk directly in the destination
+		// payload area. Avoid copying that already-staged range a second time.
+		if (payload != target || payloadOffset != targetOffset + HEADER_LENGTH)
+		{
+			target.putBytes(targetOffset + HEADER_LENGTH, payload, payloadOffset, chunkLength);
+		}
+		return encodedLength;
+	}
+
+	private static void validate(
+		final UUID clusterId,
+		final long epoch,
+		final long sequence,
+		final Kind kind,
+		final int payloadLength,
+		final int chunkIndex,
+		final int chunkCount,
+		final int chunkOffset,
+		final DirectBuffer payload,
+		final int payloadOffset,
+		final int chunkLength
+	)
+	{
+		if (clusterId == null || kind == null || payload == null) throw new NullPointerException();
+		if (epoch < 0 || sequence < 0 || payloadLength < 0 || chunkIndex < 0 || chunkCount <= 0 ||
+			chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
+			payloadOffset > payload.capacity() - chunkLength)
+		{
+			throw new IllegalArgumentException("invalid envelope field");
+		}
+		if (chunkLength > payloadLength ||
+			(kind == Kind.COMMIT || kind == Kind.ABORT) && chunkLength != 0)
+		{
+			throw new IllegalArgumentException("invalid payload length");
+		}
+		if (kind != Kind.COMMIT && kind != Kind.ABORT)
+		{
+			final long end = (long)chunkOffset + chunkLength;
+			if (end > payloadLength || chunkIndex == chunkCount - 1 && end != payloadLength)
+			{
+				throw new IllegalArgumentException("chunk does not match logical payload length");
+			}
+		}
+	}
+
+	/** Decodes one complete envelope and validates its bounds and payload CRC. */
+	public static Envelope decode(final DirectBuffer source, final int offset, final int length)
+	{
+		final EnvelopeView view = decodeView(source, offset, length);
+		final byte[] payload = new byte[view.payloadLengthOnWire];
+		source.getBytes(view.payloadOffset, payload);
+		return new Envelope(view.clusterId(), view.epoch, view.sequence, view.kind, view.payloadLength,
+			view.chunkIndex, view.chunkCount, view.chunkOffset, view.commitCrc32c, payload);
+	}
+
+	/**
+	 * Decodes and validates an envelope without copying its payload. The view is
+	 * valid only while the supplied Aeron fragment is valid; callers that retain
+	 * data must copy it into owned storage before returning from the fragment
+	 * callback.
+	 */
+	/* Allocating convenience form retained for codec tests and the compatibility
+	 * decode(byte[]) accessor; production readers must use the reusable overload. */
+	static EnvelopeView decodeView(final DirectBuffer source, final int offset, final int length)
+	{
+		return decodeView(source, offset, length, new EnvelopeView());
+	}
+
+	/** Decodes into a reusable view to keep the reader hot path allocation-free. */
+	public static EnvelopeView decodeView(
+		final DirectBuffer source,
+		final int offset,
+		final int length,
+		final EnvelopeView view
+	)
+	{
+		if (view == null) throw new NullPointerException("view");
+		if (source == null || offset < 0 || length < HEADER_LENGTH || length > source.capacity() ||
+			offset > source.capacity() - length)
+		{
+			throw new IllegalArgumentException("truncated envelope");
+		}
+		if (source.getInt(offset, ByteOrder.BIG_ENDIAN) != MAGIC ||
+			source.getShort(offset + 4, ByteOrder.BIG_ENDIAN) != VERSION)
+		{
+			throw new IllegalArgumentException("unknown DataGrid envelope");
+		}
+		final int kindCode = source.getByte(offset + 6) & 0xff;
+		if (source.getByte(offset + 7) != 0)
+		{
+			throw new IllegalArgumentException("unknown envelope flags");
+		}
+		final Kind kind = Kind.fromCode(kindCode);
+		final long epoch = source.getLong(offset + 8, ByteOrder.BIG_ENDIAN);
+		final long sequence = source.getLong(offset + 16, ByteOrder.BIG_ENDIAN);
+		final int payloadLength = source.getInt(offset + 24, ByteOrder.BIG_ENDIAN);
+		final int chunkIndex = source.getInt(offset + 28, ByteOrder.BIG_ENDIAN);
+		final int chunkCount = source.getInt(offset + 32, ByteOrder.BIG_ENDIAN);
+		final int chunkOffset = source.getInt(offset + 36, ByteOrder.BIG_ENDIAN);
+		if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 || chunkIndex < 0 ||
+			chunkCount <= 0 || chunkIndex >= chunkCount || chunkOffset < 0 ||
+			(kind != Kind.COMMIT && kind != Kind.ABORT &&
+				(length - HEADER_LENGTH > payloadLength ||
+					(chunkIndex == chunkCount - 1 && (long)chunkOffset + length - HEADER_LENGTH != payloadLength))))
+		{
+			throw new IllegalArgumentException("invalid envelope bounds");
+		}
+		if ((kind == Kind.COMMIT || kind == Kind.ABORT) && length != HEADER_LENGTH)
+		{
+			throw new IllegalArgumentException("marker carries a payload");
+		}
+		final int payloadOnWire = length - HEADER_LENGTH;
+		if (kind != Kind.COMMIT && kind != Kind.ABORT &&
+			((long)chunkOffset + payloadOnWire > payloadLength))
+		{
+			throw new IllegalArgumentException("chunk exceeds logical payload length");
+		}
+		if (source.getInt(offset + 40, ByteOrder.BIG_ENDIAN) != crc32c(source, offset + HEADER_LENGTH, payloadOnWire))
+		{
+			throw new IllegalArgumentException("payload CRC32C mismatch");
+		}
+		view.set(source, offset + HEADER_LENGTH, payloadOnWire,
+			source.getLong(offset + 48, ByteOrder.BIG_ENDIAN),
+			source.getLong(offset + 56, ByteOrder.BIG_ENDIAN), epoch, sequence, kind,
+			payloadLength, chunkIndex, chunkCount, chunkOffset, source.getInt(offset + 44, ByteOrder.BIG_ENDIAN));
+		return view;
+	}
+
+	/** Computes the CRC32C used for chunk and commit-witness validation. */
+	public static int crc32c(final byte[] payload)
+	{
+		return Crc32c.compute(payload);
+	}
+
+	public static int crc32c(final DirectBuffer payload, final int offset, final int length)
+	{
+		if (payload == null || offset < 0 || length < 0 || offset > payload.capacity() - length)
+		{
+			throw new IllegalArgumentException("invalid CRC32C range");
+		}
+		final CRC32C crc = DIRECT_CRC.get();
+		crc.reset();
+		/* Agrona's bulk copy keeps this path allocation-free after the first use
+		 * on a polling thread and lets CRC32C use the JDK's vectorized update. */
+		final byte[] scratch = CRC_SCRATCH.get();
+		for (int copied = 0; copied < length; )
+		{
+			final int amount = Math.min(scratch.length, length - copied);
+			payload.getBytes(offset + copied, scratch, 0, amount);
+			crc.update(scratch, 0, amount);
+			copied += amount;
+		}
+		return (int)crc.getValue();
+	}
+
+	public static final class EnvelopeView
+	{
+		public DirectBuffer source;
+		public int payloadOffset;
+		public int payloadLengthOnWire;
+		long clusterMostSignificantBits;
+		long clusterLeastSignificantBits;
+		long epoch;
+		long sequence;
+		Kind kind;
+		int payloadLength;
+		int chunkIndex;
+		int chunkCount;
+		int chunkOffset;
+		int commitCrc32c;
+
+		public EnvelopeView()
+		{
+		}
+
+		void set(final DirectBuffer source, final int payloadOffset, final int payloadLengthOnWire,
+			final long clusterMostSignificantBits, final long clusterLeastSignificantBits,
+			final long epoch, final long sequence, final Kind kind, final int payloadLength,
+			final int chunkIndex, final int chunkCount, final int chunkOffset, final int commitCrc32c)
+		{
+			this.source = source;
+			this.payloadOffset = payloadOffset;
+			this.payloadLengthOnWire = payloadLengthOnWire;
+			this.clusterMostSignificantBits = clusterMostSignificantBits;
+			this.clusterLeastSignificantBits = clusterLeastSignificantBits;
+			this.epoch = epoch;
+			this.sequence = sequence;
+			this.kind = kind;
+			this.payloadLength = payloadLength;
+			this.chunkIndex = chunkIndex;
+			this.chunkCount = chunkCount;
+			this.chunkOffset = chunkOffset;
+			this.commitCrc32c = commitCrc32c;
+		}
+
+		public UUID clusterId() { return new UUID(this.clusterMostSignificantBits, this.clusterLeastSignificantBits); }
+		public boolean matches(final UUID clusterId)
+		{
+			return clusterId.getMostSignificantBits() == this.clusterMostSignificantBits &&
+				clusterId.getLeastSignificantBits() == this.clusterLeastSignificantBits;
+		}
+		public long epoch() { return this.epoch; }
+		public long sequence() { return this.sequence; }
+		public Kind kind() { return this.kind; }
+		public int payloadLength() { return this.payloadLength; }
+		public int chunkIndex() { return this.chunkIndex; }
+		public int chunkCount() { return this.chunkCount; }
+		public int chunkOffset() { return this.chunkOffset; }
+		public int commitCrc32c() { return this.commitCrc32c; }
+	}
+
+	public record Envelope(
+		UUID clusterId,
+		long epoch,
+		long sequence,
+		Kind kind,
+		int payloadLength,
+		int chunkIndex,
+		int chunkCount,
+		int chunkOffset,
+		int commitCrc32c,
+		byte[] payload
+	)
+	{
+		public Envelope
+		{
+			if (payload == null) throw new NullPointerException("payload");
+		}
+
+		/** Returns a defensive copy for codec tests and compatibility callers. */
+		@Override
+		public byte[] payload()
+		{
+			return this.payload.clone();
+		}
+	}
+
+}

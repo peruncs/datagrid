@@ -21,6 +21,71 @@ Eclipse Data Grid is based on two other Eclipse projects:
 
 Eclipse Data Grid itself provides you with the code to generate a cluster environment to run, scale, and maintain an Eclipse Data Grid application based on Kubernetes, as well as important cluster features such as replication, elastic scale-out / scale-in, and backups. Eclipse Data Grid is based on a single-writer approach. While the consistency model on each cluster node is full consistency, the standard cluster consistency model is eventual consistency.
 
+### Optional replication transports
+
+The core cluster and storage artifacts are transport-neutral. Select exactly
+one provider for Store binary replication:
+
+- Kafka: `storage-distributed-kafka` plus `cluster-nodelibrary-kafka` (the
+  compatibility provider for existing deployments).
+- Aeron: `storage-distributed-aeron` plus `cluster-nodelibrary-aeron`, with
+  `ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron` and a stable
+  `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`.
+
+The Aeron provider embeds MediaDriver/Aeron Archive and uses reliable UDP; it
+does not require Kafka infrastructure. The fixed-writer/no-consensus model is
+intentional. See [the Aeron integration plan](docs/aeron-clustering-integration-plan.md)
+and the provider READMEs for configuration and current production gates.
+
+This checkout is aligned with the locally installed Eclipse Store/Serializer
+`5.0.0-SNAPSHOT` artifacts. The replication tests assert Store 5's coalesced
+type-dictionary export contract, while Serializer supplies the crash-safe
+dictionary-file swap; the snapshot should still be treated as pre-release.
+
+The provider is an explicit dependency; framework adapters do not pull Kafka or
+Aeron transitively. For example, add the neutral SPI and one provider:
+
+```xml
+<dependency>
+  <groupId>org.eclipse.datagrid</groupId>
+  <artifactId>storage-distributed</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.eclipse.datagrid</groupId>
+  <artifactId>storage-distributed-aeron</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.eclipse.datagrid</groupId>
+  <artifactId>cluster-nodelibrary-aeron</artifactId>
+</dependency>
+```
+
+Aeron transports the bytes produced by Eclipse Serializer directly. Its small
+64-byte envelope carries only cluster/epoch/sequence, chunk, and CRC metadata;
+there is no second SBE object-graph encoding layer. `term-length`, `mtu-length`,
+`chunk-size`, `max-transaction-bytes`, `offer-timeout-nanos`, and durability
+mode are configurable with the
+`eclipsestore.distribution.aeron.*` provider properties and corresponding
+`ECLIPSE_DATAGRID_AERON_*` environment variables. Aeron deployments must also
+set an explicit `ECLIPSE_DATAGRID_REPLICATION_ROLE`; the provider refuses to
+guess whether a node is a writer or reader.
+Keep the same values on the writer and readers. Vector and Lucene storage
+payloads follow the same Store binary path; enable them only when the selected
+Store version supports deterministic export/import, otherwise gate those
+collections or replicate their rebuildable source data.
+Writer restart safety additionally requires stable `ECLIPSE_DATAGRID_AERON_NODE_ID`,
+`ECLIPSE_DATAGRID_AERON_STORE_GENERATION`, and a durable
+`ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH`; archive and checkpoint directories
+must be outside the MediaDriver directory.
+
+Cluster monitoring exposes the same transport-neutral endpoint for every
+framework adapter: `GET /eclipse-datagrid/replication-metrics`. It emits
+Prometheus gauges for provider (`aeron`/`kafka`/`none`), current and latest
+sequence, transaction lag, lifecycle state (`replaying`, `live`, `failed`,
+etc.), readiness, and health. Aeron Archive/replay failures therefore appear
+in the existing health/metrics surface instead of requiring Kafka-specific
+monitoring.
+
 ## License
 
 Eclipse Data Grid is available under [Eclipse Public License - v 2.0](LICENSE).

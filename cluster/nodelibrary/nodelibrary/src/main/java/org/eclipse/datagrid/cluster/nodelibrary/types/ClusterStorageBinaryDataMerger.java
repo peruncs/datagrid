@@ -14,20 +14,10 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.nio.ByteBuffer;
-import java.util.Arrays;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
 import org.eclipse.datagrid.storage.distributed.types.ObjectMaterializer;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataImporter;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMerger;
 import org.eclipse.serializer.collections.types.XEnum;
 import org.eclipse.serializer.concurrency.XThreads;
@@ -45,11 +35,23 @@ import org.eclipse.serializer.util.logging.Logging;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
-
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * Applies committed Store binary data on a reader node.
+ *
+ * <p>Incoming buffers are imported into the local Store immediately and then
+ * coalesced for object-graph updates on a bounded single-thread executor.
+ * Providers must call this merger only after their transport-specific commit
+ * validation has completed.</p>
+ */
 public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger, Disposable
 {
 	static ClusterStorageBinaryDataMerger New(
@@ -88,12 +90,14 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 
 		private final ExecutorService executor = Executors.newSingleThreadExecutor();
 		private final ConcurrentLinkedQueue<ByteBuffer> cachedData = new ConcurrentLinkedQueue<>();
+		private final Object applyLock = new Object();
 
 		private final BinaryPersistenceFoundation<?> foundation;
 		private final StorageConnection storage;
 		private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
 		private final long cachingTimeoutMs;
 		private final long cacheLimit;
+		private volatile boolean disposed;
 
 		private Future<?> updateFuture = CompletableFuture.completedFuture(null);
 
@@ -115,9 +119,13 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		@Override
 		public synchronized void receiveData(final Binary data)
 		{
-			this.storage.importData(X.Enum(data.buffers()));
+			if (this.disposed)
+			{
+				return;
+			}
+			final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, data.buffers());
 
-			this.cachedData.addAll(Arrays.asList(data.buffers()));
+			this.cachedData.addAll(Arrays.asList(ownedBuffers));
 
 			if (this.updateFuture.isDone())
 			{
@@ -126,10 +134,15 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 					try
 					{
 						XThreads.sleep(this.cachingTimeoutMs);
-						this.applyData();
+						this.applyDataSafely();
 					}
 					catch (final Throwable t)
 					{
+						if (Thread.currentThread().isInterrupted())
+						{
+							this.releaseCachedData();
+							return;
+						}
 						GlobalErrorHandling.handleFatalError(t);
 					}
 				});
@@ -163,6 +176,17 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		private void applyData()
 		{
 			final XEnum<ByteBuffer> data = X.Enum();
+			final AtomicBoolean released = new AtomicBoolean();
+			final Runnable release = () ->
+			{
+				if (released.compareAndSet(false, true))
+				{
+					for (final ByteBuffer buffer : data)
+					{
+						XMemory.deallocateDirectByteBuffer(buffer);
+					}
+				}
+			};
 
 			ByteBuffer next;
 			while ((next = this.cachedData.poll()) != null)
@@ -170,25 +194,62 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 				data.add(next);
 			}
 
-			this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+			try
 			{
-				final ObjectMaterializer materializer = new ObjectMaterializer(this.storage.persistenceManager());
-
-				final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
-				for (final ByteBuffer buffer : data)
+				this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
 				{
-					final long address = XMemory.getDirectByteBufferAddress(buffer);
-					iterator.iterateEntityRawData(address, address + buffer.limit(), materializer);
+					final ObjectMaterializer materializer = new ObjectMaterializer(this.storage.persistenceManager());
+
+					final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
+					try
+					{
+						for (final ByteBuffer buffer : data)
+						{
+							final long address = XMemory.getDirectByteBufferAddress(buffer);
+							iterator.iterateEntityRawData(address, address + buffer.limit(), materializer);
+						}
+						materializer.materialize();
+					}
+					finally
+					{
+						release.run();
+					}
+				});
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				release.run();
+				throw failure;
+			}
+		}
+
+		private void applyDataSafely()
+		{
+			synchronized (this.applyLock)
+			{
+				if (!this.cachedData.isEmpty())
+				{
+					this.applyData();
+				}
+			}
+		}
+
+		private void releaseCachedData()
+		{
+			synchronized (this.applyLock)
+			{
+				ByteBuffer buffer;
+				while ((buffer = this.cachedData.poll()) != null)
+				{
 					XMemory.deallocateDirectByteBuffer(buffer);
 				}
-
-				materializer.materialize();
-			});
+			}
 		}
 
 		@Override
 		public synchronized void receiveTypeDictionary(final String typeDictionaryData)
 		{
+			if (this.disposed) return;
 			final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
 				.setClassLoaderProvider(this.foundation.getClassLoaderProvider())
 				.setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
@@ -202,7 +263,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 				final PersistenceTypeDefinition localType = localTypeDictionary.lookupTypeById(remoteType.typeId());
 				if (localType == null)
 				{
-					LOG.debug("New type: " + remoteType.typeName());
+					LOG.debug("New type: {}", remoteType.typeName());
 					this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
 
 				}
@@ -214,19 +275,67 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		}
 
 		@Override
-		public void dispose()
+		public synchronized void dispose()
 		{
+			if (this.disposed) return;
+			this.disposed = true;
 			this.executor.shutdown();
 			try
 			{
 				// if any external processes like Kubernetes shuts us down, it will wait for the externally set
 				// grace period and then kill the process. But any other case we will await the task orderly like this.
-				this.executor.awaitTermination(30, TimeUnit.MINUTES);
+				if (!this.executor.awaitTermination(30, TimeUnit.SECONDS))
+				{
+					LOG.warn("Timed out waiting for storage graph updates; interrupting remaining work");
+					this.executor.shutdownNow();
+				}
 			}
 			catch (final InterruptedException e)
 			{
+				this.executor.shutdownNow();
+				Thread.currentThread().interrupt();
 				throw new NodelibraryException(e);
 			}
+			finally
+			{
+				if (this.executor.isTerminated()) this.releaseCachedData();
+			}
 		}
+
+		@Override
+		public synchronized void awaitApplied()
+		{
+			/*
+			 * The normal merger deliberately delays materialization to coalesce updates.
+			 * A replication cursor/ACK, however, is a durability boundary: waiting for
+			 * the delayed task would add the full cache timeout to every Aeron commit.
+			 * Drain immediately under the same lock used by the worker. The delayed
+			 * worker is deliberately not interrupted: it may already be inside Store
+			 * materialization, and interrupting it can leave the object graph half-applied.
+			 */
+			this.applyDataSafely();
+			final Future<?> pending = this.updateFuture;
+			if (pending.isDone())
+			{
+				try
+				{
+					pending.get();
+				}
+				catch (final InterruptedException e)
+				{
+					Thread.currentThread().interrupt();
+					throw new NodelibraryException(e);
+				}
+				catch (final ExecutionException e)
+				{
+					throw new NodelibraryException("Failed to materialize imported Store data", e.getCause());
+				}
+			}
+		}
+	}
+
+	/** Wait until the latest accepted import has completed object-graph materialization. */
+	default void awaitApplied()
+	{
 	}
 }

@@ -14,11 +14,6 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.util.HashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.RecordsToDelete;
 import org.apache.kafka.common.TopicPartition;
@@ -27,9 +22,14 @@ import org.eclipse.serializer.collections.types.XImmutableMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
 import static org.eclipse.serializer.util.X.notNull;
 
-public interface KafkaRecordDeleter
+public interface KafkaRecordDeleter extends ReplicationLogRetention
 {
     static KafkaRecordDeleter New(final AdminClient kafkaAdminClient)
     {
@@ -37,6 +37,19 @@ public interface KafkaRecordDeleter
     }
 
     void deleteUntilOffsets(XImmutableMap<TopicPartition, Long> partitionOffsets) throws NodelibraryException;
+
+    @Override
+    default void deleteThrough(final ReplicationCursor cursor) throws NodelibraryException
+    {
+        this.deleteUntilOffsets(KafkaCursorCodec.decode(
+            MessageInfo.New(cursor.logicalSequence(), cursor.transport(), cursor.storeGeneration(), cursor.providerPosition())
+        ));
+    }
+
+    @Override
+    default void close()
+    {
+    }
 
     class Default implements KafkaRecordDeleter
     {
@@ -68,15 +81,26 @@ public interface KafkaRecordDeleter
             {
                 deleteResult.all().get(10, TimeUnit.MINUTES);
             }
-            catch (final InterruptedException | ExecutionException e)
-            {
-                throw new NodelibraryException(e);
+			catch (final InterruptedException e)
+			{
+				Thread.currentThread().interrupt();
+				throw new NodelibraryException(e);
+			}
+			catch (final ExecutionException e)
+			{
+				throw new NodelibraryException(e);
             }
             catch (final TimeoutException e)
             {
                 LOG.warn("Timed out waiting for old records to be deleted.", e);
                 throw new RuntimeException(e);
             }
+        }
+
+        @Override
+        public void close()
+        {
+            this.kafkaAdminClient.close();
         }
     }
 }

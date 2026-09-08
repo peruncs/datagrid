@@ -15,25 +15,36 @@ package org.eclipse.datagrid.storage.distributed.internal;
  */
 
 
-import static org.eclipse.serializer.util.X.notNull;
-
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryTargetDistributing;
+import org.eclipse.datagrid.storage.distributed.types.StorageTypeDictionaryExporterDistributing;
 import org.eclipse.serializer.functional.InstanceDispatcherLogic;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
 
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryTargetDistributing;
-import org.eclipse.datagrid.storage.distributed.types.StorageTypeDictionaryExporterDistributing;
+import java.util.function.UnaryOperator;
+
+import static org.eclipse.serializer.util.X.notNull;
 
 public class DistributedStorageConfigurator implements InstanceDispatcherLogic
 {
 	private final StorageBinaryDataDistributor distributor;
+	private final UnaryOperator<PersistenceTarget<Binary>> targetFactory;
 
 	public DistributedStorageConfigurator(final StorageBinaryDataDistributor distributor)
 	{
+		this(distributor, delegate -> StorageBinaryTargetDistributing.New(delegate, distributor));
+	}
+
+	public DistributedStorageConfigurator(
+		final StorageBinaryDataDistributor distributor,
+		final UnaryOperator<PersistenceTarget<Binary>> targetFactory
+	)
+	{
 		super();
 		this.distributor = notNull(distributor);
+		this.targetFactory = notNull(targetFactory);
 	}
 
 	@SuppressWarnings("unchecked") // type safety ensure by logic
@@ -42,10 +53,7 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic
 	{
 		if (subject instanceof PersistenceTarget)
 		{
-			return (T)StorageBinaryTargetDistributing.New(
-				(PersistenceTarget<Binary>)subject,
-				this.distributor
-			);
+			return (T)this.targetFactory.apply((PersistenceTarget<Binary>)subject);
 		}
 		if (subject instanceof PersistenceTypeDictionaryExporter)
 		{

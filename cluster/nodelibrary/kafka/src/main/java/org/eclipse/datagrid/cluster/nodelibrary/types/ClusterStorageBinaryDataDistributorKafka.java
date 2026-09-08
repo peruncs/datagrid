@@ -14,25 +14,23 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.nio.ByteBuffer;
-import java.util.Properties;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataChunker;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
-import org.eclipse.serializer.collections.BulkList;
-import org.eclipse.serializer.collections.types.XList;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.Properties;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static org.apache.kafka.clients.producer.ProducerConfig.*;
 import static org.eclipse.serializer.chars.XChars.notEmpty;
@@ -107,55 +105,18 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 
 		private void executeDistribution(final MessageType messageType, final Binary data) throws InterruptedException
 		{
-			final ByteBuffer[] buffers = this.allBuffers(data);
-			int messageSize = 0;
-
-			for (final ByteBuffer buffer : buffers)
+			StorageBinaryDataChunker.forEach(data, ClusterStorageBinaryDistributedKafka.maxPacketSize(), chunk ->
 			{
-				messageSize += buffer.remaining();
-				buffer.mark();
-			}
-
-			int remaining = messageSize;
-			int currentBuffer = 0;
-			int packetIndex = 0;
-			final int packetCount = messageSize / ClusterStorageBinaryDistributedKafka.maxPacketSize() + (messageSize
-				% ClusterStorageBinaryDistributedKafka.maxPacketSize() == 0 ? 0 : 1);
-
-			while (remaining > 0)
-			{
-				final byte[] packet = new byte[Math.min(
-					remaining,
-					ClusterStorageBinaryDistributedKafka.maxPacketSize()
-				)];
-				int packetOffset = 0;
-
-				while (packetOffset < packet.length)
-				{
-					final ByteBuffer buffer = buffers[currentBuffer];
-					final int length = Math.min(packet.length - packetOffset, buffer.remaining());
-
-					buffer.get(packet, packetOffset, length);
-
-					if (!buffer.hasRemaining())
-					{
-						currentBuffer++;
-					}
-
-					remaining -= length;
-					packetOffset += length;
-				}
-
-				final var kafkaRecord = new ProducerRecord<String, byte[]>(this.topicName, packet);
+				final var kafkaRecord = new ProducerRecord<String, byte[]>(this.topicName, chunk.bytes());
 
 				++this.messageIndex;
 
 				ClusterStorageBinaryDistributedKafka.addPacketHeaders(
 					kafkaRecord.headers(),
 					messageType,
-					messageSize,
-					packetIndex,
-					packetCount,
+					chunk.messageLength(),
+					chunk.index(),
+					chunk.count(),
 					this.messageIndex
 				);
 
@@ -168,26 +129,18 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 				{
 					this.producer.send(kafkaRecord).get();
 				}
+				catch (final InterruptedException e)
+				{
+					Thread.currentThread().interrupt();
+					throw new RuntimeException("Interrupted while sending the Kafka record", e);
+				}
 				catch (final ExecutionException e)
 				{
 					// Kafka only throws RuntimeException's
 					throw (RuntimeException)e.getCause();
 				}
 
-				packetIndex++;
-			}
-
-			for (final ByteBuffer buffer : buffers)
-			{
-				buffer.reset();
-			}
-		}
-
-		private ByteBuffer[] allBuffers(final Binary data)
-		{
-			final XList<ByteBuffer> list = BulkList.New();
-			data.iterateChannelChunks(channelChunk -> list.addAll(channelChunk.buffers()));
-			return list.toArray(ByteBuffer.class);
+			});
 		}
 
 		@Override

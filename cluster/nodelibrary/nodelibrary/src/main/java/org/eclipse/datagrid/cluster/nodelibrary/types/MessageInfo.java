@@ -15,38 +15,77 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
-import org.apache.kafka.common.TopicPartition;
-import org.eclipse.serializer.chars.VarString;
-import org.eclipse.serializer.collections.types.XImmutableMap;
+import java.util.Arrays;
+import java.util.UUID;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * Backward-compatible replication position view used by the nodelibrary.
+ * Provider-specific offsets remain opaque bytes so adding Aeron does not
+ * change the existing Kafka-facing lifecycle API.
+ */
 public interface MessageInfo
 {
 	long messageIndex();
 
-	XImmutableMap<TopicPartition, Long> kafkaPartitionOffsets();
+	String transport();
 
-	static MessageInfo New(final long messageIndex, final XImmutableMap<TopicPartition, Long> kafkaPartitionOffsets)
+	UUID storeGeneration();
+
+	byte[] providerPosition();
+
+	static MessageInfo New(
+		final long messageIndex,
+		final String transport,
+		final UUID storeGeneration,
+		final byte[] providerPosition
+	)
 	{
-		return new Default(messageIndex, notNull(kafkaPartitionOffsets));
+		return new Default(messageIndex, notNull(transport), storeGeneration, providerPosition);
+	}
+
+	static MessageInfo New(final long messageIndex)
+	{
+		return New(messageIndex, "unknown", null, new byte[0]);
 	}
 
 	final class Default implements MessageInfo
 	{
 		private final long messageIndex;
-		private final XImmutableMap<TopicPartition, Long> kafkaPartitionOffsets;
+		private final String transport;
+		private final UUID storeGeneration;
+		private final byte[] providerPosition;
 
-		private Default(final long messageIndex, final XImmutableMap<TopicPartition, Long> kafkaPartitionOffsets)
+		private Default(
+			final long messageIndex,
+			final String transport,
+			final UUID storeGeneration,
+			final byte[] providerPosition
+		)
 		{
 			this.messageIndex = messageIndex;
-			this.kafkaPartitionOffsets = kafkaPartitionOffsets;
+			this.transport = transport;
+			this.storeGeneration = storeGeneration;
+			this.providerPosition = providerPosition == null ? new byte[0] : providerPosition.clone();
 		}
 
 		@Override
-		public XImmutableMap<TopicPartition, Long> kafkaPartitionOffsets()
+		public String transport()
 		{
-			return this.kafkaPartitionOffsets;
+			return this.transport;
+		}
+
+		@Override
+		public UUID storeGeneration()
+		{
+			return this.storeGeneration;
+		}
+
+		@Override
+		public byte[] providerPosition()
+		{
+			return this.providerPosition.clone();
 		}
 
 		@Override
@@ -58,13 +97,9 @@ public interface MessageInfo
 		@Override
 		public String toString()
 		{
-			return VarString.New()
-				.add("MessageInfo{messageIndex=")
-				.add(this.messageIndex)
-				.add(",kafkaPartitionOffsets=")
-				.add(this.kafkaPartitionOffsets.toString())
-				.add('}')
-				.toString();
+			return "MessageInfo{messageIndex=" + this.messageIndex + ",transport=" + this.transport +
+				",storeGeneration=" + this.storeGeneration + ",providerPositionBytes=" +
+				Arrays.toString(this.providerPosition) + '}';
 		}
 	}
 }

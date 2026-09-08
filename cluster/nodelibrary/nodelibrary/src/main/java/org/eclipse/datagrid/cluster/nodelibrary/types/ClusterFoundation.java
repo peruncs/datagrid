@@ -14,15 +14,6 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.io.IOException;
-import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.Comparator;
-import java.util.function.Supplier;
-
-import org.apache.kafka.clients.admin.AdminClient;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.datagrid.cluster.nodelibrary.types.cronjob.*;
 import org.eclipse.datagrid.cluster.nodelibrary.types.cronjob.GcWorkaroundQuartzCronJobManager.GcWorkaroundQuartzCronJob;
@@ -40,10 +31,18 @@ import org.eclipse.store.storage.exceptions.StorageException;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.eclipse.store.storage.types.StorageExceptionHandler;
 import org.eclipse.store.storage.types.StorageLiveFileProvider;
+import org.eclipse.store.storage.types.StorageManager;
 import org.quartz.*;
 import org.quartz.impl.StdSchedulerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.function.Supplier;
 
 public interface ClusterFoundation<F extends ClusterFoundation<?>> extends InstanceDispatcher
 {
@@ -83,9 +82,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
 	F setGcWorkaroundQuartzCronJobManager(GcWorkaroundQuartzCronJobManager manager);
 
-	KafkaPropertiesProvider getKafkaPropertiesProvider();
+	ClusterReplicationTransport getClusterReplicationTransport();
 
-	F setKafkaPropertiesProvider(KafkaPropertiesProvider provider);
+	F setClusterReplicationTransport(ClusterReplicationTransport transport);
 
 	ClusterStorageBinaryDataPacketAcceptor getClusterStorageBinaryDataPacketAcceptor();
 
@@ -151,13 +150,13 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
 	F setEnableAsyncDistribution(boolean enable);
 
-	KafkaMessageInfoProvider getKafkaMessageInfoProvider();
+	ReplicationPositionProvider getReplicationPositionProvider();
 
-	F setKafkaMessageInfoProvider(KafkaMessageInfoProvider provider);
+	F setReplicationPositionProvider(ReplicationPositionProvider provider);
 
-	KafkaRecordDeleter getKafkaRecordDeleter();
+	ReplicationLogRetention getReplicationLogRetention();
 
-	F setKafkaRecordDeleter(KafkaRecordDeleter deleter);
+	F setReplicationLogRetention(ReplicationLogRetention retention);
 
 	MessageInfoParser getMessageInfoParser();
 
@@ -202,9 +201,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 		private ClusterStorageBinaryDataMerger dataMerger;
 		private ClusterStorageBinaryDataPacketAcceptor dataPacketAcceptor;
 		private StoredMessageInfoManager storedMessageInfoManager;
-		private KafkaPropertiesProvider kafkaPropertiesProvider;
-		private KafkaMessageInfoProvider kafkaMessageInfoProvider;
-		private KafkaRecordDeleter kafkaRecordDeleter;
+		private ClusterReplicationTransport replicationTransport;
+		private ReplicationPositionProvider positionProvider;
+		private ReplicationLogRetention replicationRetention;
 		private MessageInfoParser messageInfoParser;
 
 		// cached created types
@@ -316,22 +315,35 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
-		protected KafkaMessageInfoProvider ensureKafkaMessageInfoProvider()
+		protected ClusterReplicationTransport ensureClusterReplicationTransport()
 		{
-			final var nodelibProps = this.getNodelibraryPropertiesProvider();
-			final var kafkaProps = this.getKafkaPropertiesProvider();
-
-			final String topic = nodelibProps.kafkaTopicName();
-			final String groupId = String.format("%s-%s-offsetgetter", topic, nodelibProps.myPodName());
-
-			return KafkaMessageInfoProvider.New(topic, groupId, kafkaProps);
+			final String configured = this.getNodelibraryPropertiesProvider().replicationTransport();
+			final String requested = configured == null || configured.isBlank() ? "none" : configured.trim();
+			for (final ClusterReplicationTransportProvider provider :
+				java.util.ServiceLoader.load(ClusterReplicationTransportProvider.class))
+			{
+				if (provider.id().equalsIgnoreCase(requested))
+				{
+					return provider.create(this.getNodelibraryPropertiesProvider());
+				}
+			}
+			if (!"none".equalsIgnoreCase(requested))
+			{
+				throw new NodelibraryException("No replication transport provider installed for " + requested);
+			}
+			return ClusterReplicationTransport.noOp();
 		}
 
-		protected KafkaPropertiesProvider ensureKafkaPropertiesProvider()
+		protected ReplicationPositionProvider ensureReplicationPositionProvider()
 		{
-			final var props = KafkaPropertiesProvider.ConfigDirectory();
-			props.init();
-			return props;
+			return this.getClusterReplicationTransport().positionProvider(
+				this.getNodelibraryPropertiesProvider().replicationStreamName()
+			);
+		}
+
+		protected ReplicationLogRetention ensureReplicationLogRetention()
+		{
+			return this.getClusterReplicationTransport().retention();
 		}
 
 		protected StoredMessageInfoManager ensureStoredMessageInfoManager()
@@ -357,9 +369,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 				@Override
 				public void onChange(final MessageInfo messageInfo) throws NodelibraryException
 				{
-					if (props.isBackupNode())
+					if (props.isBackupNode() || !"writer".equalsIgnoreCase(props.replicationRole()))
 					{
-						// only backup nodes shall update the stored message index
+						// Every reader must persist its resolved boundary; writers do not consume replication.
 						this.delegate.set(messageInfo);
 					}
 				}
@@ -372,7 +384,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			};
 			LOG.trace(
 				"Created AfterDataMessageConsumedListener->StoredMessageInfoManager delegate. WillRun={}",
-				props.isBackupNode()
+				props.isBackupNode() || !"writer".equalsIgnoreCase(props.replicationRole())
 			);
 			return storedMessageInfoUpdater;
 		}
@@ -390,7 +402,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 				this.getStorageBackupBackend(),
 				messageInfoProvider,
 				this.getClusterStorageBinaryDataClient(),
-				this.getKafkaRecordDeleter()
+				this.getReplicationLogRetention()
 			);
 		}
 
@@ -413,56 +425,41 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 		{
 			return BackupNodeManager.New(
 				this.getStorageBackupTaskExecutor(),
-
 				this.getClusterStorageBinaryDataClient(),
-				this.getStorageBackupManager(),
 				this.clusterStorageManager,
 				this.getStorageDiskSpaceReader()
+			);
+		}
+
+		protected ReplicationCursor getReplicationCursorFromStoredInfo()
+		{
+			final MessageInfo info = this.getStoredMessageInfoManager().get();
+			return new ReplicationCursor(
+				info.transport(), info.storeGeneration(), info.messageIndex(), info.providerPosition()
 			);
 		}
 
 		protected ClusterStorageBinaryDataClient ensureClusterStorageBinaryDataClient()
 		{
 			final var props = this.getNodelibraryPropertiesProvider();
-			final var topic = props.kafkaTopicName();
-			final String groupId;
-			final boolean doCommitOffset;
-			if (props.isBackupNode())
-			{
-				groupId = topic + "-backup";
-				doCommitOffset = true;
-			}
-			else
-			{
-				final var podName = props.myPodName();
-				groupId = topic + "-" + podName;
-				doCommitOffset = false;
-			}
-			LOG.trace("Created data client with group id {}", groupId);
-			return ClusterStorageBinaryDataClient.New(
+			final boolean commitPosition = props.isBackupNode();
+			return this.getClusterReplicationTransport().client(
 				this.getClusterStorageBinaryDataPacketAcceptor(),
-				topic,
-				groupId,
+				props.replicationStreamName(),
 				this.getAfterDataMessageConsumedListener(),
-				this.getStoredMessageInfoManager().get(),
-				this.getKafkaPropertiesProvider(),
-				doCommitOffset
+				this.getReplicationCursorFromStoredInfo(),
+				commitPosition
 			);
 		}
 
 		protected StorageNodeHealthCheck ensureStorageNodeHealthCheck()
 		{
-			final var properties = this.getNodelibraryPropertiesProvider();
-			final var topic = properties.kafkaTopicName();
-			final var podName = properties.myPodName();
-			// TODO: Hardcoded
-			final var groupId = String.format("%s-%s-readiness", topic, podName);
 			return StorageNodeHealthCheck.New(
-				topic,
-				groupId,
 				this.clusterStorageManager,
-				this.getClusterStorageBinaryDataClient(),
-				this.getKafkaPropertiesProvider()
+				this.getClusterReplicationTransport().health(
+					() -> this.clusterStorageManager.isRunning() && !this.clusterStorageManager.isStartingUp(),
+					this.getClusterStorageBinaryDataClient()
+				)
 			);
 		}
 
@@ -487,25 +484,19 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 				this.getStorageNodeHealthCheck(),
 				this.clusterStorageManager,
 				this.getStorageDiskSpaceReader(),
-				this.getKafkaMessageInfoProvider()
+				this.getReplicationPositionProvider(),
+				this.getClusterReplicationTransport().id()
 			);
 		}
 
 		protected ClusterStorageBinaryDataDistributor ensureDataDistributor()
 		{
-			final var topic = this.getNodelibraryPropertiesProvider().kafkaTopicName();
-			final ClusterStorageBinaryDataDistributor delegate;
-			if (this.getEnableAsyncDistribution())
-			{
-				delegate = ClusterStorageBinaryDataDistributorKafka.Async(topic, this.getKafkaPropertiesProvider());
-				LOG.info("Using async kafka data distributor");
-			}
-			else
-			{
-				delegate = ClusterStorageBinaryDataDistributorKafka.Sync(topic, this.getKafkaPropertiesProvider());
-				LOG.info("Using sync kafka data distributor");
-			}
-			return ClusterStorageBinaryDataDistributor.Caching(delegate);
+			return ClusterStorageBinaryDataDistributor.Caching(
+				this.getClusterReplicationTransport().distributor(
+					this.getNodelibraryPropertiesProvider().replicationStreamName(),
+					this.getEnableAsyncDistribution()
+				)
+			);
 		}
 
 		protected ClusterStorageBinaryDataMerger ensureClusterStorageBinaryDataMerger()
@@ -530,13 +521,6 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 		protected ClusterStorageBinaryDataPacketAcceptor ensureDataPacketAcceptor()
 		{
 			return ClusterStorageBinaryDataPacketAcceptor.New(this.getClusterStorageBinaryDataMerger());
-		}
-
-		protected KafkaRecordDeleter ensureKafkaRecordDeleter()
-		{
-			final var provider = this.getKafkaPropertiesProvider();
-			provider.init();
-			return KafkaRecordDeleter.New(AdminClient.create(provider.provide()));
 		}
 
 		protected MessageInfoParser ensureMessageInfoParser()
@@ -698,19 +682,19 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 		}
 
 		@Override
-		public KafkaPropertiesProvider getKafkaPropertiesProvider()
+		public ClusterReplicationTransport getClusterReplicationTransport()
 		{
-			if (this.kafkaPropertiesProvider == null)
+			if (this.replicationTransport == null)
 			{
-				this.kafkaPropertiesProvider = this.dispatch(this.ensureKafkaPropertiesProvider());
+				this.replicationTransport = this.dispatch(this.ensureClusterReplicationTransport());
 			}
-			return this.kafkaPropertiesProvider;
+			return this.replicationTransport;
 		}
 
 		@Override
-		public F setKafkaPropertiesProvider(final KafkaPropertiesProvider provider)
+		public F setClusterReplicationTransport(final ClusterReplicationTransport transport)
 		{
-			this.kafkaPropertiesProvider = provider;
+			this.replicationTransport = transport;
 			return this.$();
 		}
 
@@ -983,36 +967,36 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 		}
 
 		@Override
-		public KafkaMessageInfoProvider getKafkaMessageInfoProvider()
+		public ReplicationPositionProvider getReplicationPositionProvider()
 		{
-			if (this.kafkaMessageInfoProvider == null)
+			if (this.positionProvider == null)
 			{
-				this.kafkaMessageInfoProvider = this.dispatch(this.ensureKafkaMessageInfoProvider());
+				this.positionProvider = this.dispatch(this.ensureReplicationPositionProvider());
 			}
-			return this.kafkaMessageInfoProvider;
+			return this.positionProvider;
 		}
 
 		@Override
-		public F setKafkaMessageInfoProvider(final KafkaMessageInfoProvider provider)
+		public F setReplicationPositionProvider(final ReplicationPositionProvider provider)
 		{
-			this.kafkaMessageInfoProvider = provider;
+			this.positionProvider = provider;
 			return this.$();
 		}
 
 		@Override
-		public KafkaRecordDeleter getKafkaRecordDeleter()
+		public ReplicationLogRetention getReplicationLogRetention()
 		{
-			if (this.kafkaRecordDeleter == null)
+			if (this.replicationRetention == null)
 			{
-				this.kafkaRecordDeleter = this.dispatch(this.ensureKafkaRecordDeleter());
+				this.replicationRetention = this.dispatch(this.ensureReplicationLogRetention());
 			}
-			return this.kafkaRecordDeleter;
+			return this.replicationRetention;
 		}
 
 		@Override
-		public F setKafkaRecordDeleter(final KafkaRecordDeleter kafkaRecordDeleter)
+		public F setReplicationLogRetention(final ReplicationLogRetention retention)
 		{
-			this.kafkaRecordDeleter = kafkaRecordDeleter;
+			this.replicationRetention = retention;
 			return this.$();
 		}
 
@@ -1077,7 +1061,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 		{
 			LOG.info("Starting backup cluster node");
 
-			this.getKafkaMessageInfoProvider().init();
+			this.getReplicationPositionProvider().init();
 
 			// TODO: Hardcoded paths
 			final var storageParentPath = Paths.get("/storage/");
@@ -1124,62 +1108,28 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
 			if (useLatestMessageInfo)
 			{
-				final var info = this.getKafkaMessageInfoProvider().provideLatestMessageInfo();
+				final ReplicationCursor cursor = this.getReplicationPositionProvider().latest();
+				final var info = MessageInfo.New(
+					cursor.logicalSequence(), cursor.transport(), cursor.storeGeneration(), cursor.providerPosition()
+				);
 				LOG.debug("Set starting message info to: {}", info);
 				this.getStoredMessageInfoManager().set(info);
 			}
 
 			LOG.info("Creating nodelibrary cluster controller");
 
-			final var embeddedStorageFoundation = this.getEmbeddedStorageFoundation();
-			// replace the storage live file provider from the provided embedded storage foundation
-			StorageConfiguration storageConfig = embeddedStorageFoundation.getConfiguration();
-			storageConfig = StorageConfiguration.Builder()
-				.setBackupSetup(storageConfig.backupSetup())
-				.setChannelCountProvider(storageConfig.channelCountProvider())
-				.setDataFileEvaluator(storageConfig.dataFileEvaluator())
-				.setEntityCacheEvaluator(storageConfig.entityCacheEvaluator())
-				.setHousekeepingController(storageConfig.housekeepingController())
-				.setStorageFileProvider(
-					StorageLiveFileProvider.New(NioFileSystem.New().ensureDirectory(storageRootPath))
-				)
-				.createConfiguration();
-			embeddedStorageFoundation.setConfiguration(storageConfig);
-
-			embeddedStorageFoundation.setExceptionHandler((throwable, channel) ->
-			{
-				try
-				{
-					StorageExceptionHandler.defaultHandleException(throwable, channel);
-				}
-				catch (final StorageException exception)
-				{
-					GlobalErrorHandling.handleFatalError(exception);
-				}
-			});
-
-			final var embeddedStorageManager = embeddedStorageFoundation.start();
-
-			if (embeddedStorageManager.root() == null)
-			{
-				LOG.debug("Setting and storing new root from root supplier");
-				final var root = this.getRootSupplier().get();
-				if (root instanceof Lazy)
-				{
-					embeddedStorageManager.setRoot(root);
-				}
-				else
-				{
-					embeddedStorageManager.setRoot(Lazy.Reference(root));
-				}
-				embeddedStorageManager.storeRoot();
-			}
+			final var embeddedStorageManager = this.prepareEmbeddedStorage(storageRootPath).start();
+			this.initializeRoot(embeddedStorageManager);
 
 			this.getClusterStorageBinaryDataDistributor().ignoreDistribution(false);
 
 			final var scheduler = this.getQuartzCronJobScheduler();
 
-			this.clusterStorageManager = ClusterStorageManager.Wrapper(embeddedStorageManager, scheduler::shutdown);
+				this.clusterStorageManager = ClusterStorageManager.Wrapper(embeddedStorageManager, () ->
+				{
+					scheduler.shutdown();
+					this.closeReplicationTransportAndPositionProvider();
+				});
 
 			this.getClusterStorageBinaryDataClient().start();
 
@@ -1224,25 +1174,6 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			// TODO: Hardcoded paths
 			final var storageParentPath = Paths.get("/storage/");
 			final var storageRootPath = storageParentPath.resolve("storage");
-			final var messageInfoPath = storageParentPath.resolve("offset");
-
-			if (Files.exists(storageRootPath))
-			{
-				LOG.info("Cleaning storage directory");
-				this.deleteDirectory(storageRootPath);
-			}
-
-			if (Files.exists(messageInfoPath))
-			{
-				try
-				{
-					Files.delete(messageInfoPath);
-				}
-				catch (final IOException e)
-				{
-					throw new NodelibraryException("Failed to delete message info file", e);
-				}
-			}
 
 			// don't send messages generated by starting the storage and storing the empty root
 			this.getClusterStorageBinaryDataDistributor().ignoreDistribution(true);
@@ -1254,67 +1185,35 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			 * If there are backups already available, use those instead
 			 */
 
-			if (containsBackups)
+			if (containsBackups && !Files.exists(storageRootPath))
 			{
 				LOG.info("Downloading latest storage backup");
 				backend.downloadLatestBackup(storageParentPath);
 			}
 			else
 			{
-				LOG.info("Starting with local storage");
+				LOG.info(Files.exists(storageRootPath)
+					? "Resuming existing local storage and cursor"
+					: "Starting with local storage");
 			}
 
 			// don't send messages generated by starting the storage and storing the empty root
 			this.getClusterStorageBinaryDataDistributor().ignoreDistribution(true);
 
-			this.getKafkaMessageInfoProvider().init();
-
-			final var embeddedStorageFoundation = this.getEmbeddedStorageFoundation();
-			// replace the storage live file provider from the provided embedded storage foundation
-			StorageConfiguration storageConfig = embeddedStorageFoundation.getConfiguration();
-			storageConfig = StorageConfiguration.Builder()
-				.setBackupSetup(storageConfig.backupSetup())
-				.setChannelCountProvider(storageConfig.channelCountProvider())
-				.setDataFileEvaluator(storageConfig.dataFileEvaluator())
-				.setEntityCacheEvaluator(storageConfig.entityCacheEvaluator())
-				.setHousekeepingController(storageConfig.housekeepingController())
-				.setStorageFileProvider(
-					StorageLiveFileProvider.New(NioFileSystem.New().ensureDirectory(storageRootPath))
-				)
-				.createConfiguration();
-			embeddedStorageFoundation.setConfiguration(storageConfig);
+			this.getReplicationPositionProvider().init();
 
 			final var dataDistributor = this.getClusterStorageBinaryDataDistributor();
-			DistributedStorage.configureWriting(embeddedStorageFoundation, dataDistributor);
-
-			embeddedStorageFoundation.setExceptionHandler((throwable, channel) ->
-			{
-				try
-				{
-					StorageExceptionHandler.defaultHandleException(throwable, channel);
-				}
-				catch (final StorageException exception)
-				{
-					GlobalErrorHandling.handleFatalError(exception);
-				}
-			});
+			final var embeddedStorageFoundation = this.prepareEmbeddedStorage(storageRootPath);
+			DistributedStorage.configureWriting(
+				embeddedStorageFoundation,
+				dataDistributor,
+				this.getClusterReplicationTransport().persistenceTargetFactory(
+					this.getNodelibraryPropertiesProvider().replicationStreamName(), dataDistributor
+				)
+			);
 
 			final var embeddedStorageManager = embeddedStorageFoundation.start();
-
-			if (embeddedStorageManager.root() == null)
-			{
-				LOG.debug("Setting and storing new root from root supplier");
-				final var root = this.getRootSupplier().get();
-				if (root instanceof Lazy)
-				{
-					embeddedStorageManager.setRoot(root);
-				}
-				else
-				{
-					embeddedStorageManager.setRoot(Lazy.Reference(root));
-				}
-				embeddedStorageManager.storeRoot();
-			}
+			this.initializeRoot(embeddedStorageManager);
 
 			this.getClusterStorageBinaryDataDistributor().ignoreDistribution(false);
 
@@ -1323,7 +1222,11 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			this.clusterStorageManager = ClusterStorageManager.New(
 				embeddedStorageManager,
 				() -> this.getStorageLimitCheckerQuartzCronJobManager().limitReached(),
-				scheduler::shutdown
+				() ->
+				{
+					this.getClusterReplicationTransport().close();
+					scheduler.shutdown();
+				}
 			);
 
 			this.getClusterStorageBinaryDataClient().start();
@@ -1363,6 +1266,45 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			scheduler.start();
 		}
 
+		private EmbeddedStorageFoundation<?> prepareEmbeddedStorage(final Path storageRootPath)
+		{
+			final var foundation = this.getEmbeddedStorageFoundation();
+			final StorageConfiguration current = foundation.getConfiguration();
+			foundation.setConfiguration(StorageConfiguration.Builder()
+				.setBackupSetup(current.backupSetup())
+				.setChannelCountProvider(current.channelCountProvider())
+				.setDataFileEvaluator(current.dataFileEvaluator())
+				.setEntityCacheEvaluator(current.entityCacheEvaluator())
+				.setHousekeepingController(current.housekeepingController())
+				.setStorageFileProvider(
+					StorageLiveFileProvider.New(NioFileSystem.New().ensureDirectory(storageRootPath))
+				)
+				.createConfiguration());
+			foundation.setExceptionHandler((throwable, channel) ->
+			{
+				try
+				{
+					StorageExceptionHandler.defaultHandleException(throwable, channel);
+				}
+				catch (final StorageException exception)
+				{
+					GlobalErrorHandling.handleFatalError(exception);
+				}
+			});
+			return foundation;
+		}
+
+		private void initializeRoot(final StorageManager storage)
+		{
+			if (storage.root() == null)
+			{
+				LOG.debug("Setting and storing new root from root supplier");
+				final Object root = this.getRootSupplier().get();
+				storage.setRoot(root instanceof Lazy ? root : Lazy.Reference(root));
+				storage.storeRoot();
+			}
+		}
+
 		protected void startDevNode() throws NodelibraryException
 		{
 			LOG.info("Starting dev cluster node");
@@ -1383,7 +1325,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
 			this.clusterStorageManager = ClusterStorageManager.Wrapper(
 				storage,
-				ClusterStorageManager.ShutdownCallback.NoOp()
+				() -> this.getClusterReplicationTransport().close()
 			);
 			this.clusterRequestController = ClusterRestRequestController.DevNode();
 		}
@@ -1396,24 +1338,50 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			}
 
 			LOG.info("Deleting files at {}", path);
+			StorageFileOperations.deleteDirectory(path);
+		}
 
-			try (final var directories = Files.walk(path))
+		private void closeReplicationTransportAndPositionProvider()
+		{
+			RuntimeException failure = null;
+			if (this.replicationTransport != null)
 			{
-				directories.sorted(Comparator.reverseOrder()).forEach(f ->
+				try
 				{
-					try
-					{
-						Files.delete(f);
-					}
-					catch (final IOException e)
-					{
-						throw new NodelibraryException("Failed to delete file at " + f, e);
-					}
-				});
+					this.replicationTransport.close();
+				}
+				catch (final RuntimeException closeFailure)
+				{
+					failure = closeFailure;
+				}
 			}
-			catch (final IOException e) // thrown by Files.walk(Path)
+			if (this.positionProvider != null)
 			{
-				throw new NodelibraryException("Failed to walk files at " + path);
+				try
+				{
+					this.positionProvider.close();
+				}
+				catch (final RuntimeException closeFailure)
+				{
+					if (failure == null) failure = closeFailure;
+					else failure.addSuppressed(closeFailure);
+				}
+			}
+			if (this.replicationRetention != null)
+			{
+				try
+				{
+					this.replicationRetention.close();
+				}
+				catch (final RuntimeException closeFailure)
+				{
+					if (failure == null) failure = closeFailure;
+					else failure.addSuppressed(closeFailure);
+				}
+			}
+			if (failure != null)
+			{
+				throw new IllegalStateException("failed to close replication resources", failure);
 			}
 		}
 	}

@@ -14,10 +14,6 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.time.Duration;
-import java.util.Collections;
-import java.util.Locale;
-
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
@@ -26,6 +22,10 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.eclipse.serializer.collections.EqHashTable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.util.Collections;
+import java.util.Locale;
 
 import static org.apache.kafka.clients.consumer.ConsumerConfig.*;
 import static org.apache.kafka.common.IsolationLevel.READ_COMMITTED;
@@ -93,18 +93,27 @@ public class KafkaMessageInfoProvider implements AutoCloseable
 	public void init() throws KafkaException
 	{
 		LOG.trace("Initializing KafkaMessageInfoProvider. Subscribing to topic {}", this.topic);
-		this.kafka.subscribe(Collections.singleton(this.topic));
-
-		LOG.trace("Polling consumer until we have partitions assigned.");
-		final long startMs = System.currentTimeMillis();
-		final long endMs = startMs + PARTITION_ASSIGNMENT_TIMEOUT_MS;
-		while (this.kafka.assignment().isEmpty())
+		try
 		{
-			if (System.currentTimeMillis() > endMs)
+			this.kafka.subscribe(Collections.singleton(this.topic));
+
+			LOG.trace("Polling consumer until we have partitions assigned.");
+			final long startMs = System.currentTimeMillis();
+			final long endMs = startMs + PARTITION_ASSIGNMENT_TIMEOUT_MS;
+			while (this.kafka.assignment().isEmpty())
 			{
-				throw new RuntimeException("Timed out waiting for topic partition assignment");
+				if (System.currentTimeMillis() > endMs)
+				{
+					throw new RuntimeException("Timed out waiting for topic partition assignment");
+				}
+				this.kafka.poll(POLL_TIMEOUT);
 			}
-			this.kafka.poll(POLL_TIMEOUT);
+		}
+		catch (final RuntimeException failure)
+		{
+			try { this.kafka.close(); }
+			catch (final RuntimeException closeFailure) { failure.addSuppressed(closeFailure); }
+			throw failure;
 		}
 	}
 
@@ -144,7 +153,7 @@ public class KafkaMessageInfoProvider implements AutoCloseable
 			kafkaOffsets.put(partition, offset);
 		}
 
-		return MessageInfo.New(messageIndex, kafkaOffsets.immure());
+		return MessageInfo.New(messageIndex, "kafka", null, KafkaCursorCodec.encode(kafkaOffsets.immure()));
 	}
 
 	private void seekToLastOffsets() throws KafkaException

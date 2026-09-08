@@ -15,34 +15,36 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacketAcceptor;
-import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacketAssembler;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.typing.Disposable;
+
+import java.nio.ByteBuffer;
+import java.util.List;
 
 import static org.eclipse.serializer.util.X.notNull;
 
 /**
- * A {@link StorageBinaryDataPacketAcceptor} that will not dispose the
- * {@link StorageBinaryDataMessage}s so they can be cached and disposed by the
- * {@link ClusterStorageBinaryDataMerger}. This class will also call
+ * A {@link StorageBinaryDataPacketAcceptor} that forwards completed messages to
+ * the merger and then disposes their packet-owned buffers. The merger copies
+ * data it needs for deferred materialization, so ownership remains local to
+ * this acceptor. This class will also call
  * {@link #dispose()} on the {@link ClusterStorageBinaryDataMerger}
  */
 public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDataPacketAcceptor, Disposable
 {
-	public static ClusterStorageBinaryDataPacketAcceptor New(final ClusterStorageBinaryDataMerger merger)
+	default void awaitApplied()
+	{
+	}
+	static ClusterStorageBinaryDataPacketAcceptor New(final ClusterStorageBinaryDataMerger merger)
 	{
 		return new Default(notNull(merger));
 	}
 
-	public static class Default implements ClusterStorageBinaryDataPacketAcceptor
+	class Default implements ClusterStorageBinaryDataPacketAcceptor
 	{
 		private final ClusterStorageBinaryDataMerger merger;
 		private StorageBinaryDataMessage message;
@@ -56,58 +58,24 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		@Override
 		public synchronized void accept(final List<StorageBinaryDataPacket> packets)
 		{
-			final List<StorageBinaryDataMessage> completeMessages = new ArrayList<>();
-
-			for (final StorageBinaryDataPacket packet : packets)
+			final StorageBinaryDataPacketAssembler.Result result =
+				StorageBinaryDataPacketAssembler.collect(this.message, packets);
+			this.message = result.pending();
+			if (!result.completed().isEmpty())
 			{
-				if (this.message == null)
-				{
-					this.message = StorageBinaryDataMessage.New(packet);
-				}
-				else
-				{
-					this.message.addPacket(packet);
-				}
-
-				if (this.message.isComplete())
-				{
-					completeMessages.add(this.message);
-					this.message = null;
-				}
-			}
-
-			if (!completeMessages.isEmpty())
-			{
-				this.handleCompleteMessages(completeMessages);
+				this.handleCompleteMessages(result.completed());
 			}
 		}
 
 		private void handleCompleteMessages(final List<StorageBinaryDataMessage> messages)
 		{
-			// Join similiar messages and hand over to receiver
 			try
 			{
-				StorageBinaryDataMessage last = null;
-				final List<ByteBuffer> buffers = new ArrayList<>();
-				for (final StorageBinaryDataMessage message : messages)
-				{
-					if (last != null && last.type() != message.type())
-					{
-						this.send(last, buffers);
-						buffers.clear();
-					}
-
-					buffers.add(message.data());
-					last = message;
-				}
-
-				this.send(last, buffers);
+				StorageBinaryDataPacketAssembler.dispatch(messages, this::send);
 			}
 			finally
 			{
-				// don't deallocate here, instead in ClusterStorageBinaryDataMerger so we can cache them
-				// without having to copy
-				//messages.forEach(StorageBinaryDataMessage::dispose);
+				messages.forEach(StorageBinaryDataMessage::dispose);
 			}
 		}
 
@@ -126,21 +94,28 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 			case TYPE_DICTIONARY:
 			{
 				// type dictionary is always sent completely, so only the last one is relevant
-				this.merger.receiveTypeDictionary(this.createTypeDictionary(last.data()));
+				this.merger.receiveTypeDictionary(StorageBinaryDataPacketAssembler.decodeTypeDictionary(last.data()));
 			}
 				break;
 			}
 		}
 
-		private String createTypeDictionary(final ByteBuffer buffer)
+		@Override
+		public synchronized void dispose()
 		{
-			return new String(XMemory.toArray(buffer), StandardCharsets.UTF_8);
+			final StorageBinaryDataMessage pending = this.message;
+			this.message = null;
+			if (pending != null)
+			{
+				pending.dispose();
+			}
+			this.merger.dispose();
 		}
 
 		@Override
-		public void dispose()
+		public void awaitApplied()
 		{
-			this.merger.dispose();
+			this.merger.awaitApplied();
 		}
 	}
 }

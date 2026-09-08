@@ -14,21 +14,21 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Optional;
-import java.util.stream.Collectors;
-
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -83,7 +83,9 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend
 
             try
             {
+                final Path manifest = this.backupVolumePath.resolve(previousBackupMetadata.timestamp() + "/manifest");
                 offsetFileContent = Files.readString(
+                    Files.exists(manifest) ? manifest :
                     this.backupVolumePath.resolve(previousBackupMetadata.timestamp() + "/offset"),
                     StandardCharsets.UTF_8
                 );
@@ -131,6 +133,15 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend
             )
             {
                 infoWriter.set(messageInfo);
+            }
+            try
+            {
+                Files.write(backupRootPath.resolve("manifest"), MessageInfoCodec.serializeBytes(messageInfo),
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+            }
+            catch (final IOException e)
+            {
+                throw new NodelibraryException("Failed to write backup replication manifest", e);
             }
             try
             {
@@ -208,27 +219,10 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend
             return new BackupMetadata(timestamp, isManual);
         }
 
-        private void deleteDirectory(final Path path) throws NodelibraryException
-        {
-            try (final var directories = Files.walk(path))
-            {
-                directories.sorted(Comparator.reverseOrder()).forEach(f ->
-                {
-                    try
-                    {
-                        Files.delete(f);
-                    }
-                    catch (final IOException e)
-                    {
-                        throw new NodelibraryException("Failed to delete file at " + f, e);
-                    }
-                });
-            }
-            catch (final IOException e)
-            {
-                throw new NodelibraryException("Failed to iterate files at " + path);
-            }
-        }
+		private void deleteDirectory(final Path path) throws NodelibraryException
+		{
+			StorageFileOperations.deleteDirectory(path);
+		}
 
         private void copyDirectory(final Path sourceDir, final Path destinationDir)
         {

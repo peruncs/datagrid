@@ -31,4 +31,19 @@ public interface ClusterNodeManager extends AutoCloseable
 	boolean isHealthy();
 
 	long readStorageSizeBytes() throws NodelibraryException;
+
+	/** Monitoring hook; nodes without a replication stream return {@code -1}. */
+	default long getCurrentMessageIndex() { return -1; }
+
+	/** Monitoring hook; nodes without a replication stream return {@code -1}. */
+	default long getLatestMessageIndex() { return -1; }
+
+	/** Monitoring hook for the selected provider. */
+	default String getReplicationTransport() { return "none"; }
+
+	/** Monitoring hook for provider lifecycle state. */
+	default ReplicationHealth.State getReplicationState()
+	{
+		return isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING;
+	}
 }

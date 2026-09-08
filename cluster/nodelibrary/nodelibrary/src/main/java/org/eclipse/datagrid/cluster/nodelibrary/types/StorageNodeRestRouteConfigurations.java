@@ -92,6 +92,17 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Prometheus text endpoint for transport-neutral replication state. */
+	public static final class GetReplicationMetrics
+	{
+		public static final String PATH = "/replication-metrics";
+		public static final String PRODUCES = MediaTypes.TEXT_PLAIN;
+
+		private GetReplicationMetrics()
+		{
+		}
+	}
+
 	public static final class PostBackup
 	{
 		public static final String PATH = "/backup";

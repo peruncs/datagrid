@@ -15,17 +15,15 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 
-import static org.eclipse.serializer.util.X.notNull;
+import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
-import org.eclipse.serializer.memory.XMemory;
-import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import static org.eclipse.serializer.util.X.notNull;
 
+/** Reassembles ordered packets and forwards complete messages to a receiver. */
 public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBinaryDataPacket>>
 {
 	@Override
@@ -52,29 +50,12 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
 		@Override
 		public synchronized void accept(final List<StorageBinaryDataPacket> packets)
 		{
-			final List<StorageBinaryDataMessage> completeMessages = new ArrayList<>();
-
-			for (final StorageBinaryDataPacket packet : packets)
+			final StorageBinaryDataPacketAssembler.Result result =
+				StorageBinaryDataPacketAssembler.collect(this.message, packets);
+			this.message = result.pending();
+			if (!result.completed().isEmpty())
 			{
-				if (this.message == null)
-				{
-					this.message = StorageBinaryDataMessage.New(packet);
-				}
-				else
-				{
-					this.message.addPacket(packet);
-				}
-
-				if (this.message.isComplete())
-				{
-					completeMessages.add(this.message);
-					this.message = null;
-				}
-			}
-
-			if (!completeMessages.isEmpty())
-			{
-				this.handleCompleteMessages(completeMessages);
+				this.handleCompleteMessages(result.completed());
 			}
 		}
 
@@ -83,21 +64,7 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
 			// Join similiar messages and hand over to receiver
 			try
 			{
-				StorageBinaryDataMessage last = null;
-				final List<ByteBuffer> buffers = new ArrayList<>();
-				for (final StorageBinaryDataMessage message : messages)
-				{
-					if (last != null && last.type() != message.type())
-					{
-						this.send(last, buffers);
-						buffers.clear();
-					}
-
-					buffers.add(message.data());
-					last = message;
-				}
-
-				this.send(last, buffers);
+				StorageBinaryDataPacketAssembler.dispatch(messages, this::send);
 			}
 			finally
 			{
@@ -124,18 +91,10 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
 			case TYPE_DICTIONARY:
 			{
 				// type dictionary is always sent completely, so only the last one is relevant
-				this.receiver.receiveTypeDictionary(this.createTypeDictionary(last.data()));
+				this.receiver.receiveTypeDictionary(StorageBinaryDataPacketAssembler.decodeTypeDictionary(last.data()));
 			}
 				break;
 			}
-		}
-
-		private String createTypeDictionary(final ByteBuffer buffer)
-		{
-			return new String(
-				XMemory.toArray(buffer),
-				StandardCharsets.UTF_8
-			);
 		}
 
 	}

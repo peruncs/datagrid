@@ -14,25 +14,24 @@ package org.eclipse.datagrid.storage.distributed.kafka.types;
  * #L%
  */
 
-import java.nio.ByteBuffer;
-import java.util.Properties;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataChunker;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
-import org.eclipse.serializer.collections.BulkList;
-import org.eclipse.serializer.collections.types.XList;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+
+import java.util.Properties;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.eclipse.serializer.chars.XChars.notEmpty;
 import static org.eclipse.serializer.util.X.notNull;
@@ -112,49 +111,15 @@ public interface StorageBinaryDataDistributorKafka
 		)
 		{
 			final KafkaProducer<String, byte[]> producer = this.ensureProducer();
-			final ByteBuffer[] buffers = this.allBuffers(data);
-			int messageSize = 0;
-			for (final ByteBuffer buffer : buffers)
+			StorageBinaryDataChunker.forEach(data, StorageBinaryDistributedKafka.maxPacketSize(), chunk ->
 			{
-				messageSize += buffer.remaining();
-				buffer.mark();
-			}
-
-			int remaining = messageSize;
-			int currentBuffer = 0;
-			int packetIndex = 0;
-			final int packetCount = messageSize / StorageBinaryDistributedKafka.maxPacketSize()
-				+ (messageSize % StorageBinaryDistributedKafka.maxPacketSize() == 0 ? 0 : 1);
-			while (remaining > 0)
-			{
-				final byte[] packet = new byte[Math.min(
-					remaining,
-					StorageBinaryDistributedKafka.maxPacketSize()
-				)];
-				int packetOffset = 0;
-				while (packetOffset < packet.length)
-				{
-					final ByteBuffer buffer = buffers[currentBuffer];
-					final int length = Math.min(
-						packet.length - packetOffset,
-						buffer.remaining()
-					);
-					buffer.get(packet, packetOffset, length);
-					if (!buffer.hasRemaining())
-					{
-						currentBuffer++;
-					}
-					remaining -= length;
-					packetOffset += length;
-				}
-
-				final ProducerRecord<String, byte[]> record = new ProducerRecord<>(this.topicName, packet);
+				final ProducerRecord<String, byte[]> record = new ProducerRecord<>(this.topicName, chunk.bytes());
 				StorageBinaryDistributedKafka.addPacketHeaders(
 					record.headers(),
 					messageType,
-					messageSize,
-					packetIndex,
-					packetCount
+					chunk.messageLength(),
+					chunk.index(),
+					chunk.count()
 				);
 
 				try
@@ -178,22 +143,7 @@ public interface StorageBinaryDataDistributorKafka
 					}
 				}
 
-				packetIndex++;
-			}
-
-			for (final ByteBuffer buffer : buffers)
-			{
-				buffer.reset();
-			}
-		}
-
-		private ByteBuffer[] allBuffers(final Binary data)
-		{
-			final XList<ByteBuffer> list = BulkList.New();
-
-			data.iterateChannelChunks(channelChunk -> list.addAll(channelChunk.buffers()));
-
-			return list.toArray(ByteBuffer.class);
+			});
 		}
 
 		@Override
@@ -275,11 +225,24 @@ public interface StorageBinaryDataDistributorKafka
 		}
 
 		@Override
-		public synchronized void dispose()
+		public void dispose()
 		{
 			if (!this.executor.isShutdown())
 			{
 				this.executor.shutdown();
+			}
+			try
+			{
+				if (!this.executor.awaitTermination(30, TimeUnit.SECONDS))
+				{
+					this.executor.shutdownNow();
+					this.executor.awaitTermination(5, TimeUnit.SECONDS);
+				}
+			}
+			catch (final InterruptedException interrupted)
+			{
+				this.executor.shutdownNow();
+				Thread.currentThread().interrupt();
 			}
 
 			super.dispose();

@@ -19,7 +19,6 @@ import org.eclipse.store.storage.types.StorageConnection;
 import org.quartz.DisallowConcurrentExecution;
 import org.quartz.Job;
 import org.quartz.JobExecutionContext;
-import org.quartz.JobExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -62,7 +61,7 @@ public interface GcWorkaroundQuartzCronJobManager extends QuartzCronJobManager
 		}
 
 		@Override
-		public void execute(final JobExecutionContext context) throws JobExecutionException
+		public void execute(final JobExecutionContext context)
 		{
 			LOG.info("Issuing GC and CC");
 			this.connection.issueFullCacheCheck();

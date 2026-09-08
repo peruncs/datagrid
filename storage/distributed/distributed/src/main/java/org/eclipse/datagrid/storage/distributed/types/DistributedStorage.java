@@ -15,10 +15,13 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 
+import org.eclipse.datagrid.storage.distributed.internal.DistributedStorageConfigurator;
+import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageConnectionFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 
-import org.eclipse.datagrid.storage.distributed.internal.DistributedStorageConfigurator;
+import java.util.function.UnaryOperator;
 
 public final class DistributedStorage
 {
@@ -29,6 +32,17 @@ public final class DistributedStorage
 	{
 		final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
 		connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(distributor));
+		return foundation;
+	}
+
+	public static EmbeddedStorageFoundation<?> configureWriting(
+		final EmbeddedStorageFoundation<?> foundation,
+		final StorageBinaryDataDistributor distributor,
+		final UnaryOperator<PersistenceTarget<Binary>> targetFactory
+	)
+	{
+		final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
+		connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(distributor, targetFactory));
 		return foundation;
 	}
 

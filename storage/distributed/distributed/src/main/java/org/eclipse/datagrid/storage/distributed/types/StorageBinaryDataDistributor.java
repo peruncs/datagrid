@@ -15,16 +15,27 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 
-import static org.eclipse.serializer.util.X.notNull;
-
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.typing.Disposable;
 
+import static org.eclipse.serializer.util.X.notNull;
+
+/**
+ * Provider-neutral sink for Store binary data and optional type dictionaries.
+ * Implementations decide how bytes are transported; callers only require that
+ * dictionary data precede the matching binary transaction.
+ */
 public interface StorageBinaryDataDistributor extends Disposable
 {
 	public void distributeData(Binary data);
 
 	public void distributeTypeDictionary(String typeDictionaryData);
+
+	/** Returns and clears a dictionary staged for the next binary transaction. */
+	default String consumeTypeDictionary()
+	{
+		return null;
+	}
 
 	public static StorageBinaryDataDistributor Caching(final StorageBinaryDataDistributor delegate)
 	{
@@ -40,7 +51,12 @@ public interface StorageBinaryDataDistributor extends Disposable
 	public static class Caching implements StorageBinaryDataDistributor
 	{
 		private final StorageBinaryDataDistributor delegate;
-		private String typeDictionaryData;
+		/*
+		 * BinaryStorer exports its dictionary and writes the matching Binary on the
+		 * committing thread. Keeping the snapshot per thread prevents concurrent
+		 * commits from attaching one transaction's dictionary to another.
+		 */
+		private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();
 
 		Caching(final StorageBinaryDataDistributor delegate)
 		{
@@ -49,25 +65,48 @@ public interface StorageBinaryDataDistributor extends Disposable
 		}
 
 		@Override
-		public synchronized void distributeData(final Binary data)
+		public void distributeData(final Binary data)
 		{
-			if (this.typeDictionaryData != null)
+			final String dictionary = this.typeDictionaryData.get();
+			if (dictionary != null)
 			{
-				this.delegate.distributeTypeDictionary(this.typeDictionaryData);
-				this.typeDictionaryData = null;
+				try
+				{
+					this.delegate.distributeTypeDictionary(dictionary);
+				}
+				finally
+				{
+					this.typeDictionaryData.remove();
+				}
 			}
 			this.delegate.distributeData(data);
 		}
 
 		@Override
-		public synchronized void distributeTypeDictionary(final String typeDictionaryData)
+		public String consumeTypeDictionary()
 		{
-			this.typeDictionaryData = typeDictionaryData;
+			final String value = this.typeDictionaryData.get();
+			this.typeDictionaryData.remove();
+			return value;
+		}
+
+		@Override
+		public void distributeTypeDictionary(final String typeDictionaryData)
+		{
+			if (typeDictionaryData == null)
+			{
+				this.typeDictionaryData.remove();
+			}
+			else
+			{
+				this.typeDictionaryData.set(typeDictionaryData);
+			}
 		}
 
 		@Override
 		public void dispose()
 		{
+			this.typeDictionaryData.remove();
 			this.delegate.dispose();
 		}
 

@@ -20,8 +20,31 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * Cluster-aware extension of the transport-neutral binary distributor.
+ *
+ * <p>The message index and ignore flag are lifecycle controls, not transport
+ * details. {@link Caching} preserves a type dictionary until the next data
+ * message and is shared by Kafka and Aeron providers.</p>
+ */
 public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDistributor
 {
+	static ClusterStorageBinaryDataDistributor NoOp()
+	{
+		return new ClusterStorageBinaryDataDistributor()
+		{
+			private long index = -1;
+			private boolean ignored;
+			public void messageIndex(final long value) { this.index = value; }
+			public long messageIndex() { return this.index; }
+			public void ignoreDistribution(final boolean value) { this.ignored = value; }
+			public boolean ignoreDistribution() { return this.ignored; }
+			public void distributeTypeDictionary(final String value) { }
+			public void distributeData(final Binary value) { }
+			public void dispose() { }
+		};
+	}
+
 	void messageIndex(long index);
 
 	long messageIndex();
@@ -38,7 +61,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 	public static final class Caching implements ClusterStorageBinaryDataDistributor
 	{
 		private final ClusterStorageBinaryDataDistributor delegate;
-		private String typeDictionaryData;
+		private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();
 
 		private Caching(final ClusterStorageBinaryDataDistributor delegate)
 		{
@@ -48,10 +71,17 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		@Override
 		public synchronized void distributeData(final Binary data)
 		{
-			if (this.typeDictionaryData != null)
+			final String dictionary = this.typeDictionaryData.get();
+			if (dictionary != null)
 			{
-				this.delegate.distributeTypeDictionary(this.typeDictionaryData);
-				this.typeDictionaryData = null;
+				try
+				{
+					this.delegate.distributeTypeDictionary(dictionary);
+				}
+				finally
+				{
+					this.typeDictionaryData.remove();
+				}
 			}
 			this.delegate.distributeData(data);
 		}
@@ -59,7 +89,22 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		@Override
 		public synchronized void distributeTypeDictionary(final String typeDictionaryData)
 		{
-			this.typeDictionaryData = typeDictionaryData;
+			if (typeDictionaryData == null)
+			{
+				this.typeDictionaryData.remove();
+			}
+			else
+			{
+				this.typeDictionaryData.set(typeDictionaryData);
+			}
+		}
+
+		@Override
+		public synchronized String consumeTypeDictionary()
+		{
+			final String value = this.typeDictionaryData.get();
+			this.typeDictionaryData.remove();
+			return value;
 		}
 
 		@Override
@@ -89,6 +134,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		@Override
 		public void dispose()
 		{
+			this.typeDictionaryData.remove();
 			this.delegate.dispose();
 		}
 	}

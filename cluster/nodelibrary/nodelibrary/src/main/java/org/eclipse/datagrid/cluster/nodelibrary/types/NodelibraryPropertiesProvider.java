@@ -15,9 +15,47 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
+/**
+ * Configuration contract shared by cluster lifecycle code and optional
+ * providers. Environment-backed defaults preserve the existing Kafka
+ * deployment while {@link #replicationTransport()} allows explicit
+ * {@code kafka}, {@code aeron}, or {@code none} selection.
+ */
 public interface NodelibraryPropertiesProvider
 {
-	String kafkaTopicName();
+	/** Existing Kafka topic contract retained for source compatibility. */
+	default String kafkaTopicName()
+	{
+		return null;
+	}
+
+	default String replicationStreamName()
+	{
+		return this.kafkaTopicName();
+	}
+
+	default String replicationTransport()
+	{
+		return "none";
+	}
+
+	/** Optional provider-specific setting, allowing embedded applications to avoid environment variables. */
+	default String replicationProperty(final String name)
+	{
+		return null;
+	}
+
+	/** Fixed-topology node role: {@code writer}, {@code reader}, or {@code backup-reader}. */
+	default String replicationRole()
+	{
+		return isBackupNode() ? "backup-reader" : "writer";
+	}
+
+	/** Returns whether the role was explicitly configured rather than inherited from the Kafka-era default. */
+	default boolean replicationRoleConfigured()
+	{
+		return false;
+	}
 
 	boolean isBackupNode();
 
@@ -51,6 +89,8 @@ public interface NodelibraryPropertiesProvider
 		public static final class EnvKeys
 		{
 			public static final String KAFKA_TOPIC_NAME = "MSCNL_KAFKA_TOPIC_NAME";
+			public static final String REPLICATION_STREAM_NAME = "ECLIPSE_DATAGRID_REPLICATION_STREAM";
+			public static final String REPLICATION_TRANSPORT = "ECLIPSE_DATAGRID_REPLICATION_TRANSPORT";
 			public static final String IS_BACKUP_NODE = "IS_BACKUP_NODE";
 			public static final String BACKUP_TARGET = "BACKUP_TARGET";
 			public static final String KEPT_BACKUPS_COUNT = "KEPT_BACKUPS_COUNT";
@@ -70,15 +110,51 @@ public interface NodelibraryPropertiesProvider
 		}
 
 		@Override
+		public String replicationStreamName()
+		{
+			final String stream = this.envString(EnvKeys.REPLICATION_STREAM_NAME);
+			return stream == null ? this.envString(EnvKeys.KAFKA_TOPIC_NAME) : stream;
+		}
+
+		@Override
 		public String kafkaTopicName()
 		{
-			return this.envString(EnvKeys.KAFKA_TOPIC_NAME);
+			return this.replicationStreamName();
+		}
+
+		@Override
+		public String replicationTransport()
+		{
+			final String transport = this.envString(EnvKeys.REPLICATION_TRANSPORT);
+			return transport == null
+				? (this.envString(EnvKeys.KAFKA_TOPIC_NAME) == null ? "none" : "kafka")
+				: transport;
 		}
 
 		@Override
 		public boolean isBackupNode()
 		{
 			return this.envBoolean(EnvKeys.IS_BACKUP_NODE);
+		}
+
+		@Override
+		public String replicationProperty(final String name)
+		{
+			return this.envString(name);
+		}
+
+		@Override
+		public String replicationRole()
+		{
+			final String role = this.envString("ECLIPSE_DATAGRID_REPLICATION_ROLE");
+			return role == null || role.isBlank() ? NodelibraryPropertiesProvider.super.replicationRole() : role;
+		}
+
+		@Override
+		public boolean replicationRoleConfigured()
+		{
+			final String role = this.envString("ECLIPSE_DATAGRID_REPLICATION_ROLE");
+			return role != null && !role.isBlank();
 		}
 
 		@Override

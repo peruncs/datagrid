@@ -14,16 +14,16 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.nio.file.Path;
-import java.util.Comparator;
-import java.util.List;
-import java.util.function.Supplier;
-
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.serializer.concurrency.XThreads;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.List;
+import java.util.function.Supplier;
 
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
@@ -61,7 +61,7 @@ public interface StorageBackupManager
         final StorageBackupBackend storageBackupBackend,
         final Supplier<MessageInfo> messageInfoSupplier,
         final ClusterStorageBinaryDataClient dataClient,
-        final KafkaRecordDeleter kafkaRecordDeleter
+        final ReplicationLogRetention retention
     )
     {
         return new Default(
@@ -70,7 +70,7 @@ public interface StorageBackupManager
             notNull(storageBackupBackend),
             notNull(messageInfoSupplier),
             notNull(dataClient),
-            notNull(kafkaRecordDeleter)
+            notNull(retention)
         );
     }
 
@@ -83,7 +83,7 @@ public interface StorageBackupManager
         private final StorageBackupBackend backend;
         private final Supplier<MessageInfo> messageInfoSupplier;
         private final ClusterStorageBinaryDataClient dataClient;
-        private final KafkaRecordDeleter kafkaRecordDeleter;
+        private final ReplicationLogRetention retention;
 
         private Default(
             final StorageConnection storageConnection,
@@ -91,7 +91,7 @@ public interface StorageBackupManager
             final StorageBackupBackend backupBackend,
             final Supplier<MessageInfo> messageInfoSupplier,
             final ClusterStorageBinaryDataClient dataClient,
-            final KafkaRecordDeleter kafkaRecordDeleter
+            final ReplicationLogRetention retention
         )
         {
             this.storageConnection = storageConnection;
@@ -99,7 +99,7 @@ public interface StorageBackupManager
             this.backend = backupBackend;
             this.messageInfoSupplier = messageInfoSupplier;
             this.dataClient = dataClient;
-            this.kafkaRecordDeleter = kafkaRecordDeleter;
+            this.retention = retention;
         }
 
         @Override
@@ -141,7 +141,9 @@ public interface StorageBackupManager
                 {
                     // delete up to the previous backup to save on Kafka log storage
                     this.backend.getMessageInfoFromPreviousBackup(1)
-                        .ifPresent(info -> this.kafkaRecordDeleter.deleteUntilOffsets(info.kafkaPartitionOffsets()));
+                        .ifPresent(info -> this.retention.deleteThrough(new ReplicationCursor(
+                            info.transport(), info.storeGeneration(), info.messageIndex(), info.providerPosition()
+                        )));
                 }
             }
             finally

@@ -36,18 +36,14 @@ public interface BackupNodeManager extends ClusterNodeManager
 
 	static BackupNodeManager New(
 		final StorageBackupTaskExecutor storageBackupTaskExecutor,
-
 		final ClusterStorageBinaryDataClient dataClient,
-		final StorageBackupManager backupManager,
 		final StorageController storageController,
 		final StorageDiskSpaceReader storageDiskSpaceReader
 	)
 	{
 		return new Default(
 			notNull(storageBackupTaskExecutor),
-
 			notNull(dataClient),
-			notNull(backupManager),
 			notNull(storageController),
 			notNull(storageDiskSpaceReader)
 		);
@@ -59,25 +55,18 @@ public interface BackupNodeManager extends ClusterNodeManager
 
 		private final StorageBackupTaskExecutor tasks;
 		private final ClusterStorageBinaryDataClient dataClient;
-		private final StorageBackupManager backupManager;
 		private final StorageController storageController;
 		private final StorageDiskSpaceReader storageDiskSpaceReader;
 
-		private final boolean isStopping = false;
-
 		private Default(
 			final StorageBackupTaskExecutor storageBackupTaskExecutor,
-
 			final ClusterStorageBinaryDataClient dataClient,
-			final StorageBackupManager backupManager,
 			final StorageController storageController,
 			final StorageDiskSpaceReader storageDiskSpaceReader
 		)
 		{
 			this.tasks = storageBackupTaskExecutor;
-
 			this.dataClient = dataClient;
-			this.backupManager = backupManager;
 			this.storageController = storageController;
 			this.storageDiskSpaceReader = storageDiskSpaceReader;
 		}
@@ -85,14 +74,12 @@ public interface BackupNodeManager extends ClusterNodeManager
 		@Override
 		public void stopReadingAtLatestMessage()
 		{
-			this.validateRunning();
 			this.dataClient.stopAtLatestMessage();
 		}
 
 		@Override
 		public void resumeReading() throws NodelibraryException
 		{
-			this.validateRunning();
 			this.dataClient.resume();
 		}
 
@@ -105,7 +92,6 @@ public interface BackupNodeManager extends ClusterNodeManager
 		@Override
 		public void createStorageBackup(final boolean useManualSlot) throws NodelibraryException
 		{
-			this.validateRunning();
 			this.tasks.runBackup(useManualSlot);
 		}
 
@@ -142,7 +128,6 @@ public interface BackupNodeManager extends ClusterNodeManager
 		@Override
 		public void startStorageChecks()
 		{
-			this.validateRunning();
 			this.tasks.runChecks();
 		}
 
@@ -154,12 +139,5 @@ public interface BackupNodeManager extends ClusterNodeManager
 			//this.backupManager.close();
 		}
 
-		private void validateRunning()
-		{
-			if (this.isStopping)
-			{
-				throw new NodelibraryException("Backup Node is stopping.");
-			}
-		}
 	}
 }

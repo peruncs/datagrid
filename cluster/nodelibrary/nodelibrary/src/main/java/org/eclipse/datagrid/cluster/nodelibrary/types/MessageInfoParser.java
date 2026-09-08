@@ -4,80 +4,52 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #%L
  * Eclipse Data Grid Cluster Nodelibrary
  * %%
- * Copyright (C) 2025 - 2026 MicroStream Software
+ * Copyright (C) 2025 MicroStream Software
  * %%
  * This program and the accompanying materials are made
  * available under the terms of the Eclipse Public License 2.0
  * which is available at https://www.eclipse.org/legal/epl-2.0/
- * 
+ *
  * SPDX-License-Identifier: EPL-2.0
  * #L%
  */
 
-import org.apache.kafka.common.TopicPartition;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
-import org.eclipse.serializer.collections.EqHashTable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
+import java.util.Base64;
+import java.util.UUID;
+
+/** Parses the transport-neutral persisted replication cursor format. */
 public interface MessageInfoParser
 {
-    static MessageInfoParser New()
-    {
-        return new Default();
-    }
+	static MessageInfoParser New() { return new Default(); }
 
-    MessageInfo parseMessageInfo(final String offsetFileContent) throws NodelibraryException;
+	MessageInfo parseMessageInfo(String offsetFileContent) throws NodelibraryException;
 
-    class Default implements MessageInfoParser
-    {
-        private static final Logger LOG = LoggerFactory.getLogger(MessageInfoParser.class);
-
-        @Override
-        public MessageInfo parseMessageInfo(final String offsetFileContent) throws NodelibraryException
-        {
-            final String[] rows = offsetFileContent.trim().split("\n");
-            try
-            {
-                // parse message index
-                final long messageIndex = Long.parseLong(rows[0]);
-
-                // parse partition offsets
-                final EqHashTable<TopicPartition, Long> partitionOffsets = EqHashTable.New();
-                for (int i = 1; i < rows.length; i++)
-                {
-                    final String[] cols = rows[i].split(",");
-                    if (cols.length != 3)
-                    {
-                        throw new NodelibraryException(
-                            "Offset Partition column formatting wrong, excpeted 3 comma separated columns: " + rows[i]
-                        );
-                    }
-
-                    final String topic = cols[0];
-                    final int partition = Integer.parseInt(cols[1]);
-                    final long offset = Long.parseLong(cols[2]);
-
-                    final var topicPartition = new TopicPartition(topic, partition);
-
-                    LOG.debug("Parsed partition {} at offset {}", topicPartition, offset);
-                    if (partitionOffsets.get(topicPartition) != null)
-                    {
-                        throw new NodelibraryException("Offset file contains duplicate partition " + partition);
-                    }
-                    partitionOffsets.put(topicPartition, offset);
-                }
-
-                return MessageInfo.New(messageIndex, partitionOffsets.immure());
-            }
-            catch (final NumberFormatException | IndexOutOfBoundsException | NodelibraryException e)
-            {
-                if (e instanceof NodelibraryException)
-                {
-                    throw e;
-                }
-                throw new NodelibraryException("Failed to parse message info file", e);
-            }
-        }
-    }
+	final class Default implements MessageInfoParser
+	{
+		@Override
+		public MessageInfo parseMessageInfo(final String content) throws NodelibraryException
+		{
+			if (content == null || content.isBlank()) throw new NodelibraryException("Empty replication cursor");
+			final String[] rows = content.trim().split("\\R");
+			try
+			{
+				final long index = Long.parseLong(rows[0]);
+				if (rows.length == 1) return MessageInfo.New(index);
+				if (rows.length >= 4 && !rows[1].contains(","))
+				{
+					if (rows.length != 4) throw new IllegalArgumentException("trailing replication cursor fields");
+					final UUID generation = rows[2].isBlank() ? null : UUID.fromString(rows[2]);
+					return MessageInfo.New(index, rows[1], generation, Base64.getDecoder().decode(rows[3]));
+				}
+				final String legacyPosition = String.join("\n", java.util.Arrays.copyOfRange(rows, 1, rows.length));
+				return MessageInfo.New(index, "kafka", null, legacyPosition.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			}
+			catch (final RuntimeException failure)
+			{
+				throw new NodelibraryException("Failed to parse replication cursor", failure);
+			}
+		}
+	}
 }

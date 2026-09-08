@@ -15,11 +15,11 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
  */
 
 
+import org.eclipse.datagrid.cluster.nodelibrary.types.HttpHeader;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-
-import org.eclipse.datagrid.cluster.nodelibrary.types.HttpHeader;
 
 public class NotADistributorException extends BadRequestException
 {
@@ -59,8 +59,7 @@ public class NotADistributorException extends BadRequestException
 	@Override
 	public Collection<HttpHeader> extraHeaders()
 	{
-		final var headers = new ArrayList<HttpHeader>();
-		headers.addAll(super.extraHeaders());
+		final var headers = new ArrayList<HttpHeader>(super.extraHeaders());
 		headers.add(new HttpHeader(NAD_HEADER_KEY, NAD_HEADER_VALUE));
 		return Collections.unmodifiableList(headers);
 	}

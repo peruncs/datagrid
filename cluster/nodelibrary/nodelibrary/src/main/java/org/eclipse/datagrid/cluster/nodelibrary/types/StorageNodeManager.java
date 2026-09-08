@@ -35,6 +35,12 @@ public interface StorageNodeManager extends ClusterNodeManager
 
 	long getLatestMessageIndex();
 
+	/** Returns the selected transport id for monitoring (for example {@code aeron}). */
+	String getReplicationTransport();
+
+	/** Returns the provider lifecycle state shown by monitoring endpoints. */
+	ReplicationHealth.State getReplicationState();
+
 	static StorageNodeManager New(
 		final ClusterStorageBinaryDataDistributor dataDistributor,
 		final StorageTaskExecutor storageTaskExecutor,
@@ -42,7 +48,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 		final StorageNodeHealthCheck healthCheck,
 		final StorageController storageController,
 		final StorageDiskSpaceReader storageDiskSpaceReader,
-		final KafkaMessageInfoProvider kafkaMessageInfoProvider
+		final ReplicationPositionProvider positionProvider
 	)
 	{
 		return new Default(
@@ -52,7 +58,26 @@ public interface StorageNodeManager extends ClusterNodeManager
 			notNull(healthCheck),
 			notNull(storageController),
 			notNull(storageDiskSpaceReader),
-			notNull(kafkaMessageInfoProvider)
+			notNull(positionProvider)
+		);
+	}
+
+	/** Creates a manager with an explicit transport id for monitoring labels. */
+	static StorageNodeManager New(
+		final ClusterStorageBinaryDataDistributor dataDistributor,
+		final StorageTaskExecutor storageTaskExecutor,
+		final ClusterStorageBinaryDataClient dataClient,
+		final StorageNodeHealthCheck healthCheck,
+		final StorageController storageController,
+		final StorageDiskSpaceReader storageDiskSpaceReader,
+		final ReplicationPositionProvider positionProvider,
+		final String replicationTransport
+	)
+	{
+		return new Default(
+			notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient), notNull(healthCheck),
+			notNull(storageController), notNull(storageDiskSpaceReader), notNull(positionProvider),
+			replicationTransport
 		);
 	}
 
@@ -61,15 +86,18 @@ public interface StorageNodeManager extends ClusterNodeManager
 		private static final Logger LOG = LoggerFactory.getLogger(StorageNodeManager.class);
 
 		private final ClusterStorageBinaryDataDistributor dataDistributor;
-		private StorageTaskExecutor storageTaskExecutor;
+		private final StorageTaskExecutor storageTaskExecutor;
 		private final ClusterStorageBinaryDataClient dataClient;
 		private final StorageNodeHealthCheck healthCheck;
 		private final StorageController storageController;
 		private final StorageDiskSpaceReader storageDiskSpaceReader;
-		private final KafkaMessageInfoProvider kafkaMessageInfoProvider;
+		private final ReplicationPositionProvider positionProvider;
+		private final String replicationTransport;
 
 		private boolean isDistributor;
 		private boolean isSwitchingToDistributor;
+		private boolean closed;
+		private boolean positionProviderClosed;
 
 		public Default(
 			final ClusterStorageBinaryDataDistributor dataDistributor,
@@ -78,7 +106,22 @@ public interface StorageNodeManager extends ClusterNodeManager
 			final StorageNodeHealthCheck healthCheck,
 			final StorageController storageController,
 			final StorageDiskSpaceReader storageDiskSpaceReader,
-			final KafkaMessageInfoProvider kafkaMessageInfoProvider
+			final ReplicationPositionProvider positionProvider
+		)
+		{
+			this(dataDistributor, storageTaskExecutor, dataClient, healthCheck, storageController,
+				storageDiskSpaceReader, positionProvider, "unknown");
+		}
+
+		public Default(
+			final ClusterStorageBinaryDataDistributor dataDistributor,
+			final StorageTaskExecutor storageTaskExecutor,
+			final ClusterStorageBinaryDataClient dataClient,
+			final StorageNodeHealthCheck healthCheck,
+			final StorageController storageController,
+			final StorageDiskSpaceReader storageDiskSpaceReader,
+			final ReplicationPositionProvider positionProvider,
+			final String replicationTransport
 		)
 		{
 			this.dataDistributor = dataDistributor;
@@ -87,7 +130,9 @@ public interface StorageNodeManager extends ClusterNodeManager
 			this.storageController = storageController;
 			this.storageDiskSpaceReader = storageDiskSpaceReader;
 			this.storageTaskExecutor = storageTaskExecutor;
-			this.kafkaMessageInfoProvider = kafkaMessageInfoProvider;
+			this.positionProvider = positionProvider;
+			this.replicationTransport = replicationTransport == null || replicationTransport.isBlank()
+				? "unknown" : replicationTransport;
 		}
 
 		@Override
@@ -174,8 +219,19 @@ public interface StorageNodeManager extends ClusterNodeManager
 			final var messageInfo = this.dataClient.messageInfo();
 
 			// once a node has been switched to distribution it will never become a reader node anymore
-			this.healthCheck.close();
-			this.dataClient.dispose();
+			RuntimeException failure = null;
+			try { this.healthCheck.close(); }
+			catch (final RuntimeException closeFailure) { failure = closeFailure; }
+			try { this.dataClient.dispose(); }
+			catch (final RuntimeException closeFailure)
+			{
+				if (failure == null) failure = closeFailure;
+				else failure.addSuppressed(closeFailure);
+			}
+			if (failure != null)
+			{
+				throw new IllegalStateException("failed to close reader resources during promotion", failure);
+			}
 			this.dataDistributor.messageIndex(messageInfo.messageIndex());
 
 			this.isDistributor = true;
@@ -199,16 +255,74 @@ public interface StorageNodeManager extends ClusterNodeManager
 		@Override
 		public long getLatestMessageIndex()
 		{
-			return this.kafkaMessageInfoProvider.provideLatestMessageIndex();
+			try
+			{
+				return this.positionProvider.latestSequence();
+			}
+			catch (final NodelibraryException e)
+			{
+				throw new IllegalStateException("Failed to read latest replication position", e);
+			}
+		}
+
+		@Override
+		public String getReplicationTransport()
+		{
+			return this.replicationTransport;
+		}
+
+		@Override
+		public ReplicationHealth.State getReplicationState()
+		{
+			return this.isDistributor
+				? (this.isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING)
+				: this.healthCheck.replicationState();
 		}
 
 		@Override
 		public void close()
 		{
 			LOG.info("Closing StorageNodeManager");
-			this.dataDistributor.dispose();
-			this.dataClient.dispose();
-			this.healthCheck.close();
+			if (this.closed)
+			{
+				return;
+			}
+			this.closed = true;
+			RuntimeException failure = null;
+			try { this.dataDistributor.dispose(); }
+			catch (final RuntimeException closeFailure) { failure = closeFailure; }
+			try { this.dataClient.dispose(); }
+			catch (final RuntimeException closeFailure)
+			{
+				if (failure == null) failure = closeFailure;
+				else failure.addSuppressed(closeFailure);
+			}
+			try { this.healthCheck.close(); }
+			catch (final RuntimeException closeFailure)
+			{
+				if (failure == null) failure = closeFailure;
+				else failure.addSuppressed(closeFailure);
+			}
+			try { this.closePositionProvider(); }
+			catch (final RuntimeException closeFailure)
+			{
+				if (failure == null) failure = closeFailure;
+				else failure.addSuppressed(closeFailure);
+			}
+			if (failure != null)
+			{
+				throw new IllegalStateException("failed to close storage node resources", failure);
+			}
+		}
+
+		private void closePositionProvider()
+		{
+			if (this.positionProviderClosed)
+			{
+				return;
+			}
+			this.positionProviderClosed = true;
+			this.positionProvider.close();
 		}
 	}
 }

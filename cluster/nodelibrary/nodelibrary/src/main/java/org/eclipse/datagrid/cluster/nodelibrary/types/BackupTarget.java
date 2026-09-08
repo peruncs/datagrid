@@ -30,14 +30,11 @@ public enum BackupTarget
 			return null;
 		}
 
-		switch (s)
+		return switch (s)
 		{
-		case "SAAS":
-			return SAAS;
-		case "ONPREM":
-			return ONPREM;
-		default:
-			return null;
-		}
+		case "SAAS" -> SAAS;
+		case "ONPREM" -> ONPREM;
+		default -> null;
+		};
 	}
 }

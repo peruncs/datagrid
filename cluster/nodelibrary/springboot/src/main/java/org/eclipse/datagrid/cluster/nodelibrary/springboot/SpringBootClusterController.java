@@ -15,34 +15,18 @@ package org.eclipse.datagrid.cluster.nodelibrary.springboot;
  */
 
 
-import java.util.concurrent.CompletableFuture;
-import java.util.function.Supplier;
-
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.HttpResponseException;
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterRestRequestController;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetBackup;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetDistributor;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetGc;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetHealth;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetHealthReady;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetStorageBytes;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.GetUpdates;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostActivateDistributorFinish;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostActivateDistributorStart;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostBackup;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostGc;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostResumeUpdates;
-import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.PostUpdates;
-import org.eclipse.serializer.util.X;
+import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Async;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
+
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 @RestController
 @RequestMapping(StorageNodeRestRouteConfigurations.ROOT_PATH)
@@ -100,6 +84,13 @@ public class SpringBootClusterController
 	public CompletableFuture<String> getStorageBytes() throws HttpResponseException
 	{
 		return CompletableFuture.completedFuture(this.call(this.controller::getStorageBytes));
+	}
+
+	@GetMapping(value = GetReplicationMetrics.PATH, produces = GetReplicationMetrics.PRODUCES)
+	@Async
+	public CompletableFuture<String> getReplicationMetrics() throws HttpResponseException
+	{
+		return CompletableFuture.completedFuture(this.call(this.controller::getReplicationMetrics));
 	}
 
 	@PostMapping(
@@ -186,7 +177,9 @@ public class SpringBootClusterController
 
 	private ResponseStatusException createResponseStatusException(final HttpResponseException e)
 	{
-		final var excp = new ResponseStatusException(X.notNull(HttpStatus.resolve(e.statusCode())));
+		final HttpStatus status = Objects.requireNonNull(
+			HttpStatus.resolve(e.statusCode()), "Unsupported HTTP status code: " + e.statusCode());
+		final var excp = new ResponseStatusException(status);
 		for (final var header : e.extraHeaders())
 		{
 			excp.getHeaders().add(header.key(), header.value());

@@ -14,20 +14,20 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import java.io.IOException;
-import java.lang.ProcessBuilder.Redirect;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Optional;
-import java.util.stream.Collectors;
-
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.lang.ProcessBuilder.Redirect;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -122,7 +122,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
             try
             {
                 this.http.download(archiveFileName, archiveFilePath);
-                offsetFileContent = this.readFileFromArchive(scratchSpacePath.toString(), "offset", archiveFilePath);
+                offsetFileContent = this.readFileFromArchive(scratchSpacePath.toString(), archiveFilePath);
             }
             finally
             {
@@ -173,10 +173,19 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
                 {
                     infoWriter.set(messageInfo);
                 }
+                try
+                {
+                    Files.write(this.storageExportScratchSpacePath.resolve("manifest"),
+                        MessageInfoCodec.serializeBytes(messageInfo),
+                        StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+                }
+                catch (final IOException e)
+                {
+                    throw new NodelibraryException("Failed to write backup replication manifest", e);
+                }
 
                 this.compressStorage(this.storageExportScratchSpacePath.toString(), archiveFilePath);
-                final String s3Key = archiveFileName;
-                this.http.upload(s3Key, archiveFilePath);
+                this.http.upload(archiveFileName, archiveFilePath);
             }
             finally
             {
@@ -198,8 +207,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
             final String archiveFileName = this.toArchiveFileName(backup);
             final Path archiveFilePath = storageDestinationParentPath.resolve(archiveFileName);
 
-            final String s3Key = archiveFileName;
-            this.http.download(s3Key, archiveFilePath);
+            this.http.download(archiveFileName, archiveFilePath);
             this.extractStorage(storageDestinationParentPath.toString(), archiveFilePath);
             this.deleteFile(archiveFilePath);
         }
@@ -254,38 +262,19 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
             }
         }
 
-        private void deleteDirectory(final Path path) throws NodelibraryException
-        {
-            try (final var directories = Files.walk(path))
-            {
-                directories.sorted(Comparator.reverseOrder()).forEach(f ->
-                {
-                    try
-                    {
-                        Files.delete(f);
-                    }
-                    catch (final IOException e)
-                    {
-                        throw new NodelibraryException("Failed to delete file at " + f, e);
-                    }
-                });
-            }
-            catch (final IOException e)
-            {
-                throw new NodelibraryException("Failed to iterate files at " + path);
-            }
-        }
+		private void deleteDirectory(final Path path) throws NodelibraryException
+		{
+			StorageFileOperations.deleteDirectory(path);
+		}
 
         private void compressStorage(final String workingDir, final Path archiveFilePath) throws NodelibraryException
         {
             LOG.trace("Compressing storage");
 
             // -C parentPath is so the archive contains a 'storage' folder and nothing else
-            final int exitCode;
-
-            try
-            {
-                exitCode = new ProcessBuilder(
+            final int exitCode = this.runProcess(
+                "Failed to compress storage",
+                new ProcessBuilder(
                     "tar",
                     "-C",
                     workingDir,
@@ -293,16 +282,8 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
                     archiveFilePath.toString(),
                     "storage",
                     "offset"
-                ).inheritIO().start().waitFor();
-            }
-            catch (final Exception e)
-            {
-                if (e instanceof InterruptedException)
-                {
-                    Thread.currentThread().interrupt();
-                }
-                throw new NodelibraryException("Failed to compress storage", e);
-            }
+                ).inheritIO()
+            );
 
             if (exitCode != 0)
             {
@@ -327,23 +308,11 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
         {
             LOG.trace("Extracting storage archive");
 
-            final int exitCode;
-
-            try
-            {
-                // -C parentPath is so the archive contains a 'storage' folder and nothing else
-                exitCode = new ProcessBuilder("tar", "-C", workingDir, "-Jxf", archiveFilePath.toString()).inheritIO()
-                    .start()
-                    .waitFor();
-            }
-            catch (final Exception e)
-            {
-                if (e instanceof InterruptedException)
-                {
-                    Thread.currentThread().interrupt();
-                }
-                throw new NodelibraryException("Failed to extract storage", e);
-            }
+            // -C parentPath is so the archive contains a 'storage' folder and nothing else
+            final int exitCode = this.runProcess(
+                "Failed to extract storage",
+                new ProcessBuilder("tar", "-C", workingDir, "-Jxf", archiveFilePath.toString()).inheritIO()
+            );
 
             if (exitCode != 0)
             {
@@ -351,9 +320,35 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
             }
         }
 
+        private int runProcess(final String failureMessage, final ProcessBuilder builder)
+            throws NodelibraryException
+        {
+            Process process = null;
+            try
+            {
+                process = builder.start();
+                return process.waitFor();
+            }
+            catch (final InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                throw new NodelibraryException(failureMessage, e);
+            }
+            catch (final IOException e)
+            {
+                throw new NodelibraryException(failureMessage, e);
+            }
+            finally
+            {
+                if (process != null)
+                {
+                    process.destroy();
+                }
+            }
+        }
+
         private String readFileFromArchive(
             final String workingDir,
-            final String fileToExtract,
             final Path archiveFilePath
         )
             throws NodelibraryException
@@ -366,24 +361,36 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
             try
             {
                 // -C parentPath is so the archive contains a 'storage' folder and nothing else
-                final var process = new ProcessBuilder(
-                    "tar",
-                    "-C",
-                    workingDir,
-                    "-OJxf",
-                    archiveFilePath.toString(),
-                    fileToExtract
-                ).redirectError(Redirect.INHERIT).start();
+				Process process = null;
+				try
+				{
+					process = new ProcessBuilder(
+						"tar",
+						"-C",
+						workingDir,
+						"-OJxf",
+						archiveFilePath.toString(),
+						"offset"
+					).redirectError(Redirect.INHERIT).start();
 
-                try (final var reader = process.inputReader())
-                {
-                    fileContent = reader.lines().collect(Collectors.joining("\n"));
-                }
+					try (final var reader = process.inputReader())
+					{
+						fileContent = reader.lines().collect(Collectors.joining("\n"));
+					}
 
-                exitCode = process.waitFor();
+					exitCode = process.waitFor();
+				}
+				finally
+				{
+					if (process != null) process.destroy();
+				}
             }
             catch (final Exception e)
             {
+                if (e instanceof InterruptedException)
+                {
+                    Thread.currentThread().interrupt();
+                }
                 throw new NodelibraryException("Failed to extract storage", e);
             }
 

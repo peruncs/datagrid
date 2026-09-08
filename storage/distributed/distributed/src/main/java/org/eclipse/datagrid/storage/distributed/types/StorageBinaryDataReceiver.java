@@ -17,8 +17,14 @@ package org.eclipse.datagrid.storage.distributed.types;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 
+/** Receives complete Store binaries and type dictionaries from a provider. */
 public interface StorageBinaryDataReceiver
 {
+	/**
+	 * Receives a complete binary. The callback must consume the supplied binary
+	 * synchronously; transports may release its native buffers immediately after
+	 * this method returns to avoid retaining off-heap memory.
+	 */
 	public void receiveData(Binary data);
 
 	public void receiveTypeDictionary(String typeDictionaryData);
