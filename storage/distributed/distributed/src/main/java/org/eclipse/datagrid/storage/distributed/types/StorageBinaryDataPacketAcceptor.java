@@ -27,16 +27,16 @@ import static org.eclipse.serializer.util.X.notNull;
 public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBinaryDataPacket>>
 {
 	@Override
-	public void accept(final List<StorageBinaryDataPacket> packet);
+    void accept(final List<StorageBinaryDataPacket> packet);
 
-	public static StorageBinaryDataPacketAcceptor New(final StorageBinaryDataReceiver receiver)
+	static StorageBinaryDataPacketAcceptor New(final StorageBinaryDataReceiver receiver)
 	{
 		return new StorageBinaryDataPacketAcceptor.Default(
 			notNull(receiver)
 		);
 	}
 
-	public static class Default implements StorageBinaryDataPacketAcceptor
+	class Default implements StorageBinaryDataPacketAcceptor
 	{
 		private final StorageBinaryDataReceiver receiver;
 		private StorageBinaryDataMessage message;

@@ -11,5 +11,12 @@
  * SPDX-License-Identifier: EPL-2.0
  * #L%
  */
-/** Aeron publication, Archive recording, and Store write-coordination components. */
+/**
+ * Ordered publication of Store transactions to Aeron and Archive.
+ *
+ * <p>The writer publishes data first and makes it visible with one terminal
+ * commit marker. The coordinator then records the restart boundary. This
+ * separation keeps transport I/O, Archive durability, and local Store
+ * acceptance from being mistaken for the same event.</p>
+ */
 package org.eclipse.datagrid.storage.distributed.aeron.writer;

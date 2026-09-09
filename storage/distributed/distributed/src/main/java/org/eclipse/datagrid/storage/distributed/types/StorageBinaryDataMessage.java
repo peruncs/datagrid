@@ -26,32 +26,32 @@ public interface StorageBinaryDataMessage extends Disposable
 {
 	/** Defensive upper bound for a single network message before a transport-specific limit is supplied. */
 	int MAX_MESSAGE_LENGTH = 256 * 1024 * 1024;
-	public static enum MessageType
+	enum MessageType
 	{
 		TYPE_DICTIONARY,
 		DATA
 	}
 
-	public MessageType type();
+	MessageType type();
 
-	public int length();
+	int length();
 
-	public int packetCount();
+	int packetCount();
 
-	public StorageBinaryDataMessage addPacket(StorageBinaryDataPacket packet);
+	StorageBinaryDataMessage addPacket(StorageBinaryDataPacket packet);
 
-	public boolean isComplete();
+	boolean isComplete();
 
-	public ByteBuffer data();
+	ByteBuffer data();
 
-	public static StorageBinaryDataMessage New(final StorageBinaryDataPacket initialPacket)
+	static StorageBinaryDataMessage New(final StorageBinaryDataPacket initialPacket)
 	{
 		return new StorageBinaryDataMessage.Default(
 			notNull(initialPacket)
 		);
 	}
 
-	public static class Default implements StorageBinaryDataMessage
+	class Default implements StorageBinaryDataMessage
 	{
 		private final MessageType type;
 		private final int length;

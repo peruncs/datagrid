@@ -19,26 +19,42 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfer;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 
+import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/** Persistence target that keeps local enqueue and Aeron publication ordered. */
+/**
+ * Store target that couples local acceptance to Aeron replication.
+ *
+ * <p>The selected durability mode decides which side is attempted first. A
+ * failed terminal step records an uncertain state and stops further writes;
+ * this is safer than allowing the local Store and Archive to drift silently.</p>
+ */
 public final class AeronStorageBinaryTargetDistributing implements PersistenceTarget<Binary>
 {
+	/** Installs a package-private fault seam for deterministic write-boundary tests. */
+	static void setCrashHook(final BiConsumer<String, Long> hook) { CrashHook.install(hook); }
+	static void clearCrashHook() { CrashHook.clear(); }
+	private static void crashPoint(final String name, final long sequence)
+	{
+		CrashHook.invoke(name, sequence);
+	}
 	private final PersistenceTarget<Binary> delegate;
 	private final AeronReplicationWriteCoordinator coordinator;
 	private final StorageBinaryDataDistributor dictionarySource;
 	private final LongConsumer committedSequence;
 	private final BooleanSupplier distributionEnabled;
 
+	/** Creates a target with replication enabled for every write. */
 	public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
 		final AeronReplicationWriteCoordinator coordinator)
 	{
 		this(delegate, coordinator, null, ignored -> { }, () -> true);
 	}
 
+	/** Creates a target whose distribution can be enabled or disabled per write. */
 	public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
 		final AeronReplicationWriteCoordinator coordinator, final StorageBinaryDataDistributor dictionarySource,
 		final LongConsumer committedSequence, final BooleanSupplier distributionEnabled)
@@ -50,9 +66,14 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 		this.distributionEnabled = notNull(distributionEnabled);
 	}
 
+	/** Writes locally and completes the matching Aeron transaction. */
 	@Override
 	public void write(final Binary data) throws PersistenceExceptionTransfer
 	{
+		/* The target lock is the transaction boundary: prepare, local Store
+		 * acceptance, and terminal publication must not interleave with another
+		 * writer. Coordinator methods remain synchronized because they are also
+		 * used directly by the provider and tests. */
 		synchronized (this.coordinator)
 		{
 			if (!this.distributionEnabled.getAsBoolean())
@@ -72,7 +93,15 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 			{
 				try
 				{
+					final long localSequence = this.coordinator.markLocalEnqueue(data);
 					this.delegate.write(data);
+					crashPoint("AFTER_ENQUEUE_BEFORE_PREPARE", localSequence);
+				}
+				catch (final RuntimeException | Error failure)
+				{
+					try { this.coordinator.clearLocalEnqueue(); }
+					catch (final RuntimeException | Error clearFailure) { failure.addSuppressed(clearFailure); }
+					throw failure;
 				}
 				finally
 				{
@@ -98,11 +127,23 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 				return;
 			}
 
-			try (final AeronReplicationPublisher.PreparedTransaction prepared = this.coordinator.prepare(data))
+			final AeronReplicationPublisher.PreparedTransaction prepared;
+			try
 			{
+				prepared = this.coordinator.prepare(data);
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				data.iterateChannelChunks(Binary::reset);
+				throw failure;
+			}
+			try (prepared)
+			{
+				crashPoint("AFTER_PREPARE_BEFORE_LOCAL_WRITE", prepared.sequence());
 				try
 				{
 					this.delegate.write(data);
+					crashPoint("AFTER_LOCAL_WRITE_BEFORE_COMMIT", prepared.sequence());
 				}
 				catch (final RuntimeException | Error failure)
 				{
@@ -110,10 +151,7 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 					catch (final RuntimeException | Error abortFailure) { failure.addSuppressed(abortFailure); }
 					throw failure;
 				}
-				finally
-				{
-					data.iterateChannelChunks(Binary::reset);
-				}
+				finally { data.iterateChannelChunks(Binary::reset); }
 				this.coordinator.markEnqueued(prepared);
 				this.commitAndNotify(prepared);
 			}
@@ -127,6 +165,7 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 		this.committedSequence.accept(prepared.sequence());
 	}
 
+	/** Returns whether the local persistence target can accept a write. */
 	@Override
 	public boolean isWritable()
 	{

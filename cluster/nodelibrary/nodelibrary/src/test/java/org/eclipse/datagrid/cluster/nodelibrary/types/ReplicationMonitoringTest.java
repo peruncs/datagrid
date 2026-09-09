@@ -18,8 +18,10 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/** Tests replication monitoring behavior. */
 class ReplicationMonitoringTest
 {
+	/** Verifies that Aeron transport state, lag, and readiness are exposed as Prometheus metrics. */
 	@Test
 	void exposesAeronTransportStateLagAndReadinessAsPrometheusMetrics() throws Exception
 	{

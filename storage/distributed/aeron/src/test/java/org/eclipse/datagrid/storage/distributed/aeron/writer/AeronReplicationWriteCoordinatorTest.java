@@ -33,18 +33,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * #L%
  */
 
+/** Verifies checkpoint transitions and fail-closed writer coordination. */
 class AeronReplicationWriteCoordinatorTest
 {
+	/** Verifies reporting of prepare commit and abort checkpoint states. */
 	@Test
 	void reportsPrepareCommitAndAbortCheckpointStates()
 	{
 		final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
+		final List<Long> sequences = new ArrayList<>();
+		final List<Integer> crcs = new ArrayList<>();
 		final UUID cluster = UUID.randomUUID();
 		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
 			(buffer, offset, length) -> length, 1024,
 			AeronReplicationConfiguration.builder().chunkSize(256).maxTransactionBytes(512).build(), cluster, 1, 0);
 		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-			publisher, (state, sequence, length, chunks, crc, position) -> states.add(state));
+			publisher, (state, sequence, length, chunks, crc, position) ->
+			{
+				states.add(state);
+				sequences.add(sequence);
+				crcs.add(crc);
+			});
 		final var prepared = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 })));
 		coordinator.commit(prepared);
 		final var second = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 2 })));
@@ -54,13 +63,20 @@ class AeronReplicationWriteCoordinatorTest
 			AeronReplicationCheckpoint.State.COMMITTED,
 			AeronReplicationCheckpoint.State.PREPARING,
 			AeronReplicationCheckpoint.State.REJECTED), states);
+		assertEquals(List.of(0L, 0L, 1L, 1L), sequences);
+		assertEquals(AeronReplicationEnvelope.crc32c(new byte[] {1}), crcs.get(0));
+		assertEquals(crcs.get(0), crcs.get(1));
+		assertEquals(AeronReplicationEnvelope.crc32c(new byte[] {2}), crcs.get(2));
+		assertEquals(crcs.get(2), crcs.get(3));
 		coordinator.dispose();
 	}
 
+	/** Verifies enqueue then archive does not publish before local enqueue. */
 	@Test
 	void enqueueThenArchiveDoesNotPublishBeforeLocalEnqueue()
 	{
 		final List<String> events = new ArrayList<>();
+		final List<Long> sequences = new ArrayList<>();
 		final UUID cluster = UUID.randomUUID();
 		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
 			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
@@ -73,7 +89,11 @@ class AeronReplicationWriteCoordinatorTest
 				return length;
 			}, configuration.maxMessageLength(), configuration, cluster, 1, 0);
 		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> events.add(state.name()));
+			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) ->
+			{
+				events.add(state.name());
+				sequences.add(sequence);
+			});
 		final PersistenceTarget<Binary> local = new PersistenceTarget<>()
 		{
 			@Override public void write(final Binary data) { events.add("local"); }
@@ -81,10 +101,12 @@ class AeronReplicationWriteCoordinatorTest
 		};
 		new AeronStorageBinaryTargetDistributing(local, coordinator)
 			.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 7 })));
-		assertEquals(List.of("local", "archive", "PREPARING", "ENQUEUED", "archive", "COMMITTED"), events);
+		assertEquals(List.of("ENQUEUED", "local", "archive", "PREPARING", "archive", "COMMITTED"), events);
+		assertEquals(List.of(0L, 0L, 0L), sequences);
 		coordinator.dispose();
 	}
 
+	/** Verifies enqueue prepare failure records the failed transaction dimensions. */
 	@Test
 	void enqueuePrepareFailureRecordsTheFailedTransactionDimensions()
 	{
@@ -123,6 +145,7 @@ class AeronReplicationWriteCoordinatorTest
 		coordinator.dispose();
 	}
 
+	/** Verifies local rejection emits abort and never commits. */
 	@Test
 	void localRejectionEmitsAbortAndNeverCommits()
 	{
@@ -141,10 +164,38 @@ class AeronReplicationWriteCoordinatorTest
 		};
 		assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryTargetDistributing(failing, coordinator)
 			.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }))));
-		assertEquals(List.of("archive", "PREPARING", "archive", "REJECTED"), events);
+		assertEquals(List.of("PREPARING", "archive", "archive", "REJECTED"), events);
 		coordinator.dispose();
 	}
 
+	/** Verifies an ENQUEUE local rejection removes only the fence and never advances a sequence. */
+	@Test
+	void enqueueLocalRejectionDoesNotCreateSyntheticTerminalSequence()
+	{
+		final List<String> events = new ArrayList<>();
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
+			.durabilityMode(org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
+			.build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) ->
+				events.add(state + ":" + sequence));
+		final PersistenceTarget<Binary> failing = new PersistenceTarget<>()
+		{
+			@Override public void write(final Binary data) { throw new IllegalStateException("local failure"); }
+			@Override public boolean isWritable() { return true; }
+		};
+		assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryTargetDistributing(failing, coordinator)
+			.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }))));
+		assertEquals(List.of("ENQUEUED:0", "REJECTED:-1"), events);
+		assertEquals(0L, coordinator.nextSequence());
+		coordinator.dispose();
+	}
+
+	/** Verifies commit failure is marked uncertain and coordinator cannot pretend success. */
 	@Test
 	void commitFailureIsMarkedUncertainAndCoordinatorCannotPretendSuccess()
 	{
@@ -166,6 +217,7 @@ class AeronReplicationWriteCoordinatorTest
 		coordinator.dispose();
 	}
 
+	/** Verifies local durable first is rejected until store exposes durability callback. */
 	@Test
 	void localDurableFirstIsRejectedUntilStoreExposesDurabilityCallback()
 	{
@@ -180,6 +232,7 @@ class AeronReplicationWriteCoordinatorTest
 		publisher.close();
 	}
 
+	/** Verifies persistence target consumes dictionary from shared distributor. */
 	@Test
 	void persistenceTargetConsumesDictionaryFromSharedDistributor()
 	{
@@ -211,6 +264,7 @@ class AeronReplicationWriteCoordinatorTest
 		coordinator.dispose();
 	}
 
+	/** Verifies ignored distribution writes locally without offering aeron frames. */
 	@Test
 	void ignoredDistributionWritesLocallyWithoutOfferingAeronFrames()
 	{
@@ -235,6 +289,7 @@ class AeronReplicationWriteCoordinatorTest
 		coordinator.dispose();
 	}
 
+	/** Verifies committed sequence callback does not advance on uncertain commit. */
 	@Test
 	void committedSequenceCallbackDoesNotAdvanceOnUncertainCommit()
 	{

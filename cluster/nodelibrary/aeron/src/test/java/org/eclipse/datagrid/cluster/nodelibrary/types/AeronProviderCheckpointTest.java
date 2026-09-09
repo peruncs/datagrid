@@ -32,8 +32,10 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/** Verifies provider restart uses the Archive position in the writer checkpoint. */
 class AeronProviderCheckpointTest
 {
+	/** Verifies persistence target writes committed writer checkpoint. */
 	@Test
 	void persistenceTargetWritesCommittedWriterCheckpoint() throws Exception
 	{
@@ -60,8 +62,8 @@ class AeronProviderCheckpointTest
 					case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> checkpoint.toString();
 					case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> "aeron:udp?endpoint=localhost:" + livePort;
 					case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:" + controlPort;
-					case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
-					case "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
+					case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
+						"ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
 					case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH" -> "1048576";
 					case "ECLIPSE_DATAGRID_AERON_MTU_LENGTH" -> "1024";
 					case "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE" -> "16384";
@@ -107,7 +109,7 @@ class AeronProviderCheckpointTest
 		}
 		finally
 		{
-            transport.close();
+			transport.close();
 			try (var paths = Files.walk(directory))
 			{
 				paths.sorted(java.util.Comparator.reverseOrder()).forEach(path ->

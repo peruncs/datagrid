@@ -23,8 +23,10 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/** Verifies that restart records survive only as complete, checksummed files. */
 class AeronReplicationCheckpointStoreTest
 {
+	/** Verifies round-tripping of the fixed recovery record. */
 	@Test
 	void roundTripsFixedRecoveryRecord() throws Exception
 	{
@@ -36,6 +38,7 @@ class AeronReplicationCheckpointStoreTest
 		Files.deleteIfExists(path);
 	}
 
+	/** Verifies rejection of torn and corrupt records. */
 	@Test
 	void rejectsTornAndCorruptRecords() throws Exception
 	{
@@ -51,6 +54,7 @@ class AeronReplicationCheckpointStoreTest
 		Files.deleteIfExists(path);
 	}
 
+	/** Verifies atomically replaces existing checkpoint and creates parent. */
 	@Test
 	void atomicallyReplacesExistingCheckpointAndCreatesParent() throws Exception
 	{
@@ -61,7 +65,8 @@ class AeronReplicationCheckpointStoreTest
 		final AeronReplicationCheckpoint second = new AeronReplicationCheckpoint(
 			first.recordType(), first.durabilityMode(), AeronReplicationCheckpoint.State.COMMITTED,
 			first.clusterId(), first.nodeId(), first.storeGeneration(), first.recordingId(),
-			first.writerEpoch(), first.transactionSequence() + 1, first.recordingPosition() + 10, 7);
+			first.writerEpoch(), first.transactionSequence() + 1, first.recordingPosition() + 10,
+			first.dataLength(), first.dataChunkCount(), 7);
 		AeronReplicationCheckpointStore.write(path, second);
 		assertEquals(second, AeronReplicationCheckpointStore.read(path));
 		try (var paths = Files.walk(directory))
@@ -73,6 +78,7 @@ class AeronReplicationCheckpointStoreTest
 		}
 	}
 
+	/** Verifies rejection of invalid checkpoint fields at construction. */
 	@Test
 	void rejectsInvalidCheckpointFieldsAtConstruction()
 	{
@@ -80,7 +86,7 @@ class AeronReplicationCheckpointStoreTest
 			AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
 			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
 			AeronReplicationCheckpoint.State.PREPARING,
-			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -2, 0, -1, -1, 0));
+			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -2, 0, -1, -1, 0, 0, 0));
 	}
 
 	private static AeronReplicationCheckpoint checkpoint()
@@ -89,7 +95,7 @@ class AeronReplicationCheckpointStoreTest
 			AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
 			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
 			AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
-			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 7, 13, 4096, 99
+			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 7, 13, 4096, 12, 1, 99
 		);
 	}
 }

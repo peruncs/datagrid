@@ -21,10 +21,12 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Verifies envelope framing, bounds, and corruption detection. */
 class AeronReplicationEnvelopeTest
 {
 	private static final UUID CLUSTER = UUID.randomUUID();
 
+	/** Verifies round trip preserves opaque serializer bytes. */
 	@Test
 	void roundTripPreservesOpaqueSerializerBytes()
 	{
@@ -49,6 +51,7 @@ class AeronReplicationEnvelopeTest
 		assertArrayEquals(payload, decoded.payload());
 	}
 
+	/** Verifies rejection of corrupt payload before delivery. */
 	@Test
 	void rejectsCorruptPayloadBeforeDelivery()
 	{
@@ -63,6 +66,7 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Verifies rejection of truncated and unknown version. */
 	@Test
 	void rejectsTruncatedAndUnknownVersion()
 	{
@@ -82,6 +86,7 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Verifies rejection of invalid chunk metadata and source bounds. */
 	@Test
 	void rejectsInvalidChunkMetadataAndSourceBounds()
 	{
@@ -103,6 +108,7 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Verifies rejection of nulls negative fields and marker payloads. */
 	@Test
 	void rejectsNullsNegativeFieldsAndMarkerPayloads()
 	{
@@ -123,6 +129,7 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Verifies rejection of logical payload bounds and reserved header byte. */
 	@Test
 	void rejectsLogicalPayloadBoundsAndReservedHeaderByte()
 	{
@@ -144,6 +151,7 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Verifies rejection of truncated data payload declared by header. */
 	@Test
 	void rejectsTruncatedDataPayloadDeclaredByHeader()
 	{
@@ -157,6 +165,7 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Verifies decodes at non zero offset without reading outside source. */
 	@Test
 	void decodesAtNonZeroOffsetWithoutReadingOutsideSource()
 	{
@@ -175,6 +184,7 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Verifies rejection of length larger than source without integer underflow. */
 	@Test
 	void rejectsLengthLargerThanSourceWithoutIntegerUnderflow()
 	{
@@ -185,6 +195,7 @@ class AeronReplicationEnvelopeTest
 			new UnsafeBuffer(encoded), 0, Integer.MAX_VALUE));
 	}
 
+	/** Verifies envelope payload accessor is defensive. */
 	@Test
 	void envelopePayloadAccessorIsDefensive()
 	{

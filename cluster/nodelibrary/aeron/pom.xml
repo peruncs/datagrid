@@ -60,4 +60,54 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>crashmatrix</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <version>3.5.0</version>
+                        <configuration>
+                            <includes>
+                                <include>**/ProviderCrashMatrixIT.java</include>
+                                <include>**/ExternalArchiveCrashIT.java</include>
+                            </includes>
+                            <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+                            <forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>
+                            <parallel>none</parallel>
+                            <systemPropertyVariables>
+                                    <crash.matrix.seed>${crash.matrix.seed}</crash.matrix.seed>
+                                    <crash.matrix.random.iterations>${crash.matrix.random.iterations}</crash.matrix.random.iterations>
+                                    <crash.matrix.random.seeds>${crash.matrix.random.seeds}</crash.matrix.random.seeds>
+                                    <crash.budget.startup>${crash.budget.startup}</crash.budget.startup>
+                                    <crash.budget.milestone>${crash.budget.milestone}</crash.budget.milestone>
+                                    <crash.budget.archiveStop>${crash.budget.archiveStop}</crash.budget.archiveStop>
+                                    <crash.budget.cell>${crash.budget.cell}</crash.budget.cell>
+                            </systemPropertyVariables>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+            <properties>
+                <crash.matrix.seed>1</crash.matrix.seed>
+                <crash.matrix.random.iterations>3</crash.matrix.random.iterations>
+                <crash.matrix.random.seeds>1</crash.matrix.random.seeds>
+                <crash.budget.startup>120000</crash.budget.startup>
+                <crash.budget.milestone>60000</crash.budget.milestone>
+                <crash.budget.archiveStop>30000</crash.budget.archiveStop>
+                <crash.budget.cell>600000</crash.budget.cell>
+            </properties>
+        </profile>
+    </profiles>
 </project>

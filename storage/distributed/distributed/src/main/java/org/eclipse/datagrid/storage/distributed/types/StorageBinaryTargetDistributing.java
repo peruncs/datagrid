@@ -27,10 +27,10 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binary>
 {
-	public static StorageBinaryTargetDistributing New(
-		final PersistenceTarget<Binary> delegate,
-		final StorageBinaryDataDistributor distributor
-	)
+	static StorageBinaryTargetDistributing New(
+            final PersistenceTarget<Binary> delegate,
+            final StorageBinaryDataDistributor distributor
+    )
 	{
 		return new StorageBinaryTargetDistributing.Default(
 			notNull(delegate),
@@ -38,7 +38,7 @@ public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binar
 		);
 	}
 
-	public static class Default implements StorageBinaryTargetDistributing
+	class Default implements StorageBinaryTargetDistributing
 	{
 		private final PersistenceTarget<Binary> delegate;
 		private final StorageBinaryDataDistributor distributor;

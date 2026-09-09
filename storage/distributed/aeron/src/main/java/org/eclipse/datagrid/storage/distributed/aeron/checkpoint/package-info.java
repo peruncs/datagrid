@@ -11,5 +11,12 @@
  * SPDX-License-Identifier: EPL-2.0
  * #L%
  */
-/** Durable writer checkpoints and self-describing Aeron reader cursors. */
+/**
+ * Restart state for Aeron replication.
+ *
+ * <p>A writer checkpoint is the last terminal transaction that the Archive
+ * confirmed. A reader cursor identifies the exact recording and Store image
+ * from which replay may continue. Keeping both identities in the record lets
+ * startup reject stale or mixed state instead of guessing.</p>
+ */
 package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;

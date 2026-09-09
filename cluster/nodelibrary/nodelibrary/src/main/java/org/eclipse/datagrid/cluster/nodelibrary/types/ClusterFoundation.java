@@ -348,14 +348,11 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
 		protected StoredMessageInfoManager ensureStoredMessageInfoManager()
 		{
-			// TODO: Hardcoded path
-			final var messageInfoPath = Paths.get("/storage/offset");
-			LOG.trace("Creating StoredMessageInfoManager for offset file at {}", messageInfoPath);
-			return StoredMessageInfoManager.New(
-				NioFileSystem.New().ensureFile(messageInfoPath).tryUseWriting(),
-				this.getMessageInfoParser()
-			);
-		}
+            // TODO: Hardcoded path
+            final var messageInfoPath = Paths.get("/storage/offset");
+            LOG.trace("Creating StoredMessageInfoManager for offset file at {}", messageInfoPath);
+            return StoredMessageInfoManager.NewAtomic(messageInfoPath, this.getMessageInfoParser());
+        }
 
 		protected AfterDataMessageConsumedListener ensureAfterDataMessageConsumedListener()
 		{

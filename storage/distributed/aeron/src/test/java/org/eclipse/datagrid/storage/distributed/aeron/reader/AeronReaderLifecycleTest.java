@@ -16,18 +16,22 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Verifies that reader shutdown stops polling before closing its subscription. */
 class AeronReaderLifecycleTest
 {
+	/** Verifies subscription cleanup when the polling thread is interrupted while waiting. */
 	@Test
 	void closesSubscriptionWhenPollingThreadWaitIsInterrupted()
 	{
 		final AtomicBoolean active = new AtomicBoolean(true);
 		final AtomicBoolean closed = new AtomicBoolean();
+		final CountDownLatch stopped = new CountDownLatch(1);
 		final Thread pollingThread = new Thread(() ->
 		{
 			try
@@ -38,16 +42,21 @@ class AeronReaderLifecycleTest
 			{
 				// Expected shutdown path.
 			}
+			finally
+			{
+				stopped.countDown();
+			}
 		});
 		pollingThread.start();
 
-		AeronReaderLifecycle.stopAndClose(active, pollingThread, () -> closed.set(true));
+		AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, () -> closed.set(true));
 
 		assertFalse(active.get());
 		assertFalse(pollingThread.isAlive());
 		org.junit.jupiter.api.Assertions.assertTrue(closed.get());
 	}
 
+	/** Verifies subscription cleanup even when the close callback fails. */
 	@Test
 	void closesSubscriptionEvenWhenTheCloseCallbackFails()
 	{
@@ -56,13 +65,14 @@ class AeronReaderLifecycleTest
 
 		final IllegalStateException actual = assertThrows(
 			IllegalStateException.class,
-			() -> AeronReaderLifecycle.stopAndClose(active, null, () -> { throw expected; })
+			() -> AeronReaderLifecycle.stopAndClose(active, null, new CountDownLatch(0), () -> { throw expected; })
 		);
 
 		assertSame(expected, actual);
 		assertFalse(active.get());
 	}
 
+	/** Verifies shared polling loop stops only after an idle poll. */
 	@Test
 	void sharedPollingLoopStopsOnlyAfterAnIdlePoll()
 	{
@@ -77,6 +87,7 @@ class AeronReaderLifecycleTest
 		assertEquals(2, polls.get());
 	}
 
+	/** Verifies shared polling loop reports archive tail timeout. */
 	@Test
 	void sharedPollingLoopReportsArchiveTailTimeout()
 	{

@@ -22,8 +22,10 @@ import java.util.List;
 import static org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType.DATA;
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Tests storage binary data packet assembler behavior. */
 class StorageBinaryDataPacketAssemblerTest
 {
+	/** Verifies that an incomplete message carries across batches and completes in order. */
 	@Test
 	void carriesIncompleteMessageAcrossBatchesAndCompletesInOrder()
 	{
@@ -41,6 +43,7 @@ class StorageBinaryDataPacketAssemblerTest
 		complete.completed().forEach(StorageBinaryDataMessage::dispose);
 	}
 
+	/** Verifies that adjacent messages dispatch as one buffer group per type. */
 	@Test
 	void dispatchesAdjacentMessagesAsOneBufferGroupPerType()
 	{
@@ -58,6 +61,7 @@ class StorageBinaryDataPacketAssemblerTest
 		dictionary.dispose();
 	}
 
+	/** Verifies rejection of oversized message before native allocation. */
 	@Test
 	void rejectsOversizedMessageBeforeNativeAllocation()
 	{

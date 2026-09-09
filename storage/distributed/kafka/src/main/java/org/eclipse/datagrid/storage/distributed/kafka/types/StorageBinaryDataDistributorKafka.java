@@ -40,10 +40,10 @@ public interface StorageBinaryDataDistributorKafka
 	extends
 	StorageBinaryDataDistributor
 {
-	public static StorageBinaryDataDistributorKafka Sync(
-		final Properties kafkaProperties,
-		final String topicName
-	)
+	static StorageBinaryDataDistributorKafka Sync(
+            final Properties kafkaProperties,
+            final String topicName
+    )
 	{
 		return new StorageBinaryDataDistributorKafka.Sync(
 			notNull(kafkaProperties),
@@ -51,10 +51,10 @@ public interface StorageBinaryDataDistributorKafka
 		);
 	}
 
-	public static StorageBinaryDataDistributorKafka Async(
-		final Properties kafkaProperties,
-		final String topicName
-	)
+	static StorageBinaryDataDistributorKafka Async(
+            final Properties kafkaProperties,
+            final String topicName
+    )
 	{
 		return new StorageBinaryDataDistributorKafka.Async(
 			notNull(kafkaProperties),
@@ -62,7 +62,7 @@ public interface StorageBinaryDataDistributorKafka
 		);
 	}
 
-	static abstract class Abstract implements StorageBinaryDataDistributorKafka
+	abstract class Abstract implements StorageBinaryDataDistributorKafka
 	{
 		private final Properties kafkaProperties;
 		private final String topicName;
@@ -180,7 +180,7 @@ public interface StorageBinaryDataDistributorKafka
 
 	}
 
-	public static class Sync extends Abstract
+	class Sync extends Abstract
 	{
 		Sync(
 			final Properties kafkaProperties,
@@ -198,7 +198,7 @@ public interface StorageBinaryDataDistributorKafka
 
 	}
 
-	public static class Async extends Abstract
+	class Async extends Abstract
 	{
 		private final ExecutorService executor;
 

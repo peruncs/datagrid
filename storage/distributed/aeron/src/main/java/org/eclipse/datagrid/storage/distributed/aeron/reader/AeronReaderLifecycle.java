@@ -14,12 +14,13 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
  * #L%
  */
 
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
-/** Shared shutdown sequence for the live and Archive-backed Aeron readers. */
+/** Shared polling and shutdown rules for the Aeron readers. */
 final class AeronReaderLifecycle
 {
 	private AeronReaderLifecycle()
@@ -27,9 +28,9 @@ final class AeronReaderLifecycle
 	}
 
 	/**
-	 * Runs the common subscription duty cycle used by live and Archive readers.
-	 * The poller owns the subscription and returns its fragment count; idle
-	 * handling is centralized so stop-at-tail and park behavior cannot diverge.
+	 * Runs the subscription duty cycle used by both readers. Keeping idle and
+	 * stop-at-tail handling here prevents the test reader and the production
+	 * reader from acquiring different lifecycle semantics.
 	 */
 	static void runPollingLoop(
 		final AtomicBoolean active,
@@ -61,16 +62,19 @@ final class AeronReaderLifecycle
 	}
 
 	/**
-	 * Stops polling, waits briefly for a different polling thread, and closes the
-	 * owned subscription. The close callback is always invoked after the wait.
+	 * Stops polling, waits up to five seconds for a different polling thread, and
+	 * closes the subscription. The callback runs after the wait so a fragment
+	 * cannot use a subscription while it is being closed.
 	 *
 	 * @param active reader running flag
 	 * @param thread reader polling thread, or {@code null}
+	 * @param stopped latch released by the polling thread on exit
 	 * @param closeSubscription callback that closes the reader subscription
 	 */
 	static void stopAndClose(
 		final AtomicBoolean active,
 		final Thread thread,
+		final CountDownLatch stopped,
 		final Runnable closeSubscription
 	)
 	{
@@ -83,11 +87,15 @@ final class AeronReaderLifecycle
 			{
 				try
 				{
-					thread.join(5_000L);
+					if (!stopped.await(5L, java.util.concurrent.TimeUnit.SECONDS))
+					{
+						failure = new IllegalStateException("Aeron reader polling thread did not stop");
+					}
 				}
 				catch (final InterruptedException interrupted)
 				{
 					Thread.currentThread().interrupt();
+					failure = new IllegalStateException("interrupted while stopping Aeron reader", interrupted);
 				}
 			}
 		}
@@ -97,7 +105,8 @@ final class AeronReaderLifecycle
 		}
 		catch (final RuntimeException closeFailure)
 		{
-			failure = closeFailure;
+			if (failure == null) failure = closeFailure;
+			else failure.addSuppressed(closeFailure);
 		}
 		if (failure != null)
 		{

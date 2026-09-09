@@ -21,7 +21,14 @@ import java.util.Properties;
  * #L%
  */
 
-/** Immutable transport limits shared by a writer and all readers. */
+/**
+ * Immutable framing and durability limits shared by one writer and its
+ * readers.
+ *
+ * <p>Both sides must use the same values to interpret the stream. The builder
+ * rejects values that could create a frame the writer cannot publish or the
+ * reader cannot assemble.</p>
+ */
 public final class AeronReplicationConfiguration
 {
 	private static final String PREFIX = "eclipsestore.distribution.aeron.";
@@ -30,6 +37,7 @@ public final class AeronReplicationConfiguration
 	public static final String CHUNK_SIZE_PROPERTY = PREFIX + "chunk-size";
 	public static final String MAX_TRANSACTION_BYTES_PROPERTY = PREFIX + "max-transaction-bytes";
 	public static final String OFFER_TIMEOUT_NANOS_PROPERTY = PREFIX + "offer-timeout-nanos";
+	private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
 	public static final String DURABILITY_MODE_PROPERTY = PREFIX + "durability-mode";
 	public static final int DEFAULT_TERM_LENGTH = 16 * 1024 * 1024;
 	public static final int DEFAULT_MTU_LENGTH = 1408;
@@ -60,25 +68,54 @@ public final class AeronReplicationConfiguration
 		this.durabilityMode = durabilityMode;
 	}
 
+	/** Returns the validated default configuration. */
 	public static AeronReplicationConfiguration defaults()
 	{
 		return builder().build();
 	}
 
+	/** Starts a builder with the documented defaults. */
 	public static Builder builder()
 	{
 		return new Builder();
 	}
 
+	/**
+	 * Builds a configuration from properties. Missing values use the defaults;
+	 * malformed values fail before any Aeron resource is opened.
+	 *
+	 * @param properties source properties
+	 * @return validated configuration
+	 * @throws NullPointerException if {@code properties} is {@code null}
+	 * @throws IllegalArgumentException if a value is malformed or unsafe
+	 */
 	public static AeronReplicationConfiguration from(final Properties properties)
 	{
 		Objects.requireNonNull(properties, "properties");
+		final String offerTimeout = properties.getProperty(OFFER_TIMEOUT_NANOS_PROPERTY);
+		final long offerTimeoutNanos;
+		if (offerTimeout == null)
+		{
+			offerTimeoutNanos = DEFAULT_OFFER_TIMEOUT_NANOS;
+		}
+		else
+		{
+			try
+			{
+				offerTimeoutNanos = Long.parseLong(offerTimeout.trim());
+			}
+			catch (final NumberFormatException failure)
+			{
+				throw new IllegalArgumentException(
+					"Invalid long for " + OFFER_TIMEOUT_NANOS_PROPERTY + ": " + offerTimeout, failure);
+			}
+		}
 		return builder()
 			.termLength(integer(properties, TERM_LENGTH_PROPERTY, DEFAULT_TERM_LENGTH))
 			.mtuLength(integer(properties, MTU_LENGTH_PROPERTY, DEFAULT_MTU_LENGTH))
 			.chunkSize(integer(properties, CHUNK_SIZE_PROPERTY, DEFAULT_CHUNK_SIZE))
 			.maxTransactionBytes(integer(properties, MAX_TRANSACTION_BYTES_PROPERTY, DEFAULT_MAX_TRANSACTION_BYTES))
-			.offerTimeoutNanos(longValue(properties, OFFER_TIMEOUT_NANOS_PROPERTY, 30_000_000_000L))
+			.offerTimeoutNanos(offerTimeoutNanos)
 			.durabilityMode(mode(properties.getProperty(DURABILITY_MODE_PROPERTY)))
 			.build();
 	}
@@ -97,20 +134,6 @@ public final class AeronReplicationConfiguration
 		}
 	}
 
-	private static long longValue(final Properties properties, final String key, final long fallback)
-	{
-		final String value = properties.getProperty(key);
-		if (value == null) return fallback;
-		try
-		{
-			return Long.parseLong(value.trim());
-		}
-		catch (final NumberFormatException failure)
-		{
-			throw new IllegalArgumentException("Invalid long for " + key + ": " + value, failure);
-		}
-	}
-
 	private static ReplicationDurabilityMode mode(final String value)
 	{
 		if (value == null || value.isBlank()) return ReplicationDurabilityMode.ARCHIVE_FIRST;
@@ -123,40 +146,46 @@ public final class AeronReplicationConfiguration
 		};
 	}
 
+	/** Returns the Aeron term length in bytes. */
 	public int termLength()
 	{
 		return this.termLength;
 	}
 
+	/** Returns the transport MTU used when the publication is created. */
 	public int mtuLength()
 	{
 		return this.mtuLength;
 	}
 
+	/** Returns the largest logical Store-data chunk in one envelope. */
 	public int chunkSize()
 	{
 		return this.chunkSize;
 	}
 
+	/** Returns the largest Store transaction accepted by the writer. */
 	public int maxTransactionBytes()
 	{
 		return this.maxTransactionBytes;
 	}
 
+	/** Returns the deadline used for publication and Archive progress waits. */
 	public long offerTimeoutNanos()
 	{
 		return this.offerTimeoutNanos;
 	}
 
+	/** Returns the order in which local acceptance and Archive publication occur. */
 	public ReplicationDurabilityMode durabilityMode()
 	{
 		return this.durabilityMode;
 	}
 
 	/**
-	 * The Aeron publication limit is termLength / 8, capped by 16 MiB. The
-	 * application envelope must fit within that limit because one logical chunk
-	 * is offered as one Aeron message and Aeron then fragments it on the wire.
+	 * Returns the largest envelope message that this publication may offer.
+	 * Aeron fragments that message according to the MTU; the logical chunk must
+	 * still fit within this publication limit.
 	 */
 	public int maxMessageLength()
 	{
@@ -169,45 +198,58 @@ public final class AeronReplicationConfiguration
 		private int mtuLength = DEFAULT_MTU_LENGTH;
 		private int chunkSize = DEFAULT_CHUNK_SIZE;
 		private int maxTransactionBytes = DEFAULT_MAX_TRANSACTION_BYTES;
-		private long offerTimeoutNanos = 30_000_000_000L;
+		private long offerTimeoutNanos = DEFAULT_OFFER_TIMEOUT_NANOS;
 		private ReplicationDurabilityMode durabilityMode = ReplicationDurabilityMode.ARCHIVE_FIRST;
 
+		/** Sets the term length; it must be a power of two of at least 64 KiB. */
 		public Builder termLength(final int value)
 		{
 			this.termLength = value;
 			return this;
 		}
 
+		/** Sets the aligned network MTU used by the publication. */
 		public Builder mtuLength(final int value)
 		{
 			this.mtuLength = value;
 			return this;
 		}
 
+		/** Sets the logical data chunk size. */
 		public Builder chunkSize(final int value)
 		{
 			this.chunkSize = value;
 			return this;
 		}
 
+		/** Sets the largest complete Store transaction accepted. */
 		public Builder maxTransactionBytes(final int value)
 		{
 			this.maxTransactionBytes = value;
 			return this;
 		}
 
+		/** Sets the maximum wait for publication or Archive progress. */
 		public Builder offerTimeoutNanos(final long value)
 		{
 			this.offerTimeoutNanos = value;
 			return this;
 		}
 
+		/** Sets the local-versus-Archive ordering used by the writer. */
 		public Builder durabilityMode(final ReplicationDurabilityMode value)
 		{
 			this.durabilityMode = Objects.requireNonNull(value, "durabilityMode");
 			return this;
 		}
 
+		/**
+		 * Validates and creates the immutable configuration.
+		 *
+		 * @return validated configuration
+		 * @throws IllegalArgumentException if the limits cannot describe a valid
+		 *         Aeron envelope
+		 */
 		public AeronReplicationConfiguration build()
 		{
 			if (!BitUtil.isPowerOfTwo(this.termLength) || this.termLength < 64 * 1024)

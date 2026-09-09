@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Proves the Store-level replacement contract used by at-least-once replay. */
 class StorageBinaryImportIntegrationTest
 {
+	/** Verifies imports the same binary transactions twice and survives restart. */
 	@Test
 	void importsTheSameBinaryTransactionsTwiceAndSurvivesRestart() throws Exception
 	{
@@ -48,7 +49,7 @@ class StorageBinaryImportIntegrationTest
 			capture.transactions.clear();
 
 			final EmbeddedStorageManager resumedWriter = startExisting(sourcePath, capture);
-			final Root resumedRoot = (Root)resumedWriter.root();
+			final Root resumedRoot = resumedWriter.root();
 			resumedRoot.values.add("one");
 			resumedWriter.store(resumedRoot.values);
 			resumedRoot.values.add("two");

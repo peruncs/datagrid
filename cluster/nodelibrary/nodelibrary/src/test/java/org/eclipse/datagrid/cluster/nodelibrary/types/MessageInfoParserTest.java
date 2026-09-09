@@ -22,8 +22,10 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Tests message info parser behavior. */
 class MessageInfoParserTest
 {
+	/** Tests message info parser behavior. */
 	@Test
 	void parsesVersionedCursorText()
 	{
@@ -38,6 +40,7 @@ class MessageInfoParserTest
 		assertArrayEquals(position, info.providerPosition());
 	}
 
+	/** Verifies that legacy provider rows remain opaque. */
 	@Test
 	void keepsLegacyProviderRowsOpaque()
 	{
@@ -47,6 +50,7 @@ class MessageInfoParserTest
 		assertEquals("topic,0,19", new String(info.providerPosition()));
 	}
 
+	/** Verifies that all legacy Kafka partitions are preserved. */
 	@Test
 	void keepsAllLegacyKafkaPartitions()
 	{
@@ -55,6 +59,7 @@ class MessageInfoParserTest
 		assertEquals("topic,0,19\ntopic,1,23", new String(info.providerPosition()));
 	}
 
+	/** Verifies rejection of trailing cursor fields. */
 	@Test
 	void rejectsTrailingCursorFields()
 	{

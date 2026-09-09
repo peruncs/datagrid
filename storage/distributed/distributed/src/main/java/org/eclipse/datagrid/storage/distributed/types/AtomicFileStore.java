@@ -21,16 +21,45 @@ import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Set;
+import java.util.function.BiConsumer;
 
 /** Writes small replication metadata files with forced temporary replacement. */
 public final class AtomicFileStore
 {
+	/** Selects checkpoint-specific crash-test phases. */
+	public static final String PHASE_CHECKPOINT = "CHECKPOINT";
+	/** Selects cursor-specific crash-test phases. */
+	public static final String PHASE_CURSOR = "CURSOR";
 	private static final System.Logger LOGGER = System.getLogger(AtomicFileStore.class.getName());
+	private static final ThreadLocal<BiConsumer<String, Path>> TEST_HOOK = new ThreadLocal<>();
 	private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY =
-            PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+		PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
 
-    private AtomicFileStore()
+	private AtomicFileStore()
 	{
+	}
+
+	/**
+	 * Installs a thread-confined crash-test hook; production callers must leave
+	 * it unset. A blocking hook belongs only in a forked child because file
+	 * writes may run while a provider monitor is held.
+	 */
+	static void setTestHook(final BiConsumer<String, Path> hook)
+	{
+		if (hook == null) TEST_HOOK.remove();
+		else TEST_HOOK.set(hook);
+	}
+
+	/** Clears the package-local crash-test hook. */
+	static void clearTestHook()
+	{
+		TEST_HOOK.remove();
+	}
+
+	private static void testPoint(final String phase, final Path path)
+	{
+		final BiConsumer<String, Path> hook = TEST_HOOK.get();
+		if (hook != null) hook.accept(phase, path);
 	}
 
 	@FunctionalInterface
@@ -39,17 +68,39 @@ public final class AtomicFileStore
 		void write(FileChannel channel) throws IOException;
 	}
 
-	/**
-	 * Writes a file through a forced sibling temporary file and replacement.
-	 * Temporary files use owner read/write permissions where the file system
-	 * supports POSIX attributes. If atomic rename is unavailable, the fallback
-	 * is logged because crash atomicity is reduced.
+	/** Writes a file through a forced sibling temporary file and replacement.
+	 *
+	 * <p>The {@code phase} parameter selects the crash-test hook names.
+	 * When {@code null} the generic names {@code BEFORE_TEMP_WRITE},
+	 * {@code DURING_FILE_WRITE}, {@code AFTER_TEMP_WRITE_BEFORE_RENAME},
+	 * and {@code AFTER_RENAME_BEFORE_DIRECTORY_SYNC} are used. Checkpoint
+	 * and cursor stores pass {@link #PHASE_CHECKPOINT} or {@link #PHASE_CURSOR}.</p>
 	 *
 	 * @param path destination path
 	 * @param encoder callback that writes the complete encoded contents
+	 * @param phase crash-test hook phase name, or {@code null} for generic names
 	 * @throws IOException if writing or replacement fails
 	 */
-	public static void write(final Path path, final Encoder encoder) throws IOException
+	public static void write(final Path path, final Encoder encoder, final String phase) throws IOException
+	{
+		if (phase != null && !PHASE_CHECKPOINT.equals(phase) && !PHASE_CURSOR.equals(phase))
+		{
+			throw new IllegalArgumentException("unsupported AtomicFileStore phase: " + phase);
+		}
+		final String beforePhase = phase != null ? "BEFORE_" + phase + "_TEMP_WRITE" : "BEFORE_TEMP_WRITE";
+		final String duringPhase = phase != null ? "DURING_" + phase + "_FILE_WRITE" : "DURING_FILE_WRITE";
+		final String afterTempPhase = phase != null
+			? "AFTER_" + phase + "_TEMP_WRITE_BEFORE_RENAME"
+			: "AFTER_TEMP_WRITE_BEFORE_RENAME";
+		final String afterRenamePhase = phase != null
+			? "AFTER_" + phase + "_RENAME_BEFORE_DIRECTORY_SYNC"
+			: "AFTER_RENAME_BEFORE_DIRECTORY_SYNC";
+		write(path, encoder, beforePhase, duringPhase, afterTempPhase, afterRenamePhase);
+	}
+
+	private static void write(final Path path, final Encoder encoder,
+		final String beforePhase, final String duringPhase,
+		final String afterTempPhase, final String afterRenamePhase) throws IOException
 	{
 		final Path absolute = path.toAbsolutePath();
 		final Path parent = absolute.getParent();
@@ -68,11 +119,14 @@ public final class AtomicFileStore
 		}
 		try
 		{
+			testPoint(beforePhase, absolute);
 			try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
 			{
+				testPoint(duringPhase, absolute);
 				encoder.write(channel);
 				channel.force(true);
 			}
+			testPoint(afterTempPhase, absolute);
 			try
 			{
 				Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
@@ -82,6 +136,7 @@ public final class AtomicFileStore
 				LOGGER.log(System.Logger.Level.WARNING, "Atomic move is unavailable for replication metadata {0}; crash atomicity is reduced", absolute);
 				Files.move(temporary, absolute, StandardCopyOption.REPLACE_EXISTING);
 			}
+			testPoint(afterRenamePhase, absolute);
 			forceDirectory(parent);
 		}
 		finally
@@ -95,6 +150,30 @@ public final class AtomicFileStore
 				LOGGER.log(System.Logger.Level.WARNING,
 					"Unable to remove temporary replication metadata file " + temporary, cleanupFailure);
 			}
+		}
+	}
+
+	/** Writes a file through a forced sibling temporary file and replacement.
+	 * Uses generic phase names for the crash-test hook. */
+	public static void write(final Path path, final Encoder encoder) throws IOException
+	{
+		write(path, encoder, null);
+	}
+
+	/**
+	 * Deletes a metadata file and forces the parent directory when the file was
+	 * present. This is used for short-lived in-flight recovery records: removing
+	 * the record must be durable just like replacing the terminal checkpoint.
+	 *
+	 * @param path file to remove
+	 * @throws IOException if the file or its parent directory cannot be synced
+	 */
+	public static void delete(final Path path) throws IOException
+	{
+		final Path absolute = path.toAbsolutePath();
+		if (Files.deleteIfExists(absolute))
+		{
+			forceDirectory(absolute.getParent());
 		}
 	}
 

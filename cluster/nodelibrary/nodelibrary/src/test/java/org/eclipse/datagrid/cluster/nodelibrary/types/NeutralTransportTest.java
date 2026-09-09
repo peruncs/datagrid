@@ -23,8 +23,10 @@ import java.util.concurrent.CountDownLatch;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/** Tests neutral transport behavior. */
 class NeutralTransportTest
 {
+	/** Verifies no op transport keeps core usable without any provider dependency. */
 	@Test
 	void noOpTransportKeepsCoreUsableWithoutAnyProviderDependency()
 	{
@@ -39,6 +41,7 @@ class NeutralTransportTest
 		transport.close();
 	}
 
+	/** Verifies caching distributor keeps dictionaries associated with writing threads. */
 	@Test
 	void cachingDistributorKeepsDictionariesAssociatedWithWritingThreads() throws Exception
 	{

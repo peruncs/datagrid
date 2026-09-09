@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eclipse DataGrid × Aeron — How Replication Works</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#121a23; --panel2:#0e141b; --line:#1f2a36; --line2:#2a3a4c;
+    --text:#d7e1ea; --muted:#8ba0b3; --dim:#5d7285;
+    --accent:#4f9cf7; --accent2:#16b8a6; --warn:#f5a524; --danger:#ef5350; --violet:#a78bfa;
+    --green:#34d399; --mono:'SF Mono','JetBrains Mono',Consolas,monospace;
+    --sans:'Inter','Segoe UI',system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.55;font-size:15px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px}
+  header{padding:56px 0 28px;border-bottom:1px solid var(--line)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;color:var(--accent);text-transform:uppercase}
+  h1{font-size:clamp(28px,5vw,42px);font-weight:750;letter-spacing:-.02em;margin:10px 0 14px}
+  h1 .sub{color:var(--muted);font-weight:500}
+  .lede{color:var(--muted);max-width:760px;font-size:16.5px}
+  .lede b{color:var(--text)}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .chip{font-family:var(--mono);font-size:12px;color:var(--muted);border:1px solid var(--line2);border-radius:999px;padding:4px 12px;background:var(--panel2)}
+  .chip b{color:var(--accent2);font-weight:600}
+  h2{font-size:21px;margin:52px 0 6px;letter-spacing:-.01em}
+  h2 .idx{color:var(--accent);font-family:var(--mono);font-size:15px;margin-right:8px}
+  .sub{color:var(--dim);font-size:13.5px;margin-bottom:20px}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px}
+
+  /* Topology */
+  .topo{display:flex;flex-direction:column;gap:18px;align-items:center;padding:26px 10px}
+  .app{background:var(--panel2);border:1px solid var(--line2);border-radius:10px;padding:8px 16px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  .roles{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;width:100%}
+  .node{flex:1;min-width:250px;border-radius:12px;border:1px solid var(--line2);background:var(--panel);overflow:hidden}
+  .node .head{padding:10px 14px;font-family:var(--mono);font-size:12.5px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  .node.writer .head{background:rgba(79,156,247,.08)}
+  .node.reader .head{background:rgba(22,184,166,.06)}
+  .node .body{padding:12px 14px;font-size:12.5px;color:var(--muted);line-height:1.7}
+  .node .body b{color:var(--text)}
+  .tag{font-family:var(--mono);font-size:10.5px;border-radius:5px;padding:2px 8px}
+  .tag.live{background:rgba(52,211,153,.12);color:var(--green)}
+  .tag.rec{background:rgba(245,165,36,.12);color:var(--warn)}
+  .tag.rep{background:rgba(167,139,250,.12);color:var(--violet)}
+  .arrow{color:var(--dim);font-size:12px;font-family:var(--mono);letter-spacing:.08em;display:flex;align-items:center;gap:8px}
+  .arrow .line{height:1px;background:var(--line2);flex:1}
+
+  /* grid */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+  .idea{border:1px solid var(--line);border-radius:12px;padding:18px;background:var(--panel)}
+  .idea .t{font-weight:650;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+  .idea .t .n{width:22px;height:22px;border-radius:6px;background:rgba(79,156,247,.12);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;flex:none}
+  .idea p{color:var(--muted);font-size:13px}
+  .idea code,.inline{font-family:var(--mono);font-size:12.5px;background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--accent2)}
+  .idea .api{margin-top:10px;font-family:var(--mono);font-size:11.5px;color:var(--dim);border-top:1px dashed var(--line);padding-top:8px}
+
+  /* envelope */
+  .env{overflow-x:auto;padding:4px 0}
+  .env-row{display:flex;min-width:840px}
+  .fld{padding:8px 6px;border-right:1px solid var(--bg);text-align:center;font-size:11px;min-width:44px;flex:1}
+  .fld .nm{font-family:var(--mono);color:var(--text);display:block;font-size:10.5px;white-space:nowrap}
+  .fld .bt{color:var(--dim);font-size:9.5px;display:block;margin-top:2px}
+  .fld.magic{background:rgba(79,156,247,.18)} .fld.kind{background:rgba(167,139,250,.18)}
+  .fld.seq{background:rgba(22,184,166,.18)} .fld.chunk{background:rgba(245,165,36,.16)}
+  .fld.crc{background:rgba(239,83,80,.16)} .fld.cluster{background:rgba(52,211,153,.14)}
+  .fld.payload{background:rgba(255,255,255,.05)}
+  .env-note{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:8px}
+  .env-kind{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .k{font-family:var(--mono);font-size:11.5px;border:1px solid var(--line2);border-radius:6px;padding:3px 9px;background:var(--panel2)}
+  .k.data{color:var(--accent2)} .k.term{color:var(--warn)} .k.ctl{color:var(--violet)}
+
+  /* sequence diagram - hand-built */
+  .seq{font-family:var(--mono);font-size:12.5px}
+  .seq .row{display:flex;min-height:34px}
+  .seq .lbl{width:130px;flex:none;text-align:right;padding-right:12px;color:var(--dim);font-size:11px;line-height:34px}
+  .seq .lane{flex:1;position:relative;min-width:80px}
+  .seq .lane .name{position:absolute;top:-8px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--muted);white-space:nowrap}
+  .seq .lane .name.self{color:var(--accent)}
+  .seq .lane::after{content:'';position:absolute;top:8px;bottom:0;left:50%;width:1px;background:var(--line2)}
+  .seq .msg{position:relative}
+  .seq .msg .bar{position:absolute;top:8px;left:50%;transform:translateX(-50%);height:18px;border-radius:3px}
+  .seq .msg .txt{position:absolute;top:3px;white-space:nowrap;padding:0 8px;font-size:11px;line-height:18px;border-radius:4px}
+  .seq .msg.live .txt{left:55%;border:1px solid var(--line2);background:var(--panel2);color:var(--muted)}
+  .seq .msg.alt .txt{right:calc(50% + 14px);border:1px dashed var(--line2);background:transparent;color:var(--dim)}
+  .seq .msg.sync .txt{left:55%;border:1px solid var(--line);background:var(--panel);color:var(--text)}
+  .seq .msg.sync.ret .txt{color:var(--accent2);border-style:dashed}
+  .seq .msg .bar.b{background:rgba(79,156,247,.25)}
+  .seq .msg .bar.w{background:rgba(245,165,36,.25)}
+  .seq .msg .bar.a{background:rgba(245,165,36,.25)}
+  .msg-note{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+  .seq .row.gap{height:8px}
+  .seq .row.dim .txt{color:var(--dim)}
+
+  /* tables */
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}
+  td code{font-family:var(--mono);font-size:11.5px;color:var(--accent2);background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;white-space:nowrap}
+  tr:hover td{background:rgba(255,255,255,.015)}
+
+  /* packages / file tree */
+  .tree{font-family:var(--mono);font-size:13px;line-height:1.75}
+  .tree .dir{color:var(--text);font-weight:600}
+  .tree .cmt{color:var(--dim)}
+  .tree .cls{color:var(--accent2)}
+  .tree .pkg{color:var(--violet)}
+
+  /* state machine */
+  .sm{display:flex;flex-direction:column;gap:6px;align-items:center;padding:10px 0}
+  .sm-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
+  .state{border:1px solid var(--line2);border-radius:8px;padding:6px 12px;font-family:var(--mono);font-size:12px;background:var(--panel2)}
+  .state.ok{border-color:rgba(52,211,153,.4);color:var(--green)}
+  .state.unk{border-color:rgba(245,165,36,.4);color:var(--warn)}
+  .state.bad{border-color:rgba(239,83,80,.4);color:var(--danger)}
+  .tr{color:var(--dim);font-size:11px;font-family:var(--mono)}
+  .tr.bad{color:var(--danger)} .tr.ok{color:var(--green)}
+
+  .callout{border-left:3px solid var(--warn);background:rgba(245,165,36,.06);border-radius:0 10px 10px 0;padding:14px 18px;margin:14px 0;font-size:13.5px}
+  .callout b{color:var(--warn)}
+  .callout.green{border-color:var(--green);background:rgba(52,211,153,.05)}
+  .callout.green b{color:var(--green)}
+  .callout code{font-family:var(--mono);font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.two{grid-template-columns:1fr}}
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:var(--text)}
+  pre .c{color:var(--dim)} pre .k{color:var(--violet)} pre .s{color:var(--green)}
+  footer{margin-top:60px;border-top:1px solid var(--line);padding-top:22px;color:var(--dim);font-size:12.5px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .legend{font-size:12px;color:var(--dim);font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">Eclipse DataGrid · Aeron clustering &nbsp;//&nbsp; explainer</div>
+  <h1>One writer, many readers — <span class="sub">no Kafka, no Raft.</span></h1>
+  <p class="lede">
+    Eclipse Store commits are packaged into a fixed binary envelope, published over
+    <b>Aeron UDP</b>, durably recorded by an <b>embedded Archive</b>, and replayed by readers through
+    <b>PersistentSubscription</b>. The commit is acknowledged to the application only after the
+    Archive has <b>recorded</b> it. Crash recovery is conservative: ambiguous states fail closed with
+    <code>RESEED_REQUIRED</code> rather than guessing.
+  </p>
+  <div class="chips">
+    <span class="chip">topology <b>1 writer / N readers</b></span>
+    <span class="chip">consensus <b>none</b></span>
+    <span class="chip">transport <b>UDP · dynamic MDC</b></span>
+    <span class="chip">log <b>Aeron Archive</b></span>
+    <span class="chip">ordering <b>journal-first</b></span>
+    <span class="chip">migration <b>Kafka ⇄ Aeron SPI</b></span>
+  </div>
+</header>
+
+<!-- ======================= 1. IDEA ======================= -->
+<h2><span class="idx">01</span>Key ideas</h2>
+<div class="sub">Five decisions that shape everything else.</div>
+<div class="grid">
+  <div class="idea">
+    <div class="t"><span class="n">A</span>Opaque bytes, thin envelope</div>
+    <p>Eclipse Serializer stays the only object format. The wire protocol adds only routing, ordering,
+       chunking and checksums — it never models your object graph.</p>
+    <div class="api">Binary (Serializer) → AeronReplicationEnvelope → Aeron</div>
+  </div>
+  <div class="idea">
+    <div class="t"><span class="n">B</span>Archive is the WAL</div>
+    <p>The recorded publication is the source of truth for recovery. Readers replay it; the writer
+       acknowledges a commit only after <code>RecordingPos</code> passes the commit marker.</p>
+    <div class="api">addRecordedExclusivePublication · RecordingPos · awaitRecorded()</div>
+  </div>
+  <div class="idea">
+    <div class="t"><span class="n">C</span>Journal-first commit</div>
+    <p>Archive the prepared transaction → ask the local Store to accept it → archive a COMMIT marker.
+       A failed local write emits ABORT. Ambiguous outcomes never reuse a sequence.</p>
+    <div class="api">AeronStorageBinaryTargetDistributing → WriteCoordinator</div>
+  </div>
+  <div class="idea">
+    <div class="t"><span class="n">D</span>Readers replay-then-live</div>
+    <p><code>PersistentSubscription</code> replays from a durable cursor, then seamlessly switches to
+       live UDP. Chunks are staged in native memory and released to the Store only after a matching COMMIT + CRC.</p>
+    <div class="api">PersistentSubscription · TransactionAssembler · EnvelopeView</div>
+  </div>
+  <div class="idea">
+    <div class="t"><span class="n">E</span>Fail closed, never invent</div>
+    <p>Non-terminal checkpoint states (<code>PREPARING</code>, <code>ENQUEUED</code>, <code>COMMITTING_UNCERTAIN</code>)
+       are not recoverable today → startup reports <code>RESEED_REQUIRED</code>. No silent skip, no duplicate, no invented sequence.</p>
+    <div class="api">AeronReplicationCheckpoint · State · ReplicationHealth</div>
+  </div>
+</div>
+
+<!-- ======================= 2. TOPOLOGY ======================= -->
+<h2><span class="idx">02</span>Topology & runtimes</h2>
+<div class="sub">The Archive is embedded in the writer process — an external Archive is future work.</div>
+<div class="card">
+  <div class="topo">
+    <div class="app">application &#8594; EmbeddedStorageFoundation &#8594; (store() calls)</div>
+    <div class="roles">
+      <div class="node writer">
+        <div class="head"><b>WRITER</b><span><span class="tag live">ArchivingMediaDriver</span>&nbsp;<span class="tag rec">Archive</span></span></div>
+        <div class="body">
+          <b>MediaDriver + Archive</b> (embedded, file-sync level 1)<br>
+          <b>ExclusivePublication</b> — one recorded stream, UDP dynamic MDC<br>
+          <b>AeronReplicationPublisher</b> — prepare/commit/abort envelopes<br>
+          <b>WriteCoordinator</b> — state machine + checkpoint writer<br>
+          <b>checkpoint file</b> — atomic, CRC-protected, outside driver dir
+        </div>
+      </div>
+      <div class="node reader">
+        <div class="head"><b>READER × N</b><span><span class="tag rep">PersistentSubscription</span></span></div>
+        <div class="body">
+          <b>MediaDriver</b> only (no Archive)<br>
+          <b>PersistentSubscription</b> — replay from cursor &#8594; live<br>
+          <b>TransactionAssembler</b> — commit-gated native staging<br>
+          <b>Eclipse Store</b> — importData(materialize)<br>
+          <b>cursor file</b> — atomic, written by backup-reader role
+        </div>
+      </div>
+    </div>
+    <div class="arrow"><span class="line"></span> live UDP (dynamic MDC, fc=max) + replay from Archive <span class="line"></span></div>
+    <div class="roles">
+      <div class="node reader" style="min-width:220px;flex:.6">
+        <div class="head"><b>BACKUP-READER</b><span><span class="tag rec">cursor writer</span></span></div>
+        <div class="body">reads like a reader, persists the durable cursor and takes backups</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= 3. WIRE ======================= -->
+<h2><span class="idx">03</span>The 64-byte envelope</h2>
+<div class="sub">Fixed big-endian header, one chunk per message; Aeron fragments at the MTU, reassembles before delivery.
+       CRC32C detects torn/corrupt frames — it is <i>not</i> authentication.</div>
+<div class="card">
+  <div class="env">
+    <div class="env-row">
+      <div class="fld magic"><span class="nm">MAGIC</span><span class="bt">4B "DGAR"</span></div>
+      <div class="fld magic"><span class="nm">VERSION</span><span class="bt">2B</span></div>
+      <div class="fld kind"><span class="nm">KIND</span><span class="bt">1B</span></div>
+      <div class="fld"><span class="nm">FLAGS</span><span class="bt">1B</span></div>
+      <div class="fld kind"><span class="nm">EPOCH</span><span class="bt">8B</span></div>
+      <div class="fld seq"><span class="nm">SEQUENCE</span><span class="bt">8B</span></div>
+      <div class="fld chunk"><span class="nm">PAYLOAD LEN</span><span class="bt">4B</span></div>
+      <div class="fld chunk"><span class="nm">CHUNK IDX</span><span class="bt">4B</span></div>
+      <div class="fld chunk"><span class="nm">CHUNK CNT</span><span class="bt">4B</span></div>
+      <div class="fld chunk"><span class="nm">CHUNK OFF</span><span class="bt">4B</span></div>
+      <div class="fld crc"><span class="nm">PAYLOAD CRC32C</span><span class="bt">4B</span></div>
+      <div class="fld crc"><span class="nm">COMMIT CRC32C</span><span class="bt">4B</span></div>
+      <div class="fld cluster"><span class="nm">CLUSTER UUID</span><span class="bt">16B</span></div>
+      <div class="fld payload"><span class="nm">PAYLOAD</span><span class="bt">chunk bytes</span></div>
+    </div>
+  </div>
+  <div class="env-note">64-byte header + payload · big-endian · one <i>logical</i> message per chunk (max = min(termLength/8, 16 MiB))</div>
+  <div class="env-kind">
+    <span class="k data">TYPE_DICTIONARY</span><span class="k data">STORE_BINARY</span>
+    <span class="k term">COMMIT</span><span class="k term">ABORT</span>
+    <span class="k ctl">(ACK — removed)</span>
+  </div>
+</div>
+
+<!-- ======================= 4. WRITER SEQ ======================= -->
+<h2><span class="idx">04</span>Writer sequence — journal-first</h2>
+<div class="sub">Happens inside <code>PersistenceTarget.write(Binary)</code> under one coordinator lock; each phase is a durable boundary.</div>
+<div class="card">
+<div class="seq">
+  <div class="row">
+    <div class="lbl">Application</div><div class="lane"></div>
+    <div class="lane"><span class="name self">Store</span></div>
+    <div class="lane"><span class="name">Coordinator+Publisher</span></div>
+    <div class="lane"><span class="name">Archive</span></div>
+  </div>
+  <div class="row dim"><div class="lbl"></div><div class="lane msg sync"><div class="txt">store()</div></div><div class="lane"></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync"><div class="txt">prepare → chunks (dict + data)</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg live"><div class="txt">chunk envelopes</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync ret"><div class="txt">PREPARING</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane msg sync ret"><div class="txt">accept local write</div></div><div class="lane"></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync"><div class="txt">commit marker</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg live"><div class="txt">COMMIT (no payload)</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync"><div class="txt bar w" style="width:34px"></div><div class="txt">wait RecordingPos ≥ commit pos</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync ret"><div class="txt">COMMITTED</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync"><div class="txt">atomic checkpoint write (fsync)</div></div><div class="lane"></div></div>
+  <div class="row dim"><div class="lbl"></div><div class="lane msg sync ret"><div class="txt">store() returns</div></div><div class="lane"></div><div class="lane"></div></div>
+</div>
+</div>
+<div class="callout">
+  <b>Ambiguity is never papered over.</b> If the COMMIT offer reaches the Archive but the RecordingPos wait times out,
+  the publisher fails closed and the transaction is <i>not</i> reused — recovery decides (archive reconciliation or <code>RESEED_REQUIRED</code>).
+</div>
+
+<!-- ======================= 5. READER SEQ ======================= -->
+<h2><span class="idx">05</span>Reader sequence — replay then live</h2>
+<div class="sub">Same commit-gated assembler whether data comes from the Archive replay or the live UDP stream.</div>
+<div class="card">
+<div class="seq">
+  <div class="row">
+    <div class="lbl">Backup/Reader</div><div class="lane"><span class="name self">PersistentSubscription</span></div><div class="lane"><span class="name">Assembler</span></div><div class="lane"><span class="name">Store</span></div>
+  </div>
+  <div class="row dim"><div class="lbl"></div><div class="lane msg sync"><div class="txt">create(recordingId, startPos, liveChannel)</div></div><div class="lane"></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane msg live"><div class="txt">replay envelopes (from cursor)</div></div><div class="lane"></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync"><div class="txt">stage chunks → native memory</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync ret"><div class="txt">COMMIT validated (CRC, counts, sequence)</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync"><div class="txt">receiveTypeDictionary / receiveData</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg live"><div class="txt">importData + materialize</div></div><div class="lane"></div></div>
+  <div class="row"><div class="lbl"></div><div class="lane"></div><div class="lane msg sync ret"><div class="txt">advance resolved seq/pos</div></div><div class="lane"></div></div>
+  <div class="row dim"><div class="lbl"></div><div class="lane msg sync"><div class="txt">cursor: MessageInfo via AtomicFileStore</div></div><div class="lane"></div><div class="lane"></div></div>
+</div>
+</div>
+
+<!-- ======================= 6. STATE MACHINE ======================= -->
+<h2><span class="idx">06</span>Writer checkpoint state machine</h2>
+<div class="sub">The checkpoint file is the restart boundary — persisted atomically (temp + fsync + rename + dir sync) and CRC-protected.</div>
+<div class="card">
+  <div class="sm">
+    <div class="sm-row">
+      <span class="state">PREPARING</span><span class="tr">&#8594;</span>
+      <span class="state">ENQUEUED</span><span class="tr">&#8594;</span>
+      <span class="state ok">COMMITTED</span>
+    </div>
+    <div class="sm-row"><span class="tr">fail local write &#8594;</span><span class="state bad">REJECTED</span><span class="tr">(ABORT published)</span></div>
+    <div class="sm-row"><span class="tr">commit uncertain / archive gap &#8594;</span><span class="state unk">COMMITTING_UNCERTAIN</span><span class="tr bad">&#8594; RESEED_REQUIRED</span></div>
+    <div class="sm-row"><span class="tr">everything else on restart</span><span class="tr bad">&#8594; RESEED_REQUIRED (never auto-continue)</span></div>
+  </div>
+  <table style="margin-top:14px">
+    <tr><th>checkpoint state on disk</th><th>restart</th></tr>
+    <tr><td><code>COMMITTED</code> / <code>REJECTED</code></td><td>resume at <code>transactionSequence + 1</code>, <code>Extend</code> the recording</td></tr>
+    <tr><td>file missing</td><td>fresh recording via <code>addRecordedExclusivePublication</code></td></tr>
+    <tr><td><code>PREPARING</code>/<code>ENQUEUED</code>/<code>COMMITTING_UNCERTAIN</code></td><td><b>RESEED_REQUIRED</b> — health reports it with path + sequence</td></tr>
+    <tr><td>torn file / CRC mismatch / identity mismatch</td><td>reject; previous valid file or fail closed</td></tr>
+  </table>
+</div>
+
+<!-- ======================= 7. API MAP ======================= -->
+<h2><span class="idx">07</span>Java API map</h2>
+<div class="sub">Module <code>storage-distributed-aeron</code> — split into focused packages; <code>wire</code> stays module-internal.</div>
+<div class="two">
+  <div class="card">
+    <div class="tree">
+<pre>
+storage-distributed-aeron/
+├─ config/
+│  └─ <span class="cls">AeronReplicationConfiguration</span>   # term/MTU/chunk/maxTx/durability
+├─ wire/                          <span class="cmt">(not exported)</span>
+│  └─ <span class="cls">AeronReplicationEnvelope</span>      # 64B header + CRC, EnvelopeView
+├─ checkpoint/
+│  ├─ <span class="cls">AeronReplicationCheckpoint</span>  # State/RecordType/DurabilityMode record
+│  ├─ <span class="cls">AeronReplicationCheckpointStore</span> # atomic, CRC file
+│  └─ <span class="cls">AeronReplicationCursor</span>     # cluster+node+generation+recording fence
+├─ reader/
+│  ├─ <span class="cls">StorageBinaryDataClientAeronArchive</span>  # PersistentSubscription + lifecycle
+│  └─ <span class="cls">TransactionAssembler</span>        # commit-gated native staging
+└─ writer/
+   ├─ <span class="cls">AeronArchiveReplicationPublisher</span> # New/Extend, awaitRecorded, CheckpointWriter
+   ├─ <span class="cls">AeronReplicationPublisher</span>   # (pkg-private) prepare/commit/abort, direct buffer
+   ├─ <span class="cls">AeronReplicationWriteCoordinator</span> # state transitions
+   ├─ <span class="cls">AeronStorageBinaryTargetDistributing</span> # PersistenceTarget ordering
+   └─ <span class="cls">AeronOfferRetryer</span>           # (pkg-private) bounded offer loop
+</pre>
+    </div>
+  </div>
+  <div class="card">
+    <div class="tree">
+<pre>
+cluster-nodelibrary-aeron/          <span class="cmt">(provider)</span>
+└─ <span class="cls">AeronClusterReplicationTransportProvider</span>
+    # ServiceLoader discovery (id = "aeron")
+
+neutral SPI (cluster-nodelibrary)
+├─ <span class="pkg">ClusterReplicationTransport</span>     # distributor / client / health / retention
+├─ <span class="pkg">ClusterReplicationTransportProvider</span>
+├─ <span class="pkg">ReplicationCursor</span>              # transport + generation + seq + opaque position
+├─ <span class="pkg">ReplicationHealth</span>              # LIVE / REPLAYING / RESEED_REQUIRED ...
+└─ <span class="pkg">ReplicationPositionProvider</span>   # backup/bootstrap boundary
+
+Kafka provider = same SPI, different impl.
+</pre>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= 8. CRASH / RECOVERY ======================= -->
+<h2><span class="idx">08</span>Crash → recovery map</h2>
+<div class="sub">The crash-test matrix in <code>docs/crash_testing.md</code> must produce exactly one safe outcome per window.</div>
+<div class="card">
+<table>
+  <tr><th>crash window</th><th>what could be on disk</th><th>required outcome</th></tr>
+  <tr><td>before prepare / clean committed checkpoint</td><td>last COMMITTED checkpoint</td><td><code>CONTINUE</code></td></tr>
+  <tr><td>after data chunks, before COMMIT (orphan tail)</td><td>unterminated tail in Archive</td><td><code>RESEED_REQUIRED</code> until tail abort/reconcile exists</td></tr>
+  <tr><td>after local write, before COMMIT</td><td>local Store ahead of replica</td><td>fail closed or <code>RESEED_REQUIRED</code></td></tr>
+  <tr><td>after COMMIT offer, before RecordingPos ack</td><td>commit may be in Archive</td><td>never reuse seq silently — fail closed/<code>RESEED_REQUIRED</code></td></tr>
+  <tr><td>after recorded, before checkpoint</td><td>Archive has commit, checkpoint stale</td><td>archive-tail reconcilation or <code>RESEED_REQUIRED</code></td></tr>
+  <tr><td>during atomic checkpoint replace</td><td>old or new valid file</td><td>old or new accepted; torn rejected</td></tr>
+  <tr><td><code>COMMITTING_UNCERTAIN</code> (ENQUEUE mode, prepare failed)</td><td>uncertain marker + CRC</td><td><code>RESEED_REQUIRED</code>, never auto-continue</td></tr>
+</table>
+</div>
+<div class="callout green">
+  <b>Exactly-once is claimed only where proven.</b> Reader replay after “import done, cursor not yet written” must be
+  idempotent or fail closed — the crash-matrix harness asserts this instead of assuming it.
+</div>
+
+<!-- ======================= 9. WHY CRC + KAFKA PARITY ======================= -->
+<h2><span class="idx">09</span>Why CRC32C &amp; what didn't we do</h2>
+<div class="two">
+  <div class="card">
+    <div class="idea" style="border:none;padding:0">
+      <div class="t"><span class="n">Σ</span>Two CRCs, two jobs</div>
+      <p><b>Chunk CRC</b> catches a torn/partial frame at the fragment boundary before the assembler allocates or stages.
+         <b>Commit CRC</b> is the whole-Store-binary witness — the reader only releases a transaction when the assembled
+         bytes match the commit marker, and the writer stores it in the checkpoint as the restart identity.</p>
+      <p style="margin-top:8px">Cheap (<code>java.util.zip.CRC32C</code>, vectorized, bulk scratch buffer) — and deliberately
+         <i>not</i> authentication. Network isolation/fencing is the boundary, not the envelope.</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="idea" style="border:none;padding:0">
+      <div class="t"><span class="n">×</span>Explicitly not built</div>
+      <p>No Aeron Cluster/Raft, no leader election, no SBE codegen, no compression, no TLS in the envelope,
+         no ACK-driven retention (until authenticated reader watermarks exist), no <code>LOCAL_DURABLE_FIRST</code>
+         (Store has no durable-completion callback), no independent Archive process (yet), no power-loss proof.</p>
+      <p style="margin-top:8px;color:var(--dim)">Each one is a documented, deliberate deferral — most are gated by real
+         design questions, not missing effort.</p>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span>Eclipse DataGrid + Aeron — writer/reader replication explainer</span>
+  <span class="legend">codebase: storage-distributed-aeron · cluster-nodelibrary-aeron</span>
+</footer>
+
+</div>
+</body>
+</html>

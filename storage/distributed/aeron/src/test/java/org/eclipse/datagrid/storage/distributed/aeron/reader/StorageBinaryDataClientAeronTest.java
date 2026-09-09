@@ -1,3 +1,17 @@
+/*-
+ * #%L
+ * Eclipse Data Grid Storage Distributed Aeron
+ * %%
+ * Copyright (C) 2025 MicroStream Software
+ * %%
+ * This program and the accompanying materials are made
+ * available under the terms of the Eclipse Public License 2.0
+ * which is available at https://www.eclipse.org/legal/epl-2.0/
+ *
+ * SPDX-License-Identifier: EPL-2.0
+ * #L%
+ */
+
 package org.eclipse.datagrid.storage.distributed.aeron.reader;
 
 import org.agrona.concurrent.UnsafeBuffer;
@@ -13,25 +27,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/*-
- * #%L
- * Eclipse Data Grid Storage Distributed Aeron
- * %%
- * Copyright (C) 2025 MicroStream Software
- * %%
- * This program and the accompanying materials are made
- * available under the terms of the Eclipse Public License 2.0
- * which is available at https://www.eclipse.org/legal/epl-2.0/
- *
- * SPDX-License-Identifier: EPL-2.0
- * #L%
- */
-
+/** Verifies live-reader ordering and commit-gated Store delivery. */
 class StorageBinaryDataClientAeronTest
 {
 	private static final UUID CLUSTER = UUID.randomUUID();
 	private static final long EPOCH = 17;
 
+	/** Verifies delivery of dictionary and store payload only after commit. */
 	@Test
 	void deliversDictionaryAndStorePayloadOnlyAfterCommit()
 	{
@@ -44,7 +46,7 @@ class StorageBinaryDataClientAeronTest
 			data, data.length, 0));
 
 		assertEquals(-1, assembler.lastResolvedSequence());
-		assertEquals(null, receiver.data);
+        assertNull(receiver.data);
 
 		accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
@@ -63,6 +65,7 @@ class StorageBinaryDataClientAeronTest
 		assertEquals(1, receiver.dataCalls);
 	}
 
+	/** Verifies rejection of gap and interleaving without delivering partial data. */
 	@Test
 	void rejectsGapAndInterleavingWithoutDeliveringPartialData()
 	{
@@ -81,6 +84,25 @@ class StorageBinaryDataClientAeronTest
 				new byte[] { 2 }, 1, 0)));
 	}
 
+	/** Verifies live reader fails closed when writer leaves an orphan tail. */
+	@Test
+	void liveReaderFailsClosedWhenWriterLeavesAnOrphanTail()
+	{
+		final RecordingReceiver receiver = new RecordingReceiver();
+		final TransactionAssembler assembler = assembler(receiver, 1024);
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			new byte[] { 1 }, 1, 0));
+
+		final IllegalStateException failure = assertThrows(IllegalStateException.class, () -> accept(assembler,
+			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0,
+				new byte[] { 2 }, 1, 0)));
+
+		assertEquals("replication sequence gap: expected 0, received 1", failure.getMessage());
+		assertEquals(0, receiver.dataCalls);
+		assertNotNull(assembler.failure());
+	}
+
+	/** Verifies rejection of sequence regression instead of silently skipping data. */
 	@Test
 	void rejectsSequenceRegressionInsteadOfSilentlySkippingData()
 	{
@@ -91,6 +113,7 @@ class StorageBinaryDataClientAeronTest
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 4, 0, 1, 0, data, 1, 0)));
 	}
 
+	/** Verifies abort advances cursor and does not import. */
 	@Test
 	void abortAdvancesCursorAndDoesNotImport()
 	{
@@ -106,6 +129,26 @@ class StorageBinaryDataClientAeronTest
 		assertEquals(0, receiver.dataCalls);
 	}
 
+	/** Verifies a committed zero-length transaction is delivered as an empty binary. */
+	@Test
+	void emptyCommitDeliversAnEmptyBinary()
+	{
+		final RecordingReceiver receiver = new RecordingReceiver();
+		final TransactionAssembler assembler = assembler(receiver, 1024);
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			new byte[0], 0, 0));
+		accept(assembler, AeronReplicationEnvelope.encode(
+			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
+			0, 0, 1, 0, 0, new byte[0]
+		));
+
+		assertEquals(1, receiver.dataCalls);
+		assertNotNull(receiver.data);
+		assertEquals(0, receiver.data.length);
+		assertEquals(0, assembler.lastResolvedSequence());
+	}
+
+	/** Verifies resolution callback runs exactly once for commit and abort. */
 	@Test
 	void resolutionCallbackRunsExactlyOnceForCommitAndAbort()
 	{
@@ -128,6 +171,52 @@ class StorageBinaryDataClientAeronTest
 		assertEquals(2, callbacks.get(), "duplicate resolution must be idempotent");
 	}
 
+	/** Verifies delivery boundary leaves uncertain marker when store import fails. */
+	@Test
+	void deliveryBoundaryLeavesUncertainMarkerWhenStoreImportFails()
+	{
+		final AtomicInteger before = new AtomicInteger();
+		final AtomicInteger after = new AtomicInteger();
+		final StorageBinaryDataReceiver receiver = new RecordingReceiver()
+		{
+			@Override
+			public void receiveData(final Binary value)
+			{
+				throw new IllegalStateException("injected Store import failure");
+			}
+		};
+		final TransactionAssembler assembler = new TransactionAssembler(
+			AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
+				.maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver, () -> { },
+			new ReaderDeliveryListener()
+			{
+				@Override
+				public void beforeStoreImport(final long sequence, final long position, final int dataLength,
+					final int dataChunkCount, final int crc32c)
+				{
+					before.incrementAndGet();
+				}
+
+				@Override
+				public void afterStoreImport()
+				{
+					after.incrementAndGet();
+				}
+			}
+		);
+		final byte[] data = {1, 2, 3};
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			data, data.length, 0));
+		assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelope.encode(
+			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
+			AeronReplicationEnvelope.crc32c(data), new byte[0])));
+		assertEquals(1, before.get());
+		assertEquals(0, after.get());
+		assertEquals(-1, assembler.lastResolvedSequence());
+		assertNotNull(assembler.failure());
+	}
+
+	/** Verifies rejection of oversize and non contiguous chunks. */
 	@Test
 	void rejectsOversizeAndNonContiguousChunks()
 	{
@@ -145,6 +234,7 @@ class StorageBinaryDataClientAeronTest
 				new byte[] { 2 }, 2, 0)));
 	}
 
+	/** Verifies resumes from persisted sequence. */
 	@Test
 	void resumesFromPersistedSequence()
 	{
@@ -172,6 +262,7 @@ class StorageBinaryDataClientAeronTest
 		assertEquals(42, assembler.lastResolvedSequence());
 	}
 
+	/** Verifies rejection of an equal sequence commit with a different payload checksum. */
 	@Test
 	void rejectsAnEqualSequenceCommitWithADifferentPayloadChecksum()
 	{
@@ -189,6 +280,7 @@ class StorageBinaryDataClientAeronTest
 			AeronReplicationEnvelope.crc32c(new byte[] { 1, 2, 3 }), new byte[0])));
 	}
 
+	/** Verifies cursor persistence failure stops further assembly. */
 	@Test
 	void cursorPersistenceFailureStopsFurtherAssembly()
 	{
@@ -209,6 +301,7 @@ class StorageBinaryDataClientAeronTest
 		assertEquals("checkpoint failed", assembler.failure().getMessage());
 	}
 
+	/** Verifies rejection of wrong cluster and epoch before mutating state. */
 	@Test
 	void rejectsWrongClusterAndEpochBeforeMutatingState()
 	{
@@ -229,6 +322,7 @@ class StorageBinaryDataClientAeronTest
 		assertEquals(-1, wrongEpoch.lastResolvedSequence());
 	}
 
+	/** Verifies rejection of commit checksum mismatch without delivering data. */
 	@Test
 	void rejectsCommitChecksumMismatchWithoutDeliveringData()
 	{
@@ -246,6 +340,7 @@ class StorageBinaryDataClientAeronTest
 			AeronReplicationEnvelope.Kind.ABORT, data.length, 0, 1, 0, 0, new byte[0]));
 		}
 
+	/** Verifies rejection of duplicate or changed data chunk before commit. */
 	@Test
 	void rejectsDuplicateOrChangedDataChunkBeforeCommit()
 	{
@@ -263,6 +358,7 @@ class StorageBinaryDataClientAeronTest
 				new byte[] {2}, 3, 0)));
 	}
 
+	/** Verifies rejection of dictionary after data and data before dictionary completes. */
 	@Test
 	void rejectsDictionaryAfterDataAndDataBeforeDictionaryCompletes()
 	{
@@ -282,6 +378,7 @@ class StorageBinaryDataClientAeronTest
 				new byte[] {1}, 1, 0)));
 	}
 
+	/** Verifies rejection of commit before chunks and incomplete dictionary. */
 	@Test
 	void rejectsCommitBeforeChunksAndIncompleteDictionary()
 	{
@@ -301,6 +398,7 @@ class StorageBinaryDataClientAeronTest
 		assertEquals(0, receiver.dataCalls);
 	}
 
+	/** Verifies receiver failure is terminal and does not apply later transactions. */
 	@Test
 	void receiverFailureIsTerminalAndDoesNotApplyLaterTransactions()
 	{
@@ -325,6 +423,7 @@ class StorageBinaryDataClientAeronTest
 		assertEquals(-1, assembler.lastResolvedSequence());
 	}
 
+	/** Verifies applies many transactions in order across empty and dictionary payloads. */
 	@Test
 	void appliesManyTransactionsInOrderAcrossEmptyAndDictionaryPayloads()
 	{
@@ -352,6 +451,7 @@ class StorageBinaryDataClientAeronTest
 		assertEquals("Type28", receiver.dictionary);
 	}
 
+	/** Verifies malformed network frame fails closed and cannot skip to later sequence. */
 	@Test
 	void malformedNetworkFrameFailsClosedAndCannotSkipToLaterSequence()
 	{
@@ -421,7 +521,7 @@ class StorageBinaryDataClientAeronTest
 		assembler.onFragment(new UnsafeBuffer(bytes), 0, bytes.length, null);
 	}
 
-	private static final class RecordingReceiver implements StorageBinaryDataReceiver
+	private static class RecordingReceiver implements StorageBinaryDataReceiver
 	{
 		private String dictionary;
 		private byte[] data;

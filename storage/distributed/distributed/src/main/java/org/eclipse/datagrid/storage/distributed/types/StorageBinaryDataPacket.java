@@ -26,23 +26,23 @@ import static org.eclipse.serializer.util.X.notNull;
 /** One ordered chunk of a type-dictionary or Store-binary message. */
 public interface StorageBinaryDataPacket
 {
-	public MessageType messageType();
+	MessageType messageType();
 
-	public int messageLength();
+	int messageLength();
 
-	public int packetIndex();
+	int packetIndex();
 
-	public int packetCount();
+	int packetCount();
 
-	public ByteBuffer buffer();
+	ByteBuffer buffer();
 
-	public static StorageBinaryDataPacket New(
-		final MessageType messageType,
-		final int messageLength,
-		final int packetIndex,
-		final int packetCount,
-		final ByteBuffer buffer
-	)
+	static StorageBinaryDataPacket New(
+            final MessageType messageType,
+            final int messageLength,
+            final int packetIndex,
+            final int packetCount,
+            final ByteBuffer buffer
+    )
 	{
 		return new StorageBinaryDataPacket.Default(
 			notNull(messageType),
@@ -53,7 +53,7 @@ public interface StorageBinaryDataPacket
 		);
 	}
 
-	public static class Default implements StorageBinaryDataPacket
+	class Default implements StorageBinaryDataPacket
 	{
 		private final MessageType messageType;
 		private final int messageLength;

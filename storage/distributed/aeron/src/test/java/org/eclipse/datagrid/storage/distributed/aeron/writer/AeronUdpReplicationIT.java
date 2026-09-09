@@ -17,7 +17,6 @@ import org.junit.jupiter.api.Test;
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
 import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,8 +35,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * #L%
  */
 
+/** Verifies live UDP delivery, reconnect, and multi-buffer transactions. */
 class AeronUdpReplicationIT
 {
+	/** Verifies fragments large transaction and delivers after commit. */
 	@Test
 	void fragmentsLargeTransactionAndDeliversAfterCommit() throws Exception
 	{
@@ -61,7 +62,7 @@ class AeronUdpReplicationIT
 			ExclusivePublication publication = aeron.addExclusivePublication(channel, 1001);
 			Subscription subscription = aeron.addSubscription(channel, 1001))
 		{
-			await(() -> publication.isConnected() && subscription.isConnected(), 10_000);
+			await(() -> publication.isConnected() && subscription.isConnected());
 			final StorageBinaryDataClientAeron client = new StorageBinaryDataClientAeron(
 				subscription, configuration, clusterId, 1, -1, receiver
 			);
@@ -100,22 +101,23 @@ class AeronUdpReplicationIT
 			assertEquals(firstPosition, first.position());
 			assertEquals(secondPosition, second.position());
 
-			await(() -> client.lastResolvedSequence() == 0, 10_000);
-		assertEquals("class=example.Type", receiver.dictionary);
-		assertArrayEquals(data, receiver.data);
-		assertEquals(false, receiver.observedBeforeLocal);
-		final AeronReplicationCursor cursor = client.cursor(UUID.randomUUID(), UUID.randomUUID(), 11);
-		assertEquals(0, cursor.sequence());
-		assertEquals(11, cursor.recordingId());
-		if (cursor.recordingPosition() < 0)
-		{
-			throw new AssertionError("Aeron header position was not captured");
-		}
-		assertNull(client.failure());
+			await(() -> client.lastResolvedSequence() == 0);
+			assertEquals("class=example.Type", receiver.dictionary);
+			assertArrayEquals(data, receiver.data);
+			assertFalse(receiver.observedBeforeLocal);
+			final AeronReplicationCursor cursor = client.cursor(UUID.randomUUID(), UUID.randomUUID(), 11);
+			assertEquals(0, cursor.sequence());
+			assertEquals(11, cursor.recordingId());
+			if (cursor.recordingPosition() < 0)
+			{
+				throw new AssertionError("Aeron header position was not captured");
+			}
+			assertNull(client.failure());
 			client.dispose();
 		}
 	}
 
+	/** Verifies local enqueue failure publishes abort and reader does not apply. */
 	@Test
 	void localEnqueueFailurePublishesAbortAndReaderDoesNotApply() throws Exception
 	{
@@ -139,7 +141,7 @@ class AeronUdpReplicationIT
 			ExclusivePublication publication = aeron.addExclusivePublication(channel, 1002);
 			Subscription subscription = aeron.addSubscription(channel, 1002))
 		{
-			await(() -> publication.isConnected() && subscription.isConnected(), 10_000);
+			await(() -> publication.isConnected() && subscription.isConnected());
 			final StorageBinaryDataClientAeron client = new StorageBinaryDataClientAeron(
 				subscription, configuration, clusterId, 1, -1, receiver
 			);
@@ -155,14 +157,15 @@ class AeronUdpReplicationIT
 			final PersistenceTarget<Binary> target = new AeronStorageBinaryTargetDistributing(failingTarget, coordinator);
 			assertThrows(IllegalStateException.class,
 				() -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 4, 5, 6 }))));
-			await(() -> client.lastResolvedSequence() == 0 || client.failure() != null, 10_000);
+			await(() -> client.lastResolvedSequence() == 0 || client.failure() != null);
 			assertEquals(0, client.lastResolvedSequence());
-			assertEquals(null, receiver.data);
+			assertNull(receiver.data);
 			assertNull(client.failure());
 			client.dispose();
 		}
 	}
 
+	/** Verifies dynamic mdc uses max flow control and reconnects without kafka. */
 	@Test
 	void dynamicMdcUsesMaxFlowControlAndReconnectsWithoutKafka() throws Exception
 	{
@@ -182,25 +185,25 @@ class AeronUdpReplicationIT
 			ExclusivePublication publication = aeron.addExclusivePublication(publicationChannel, 1101);
 			Subscription subscription = aeron.addSubscription(subscriptionChannel, 1101))
 		{
-			await(() -> publication.isConnected() && subscription.isConnected(), 10_000);
+			await(() -> publication.isConnected() && subscription.isConnected());
 			final StorageBinaryDataClientAeron client = new StorageBinaryDataClientAeron(
 				subscription, configuration, clusterId, 5, -1, receiver);
 			client.start();
 			final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
 				publication, configuration, clusterId, 5, 0, false);
 			publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(new byte[] { 9, 8, 7 }) });
-			await(() -> client.lastResolvedSequence() == 0, 10_000);
+			await(() -> client.lastResolvedSequence() == 0);
 			assertArrayEquals(new byte[] { 9, 8, 7 }, receiver.data);
 			client.dispose();
 			final RecordingReceiver reconnectedReceiver = new RecordingReceiver();
 			try (Subscription reconnectedSubscription = aeron.addSubscription(subscriptionChannel, 1101))
 			{
-				await(() -> publication.isConnected() && reconnectedSubscription.isConnected(), 10_000);
+				await(() -> publication.isConnected() && reconnectedSubscription.isConnected());
 				final StorageBinaryDataClientAeron reconnected = new StorageBinaryDataClientAeron(
 					reconnectedSubscription, configuration, clusterId, 5, 0, reconnectedReceiver);
 				reconnected.start();
 				publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(new byte[] { 6, 6, 6 }) });
-				await(() -> reconnected.lastResolvedSequence() == 1 || reconnected.failure() != null, 10_000);
+				await(() -> reconnected.lastResolvedSequence() == 1 || reconnected.failure() != null);
 				if (reconnected.failure() != null)
 				{
 					throw reconnected.failure();
@@ -220,9 +223,9 @@ class AeronUdpReplicationIT
 		}
 	}
 
-	private static void await(final Check check, final long timeoutMillis) throws Exception
+	private static void await(final Check check)
 	{
-		final long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
 		while (!check.value())
 		{
 			if (System.nanoTime() >= deadline)
@@ -241,7 +244,6 @@ class AeronUdpReplicationIT
 
 	private static final class RecordingReceiver implements StorageBinaryDataReceiver
 	{
-		private final CopyOnWriteArrayList<byte[]> values = new CopyOnWriteArrayList<>();
 		private volatile String dictionary;
 		private volatile byte[] data;
 		private volatile boolean observedBeforeLocal;
@@ -254,7 +256,6 @@ class AeronUdpReplicationIT
 			final ByteBuffer source = value.buffers()[0].duplicate();
 			final byte[] bytes = new byte[source.remaining()];
 			source.get(bytes);
-			this.values.add(bytes);
 			this.data = bytes;
 		}
 

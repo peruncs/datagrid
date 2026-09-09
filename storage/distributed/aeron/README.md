@@ -26,10 +26,10 @@ try (AeronArchiveReplicationPublisher writer =
 }
 ```
 
-Readers can use `StorageBinaryDataClientAeronArchive.New(...)` for replay,
-live join, and reconnect, or `StorageBinaryDataClientAeron.New(...)` for a
-live-only subscription. Persist the neutral DataGrid cursor/checkpoint after
-each completed commit. `AeronReplicationCheckpointStore` is provided for
+Readers use `StorageBinaryDataClientAeronArchive.New(...)` for replay, live
+join, and reconnect. The live-only reader is retained under test sources for
+low-level UDP coverage, not shipped as a production API. Persist the neutral
+DataGrid cursor/checkpoint after each completed commit. `AeronReplicationCheckpointStore` is provided for
 deployments that persist the Aeron-specific identity and replay boundary;
 the neutral nodelibrary callback remains the integration point.
 

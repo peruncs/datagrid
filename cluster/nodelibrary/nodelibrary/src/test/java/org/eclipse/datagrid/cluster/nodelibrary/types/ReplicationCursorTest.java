@@ -21,8 +21,10 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/** Tests replication cursor behavior. */
 class ReplicationCursorTest
 {
+	/** Verifies provider position is defensive and identity is value based. */
 	@Test
 	void providerPositionIsDefensiveAndIdentityIsValueBased()
 	{
@@ -36,6 +38,7 @@ class ReplicationCursorTest
 		assertArrayEquals(new byte[] { 1, 2, 3 }, cursor.providerPosition());
 	}
 
+	/** Verifies rejection of invalid sequence and transport. */
 	@Test
 	void rejectsInvalidSequenceAndTransport()
 	{

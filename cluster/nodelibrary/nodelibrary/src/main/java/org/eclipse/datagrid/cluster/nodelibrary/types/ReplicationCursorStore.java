@@ -49,7 +49,8 @@ public final class ReplicationCursorStore
 			.putLong(cursor.storeGeneration() == null ? 0 : cursor.storeGeneration().getLeastSignificantBits())
 			.putLong(cursor.logicalSequence()).putInt(position.length).put(position);
 		encoded.putInt(Crc32c.compute(encoded.array(), 0, encoded.position())).flip();
-		AtomicFileStore.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[] { encoded }));
+		AtomicFileStore.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[] { encoded }),
+			AtomicFileStore.PHASE_CURSOR);
 	}
 
 	/** Reads and validates a persisted cursor, rejecting truncation and bit-rot. */

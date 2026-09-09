@@ -17,13 +17,13 @@ package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
 import java.util.UUID;
 
 /**
- * Durable reader checkpoint identity used to resume Archive replay.
+ * The reader's durable place in one Archive recording.
  *
- * <p>The tuple fences a cursor to one cluster, node, Store generation, epoch,
- * and recording. A sequence alone is insufficient because a new recording or
- * Store image may reuse sequence numbers. Persistence is provided by the
- * neutral {@code ReplicationCursorStore}; this type is the Aeron provider
- * position value crossing the module boundary.</p>
+ * <p>The sequence is paired with the cluster, node, Store image, epoch, and
+ * recording identities. A sequence by itself is unsafe after a restart because
+ * a new recording may reuse it. The neutral cursor store persists this value;
+ * this record carries the Aeron-specific position across the provider
+ * boundary.</p>
  */
 public record AeronReplicationCursor(
 	UUID clusterId,

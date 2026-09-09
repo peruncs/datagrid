@@ -193,7 +193,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		}
 	}
 
-	public static class Sync extends Abstract
+	class Sync extends Abstract
 	{
 		private Sync(final String topicName, final KafkaPropertiesProvider kafkaPropertiesProvider)
 		{
@@ -207,7 +207,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		}
 	}
 
-	public static class Async extends Abstract
+	class Async extends Abstract
 	{
 		private final ExecutorService executor;
 

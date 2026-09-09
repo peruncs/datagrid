@@ -22,11 +22,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
+/** Tests storage binary data distributor behavior. */
 class StorageBinaryDataDistributorTest
 {
+	/** Verifies preservation of concurrent type dictionaries with their committing thread. */
 	@Test
 	void keepsConcurrentTypeDictionariesWithTheirCommittingThread()
 		throws Exception
@@ -69,6 +70,7 @@ class StorageBinaryDataDistributorTest
 		assertEquals("dictionary-2", dictionaries.get("writer-2"));
 	}
 
+	/** Verifies that the dictionary is cleared after delegate failure. */
 	@Test
 	void clearsDictionaryAfterDelegateFailure() {
 		final AtomicInteger dictionaryCalls = new AtomicInteger();
@@ -86,7 +88,7 @@ class StorageBinaryDataDistributorTest
 		caching.distributeTypeDictionary("stale");
 		assertThrows(IllegalStateException.class, () -> caching.distributeData(null));
 		assertEquals(1, dictionaryCalls.get());
-		assertEquals(null, caching.consumeTypeDictionary());
+        assertNull(caching.consumeTypeDictionary());
 	}
 
 	private static Thread thread(

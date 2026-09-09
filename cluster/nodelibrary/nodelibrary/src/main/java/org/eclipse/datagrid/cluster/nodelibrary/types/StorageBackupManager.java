@@ -129,7 +129,7 @@ public interface StorageBackupManager
                 }
             }
 
-            final boolean isRunning = this.dataClient.isRunning();
+			final boolean isRunning = this.dataClient.isRunning();
 
             this.stopDataClient();
 
@@ -209,7 +209,7 @@ public interface StorageBackupManager
         {
             LOG.trace("Waiting for data client to stop reading");
             this.dataClient.stopAtLatestMessage();
-            while (this.dataClient.isRunning())
+			while (this.dataClient.isRunning())
             {
                 XThreads.sleep(500);
             }

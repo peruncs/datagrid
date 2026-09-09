@@ -40,12 +40,12 @@ import static org.eclipse.serializer.util.X.notNull;
 
 public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 {
-	public static StorageBinaryDataClientKafka New(
-		final Properties kafkaProperties,
-		final String topicName,
-		final String clientId,
-		final StorageBinaryDataReceiver receiver
-	)
+	static StorageBinaryDataClientKafka New(
+            final Properties kafkaProperties,
+            final String topicName,
+            final String clientId,
+            final StorageBinaryDataReceiver receiver
+    )
 	{
 		return New(
 			kafkaProperties,
@@ -55,12 +55,12 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		);
 	}
 
-	public static StorageBinaryDataClientKafka New(
-		final Properties kafkaProperties,
-		final String topicName,
-		final String clientId,
-		final StorageBinaryDataPacketAcceptor packetAcceptor
-	)
+	static StorageBinaryDataClientKafka New(
+            final Properties kafkaProperties,
+            final String topicName,
+            final String clientId,
+            final StorageBinaryDataPacketAcceptor packetAcceptor
+    )
 	{
 		return new StorageBinaryDataClientKafka.Default(
 			notNull(kafkaProperties),
@@ -70,7 +70,7 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		);
 	}
 
-	public static class Default implements StorageBinaryDataClientKafka
+	class Default implements StorageBinaryDataClientKafka
 	{
 		private final Properties kafkaProperties;
 		private final String topicName;

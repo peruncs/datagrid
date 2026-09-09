@@ -19,8 +19,10 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Pins the validation that keeps writer and reader framing compatible. */
 class AeronReplicationConfigurationTest
 {
+	/** Verifies that defaults expose Aeron and Data Grid limits. */
 	@Test
 	void defaultsExposeAeronAndDataGridLimits()
 	{
@@ -31,6 +33,7 @@ class AeronReplicationConfigurationTest
 		assertEquals(ReplicationDurabilityMode.ARCHIVE_FIRST, configuration.durabilityMode());
 	}
 
+	/** Verifies rejection of chunk that cannot fit one aeron message. */
 	@Test
 	void rejectsChunkThatCannotFitOneAeronMessage()
 	{
@@ -40,6 +43,7 @@ class AeronReplicationConfigurationTest
 			.build());
 	}
 
+	/** Verifies acceptance of tuned values when the invariant holds. */
 	@Test
 	void acceptsTunedValuesWhenTheInvariantHolds()
 	{
@@ -52,6 +56,7 @@ class AeronReplicationConfigurationTest
 		assertEquals(4 * 1024 * 1024, configuration.maxMessageLength());
 	}
 
+	/** Verifies that all tunable limits are read from properties. */
 	@Test
 	void readsAllTunableLimitsFromProperties()
 	{
@@ -71,6 +76,7 @@ class AeronReplicationConfigurationTest
 		assertEquals(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, configuration.durabilityMode());
 	}
 
+	/** Verifies rejection of invalid term mtu chunk and timeout values. */
 	@Test
 	void rejectsInvalidTermMtuChunkAndTimeoutValues()
 	{
@@ -88,6 +94,7 @@ class AeronReplicationConfigurationTest
 			.termLength(1 << 30).chunkSize(20 * 1024 * 1024).maxTransactionBytes(20 * 1024 * 1024).build());
 	}
 
+	/** Verifies rejection of invalid properties before aeron starts. */
 	@Test
 	void rejectsInvalidPropertiesBeforeAeronStarts()
 	{
@@ -97,6 +104,7 @@ class AeronReplicationConfigurationTest
 		assertThrows(NullPointerException.class, () -> AeronReplicationConfiguration.from(null));
 	}
 
+	/** Verifies reporting of invalid numeric properties with their key. */
 	@Test
 	void reportsInvalidNumericPropertiesWithTheirKey()
 	{

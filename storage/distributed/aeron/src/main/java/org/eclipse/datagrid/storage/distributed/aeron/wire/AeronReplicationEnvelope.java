@@ -24,26 +24,20 @@ import java.util.UUID;
 import java.util.zip.CRC32C;
 
 /**
- * Versioned DataGrid wire envelope carried by Aeron.
+ * The small envelope around one piece of a replicated Store transaction.
  *
- * <p>The envelope deliberately keeps the Eclipse Serializer output opaque:
- * Serializer remains the canonical object-graph/binary format and this class
- * only adds routing, ordering, chunk, and checksum metadata. The fixed
- * 64-byte header is followed by one chunk. Aeron may fragment that message to
- * fit the configured MTU and reassembles it before the reader sees it.</p>
+ * <p>Eclipse Serializer still owns the Store binary format. This type adds
+ * only the identity, order, chunk location, and checksum needed to move that
+ * binary through Aeron. A transaction is visible only after its commit marker
+ * and full-binary checksum pass validation.</p>
  *
- * <p>Commit and abort markers contain no payload. Readers stage chunks by
- * sequence and release a Store binary only after the matching commit checksum
- * validates, so a partial or reordered transaction cannot enter the Store.</p>
- *
- * <p>CRC32C is an accidental-corruption and torn-frame detector, not
- * authentication. Channel isolation or an authenticated transport remains
- * required when replication crosses an untrusted network.</p>
+ * <p>The checksum detects accidental corruption. It is not authentication, so
+ * deployments that cross a trust boundary must protect the Aeron channels.</p>
  */
 public final class AeronReplicationEnvelope
 {
-	/* decodeView is invoked by one polling thread at a time; do not re-enter CRC
-	 * computation from a callback on that thread while this instance is active. */
+	/* The reusable checksum state is safe only for the polling thread that owns
+	 * the current decode. Do not re-enter checksum computation from a callback. */
 	private static final ThreadLocal<CRC32C> DIRECT_CRC = ThreadLocal.withInitial(CRC32C::new);
 	private static final int CRC_SCRATCH_BYTES = 16 * 1024;
 	private static final ThreadLocal<byte[]> CRC_SCRATCH =
@@ -52,6 +46,7 @@ public final class AeronReplicationEnvelope
 	public static final short VERSION = 1;
 	public static final int HEADER_LENGTH = 64;
 
+	/** Identifies the data or terminal marker carried by an envelope. */
 	public enum Kind
 	{
 		TYPE_DICTIONARY(1),
@@ -68,11 +63,23 @@ public final class AeronReplicationEnvelope
 		}
 	}
 
+	/** Returns whether a wire kind carries transaction data rather than a terminal marker. */
+	public static boolean isPayloadKindCode(final int code)
+	{
+		return code == Kind.TYPE_DICTIONARY.code || code == Kind.STORE_BINARY.code;
+	}
+
 	private AeronReplicationEnvelope()
 	{
 	}
 
-	/** Encodes one validated envelope header and its opaque payload chunk. */
+	/**
+	 * Encodes an envelope into a new byte array.
+	 *
+	 * <p>This allocation-friendly form is intended for tests and compatibility
+	 * callers. The writer uses the direct-buffer overload to keep Store data off
+	 * the heap.</p>
+	 */
 	public static byte[] encode(
 		final UUID clusterId,
 		final long epoch,
@@ -95,8 +102,8 @@ public final class AeronReplicationEnvelope
 	}
 
 	/**
-	 * Encodes directly into a caller-owned Agrona buffer. This is the hot-path
-	 * overload used by the publisher; it performs no temporary heap allocation.
+	 * Encodes directly into a caller-owned Agrona buffer. The writer uses this
+	 * form so each chunk can be offered without first creating a heap frame.
 	 *
 	 * @param target destination buffer
 	 * @param targetOffset destination offset
@@ -198,7 +205,12 @@ public final class AeronReplicationEnvelope
 		}
 	}
 
-	/** Decodes one complete envelope and validates its bounds and payload CRC. */
+	/**
+	 * Decodes one complete envelope and copies its payload.
+	 *
+	 * <p>Use the reusable view overload in a reader. This method is kept for
+	 * tests and callers that need an owned byte array.</p>
+	 */
 	public static Envelope decode(final DirectBuffer source, final int offset, final int length)
 	{
 		final EnvelopeView view = decodeView(source, offset, length);
@@ -208,20 +220,16 @@ public final class AeronReplicationEnvelope
 			view.chunkIndex, view.chunkCount, view.chunkOffset, view.commitCrc32c, payload);
 	}
 
-	/**
-	 * Decodes and validates an envelope without copying its payload. The view is
-	 * valid only while the supplied Aeron fragment is valid; callers that retain
-	 * data must copy it into owned storage before returning from the fragment
-	 * callback.
-	 */
-	/* Allocating convenience form retained for codec tests and the compatibility
-	 * decode(byte[]) accessor; production readers must use the reusable overload. */
+	/** Convenience form for codec tests; production readers use the reusable view. */
 	static EnvelopeView decodeView(final DirectBuffer source, final int offset, final int length)
 	{
 		return decodeView(source, offset, length, new EnvelopeView());
 	}
 
-	/** Decodes into a reusable view to keep the reader hot path allocation-free. */
+	/**
+	 * Decodes into a caller-provided view. The view is valid until the next call
+	 * that reuses it, so a reader must copy any payload it keeps.
+	 */
 	public static EnvelopeView decodeView(
 		final DirectBuffer source,
 		final int offset,
@@ -281,12 +289,13 @@ public final class AeronReplicationEnvelope
 		return view;
 	}
 
-	/** Computes the CRC32C used for chunk and commit-witness validation. */
+	/** Computes the checksum used to detect damaged chunks and commits. */
 	public static int crc32c(final byte[] payload)
 	{
 		return Crc32c.compute(payload);
 	}
 
+	/** Computes the same checksum directly from an Agrona buffer range. */
 	public static int crc32c(final DirectBuffer payload, final int offset, final int length)
 	{
 		if (payload == null || offset < 0 || length < 0 || offset > payload.capacity() - length)
@@ -308,6 +317,7 @@ public final class AeronReplicationEnvelope
 		return (int)crc.getValue();
 	}
 
+	/** Reusable view over one decoded envelope; it does not own the payload. */
 	public static final class EnvelopeView
 	{
 		public DirectBuffer source;
@@ -364,6 +374,7 @@ public final class AeronReplicationEnvelope
 		public int commitCrc32c() { return this.commitCrc32c; }
 	}
 
+	/** Owned decoded envelope returned by the allocation-friendly codec path. */
 	public record Envelope(
 		UUID clusterId,
 		long epoch,

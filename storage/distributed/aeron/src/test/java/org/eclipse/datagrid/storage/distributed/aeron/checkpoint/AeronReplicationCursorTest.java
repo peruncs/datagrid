@@ -21,8 +21,10 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/** Verifies that a reader cursor cannot be mistaken for another recording. */
 class AeronReplicationCursorTest
 {
+	/** Verifies preservation of the self-describing replay boundary. */
 	@Test
 	void preservesTheSelfDescribingReplayBoundary()
 	{
@@ -41,6 +43,7 @@ class AeronReplicationCursorTest
 		assertEquals(13, cursor.sequence());
 	}
 
+	/** Verifies rejection of invalid replay identity and positions. */
 	@Test
 	void rejectsInvalidReplayIdentityAndPositions()
 	{

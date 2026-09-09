@@ -20,5 +20,5 @@ import org.eclipse.serializer.typing.Disposable;
 /** Minimal lifecycle contract for a reader-side binary replication client. */
 public interface StorageBinaryDataClient extends Disposable
 {
-	public void start();
+	void start();
 }

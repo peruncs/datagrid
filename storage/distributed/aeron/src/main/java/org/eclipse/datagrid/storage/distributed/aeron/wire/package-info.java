@@ -12,9 +12,11 @@
  * #L%
  */
 /**
- * Fixed-width Aeron replication envelope codecs; checksums detect corruption,
- * not authenticity. This package is intentionally module-internal and is not
- * exported; expose it only when an external diagnostic or replay tool requires
- * the wire format.
+ * The private envelope format used on the Aeron stream.
+ *
+ * <p>The checksum catches accidental corruption and framing mistakes. It does
+ * not authenticate a sender. This package is intentionally not exported; an
+ * external diagnostic tool should be added only when the wire format becomes
+ * a supported operational interface.</p>
  */
 package org.eclipse.datagrid.storage.distributed.aeron.wire;

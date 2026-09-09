@@ -58,7 +58,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		return new Caching(notNull(delegate));
 	}
 
-	public static final class Caching implements ClusterStorageBinaryDataDistributor
+	final class Caching implements ClusterStorageBinaryDataDistributor
 	{
 		private final ClusterStorageBinaryDataDistributor delegate;
 		private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();

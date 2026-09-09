@@ -25,7 +25,7 @@ public interface StorageBinaryDataReceiver
 	 * synchronously; transports may release its native buffers immediately after
 	 * this method returns to avoid retaining off-heap memory.
 	 */
-	public void receiveData(Binary data);
+    void receiveData(Binary data);
 
-	public void receiveTypeDictionary(String typeDictionaryData);
+	void receiveTypeDictionary(String typeDictionaryData);
 }

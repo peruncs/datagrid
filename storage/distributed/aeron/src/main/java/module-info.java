@@ -12,13 +12,13 @@
  * #L%
  */
 /**
- * Optional Aeron/Archive transport for Eclipse Data Grid Store replication.
+ * Aeron transport for Eclipse Data Grid replication.
  *
- * <p>This module depends on the neutral distributed-storage contracts and
- * exports focused Aeron configuration, checkpoint, reader, and writer APIs.
- * Applications opt in by
- * adding this artifact (and its Aeron dependencies); the neutral Data Grid
- * modules remain usable with Kafka or another provider.</p>
+ * <p>The module adds the transport without changing the neutral storage
+ * contracts. Applications choose it by adding this module and configuring the
+ * Aeron provider. The exported packages cover configuration, restart state,
+ * reading, and writing. The envelope format stays private to this module so a
+ * wire-format change does not become an application API.</p>
  *
  * @since 1.0
  */

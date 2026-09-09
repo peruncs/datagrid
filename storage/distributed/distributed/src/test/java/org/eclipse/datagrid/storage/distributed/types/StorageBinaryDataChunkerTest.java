@@ -24,8 +24,10 @@ import java.util.ArrayList;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/** Tests storage binary data chunker behavior. */
 class StorageBinaryDataChunkerTest
 {
+	/** Verifies chunks across source buffers without changing their positions. */
 	@Test
 	void chunksAcrossSourceBuffersWithoutChangingTheirPositions()
 	{
@@ -45,6 +47,7 @@ class StorageBinaryDataChunkerTest
 		assertEquals(5, chunks.get(0).messageLength());
 	}
 
+	/** Verifies empty binary produces no packets. */
 	@Test
 	void emptyBinaryProducesNoPackets()
 	{
@@ -52,6 +55,7 @@ class StorageBinaryDataChunkerTest
 		assertEquals(0, StorageBinaryDataChunker.chunk(binary, 128).size());
 	}
 
+	/** Verifies that streaming iteration does not materialize a second chunk list. */
 	@Test
 	void streamingForEachDoesNotMaterializeASecondChunkList()
 	{

@@ -27,9 +27,9 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageBinaryDataDistributor extends Disposable
 {
-	public void distributeData(Binary data);
+	void distributeData(Binary data);
 
-	public void distributeTypeDictionary(String typeDictionaryData);
+	void distributeTypeDictionary(String typeDictionaryData);
 
 	/** Returns and clears a dictionary staged for the next binary transaction. */
 	default String consumeTypeDictionary()
@@ -37,7 +37,7 @@ public interface StorageBinaryDataDistributor extends Disposable
 		return null;
 	}
 
-	public static StorageBinaryDataDistributor Caching(final StorageBinaryDataDistributor delegate)
+	static StorageBinaryDataDistributor Caching(final StorageBinaryDataDistributor delegate)
 	{
 		return new StorageBinaryDataDistributor.Caching(
 			notNull(delegate)
@@ -48,7 +48,7 @@ public interface StorageBinaryDataDistributor extends Disposable
 	 * Only distribute optional new type dictionary before actual data to minimize
 	 * traffic.
 	 */
-	public static class Caching implements StorageBinaryDataDistributor
+    class Caching implements StorageBinaryDataDistributor
 	{
 		private final StorageBinaryDataDistributor delegate;
 		/*

@@ -26,22 +26,37 @@ import java.nio.file.Path;
 import java.util.UUID;
 
 /**
- * Crash-safe fixed-format checkpoint persistence independent of the Aeron wire
- * schema. Writes use a forced temporary file, atomic rename when supported,
- * and a directory sync; reads verify length, magic/version, fields, and CRC.
+ * Persists restart records without coupling them to the wire format.
+ *
+ * <p>A new record is forced to a temporary file before it replaces the old
+ * one. Reads validate the complete record and its checksum. A failed write
+ * therefore leaves the previous restart boundary available.</p>
  */
 public final class AeronReplicationCheckpointStore
 {
 	private AeronReplicationCheckpointStore() { }
 
-	/** Atomically replaces {@code path} with a fully validated checkpoint. */
+	/**
+	 * Replaces {@code path} only after the complete record is on disk.
+	 *
+	 * @param path checkpoint file
+	 * @param checkpoint record to persist
+	 * @throws IOException if the record cannot be written or forced to disk
+	 */
 	public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException
 	{
 		final ByteBuffer encoded = encode(checkpoint);
-		AtomicFileStore.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[] { encoded }));
+		AtomicFileStore.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[] { encoded }),
+			AtomicFileStore.PHASE_CHECKPOINT);
 	}
 
-	/** Reads and validates a checkpoint, rejecting torn or incompatible files. */
+	/**
+	 * Reads a record and rejects a torn, corrupt, or incompatible file.
+	 *
+	 * @param path checkpoint file
+	 * @return validated checkpoint
+	 * @throws IOException if the file is missing, truncated, or invalid
+	 */
 	public static AeronReplicationCheckpoint read(final Path path) throws IOException
 	{
 		final byte[] bytes = Files.readAllBytes(path);
@@ -70,7 +85,8 @@ public final class AeronReplicationCheckpointStore
 			buffer.get();
 			return new AeronReplicationCheckpoint(recordType, mode, state,
 				readUuid(buffer), readUuid(buffer), readUuid(buffer),
-				buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getInt());
+				buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),
+				buffer.getInt(), buffer.getInt(), buffer.getInt());
 		}
 		catch (final RuntimeException e)
 		{
@@ -93,6 +109,7 @@ public final class AeronReplicationCheckpointStore
 		putUuid(buffer, checkpoint.storeGeneration());
 		buffer.putLong(checkpoint.recordingId()).putLong(checkpoint.writerEpoch())
 			.putLong(checkpoint.transactionSequence()).putLong(checkpoint.recordingPosition())
+			.putInt(checkpoint.dataLength()).putInt(checkpoint.dataChunkCount())
 			.putInt(checkpoint.resolutionCrc32c())
 			.putInt(Crc32c.compute(buffer.array(), 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
 		return buffer.flip();

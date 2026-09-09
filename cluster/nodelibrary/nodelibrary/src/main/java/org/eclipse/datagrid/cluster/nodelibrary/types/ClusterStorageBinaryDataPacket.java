@@ -15,28 +15,27 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
-import java.nio.ByteBuffer;
-
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
 
+import java.nio.ByteBuffer;
+
 import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
-
 import static org.eclipse.serializer.util.X.notNull;
 
 public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
 {
 	long messageIndex();
 
-	public static ClusterStorageBinaryDataPacket New(
-		final MessageType messageType,
-		final int messageLength,
-		final int packetIndex,
-		final int packetCount,
-		final long messageIndex,
-		final ByteBuffer buffer
-	)
+	static ClusterStorageBinaryDataPacket New(
+            final MessageType messageType,
+            final int messageLength,
+            final int packetIndex,
+            final int packetCount,
+            final long messageIndex,
+            final ByteBuffer buffer
+    )
 	{
 		return new Default(
 			notNull(messageType),
@@ -48,7 +47,7 @@ public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
 		);
 	}
 
-	public static class Default implements ClusterStorageBinaryDataPacket
+	class Default implements ClusterStorageBinaryDataPacket
 	{
 		private final MessageType messageType;
 		private final int messageLength;

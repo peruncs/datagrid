@@ -28,11 +28,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 /**
- * Commit-gated, reusable transaction assembler shared by live and Archive readers.
+ * Reassembles chunks and releases a Store binary only after commit validation.
  *
- * <p>The test-only live reader intentionally remains in this package so it can
- * exercise the same package-private assembler and cursor hand-off invariants as
- * the production Archive reader.</p>
+ * <p>The production Archive reader and the test-only live reader use this same
+ * state machine. That keeps ordering, checksum, and cursor hand-off rules in
+ * one place.</p>
  */
 final class TransactionAssembler
 {
@@ -43,6 +43,7 @@ final class TransactionAssembler
 	private final long epoch;
 	private final StorageBinaryDataReceiver receiver;
 	private final Runnable transactionResolved;
+	private final ReaderDeliveryListener deliveryListener;
 	private volatile long lastResolvedSequence;
 	/* The next sequence is reserved while the assembler monitor is held. It
 	 * closes the gap between accepting a terminal marker and invoking the
@@ -89,11 +90,25 @@ final class TransactionAssembler
 		final Runnable transactionResolved
 	)
 	{
+		this(configuration, clusterId, epoch, initialSequence, receiver, transactionResolved, null);
+	}
+
+	TransactionAssembler(
+		final AeronReplicationConfiguration configuration,
+		final UUID clusterId,
+		final long epoch,
+		final long initialSequence,
+		final StorageBinaryDataReceiver receiver,
+		final Runnable transactionResolved,
+		final ReaderDeliveryListener deliveryListener
+	)
+	{
 		this.configuration = configuration;
 		this.clusterId = clusterId;
 		this.epoch = epoch;
 		this.receiver = receiver;
 		this.transactionResolved = transactionResolved;
+		this.deliveryListener = deliveryListener;
 		if (initialSequence < -1 || initialSequence == Long.MAX_VALUE)
 		{
 			throw new IllegalArgumentException("initialSequence must be in [-1, Long.MAX_VALUE)");
@@ -168,7 +183,8 @@ final class TransactionAssembler
 		}
 		if (envelope.kind() == AeronReplicationEnvelope.Kind.COMMIT)
 		{
-			return this.commit(envelope, position);
+			this.commit(envelope, position);
+			return true;
 		}
 		if (envelope.kind() == AeronReplicationEnvelope.Kind.ABORT)
 		{
@@ -198,7 +214,7 @@ final class TransactionAssembler
 		return false;
 	}
 
-	private boolean commit(final AeronReplicationEnvelope.EnvelopeView envelope, final long position)
+	private void commit(final AeronReplicationEnvelope.EnvelopeView envelope, final long position)
 	{
 		if (this.transaction == null)
 		{
@@ -208,7 +224,7 @@ final class TransactionAssembler
 			}
 			this.nextExpectedSequence = envelope.sequence() + 1;
 			this.delivery.prepare(null, null, null, envelope.sequence(), position, envelope.commitCrc32c());
-			return true;
+			return;
 		}
 		if (this.transaction.dataLength != envelope.payloadLength() ||
 			this.transaction.dataChunkCount != envelope.chunkCount() ||
@@ -256,7 +272,6 @@ final class TransactionAssembler
 		this.nextExpectedSequence = envelope.sequence() + 1;
 		this.delivery.prepare(dictionary, direct, completed, envelope.sequence(), position,
 			envelope.commitCrc32c());
-		return true;
 	}
 
 	private final class Delivery
@@ -284,7 +299,17 @@ final class TransactionAssembler
 			try
 			{
 				if (this.dictionary != null) receiver.receiveTypeDictionary(this.dictionary);
-				if (this.data != null) receiver.receiveData(ChunksWrapper.New(this.data));
+				if (this.data != null)
+				{
+					final int dataLength = this.completed.dataLength;
+					final int dataChunkCount = this.completed.dataChunkCount;
+					if (deliveryListener != null)
+					{
+						deliveryListener.beforeStoreImport(
+							this.sequence, this.position, dataLength, dataChunkCount, this.resolutionCrc32c);
+					}
+					receiver.receiveData(ChunksWrapper.New(this.data));
+				}
 				synchronized (TransactionAssembler.this)
 				{
 					lastResolvedSequence = this.sequence;
@@ -293,6 +318,10 @@ final class TransactionAssembler
 					hasLastResolutionCrc = true;
 				}
 				transactionResolved.run();
+				if (this.data != null && deliveryListener != null)
+				{
+					deliveryListener.afterStoreImport();
+				}
 			}
 			finally
 			{
@@ -390,7 +419,11 @@ final class TransactionAssembler
 					}
 				}
 				if (this.dictionaryLength != payloadLength) throw new IllegalArgumentException("dictionary length changed within transaction");
-				if (wireLength != 0) this.dictionary.putBytes(offset, envelope.source, envelope.payloadOffset, wireLength);
+				if (wireLength != 0)
+				{
+					if (this.dictionary == null) throw new IllegalStateException("dictionary storage is unavailable");
+					this.dictionary.putBytes(offset, envelope.source, envelope.payloadOffset, wireLength);
+				}
 				this.dictionaryOffset += wireLength;
 				this.dictionaryNextChunk++;
 				this.dictionaryChunkCount = envelope.chunkCount();
@@ -404,7 +437,11 @@ final class TransactionAssembler
 				}
 				if (this.dataLength != 0 && this.dataLength != payloadLength) throw new IllegalArgumentException("Store binary length changed within transaction");
 				this.dataLength = payloadLength;
-				if (wireLength != 0) this.data.putBytes(offset, envelope.source, envelope.payloadOffset, wireLength);
+				if (wireLength != 0)
+				{
+					if (this.data == null) throw new IllegalStateException("Store data storage is unavailable");
+					this.data.putBytes(offset, envelope.source, envelope.payloadOffset, wireLength);
+				}
 				this.dataOffset += wireLength;
 				this.dataNextChunk++;
 				this.dataChunkCount = envelope.chunkCount();

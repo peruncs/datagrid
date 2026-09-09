@@ -22,11 +22,12 @@ import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataReceiver;
 
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Live-only reader used by low-level UDP tests. Production clustering uses
- * {@link StorageBinaryDataClientAeronArchive}; both readers share
+ * Test-only live reader used by low-level UDP tests. Production clustering
+ * uses {@link StorageBinaryDataClientAeronArchive}; both readers share
  * {@link TransactionAssembler} for commit-gated delivery and CRC validation.
  */
 public final class StorageBinaryDataClientAeron implements StorageBinaryDataClient
@@ -36,6 +37,7 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 	private final AtomicBoolean active = new AtomicBoolean();
 	private final FragmentAssembler fragmentAssembler;
 	private volatile Thread thread;
+	private volatile CountDownLatch stopped = new CountDownLatch(0);
 	private volatile boolean disposed;
 	private volatile boolean stopAtLatest;
 
@@ -74,6 +76,7 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 		if (this.disposed) throw new IllegalStateException("Aeron reader is disposed");
 		if (this.active.getAndSet(true)) return;
 		this.stopAtLatest = false;
+		this.stopped = new CountDownLatch(1);
 		this.thread = new Thread(this::run, "datagrid-aeron-reader");
 		this.thread.setDaemon(true);
 		this.thread.start();
@@ -103,6 +106,7 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 		finally
 		{
 			this.active.set(false);
+			this.stopped.countDown();
 		}
 	}
 
@@ -144,6 +148,6 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 		this.disposed = true;
 		final Thread pollingThread = this.thread;
 		this.thread = null;
-		AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.subscription::close);
+		AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close);
 	}
 }

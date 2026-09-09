@@ -17,14 +17,13 @@ package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
 import java.util.UUID;
 
 /**
- * Fixed-size, CRC-protected recovery record for writer state or reader cursors.
+ * The restart record for one writer or reader.
  *
- * <p>The record is intentionally independent of the Aeron wire envelope. A
- * writer checkpoint records the last terminal commit ordering state needed
- * after a crash; a reader record records the replay boundary. The store writes
- * this record atomically. Startup currently accepts only terminal writer
- * states and fails closed when the archive identity or checkpoint is
- * inconsistent; it never guesses through a torn transaction.</p>
+ * <p>The writer stores the last transaction whose commit result is known. The
+ * reader stores the Archive position at which replay may resume. The record
+ * also carries the cluster, Store image, and recording identities. Those
+ * identities matter because a sequence number can be reused after a reseed.
+ * Startup refuses an incomplete or mismatched record instead of guessing.</p>
  *
  * @param recordType whether this is writer or reader state
  * @param durabilityMode ordering selected for the writer
@@ -36,7 +35,9 @@ import java.util.UUID;
  * @param writerEpoch writer fencing epoch
  * @param transactionSequence last transaction sequence represented
  * @param recordingPosition Aeron position at the transition
- * @param resolutionCrc32c commit/abort witness checksum
+ * @param dataLength Store binary length represented by the transition
+ * @param dataChunkCount Store binary chunk count represented by the transition
+	 * @param resolutionCrc32c checksum carried by the terminal marker
  */
 public record AeronReplicationCheckpoint(
 	RecordType recordType,
@@ -49,6 +50,8 @@ public record AeronReplicationCheckpoint(
 	long writerEpoch,
 	long transactionSequence,
 	long recordingPosition,
+	int dataLength,
+	int dataChunkCount,
 	int resolutionCrc32c
 )
 {
@@ -56,7 +59,7 @@ public record AeronReplicationCheckpoint(
 	{
 		if (recordType == null || durabilityMode == null || state == null || clusterId == null ||
 			nodeId == null || storeGeneration == null || recordingId < -1 || writerEpoch < 0 ||
-			transactionSequence < -1 || recordingPosition < -1)
+			transactionSequence < -1 || recordingPosition < -1 || dataLength < 0 || dataChunkCount < 0)
 		{
 			throw new IllegalArgumentException("invalid Aeron replication checkpoint");
 		}
@@ -64,9 +67,9 @@ public record AeronReplicationCheckpoint(
 
 	public enum RecordType
 	{
-		/** State belonging to the single writer. */
+	/** A record owned by the single writer. */
 		WRITER_CHECKPOINT(1),
-		/** State belonging to one reader's replay cursor. */
+	/** A record owned by one reader's replay cursor. */
 		READER_CURSOR(2);
 		private final int code;
 		RecordType(final int code) { this.code = code; }
@@ -79,9 +82,9 @@ public record AeronReplicationCheckpoint(
 
 	public enum DurabilityMode
 	{
-		/** Archive bytes are prepared before local Store acceptance. */
+	/** Publish the Archive transaction before accepting it locally. */
 		ARCHIVE_FIRST(1),
-		/** Local enqueue precedes archive publication; recovery is conservative. */
+	/** Accept locally first; an uncertain result requires reseeding. */
 		ENQUEUE_THEN_ARCHIVE(2);
 		private final int code;
 		DurabilityMode(final int code) { this.code = code; }
@@ -94,15 +97,15 @@ public record AeronReplicationCheckpoint(
 
 	public enum State
 	{
-		/** Data chunks have been accepted by the publication. */
+	/** Data publication has started but has no terminal result yet. */
 		PREPARING(1),
-		/** The local Store accepted the transaction. */
+	/** The local Store accepted the transaction. */
 		ENQUEUED(2),
-		/** Commit outcome was lost and must not be guessed. */
+	/** The outcome was lost and must not be guessed during restart. */
 		COMMITTING_UNCERTAIN(3),
-		/** Commit marker is durably published. */
+	/** The commit marker reached the Archive recording. */
 		COMMITTED(4),
-		/** Transaction was explicitly aborted. */
+	/** The transaction was explicitly rejected. */
 		REJECTED(5);
 		private final int code;
 		State(final int code) { this.code = code; }
@@ -115,7 +118,7 @@ public record AeronReplicationCheckpoint(
 
 	static final int MAGIC = 0x44474152; // DGAR
 	static final short VERSION = 1;
-	static final int ENCODED_BYTES = 100;
+	static final int ENCODED_BYTES = 108;
 
 	int recordTypeCode() { return this.recordType.code; }
 	int durabilityModeCode() { return this.durabilityMode.code; }

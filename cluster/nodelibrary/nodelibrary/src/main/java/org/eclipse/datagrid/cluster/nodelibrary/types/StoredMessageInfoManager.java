@@ -15,12 +15,16 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
+import org.eclipse.datagrid.storage.distributed.types.AtomicFileStore;
 import org.eclipse.serializer.afs.types.AWritableFile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -38,6 +42,12 @@ public interface StoredMessageInfoManager extends AutoCloseable
         return new Default(notNull(messageInfoFile), notNull(messageInfoParser));
     }
 
+    /** Creates a forced temporary-file replacement manager for a native path. */
+    static StoredMessageInfoManager NewAtomic(final Path messageInfoPath, final MessageInfoParser messageInfoParser)
+    {
+        return new Default(notNull(messageInfoPath), notNull(messageInfoParser));
+    }
+
     @FunctionalInterface
     interface Creator
     {
@@ -49,6 +59,7 @@ public interface StoredMessageInfoManager extends AutoCloseable
         private static final Logger LOG = LoggerFactory.getLogger(StoredMessageInfoManager.class);
 
         private final AWritableFile messageInfoFile;
+        private final Path atomicPath;
         private final MessageInfoParser messageInfoParser;
 
         private boolean closed = false;
@@ -59,6 +70,14 @@ public interface StoredMessageInfoManager extends AutoCloseable
         private Default(final AWritableFile messageInfoFile, final MessageInfoParser messageInfoParser)
         {
             this.messageInfoFile = messageInfoFile;
+            this.atomicPath = null;
+            this.messageInfoParser = messageInfoParser;
+        }
+
+        private Default(final Path atomicPath, final MessageInfoParser messageInfoParser)
+        {
+            this.messageInfoFile = null;
+            this.atomicPath = atomicPath;
             this.messageInfoParser = messageInfoParser;
         }
 
@@ -74,19 +93,32 @@ public interface StoredMessageInfoManager extends AutoCloseable
         {
             this.ensureInit();
 
-            final var buffer = ByteBuffer.wrap(MessageInfoCodec.serializeBytes(messageInfo));
-
             try
             {
-                this.messageInfoFile.truncate(0);
-                // for some reason 0x0a was added to the end once, maybe some afs weirdness?
-                final long written = this.messageInfoFile.writeBytes(buffer);
+                final byte[] serialized = MessageInfoCodec.serializeBytes(messageInfo);
+                final long written;
+                if (this.atomicPath != null)
+                {
+					AtomicFileStore.write(this.atomicPath, channel ->
+					{
+						final ByteBuffer buffer = ByteBuffer.wrap(serialized);
+						while (buffer.hasRemaining()) channel.write(buffer);
+					});
+                    written = serialized.length;
+                }
+                else
+                {
+                    final var buffer = ByteBuffer.wrap(serialized);
+                    this.messageInfoFile.truncate(0);
+                    // for some reason 0x0a was added to the end once, maybe some afs weirdness?
+                    written = this.messageInfoFile.writeBytes(buffer);
+                }
                 if (LOG.isDebugEnabled() && messageInfo.messageIndex() % 10_000 == 0)
                 {
                     LOG.debug("Stored message index {}, written {} bytes", messageInfo.messageIndex(), written);
                 }
             }
-            catch (final RuntimeException e)
+            catch (final IOException | RuntimeException e)
             {
                 throw new NodelibraryException("Failed to write message info file", e);
             }
@@ -103,7 +135,25 @@ public interface StoredMessageInfoManager extends AutoCloseable
 
             LOG.info("Initializing StoredMessageInfoManager");
 
-            final boolean createdNew = this.messageInfoFile.ensureExists();
+            final boolean createdNew;
+            if (this.atomicPath != null)
+            {
+                try
+                {
+                    final Path absolute = this.atomicPath.toAbsolutePath();
+                    final Path parent = absolute.getParent();
+                    if (parent != null) Files.createDirectories(parent);
+                    createdNew = Files.notExists(absolute);
+                }
+                catch (final IOException failure)
+                {
+                    throw new NodelibraryException("Failed to prepare message info file", failure);
+                }
+            }
+            else
+            {
+                createdNew = this.messageInfoFile.ensureExists();
+            }
 
             if (createdNew)
             {
@@ -116,9 +166,11 @@ public interface StoredMessageInfoManager extends AutoCloseable
                 final ByteBuffer fileBytesBuffer;
                 try
                 {
-                    fileBytesBuffer = this.messageInfoFile.readBytes();
+                    fileBytesBuffer = this.atomicPath == null
+                        ? this.messageInfoFile.readBytes()
+                        : ByteBuffer.wrap(Files.readAllBytes(this.atomicPath));
                 }
-                catch (final NodelibraryException e)
+                catch (final IOException | NodelibraryException e)
                 {
                     throw new NodelibraryException("Failed to read message info file", e);
                 }
@@ -155,13 +207,16 @@ public interface StoredMessageInfoManager extends AutoCloseable
             }
             LOG.trace("Closing StoredMessageInfoManager");
 
-            try
+            if (this.messageInfoFile != null)
             {
-                this.messageInfoFile.release();
-            }
-            catch (final RuntimeException e)
-            {
-                LOG.error("Failed to release message info file", e);
+                try
+                {
+                    this.messageInfoFile.release();
+                }
+                catch (final RuntimeException e)
+                {
+                    LOG.error("Failed to release message info file", e);
+                }
             }
 
             this.closed = true;

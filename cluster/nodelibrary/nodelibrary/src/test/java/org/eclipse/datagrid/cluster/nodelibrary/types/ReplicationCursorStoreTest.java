@@ -22,8 +22,10 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/** Tests replication cursor store behavior. */
 class ReplicationCursorStoreTest
 {
+	/** Verifies atomic round-tripping of an opaque provider position. */
 	@Test
 	void roundTripsOpaqueProviderPositionAtomically() throws Exception
 	{
@@ -34,6 +36,7 @@ class ReplicationCursorStoreTest
 		Files.deleteIfExists(path);
 	}
 
+	/** Verifies detection of corrupt cursor before using provider bytes. */
 	@Test
 	void detectsCorruptCursorBeforeUsingProviderBytes() throws Exception
 	{

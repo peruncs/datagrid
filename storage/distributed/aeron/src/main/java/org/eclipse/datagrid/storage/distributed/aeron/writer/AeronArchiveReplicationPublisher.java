@@ -1,6 +1,7 @@
 package org.eclipse.datagrid.storage.distributed.aeron.writer;
 
 import io.aeron.Aeron;
+import io.aeron.ChannelUri;
 import io.aeron.ChannelUriStringBuilder;
 import io.aeron.ExclusivePublication;
 import io.aeron.archive.client.AeronArchive;
@@ -28,13 +29,31 @@ import java.util.concurrent.locks.LockSupport;
  * #L%
  */
 
-/** Creates a recorded exclusive publication without changing the DataGrid API. */
+/**
+ * Publishes the replication stream and waits for the Archive to record it.
+ *
+ * <p>The commit marker is the visibility boundary for a transaction. A commit
+ * is reported only after the Archive's recorded position reaches that marker.
+ * The Archive and Aeron client are borrowed from the transport; this class
+ * closes only the publication and its recording.</p>
+ */
 public final class AeronArchiveReplicationPublisher implements AutoCloseable
 {
 	@FunctionalInterface
 	public interface CheckpointWriter
 	{
-		/** Receives a writer transition and its transaction metadata. */
+		/**
+		 * Receives a writer transition and the metadata needed for restart.
+		 * Non-terminal states are deliberately useful for diagnosis only; restart
+		 * must not treat them as committed data.
+		 *
+		 * @param state state reached by the writer
+		 * @param sequence transaction sequence, or {@code -1} for a local rejection
+		 * @param dataLength Store binary length
+		 * @param dataChunkCount Store binary chunk count
+		 * @param dataCrc32c Store binary checksum
+		 * @param position Archive position of the terminal marker, or {@code -1}
+		 */
 		void onState(AeronReplicationCheckpoint.State state, long sequence, int dataLength,
 			int dataChunkCount, int dataCrc32c, long position);
 	}
@@ -62,6 +81,18 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		this.configuration = configuration;
 	}
 
+	/**
+	 * Creates a local Archive recording and its writer publication.
+	 *
+	 * @param archive Archive client that owns the recording
+	 * @param channel publication channel
+	 * @param streamId publication stream
+	 * @param configuration shared framing and timeout limits
+	 * @param clusterId replication cluster identity
+	 * @param epoch writer epoch
+	 * @param initialSequence first sequence to publish
+	 * @return a publisher that owns the publication and recording
+	 */
 	public static AeronArchiveReplicationPublisher New(
 		final AeronArchive archive,
 		final String channel,
@@ -72,17 +103,59 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		final long initialSequence
 	)
 	{
-		final ExclusivePublication publication = archive.addRecordedExclusivePublication(channel, streamId);
+		return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+			SourceLocation.LOCAL);
+	}
+
+	/**
+	 * Creates a recording for a publication recorded by a separate Archive.
+	 * The caller still supplies the connected Archive client used for the
+	 * recording commands.
+	 */
+	public static AeronArchiveReplicationPublisher NewRemote(
+		final AeronArchive archive,
+		final String channel,
+		final int streamId,
+		final AeronReplicationConfiguration configuration,
+		final UUID clusterId,
+		final long epoch,
+		final long initialSequence
+	)
+	{
+		return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+			SourceLocation.REMOTE);
+	}
+
+	private static AeronArchiveReplicationPublisher New(
+		final AeronArchive archive,
+		final String channel,
+		final int streamId,
+		final AeronReplicationConfiguration configuration,
+		final UUID clusterId,
+		final long epoch,
+		final long initialSequence,
+		final SourceLocation sourceLocation
+	)
+	{
+		final ExclusivePublication publication;
+		if (sourceLocation == SourceLocation.LOCAL)
+		{
+			publication = archive.addRecordedExclusivePublication(channel, streamId);
+		}
+		else
+		{
+			publication = archive.context().aeron().addExclusivePublication(channel, streamId);
+			archive.startRecording(ChannelUri.addSessionId(channel, publication.sessionId()), streamId, sourceLocation);
+		}
 		try
 		{
-			awaitRecordingStarted(archive, publication, Aeron.NULL_VALUE, configuration);
-			final long recordingId = findRecordingId(archive, publication);
+			final long recordingId = awaitRecordingStarted(archive, publication, Aeron.NULL_VALUE, configuration);
 			return new AeronArchiveReplicationPublisher(
 				archive,
 				publication,
 				new AeronReplicationPublisher(
 					publication, configuration, clusterId, epoch, initialSequence, true,
-					position -> awaitRecorded(archive, publication, Aeron.NULL_VALUE, configuration, position)
+					position -> awaitRecorded(archive, publication, recordingId, configuration, position)
 				),
 				recordingId,
 				configuration
@@ -104,12 +177,13 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	}
 
 	/**
-	 * Reopens a stopped recording at its next archive position.
+	 * Extends a stopped recording without changing its framing.
+	 * The recording must belong to {@code streamId}; the same initial-position
+	 * URI is used for the new publication and the Archive extension.
 	 *
-	 * <p>The recording must belong to {@code streamId} and use the same term and
-	 * MTU framing as {@code configuration}. The exact initial-position URI is
-	 * passed to both the publication and the Archive extension request so the
-	 * recorded stream cannot be rebound with different framing.</p>
+	 * @throws IllegalArgumentException if the recording is unknown, uses another
+	 *         stream, or has different framing
+	 * @throws IllegalStateException if the recording is still active
 	 */
 	public static AeronArchiveReplicationPublisher Extend(
 		final AeronArchive archive,
@@ -119,6 +193,36 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		final UUID clusterId,
 		final long epoch,
 		final long initialSequence
+	)
+	{
+		return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+			SourceLocation.LOCAL);
+	}
+
+	/** Reopens a stopped recording whose source publication uses another driver. */
+	public static AeronArchiveReplicationPublisher ExtendRemote(
+		final AeronArchive archive,
+		final long recordingId,
+		final int streamId,
+		final AeronReplicationConfiguration configuration,
+		final UUID clusterId,
+		final long epoch,
+		final long initialSequence
+	)
+	{
+		return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+			SourceLocation.REMOTE);
+	}
+
+	private static AeronArchiveReplicationPublisher Extend(
+		final AeronArchive archive,
+		final long recordingId,
+		final int streamId,
+		final AeronReplicationConfiguration configuration,
+		final UUID clusterId,
+		final long epoch,
+		final long initialSequence,
+		final SourceLocation sourceLocation
 	)
 	{
 		final String[] channel = new String[1];
@@ -158,9 +262,9 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		final ExclusivePublication publication = archive.context().aeron().addExclusivePublication(extendedChannel, streamId);
 		try
 		{
-			archive.extendRecording(recordingId, extendedChannel, streamId, SourceLocation.LOCAL);
+			archive.extendRecording(recordingId, extendedChannel, streamId, sourceLocation);
 			awaitRecordingStarted(archive, publication, recordingId, configuration);
-			return new AeronArchiveReplicationPublisher(archive, publication,
+				return new AeronArchiveReplicationPublisher(archive, publication,
 				new AeronReplicationPublisher(publication, configuration, clusterId, epoch, initialSequence, true,
 					positionValue -> awaitRecorded(archive, publication, recordingId, configuration, positionValue)), recordingId,
 				configuration);
@@ -180,6 +284,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		}
 	}
 
+	/**
+	 * Publishes one complete transaction and waits for its Archive position.
+	 *
+	 * @param dictionary optional type dictionary bytes
+	 * @param data Store binary buffers; their positions are read but not changed
+	 * @return the Archive position at or after the commit marker
+	 * @throws IllegalStateException if the publication is closed or cannot reach
+	 *         the Archive before the configured timeout
+	 */
 	public synchronized long publishTransaction(final byte[] dictionary, final java.nio.ByteBuffer[] data)
 	{
 		if (this.closed) throw new IllegalStateException("Aeron archive publisher is closed");
@@ -190,7 +303,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	{
 		final CountersReader counters = this.archive.context().aeron().countersReader();
 		final int counterId = this.recordingCounterId(counters);
-		return counterId < 0 ? Aeron.NULL_VALUE : RecordingPos.getRecordingId(counters, counterId);
+		return counterId >= 0 ? RecordingPos.getRecordingId(counters, counterId) :
+			this.recordingIdHint >= 0 ? this.recordingIdHint : Aeron.NULL_VALUE;
 	}
 
 	private int recordingCounterId(final CountersReader counters)
@@ -218,15 +332,29 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		final CountersReader counters = archive.context().aeron().countersReader();
 		final int counterId = RecordingPos.findCounterIdBySession(
 			counters, publication.sessionId(), archive.archiveId());
-		return counterId < 0 ? Aeron.NULL_VALUE : RecordingPos.getRecordingId(counters, counterId);
+		if (counterId >= 0) return RecordingPos.getRecordingId(counters, counterId);
+
+		final long[] recordingId = { Aeron.NULL_VALUE };
+		archive.listRecordings(0, Integer.MAX_VALUE, (controlSessionId, correlationId, id,
+			startTimestamp, stopTimestamp, startPosition, stopPosition, initialTermId,
+			segmentFileLength, termBufferLength, mtuLength, sessionId, streamId,
+			strippedChannel, originalChannel, sourceIdentity) ->
+		{
+			if (sessionId == publication.sessionId() && streamId == publication.streamId())
+			{
+				recordingId[0] = id;
+			}
+		});
+		return recordingId[0];
 	}
 
-	/** Returns the archive's recorded position, or {@link Aeron#NULL_VALUE} when unavailable. */
+	/** Returns the Archive position, or {@link Aeron#NULL_VALUE} when unknown. */
 	public long recordedPosition()
 	{
 		final CountersReader counters = this.archive.context().aeron().countersReader();
 		final int counterId = this.recordingCounterId(counters);
-		return counterId < 0 ? Aeron.NULL_VALUE : counters.getCounterValue(counterId);
+		if (counterId >= 0) return counters.getCounterValue(counterId);
+		return this.recordingIdHint >= 0 ? this.archive.getRecordingPosition(this.recordingIdHint) : Aeron.NULL_VALUE;
 	}
 
 	private static long awaitRecorded(
@@ -283,7 +411,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		}
 	}
 
-	private static void awaitRecordingStarted(
+	private static long awaitRecordingStarted(
 		final AeronArchive archive,
 		final ExclusivePublication publication,
 		final long recordingIdHint,
@@ -304,7 +432,12 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			if (counterId >= 0)
 			{
 				final long recordingId = RecordingPos.getRecordingId(counters, counterId);
-				if (RecordingPos.isActive(counters, counterId, recordingId)) return;
+				if (RecordingPos.isActive(counters, counterId, recordingId)) return recordingId;
+			}
+			else
+			{
+				final long discovered = recordingIdHint >= 0 ? recordingIdHint : findRecordingId(archive, publication);
+				if (discovered >= 0) return discovered;
 			}
 			if (System.nanoTime() >= deadline)
 			{
@@ -327,7 +460,13 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		return this.publication;
 	}
 
-	/** Creates the package-owned write coordinator for this recorded publisher. */
+	/**
+	 * Creates the coordinator that records restart state for this publisher.
+	 *
+	 * @param durabilityMode ordering between local acceptance and Archive
+	 * @param writer receiver for checkpoint transitions
+	 * @return a coordinator backed by this publisher
+	 */
 	public AeronReplicationWriteCoordinator newWriteCoordinator(
 		final ReplicationDurabilityMode durabilityMode,
 		final CheckpointWriter writer)
@@ -336,12 +475,17 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer::onState);
 	}
 
-	/** Aligns the publisher with a recovered DataGrid sequence before the next write. */
+	/**
+	 * Aligns the next transaction with a sequence recovered from the Store.
+	 *
+	 * @param nextSequence next sequence that may be published
+	 */
 	public void synchronizeNextSequence(final long nextSequence)
 	{
 		this.publisher.synchronizeNextSequence(nextSequence);
 	}
 
+	/** Stops the recording, aborts any pending transaction, and closes the publication. */
 	@Override
 	public void close()
 	{

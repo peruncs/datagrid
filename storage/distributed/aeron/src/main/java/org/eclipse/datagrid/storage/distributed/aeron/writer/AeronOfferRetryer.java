@@ -20,9 +20,10 @@ import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationCon
  */
 
 /**
- * Shared bounded Aeron offer/retry loop for data and control publications.
- * The owner serializes calls; this helper is intentionally thread-confined
- * because it reuses one buffer and one idle strategy.
+ * The bounded retry policy used by the writer's Aeron publications.
+ *
+ * <p>The helper reuses its buffer and idle strategy, so it belongs to one
+ * publisher and must be called by that publisher's serialized write path.</p>
  */
 final class AeronOfferRetryer
 {
@@ -42,9 +43,22 @@ final class AeronOfferRetryer
 		this.configuration = java.util.Objects.requireNonNull(configuration, "configuration");
 	}
 
-	/* The owning publisher serializes calls.  Keeping the retryer lock-free
-	 * avoids a second monitor on every publication attempt. */
-	/** Offers a caller-owned direct buffer without copying it to the heap. */
+	/**
+	 * Offers the first {@code length} bytes of a buffer until Aeron accepts them
+	 * or the configured deadline expires.
+	 *
+	 * <p>The buffer is read synchronously and is not retained after this method
+	 * returns. The caller must keep it valid and unchanged for the duration of
+	 * the call. No heap copy is made. The helper is not thread-safe.</p>
+	 *
+	 * @param source buffer containing the frame to offer
+	 * @param length number of bytes to offer, starting at offset zero
+	 * @return the Aeron publication position
+	 * @throws IllegalArgumentException if {@code source} is null or the length
+	 *         is outside the buffer capacity
+	 * @throws IllegalStateException if the publication closes, exceeds its
+	 *         maximum position, or does not accept the frame before timeout
+	 */
 	long offer(final DirectBuffer source, final int length)
 	{
 		if (source == null || length < 0 || length > source.capacity())

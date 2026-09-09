@@ -12,12 +12,14 @@
  * #L%
  */
 /**
- * Aeron implementation of the transport-neutral nodelibrary SPI.
+ * Aeron provider for the transport-neutral cluster API.
  *
- * <p>The provider owns Aeron media-driver and Archive lifecycle while the
- * neutral cluster package exposes only cursors, health, and lifecycle types.
- * Configure it with {@code ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron} and
- * the {@code ECLIPSE_DATAGRID_AERON_*} properties documented by the module
- * README. Provider instances are not shared between cluster nodes.</p>
+ * <p>The provider owns the Aeron driver, Archive, publications, and
+ * subscriptions created for one cluster node. The neutral cluster API owns
+ * the node lifecycle; this package supplies only the Aeron implementation.
+ * Select it with {@code ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron} and
+ * configure the {@code ECLIPSE_DATAGRID_AERON_*} settings in the deployment
+ * configuration. A provider instance belongs to one node and must not be
+ * shared between nodes.</p>
  */
 package org.eclipse.datagrid.cluster.nodelibrary.types;

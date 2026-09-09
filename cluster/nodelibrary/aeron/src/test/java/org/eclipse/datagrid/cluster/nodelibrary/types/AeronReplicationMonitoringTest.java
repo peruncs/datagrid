@@ -21,56 +21,64 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Verifies provider health reflects writer readiness and checkpoint state. */
 class AeronReplicationMonitoringTest
 {
+	/** Verifies writer provider exposes aeron and reports live without reader client. */
 	@Test
 	void writerProviderExposesAeronAndReportsLiveWithoutReaderClient()
 	{
-		final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
-			.create(properties("writer"));
-		final ClusterStorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
-		final ReplicationHealth health = transport.health(() -> true, client);
-		health.init();
-		assertEquals("aeron", transport.id());
-		assertTrue(health.isReady());
-		assertTrue(health.isHealthy());
-		assertEquals(ReplicationHealth.State.LIVE, health.state());
-		health.close();
-		transport.close();
+		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+			.create(properties("writer")))
+		{
+			final ClusterStorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
+			final ReplicationHealth health = transport.health(() -> true, client);
+			health.init();
+			assertEquals("aeron", transport.id());
+			assertTrue(health.isReady());
+			assertTrue(health.isHealthy());
+			assertEquals(ReplicationHealth.State.LIVE, health.state());
+			health.close();
+		}
 	}
 
+	/** Verifies position provider uses self describing recording position. */
 	@Test
 	void positionProviderUsesSelfDescribingRecordingPosition()
 	{
-		final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
-			.create(properties("writer"));
-		final ReplicationCursor cursor = transport.positionProvider("stream").latest();
-		assertEquals("aeron", cursor.transport());
-		assertEquals(Long.BYTES * 2, cursor.providerPosition().length);
-		transport.close();
+		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+			.create(properties("writer")))
+		{
+			final ReplicationCursor cursor = transport.positionProvider("stream").latest();
+			assertEquals("aeron", cursor.transport());
+			assertEquals(Long.BYTES * 2, cursor.providerPosition().length);
+		}
 	}
 
+	/** Verifies reader provider surfaces replay and failure states. */
 	@Test
 	void readerProviderSurfacesReplayAndFailureStates()
 	{
-		final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
-			.create(properties("reader"));
-		final TestClient replaying = new TestClient(true, false, null);
-		final ReplicationHealth health = transport.health(() -> true, replaying);
-		assertTrue(health.isReady());
-		assertTrue(health.isHealthy());
-		assertEquals(ReplicationHealth.State.REPLAYING, health.state());
+		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+			.create(properties("reader")))
+		{
+			final TestClient replaying = new TestClient(true, false, null);
+			final ReplicationHealth health = transport.health(() -> true, replaying);
+			assertTrue(health.isReady());
+			assertTrue(health.isHealthy());
+			assertEquals(ReplicationHealth.State.REPLAYING, health.state());
 
-		final TestClient failed = new TestClient(false, false, new IllegalStateException("archive unavailable"));
-		final ReplicationHealth failedHealth = transport.health(() -> true, failed);
-		assertFalse(failedHealth.isReady());
-		assertFalse(failedHealth.isHealthy());
-		assertEquals(ReplicationHealth.State.FAILED, failedHealth.state());
-		health.close();
-		failedHealth.close();
-		transport.close();
+			final TestClient failed = new TestClient(false, false, new IllegalStateException("archive unavailable"));
+			final ReplicationHealth failedHealth = transport.health(() -> true, failed);
+			assertFalse(failedHealth.isReady());
+			assertFalse(failedHealth.isHealthy());
+			assertEquals(ReplicationHealth.State.FAILED, failedHealth.state());
+			health.close();
+			failedHealth.close();
+		}
 	}
 
+	/** Verifies rejection of invalid aeron epoch and stream settings. */
 	@Test
 	void rejectsInvalidAeronEpochAndStreamSettings()
 	{
@@ -80,6 +88,7 @@ class AeronReplicationMonitoringTest
 			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_STREAM_ID", "-1")));
 	}
 
+	/** Verifies rejection of malformed numeric and production temporary directory settings. */
 	@Test
 	void rejectsMalformedNumericAndProductionTemporaryDirectorySettings()
 	{
@@ -123,26 +132,28 @@ class AeronReplicationMonitoringTest
 		};
 	}
 
-	private static final class TestClient implements ClusterStorageBinaryDataClient
-	{
-		private final boolean running;
-		private final boolean live;
-		private final RuntimeException failure;
+    private record TestClient(boolean isRunning, boolean isLive, RuntimeException failure) implements ClusterStorageBinaryDataClient {
 
-		private TestClient(final boolean running, final boolean live, final RuntimeException failure)
-		{
-			this.running = running;
-			this.live = live;
-			this.failure = failure;
-		}
+        @Override
+        public void start() {
+        }
 
-		@Override public void start() { }
-		@Override public void stopAtLatestMessage() { }
-		@Override public MessageInfo messageInfo() { return MessageInfo.New(-1, "aeron", null, new byte[0]); }
-		@Override public boolean isRunning() { return this.running; }
-		@Override public boolean isLive() { return this.live; }
-		@Override public RuntimeException failure() { return this.failure; }
-		@Override public void resume() throws NodelibraryException { }
-		@Override public void dispose() { }
-	}
+        @Override
+        public void stopAtLatestMessage() {
+        }
+
+        @Override
+        public MessageInfo messageInfo() {
+            return MessageInfo.New(-1, "aeron", null, new byte[0]);
+        }
+
+
+        @Override
+        public void resume() throws NodelibraryException {
+        }
+
+        @Override
+        public void dispose() {
+        }
+    }
 }
