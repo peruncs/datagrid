@@ -15,13 +15,13 @@ package org.eclipse.datagrid.storage.distributed.kafka.types;
  */
 
 
+import org.apache.kafka.common.header.Headers;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
+
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
-import org.apache.kafka.common.header.Headers;
-
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
-
+/** Kafka header codec for the transport-neutral storage distributor. */
 public final class StorageBinaryDistributedKafka
 {
 	public static String keyMessageType()

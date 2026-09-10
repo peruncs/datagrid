@@ -101,7 +101,7 @@ public final class ReaderCrashChildMain
 			final long recordingId = Long.parseLong(required("dg.reader.recordingId"));
 			final Cursor cursor = readCursor(base.resolve("reader.cursor"));
 			final AtomicReference<StorageBinaryDataClientAeronArchive> readerRef = new AtomicReference<>();
-			final ReaderFixture fixture = new ReaderFixture(base, point);
+			final ReaderFixture fixture = new ReaderFixture(base, point, new AtomicReference<>());
 			final StorageBinaryDataClientAeronArchive reader = StorageBinaryDataClientAeronArchive.New(
 					aeron, archiveContext, recordingId, cursor == null
 						? io.aeron.archive.client.PersistentSubscription.FROM_START : cursor.position,
@@ -150,6 +150,7 @@ public final class ReaderCrashChildMain
 		public void beforeStoreImport(final long sequence, final long position, final int dataLength,
 			final int dataChunkCount, final int crc32c)
 		{
+			this.fixture.importBoundary().set(new ImportBoundary(sequence, position));
 			try
 			{
 				AeronReplicationCheckpointStore.write(this.uncertainty, new AeronReplicationCheckpoint(
@@ -180,7 +181,8 @@ public final class ReaderCrashChildMain
 		}
 	}
 
-	private record ReaderFixture(Path base, String point) implements StorageBinaryDataReceiver
+	private record ReaderFixture(Path base, String point, AtomicReference<ImportBoundary> importBoundary)
+		implements StorageBinaryDataReceiver
 	{
 		@Override
 		public void receiveData(final Binary value)
@@ -204,7 +206,10 @@ public final class ReaderCrashChildMain
 			append(this.base.resolve("reader.store"), bytes);
 			if ("AFTER_STORE_IMPORT_BEFORE_CURSOR_WRITE".equals(this.point))
 			{
-				ReaderCrashChildMain.barrier(this.base.resolve("control"), this.point, 0L, 0L);
+				final ImportBoundary boundary = this.importBoundary.get();
+				if (boundary == null) throw new IllegalStateException("missing import boundary metadata");
+				ReaderCrashChildMain.barrier(this.base.resolve("control"), this.point,
+					boundary.sequence(), boundary.position());
 			}
 		}
 
@@ -216,6 +221,8 @@ public final class ReaderCrashChildMain
 			ReaderCrashChildMain.barrier(this.base.resolve("control"), point, sequence, position);
 		}
 	}
+
+	private record ImportBoundary(long sequence, long position) { }
 
 	private record Cursor(long sequence, long position) { }
 

@@ -31,6 +31,7 @@ public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 
 	boolean isRunning();
 
+	/** Returns a terminal reader failure, or {@code null} while the client is healthy. */
 	default RuntimeException failure()
 	{
 		return null;

@@ -100,4 +100,22 @@ class AeronReaderLifecycleTest
 		assertFalse(active.get());
 		assertTrue(timedOut.get());
 	}
+
+	/** Verifies a timeout callback failure still publishes the stopped state. */
+	@Test
+	void pollingLoopClearsActiveWhenTimeoutCallbackFails()
+	{
+		final AtomicBoolean active = new AtomicBoolean(true);
+		final IllegalStateException expected = new IllegalStateException("timeout callback failed");
+
+		final IllegalStateException actual = assertThrows(
+			IllegalStateException.class,
+			() -> AeronReaderLifecycle.runPollingLoop(
+				active, () -> false, () -> 0, () -> false, () -> true, () -> { throw expected; }
+			)
+		);
+
+		assertSame(expected, actual);
+		assertFalse(active.get());
+	}
 }

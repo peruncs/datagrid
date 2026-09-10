@@ -747,7 +747,7 @@ Hook sites (class -> method -> point):
 | `AeronReplicationWriteCoordinator` | `markCommittingUncertain` | `DURING_COMMITTING_UNCERTAIN_WRITE` |
 | `AeronStorageBinaryTargetDistributing` | `write` | `AFTER_PREPARE_BEFORE_LOCAL_WRITE`, `AFTER_LOCAL_WRITE_BEFORE_COMMIT`, `AFTER_ENQUEUE_BEFORE_PREPARE` |
 | `AeronReplicationCheckpointStore` / `ReplicationCursorStore` | `write` | `CHECKPOINT`/`CURSOR` phase names passed to `AtomicFileStore.write`; generates `BEFORE_CHECKPOINT_TEMP_WRITE`, `DURING_CHECKPOINT_FILE_WRITE`, etc. and `BEFORE_CURSOR_TEMP_WRITE`, `DURING_CURSOR_FILE_WRITE`, etc. The provider child ignores `.inflight` paths for terminal-checkpoint cells. |
-| `TransactionAssembler` | `Delivery.run` | `REPLAY_BEFORE_FIRST_IMPORT`, `DURING_STORE_IMPORT`, `AFTER_STORE_IMPORT_BEFORE_CURSOR_WRITE` (via `ReaderDeliveryListener`) |
+| `TransactionAssembler` | `Delivery.run` | `REPLAY_BEFORE_FIRST_IMPORT`, `DURING_STORE_IMPORT`, `DURING_STORE_IMPORT_FAILURE`, `AFTER_STORE_IMPORT_BEFORE_CURSOR_WRITE` (via `ReaderDeliveryListener`) |
 | provider (nodelibrary) | `ensureRuntime` | `BEFORE_PUBLICATION_CONNECTED` (before driver launch), `AFTER_RECOVERY_CHECKPOINT_READ` |
 
 Notes:
@@ -765,6 +765,10 @@ Notes:
   synthetic partial-write tests. The temp file must never replace the previous
   valid file. Rename-before-directory-sync is retained as a power-loss tier,
   because a SIGKILL process test cannot reliably stop between those syscalls.
+  The reader matrix also arms all three cursor-phase barriers around its
+  CRC-protected fixture cursor. Those process cells prove the uncertainty
+  marker survives each cursor window; they do not replace a future cell that
+  routes the provider's production cursor through the same boundary.
 - The archive reader shares the same assembler as the live reader; hooking the
   assembler covers both.
 

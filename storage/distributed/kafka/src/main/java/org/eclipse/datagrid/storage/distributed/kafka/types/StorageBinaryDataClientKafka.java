@@ -40,12 +40,15 @@ import static org.eclipse.serializer.util.X.notNull;
 
 public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 {
+	/** Returns the terminal consumer failure, or {@code null} while healthy. */
+	RuntimeException failure();
+
 	static StorageBinaryDataClientKafka New(
-            final Properties kafkaProperties,
-            final String topicName,
-            final String clientId,
-            final StorageBinaryDataReceiver receiver
-    )
+		final Properties kafkaProperties,
+		final String topicName,
+		final String clientId,
+		final StorageBinaryDataReceiver receiver
+	)
 	{
 		return New(
 			kafkaProperties,
@@ -56,11 +59,11 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 	}
 
 	static StorageBinaryDataClientKafka New(
-            final Properties kafkaProperties,
-            final String topicName,
-            final String clientId,
-            final StorageBinaryDataPacketAcceptor packetAcceptor
-    )
+		final Properties kafkaProperties,
+		final String topicName,
+		final String clientId,
+		final StorageBinaryDataPacketAcceptor packetAcceptor
+	)
 	{
 		return new StorageBinaryDataClientKafka.Default(
 			notNull(kafkaProperties),
@@ -78,7 +81,9 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		private final StorageBinaryDataPacketAcceptor packetAcceptor;
 		private final AtomicBoolean active = new AtomicBoolean();
 		private volatile Thread thread;
+		private volatile KafkaConsumer<String, byte[]> consumer;
 		private volatile boolean disposed;
+		private volatile RuntimeException failure;
 
 		Default(
 			final Properties kafkaProperties,
@@ -98,6 +103,7 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		public synchronized void start()
 		{
 			if (this.disposed) throw new IllegalStateException("Kafka client is disposed");
+			if (this.failure != null) throw new IllegalStateException("Kafka client has failed", this.failure);
 			if (this.active.getAndSet(true)) return;
 
 			this.thread = new Thread(this::run, "datagrid-kafka-reader");
@@ -113,10 +119,16 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 			properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 			properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
 			properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-			//		properties.putIfAbsent(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, Duration.ofSeconds(3).toMillis());
-
 			try (final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(properties))
 			{
+				this.consumer = consumer;
+				final int partitionCount = consumer.partitionsFor(this.topicName).size();
+				if (partitionCount != 1)
+				{
+					throw new IllegalStateException(
+						"Kafka replication topic must have exactly one partition; found " + partitionCount
+					);
+				}
 				consumer.subscribe(Collections.singletonList(this.topicName));
 				while (this.active.get())
 				{
@@ -124,14 +136,26 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 					consumer.commitSync();
 				}
 			}
-			catch (final RuntimeException failure)
+			catch (final Throwable failure)
 			{
-				if (this.active.get()) throw failure;
+				if (this.active.get())
+				{
+					this.failure = failure instanceof RuntimeException runtime
+						? runtime
+						: new IllegalStateException("Kafka client stopped unexpectedly", failure);
+				}
 			}
 			finally
 			{
+				this.consumer = null;
 				this.active.set(false);
 			}
+		}
+
+		@Override
+		public RuntimeException failure()
+		{
+			return this.failure;
 		}
 
 		private void consume(final ConsumerRecords<String, byte[]> records)
@@ -159,6 +183,10 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 			);
 		}
 
+		/**
+		 * Wakes the Kafka poll before joining the reader. A timeout leaves the
+		 * packet acceptor open so the caller can retry disposal safely.
+		 */
 		@Override
 		public synchronized void dispose()
 		{
@@ -166,9 +194,13 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 			this.disposed = true;
 			this.active.set(false);
 			final Thread current = this.thread;
-			this.thread = null;
 			if (current != null && current != Thread.currentThread())
 			{
+				final KafkaConsumer<String, byte[]> consumer = this.consumer;
+				if (consumer != null)
+				{
+					consumer.wakeup();
+				}
 				current.interrupt();
 				try
 				{
@@ -178,7 +210,15 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 				{
 					Thread.currentThread().interrupt();
 				}
+				if (current.isAlive())
+				{
+					this.disposed = false;
+					throw new IllegalStateException("Kafka client reader did not stop before disposal timeout");
+				}
 			}
+			/* Keep the thread reference until the join succeeds. A timed-out disposal
+			 * is retryable and must still be able to join the same reader. */
+			this.thread = null;
 		}
 
 	}

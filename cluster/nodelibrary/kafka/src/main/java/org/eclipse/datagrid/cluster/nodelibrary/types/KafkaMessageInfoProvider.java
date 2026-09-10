@@ -108,6 +108,12 @@ public class KafkaMessageInfoProvider implements AutoCloseable
 				}
 				this.kafka.poll(POLL_TIMEOUT);
 			}
+			if (this.kafka.assignment().size() != 1)
+			{
+				throw new IllegalStateException(
+					"Kafka replication topic must have exactly one partition; found " + this.kafka.assignment().size()
+				);
+			}
 		}
 		catch (final RuntimeException failure)
 		{

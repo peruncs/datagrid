@@ -69,6 +69,32 @@ class AeronReplicationPublisherTest
 		}
 	}
 
+	/** Verifies timeout diagnostics identify the Aeron status and connectivity. */
+	@Test
+	void timeoutDiagnosticsIdentifyNotConnectedPublication()
+	{
+		final AeronReplicationConfiguration configuration = configuration(1_000_000L);
+		final AeronOfferRetryer.Offerer offerer = new AeronOfferRetryer.Offerer()
+		{
+			@Override
+			public long offer(final org.agrona.DirectBuffer buffer, final int offset, final int length)
+			{
+				return Publication.NOT_CONNECTED;
+			}
+
+			@Override
+			public boolean isConnected()
+			{
+				return false;
+			}
+		};
+		final IllegalStateException failure = assertThrows(IllegalStateException.class,
+			() -> new AeronOfferRetryer(offerer, configuration).offer(
+				new org.agrona.concurrent.UnsafeBuffer(new byte[] { 1 }), 1));
+		assertTrue(failure.getMessage().contains("NOT_CONNECTED"));
+		assertTrue(failure.getMessage().contains("connected=false"));
+	}
+
 	/** Verifies closed and max position statuses are fatal. */
 	@Test
 	void closedAndMaxPositionStatusesAreFatal()
@@ -206,17 +232,52 @@ class AeronReplicationPublisherTest
 	void publisherShutdownInvokesPendingAbortCallback()
 	{
 		final AtomicInteger abortCallbacks = new AtomicInteger();
+		final java.util.concurrent.atomic.AtomicLong abortPosition = new java.util.concurrent.atomic.AtomicLong(-1);
 		final AeronReplicationConfiguration configuration = configuration(50_000_000L);
 		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
 			(buffer, offset, length) -> length,
 			configuration.maxMessageLength(), configuration, CLUSTER, 1, 0);
 		final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
 			null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {6})});
-		prepared.onAbort(abortCallbacks::incrementAndGet);
+		prepared.onAbort(position -> { abortPosition.set(position); abortCallbacks.incrementAndGet(); });
 
 		publisher.close();
 
 		assertEquals(1, abortCallbacks.get());
+		assertTrue(abortPosition.get() >= 0);
+	}
+
+	/** Verifies a crash after token creation cannot publish a duplicate abort on shutdown. */
+	@Test
+	void prepareCrashDoesNotPublishDuplicateAbortOnShutdown()
+	{
+		final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
+		final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) ->
+			{
+				kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
+				return length;
+			}, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0);
+		try
+		{
+			AeronReplicationPublisher.setCrashHook((name, ignored) ->
+			{
+				if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
+			});
+			assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
+				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})}));
+			publisher.close();
+			assertEquals(List.of(
+				AeronReplicationEnvelope.Kind.STORE_BINARY,
+				AeronReplicationEnvelope.Kind.ABORT
+			), kinds);
+		}
+		finally
+		{
+			AeronReplicationPublisher.clearCrashHook();
+			publisher.close();
+		}
 	}
 
 	/** Verifies publishes an explicit empty store chunk. */
@@ -352,7 +413,7 @@ class AeronReplicationPublisherTest
 			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
 			CLUSTER, 1, Long.MAX_VALUE - 1))
 		{
-			assertEquals(Long.MAX_VALUE - 1, publisher.publishTransaction(
+			assertDoesNotThrow(() -> publisher.publishTransaction(
 				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})}));
 			assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
 				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {2})}));

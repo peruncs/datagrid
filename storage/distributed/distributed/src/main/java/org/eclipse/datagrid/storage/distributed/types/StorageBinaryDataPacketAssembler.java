@@ -60,7 +60,7 @@ public final class StorageBinaryDataPacketAssembler
 				{
 					current.addPacket(packet);
 				}
-				if (current != null && current.isComplete())
+				if (current.isComplete())
 				{
 					completed.add(current);
 					current = null;

@@ -195,6 +195,36 @@ class AeronReplicationWriteCoordinatorTest
 		coordinator.dispose();
 	}
 
+	/** Verifies a failed fence cleanup still releases its reserved sequence. */
+	@Test
+	void enqueueFenceCleanupReleasesSequenceWhenCheckpointCleanupFails()
+	{
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
+			.durabilityMode(org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
+			.build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final IllegalStateException cleanupFailure = new IllegalStateException("checkpoint cleanup failed");
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) ->
+			{
+				if (state == AeronReplicationCheckpoint.State.REJECTED) throw cleanupFailure;
+			});
+		try
+		{
+			final Binary data = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }));
+			coordinator.markLocalEnqueue(data);
+			assertThrows(IllegalStateException.class, coordinator::clearLocalEnqueue);
+			assertEquals(0L, coordinator.nextSequence());
+		}
+		finally
+		{
+			coordinator.dispose();
+		}
+	}
+
 	/** Verifies commit failure is marked uncertain and coordinator cannot pretend success. */
 	@Test
 	void commitFailureIsMarkedUncertainAndCoordinatorCannotPretendSuccess()

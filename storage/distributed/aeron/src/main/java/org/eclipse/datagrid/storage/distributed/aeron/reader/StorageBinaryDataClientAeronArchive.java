@@ -324,6 +324,15 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		return this.assembler.lastResolvedPosition();
 	}
 
+	/** Returns an atomic sequence/position snapshot for cursor persistence. */
+	public CursorSnapshot cursorSnapshot()
+	{
+		final TransactionAssembler.CursorSnapshot snapshot = this.assembler.cursorSnapshot();
+		return new CursorSnapshot(snapshot.sequence(), snapshot.position());
+	}
+
+	public record CursorSnapshot(long sequence, long position) {}
+
 	/** Builds a cursor that can resume this reader from the same recording. */
 	public AeronReplicationCursor cursor(
 		final UUID nodeId,
@@ -350,14 +359,23 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		return this.assembler.failure();
 	}
 
-	/** Stops polling and releases this reader's subscriptions. */
+	/**
+	 * Stops polling and releases this reader's subscriptions.
+	 *
+	 * <p>If the polling thread does not terminate within the bounded shutdown
+	 * window this method throws and leaves the subscription and assembler-owned
+	 * buffers intact. A later call must retry after the thread has exited; this
+	 * preserves native-buffer ownership and avoids closing a subscription under
+	 * the polling thread.</p>
+	 */
 	@Override
 	public synchronized void dispose()
 	{
 		if (this.disposed) return;
-		this.disposed = true;
 		final Thread pollingThread = this.thread;
-		this.thread = null;
 		AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close);
+		this.assembler.dispose();
+		this.thread = null;
+		this.disposed = true;
 	}
 }

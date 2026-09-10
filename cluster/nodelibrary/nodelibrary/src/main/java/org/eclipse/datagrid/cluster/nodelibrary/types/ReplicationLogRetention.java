@@ -16,9 +16,19 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 
-/** Provider-specific retention hook; a no-op is valid for transports without log deletion. */
+/** Provider-specific retention hook; unsupported providers retain history and report it explicitly. */
 public interface ReplicationLogRetention extends AutoCloseable
 {
+	/**
+	 * Returns whether this transport can safely delete replicated history. A
+	 * provider that cannot establish authenticated reader watermarks must return
+	 * {@code false}; lifecycle code will retain history and continue backups.
+	 */
+	default boolean isSupported()
+	{
+		return true;
+	}
+
 	/** Deletes only history proven safe by the provider's cursor/watermark rules. */
 	void deleteThrough(ReplicationCursor cursor) throws NodelibraryException;
 

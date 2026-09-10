@@ -39,7 +39,11 @@ public interface NodelibraryPropertiesProvider
 		return "none";
 	}
 
-	/** Optional provider-specific setting, allowing embedded applications to avoid environment variables. */
+	/**
+	 * Optional provider-specific setting, allowing embedded applications to avoid
+	 * environment variables. {@code ECLIPSE_DATAGRID_STORAGE_PATH} overrides the
+	 * default {@code /storage} root used for the Store and durable offset file.
+	 */
 	default String replicationProperty(final String name)
 	{
 		return null;
@@ -91,6 +95,7 @@ public interface NodelibraryPropertiesProvider
 			public static final String KAFKA_TOPIC_NAME = "MSCNL_KAFKA_TOPIC_NAME";
 			public static final String REPLICATION_STREAM_NAME = "ECLIPSE_DATAGRID_REPLICATION_STREAM";
 			public static final String REPLICATION_TRANSPORT = "ECLIPSE_DATAGRID_REPLICATION_TRANSPORT";
+			public static final String STORAGE_PATH = "ECLIPSE_DATAGRID_STORAGE_PATH";
 			public static final String IS_BACKUP_NODE = "IS_BACKUP_NODE";
 			public static final String BACKUP_TARGET = "BACKUP_TARGET";
 			public static final String KEPT_BACKUPS_COUNT = "KEPT_BACKUPS_COUNT";

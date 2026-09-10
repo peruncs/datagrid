@@ -51,9 +51,14 @@ final class TransactionAssembler
 	private long nextExpectedSequence;
 	private volatile long lastResolvedPosition = -1;
 	/* The commit/abort witness for the last resolved sequence. A resumed
-	 * assembler has no witness until it resolves one message locally. */
+	 * assembler has no witness until it resolves one message locally. These
+	 * fields are accessed only on the subscription owner thread; cursorSnapshot()
+	 * is the synchronized cross-thread boundary. */
 	private int lastResolutionCrc32c;
 	private boolean hasLastResolutionCrc;
+	private AeronReplicationEnvelope.Kind lastResolutionKind;
+	private int lastResolutionDataLength;
+	private int lastResolutionDataChunkCount;
 	private Transaction transaction;
 	private volatile RuntimeException failure;
 	private final AeronReplicationEnvelope.EnvelopeView envelopeView =
@@ -168,6 +173,17 @@ final class TransactionAssembler
 				throw new IllegalStateException("replayed data for an already resolved sequence " +
 					this.lastResolvedSequence);
 			}
+			if (this.lastResolutionKind != null && envelope.kind() != this.lastResolutionKind)
+			{
+				throw new IllegalStateException("duplicate terminal has a different kind: expected " +
+					this.lastResolutionKind + ", received " + envelope.kind());
+			}
+			if (this.lastResolutionKind != null &&
+				(envelope.payloadLength() != this.lastResolutionDataLength ||
+					envelope.chunkCount() != this.lastResolutionDataChunkCount))
+			{
+				throw new IllegalStateException("duplicate terminal has different transaction metadata");
+			}
 			if (envelope.kind() == AeronReplicationEnvelope.Kind.COMMIT &&
 				this.hasLastResolutionCrc && envelope.commitCrc32c() != this.lastResolutionCrc32c)
 			{
@@ -194,7 +210,8 @@ final class TransactionAssembler
 				this.transaction = null;
 			}
 			this.nextExpectedSequence = envelope.sequence() + 1;
-			this.delivery.prepare(null, null, null, envelope.sequence(), position, 0);
+			this.delivery.prepare(null, null, null, envelope.sequence(), position, envelope.payloadLength(),
+				envelope.chunkCount(), 0, AeronReplicationEnvelope.Kind.ABORT);
 			return true;
 		}
 		if (envelope.kind() != AeronReplicationEnvelope.Kind.TYPE_DICTIONARY &&
@@ -223,7 +240,8 @@ final class TransactionAssembler
 				throw new IllegalStateException("commit without data chunks");
 			}
 			this.nextExpectedSequence = envelope.sequence() + 1;
-			this.delivery.prepare(null, null, null, envelope.sequence(), position, envelope.commitCrc32c());
+				this.delivery.prepare(null, null, null, envelope.sequence(), position, envelope.payloadLength(),
+					envelope.chunkCount(), envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
 			return;
 		}
 		if (this.transaction.dataLength != envelope.payloadLength() ||
@@ -270,8 +288,8 @@ final class TransactionAssembler
 		}
 		this.transaction = null;
 		this.nextExpectedSequence = envelope.sequence() + 1;
-		this.delivery.prepare(dictionary, direct, completed, envelope.sequence(), position,
-			envelope.commitCrc32c());
+		this.delivery.prepare(dictionary, direct, completed, envelope.sequence(), position, envelope.payloadLength(),
+			envelope.chunkCount(), envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
 	}
 
 	private final class Delivery
@@ -281,17 +299,25 @@ final class TransactionAssembler
 		private Transaction completed;
 		private long sequence;
 		private long position;
+		private int resolutionDataLength;
+		private int resolutionDataChunkCount;
 		private int resolutionCrc32c;
+		private AeronReplicationEnvelope.Kind resolutionKind;
 
 		void prepare(final String dictionary, final ByteBuffer data, final Transaction completed,
-			final long sequence, final long position, final int resolutionCrc32c)
+			final long sequence, final long position, final int resolutionDataLength,
+			final int resolutionDataChunkCount, final int resolutionCrc32c,
+			final AeronReplicationEnvelope.Kind resolutionKind)
 		{
 			this.dictionary = dictionary;
 			this.data = data;
 			this.completed = completed;
 			this.sequence = sequence;
 			this.position = position;
+			this.resolutionDataLength = resolutionDataLength;
+			this.resolutionDataChunkCount = resolutionDataChunkCount;
 			this.resolutionCrc32c = resolutionCrc32c;
+			this.resolutionKind = resolutionKind;
 		}
 
 		void run()
@@ -316,6 +342,9 @@ final class TransactionAssembler
 					lastResolvedPosition = this.position;
 					lastResolutionCrc32c = this.resolutionCrc32c;
 					hasLastResolutionCrc = true;
+					lastResolutionKind = this.resolutionKind;
+					lastResolutionDataLength = this.resolutionDataLength;
+					lastResolutionDataChunkCount = this.resolutionDataChunkCount;
 				}
 				transactionResolved.run();
 				if (this.data != null && deliveryListener != null)
@@ -329,6 +358,7 @@ final class TransactionAssembler
 				this.dictionary = null;
 				this.data = null;
 				this.completed = null;
+				this.resolutionKind = null;
 			}
 		}
 	}
@@ -357,6 +387,16 @@ final class TransactionAssembler
 				this.transaction.dispose();
 				this.transaction = null;
 			}
+		}
+	}
+
+	/** Releases native buffers retained by an incomplete transaction. */
+	synchronized void dispose()
+	{
+		if (this.transaction != null)
+		{
+			this.transaction.dispose();
+			this.transaction = null;
 		}
 	}
 

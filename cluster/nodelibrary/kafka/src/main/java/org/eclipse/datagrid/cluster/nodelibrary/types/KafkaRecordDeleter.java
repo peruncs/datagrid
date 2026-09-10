@@ -27,13 +27,20 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static org.eclipse.serializer.chars.XChars.notEmpty;
 import static org.eclipse.serializer.util.X.notNull;
 
+/** Deletes Kafka history only after the provider has validated its cursor boundary. */
 public interface KafkaRecordDeleter extends ReplicationLogRetention
 {
     static KafkaRecordDeleter New(final AdminClient kafkaAdminClient)
     {
-        return new Default(notNull(kafkaAdminClient));
+        return new Default(notNull(kafkaAdminClient), null);
+    }
+
+    static KafkaRecordDeleter New(final AdminClient kafkaAdminClient, final String topicName)
+    {
+        return new Default(notNull(kafkaAdminClient), notEmpty(topicName));
     }
 
     void deleteUntilOffsets(XImmutableMap<TopicPartition, Long> partitionOffsets) throws NodelibraryException;
@@ -56,10 +63,20 @@ public interface KafkaRecordDeleter extends ReplicationLogRetention
         private static final Logger LOG = LoggerFactory.getLogger(KafkaRecordDeleter.class);
 
         private final AdminClient kafkaAdminClient;
+        private final String topicName;
 
-        private Default(final AdminClient kafkaAdminClient)
+        private Default(final AdminClient kafkaAdminClient, final String topicName)
         {
             this.kafkaAdminClient = kafkaAdminClient;
+            this.topicName = topicName;
+        }
+
+        @Override
+        public void deleteThrough(final ReplicationCursor cursor) throws NodelibraryException
+        {
+            final MessageInfo info = MessageInfo.New(
+                cursor.logicalSequence(), cursor.transport(), cursor.storeGeneration(), cursor.providerPosition());
+            this.deleteUntilOffsets(KafkaCursorCodec.decode(info, this.topicName));
         }
 
         @Override
@@ -67,6 +84,25 @@ public interface KafkaRecordDeleter extends ReplicationLogRetention
             throws NodelibraryException
         {
             LOG.trace("Deleting old unused Kafka records.");
+
+            if (partitionOffsets.size() != 1)
+            {
+                throw new NodelibraryException(
+                    "Kafka replication retention requires exactly one partition; found " + partitionOffsets.size()
+                );
+            }
+            if (this.topicName != null)
+            {
+                final TopicPartition[] partitionHolder = new TopicPartition[1];
+                partitionOffsets.forEach(entry -> partitionHolder[0] = entry.key());
+                final TopicPartition partition = partitionHolder[0];
+                if (!this.topicName.equals(partition.topic()) || partition.partition() != 0)
+                {
+                    throw new NodelibraryException(
+                        "Kafka replication retention cursor must target " + this.topicName + " partition 0"
+                    );
+                }
+            }
 
             final var partitionRecordsToDelete = new HashMap<TopicPartition, RecordsToDelete>();
             partitionOffsets.forEach(entry ->
@@ -89,12 +125,12 @@ public interface KafkaRecordDeleter extends ReplicationLogRetention
 			catch (final ExecutionException e)
 			{
 				throw new NodelibraryException(e);
-            }
-            catch (final TimeoutException e)
-            {
-                LOG.warn("Timed out waiting for old records to be deleted.", e);
-                throw new RuntimeException(e);
-            }
+			}
+			catch (final TimeoutException e)
+			{
+				LOG.warn("Timed out waiting for old records to be deleted.", e);
+				throw new NodelibraryException(e);
+			}
         }
 
         @Override

@@ -31,6 +31,15 @@ final class AeronOfferRetryer
 	interface Offerer
 	{
 		long offer(DirectBuffer buffer, int offset, int length);
+
+		/**
+		 * Returns the publication connectivity observed by the offerer. Test
+		 * offerers may keep the default because they do not model a subscription.
+		 */
+		default boolean isConnected()
+		{
+			return true;
+		}
 	}
 
 	private final Offerer offerer;
@@ -72,6 +81,9 @@ final class AeronOfferRetryer
 	{
 		this.idle.reset();
 		final long started = System.nanoTime();
+		long backPressured = 0;
+		long notConnected = 0;
+		long adminActions = 0;
 		while (true)
 		{
 			final long position = this.offerer.offer(source, 0, length);
@@ -80,9 +92,30 @@ final class AeronOfferRetryer
 			{
 				throw new IllegalStateException("Aeron publication failed: " + position);
 			}
+			if (position == Publication.BACK_PRESSURED) backPressured++;
+			else if (position == Publication.NOT_CONNECTED) notConnected++;
+			else if (position == Publication.ADMIN_ACTION) adminActions++;
 			if (System.nanoTime() - started >= this.configuration.offerTimeoutNanos())
 			{
-				throw new IllegalStateException("Aeron offer timed out: " + position);
+				final String reason;
+				if (position == Publication.BACK_PRESSURED)
+				{
+					reason = "BACK_PRESSURED retries=" + backPressured;
+				}
+				else if (position == Publication.NOT_CONNECTED)
+				{
+					reason = "NOT_CONNECTED retries=" + notConnected;
+				}
+				else if (position == Publication.ADMIN_ACTION)
+				{
+					reason = "ADMIN_ACTION retries=" + adminActions;
+				}
+				else
+				{
+					reason = "status=" + position;
+				}
+				throw new IllegalStateException("Aeron offer timed out: " + reason +
+					", connected=" + this.offerer.isConnected());
 			}
 			this.idle.idle();
 		}

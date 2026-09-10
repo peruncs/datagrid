@@ -34,10 +34,14 @@ import java.util.UUID;
  * @param recordingId Aeron Archive recording identity
  * @param writerEpoch writer fencing epoch
  * @param transactionSequence last transaction sequence represented
- * @param recordingPosition Aeron position at the transition
+ * @param recordingPosition recorded Archive position at the transition. It is
+ *        always the position returned after the configured recording wait;
+ *        writer terminal checkpoints never store an offer-only position.
  * @param dataLength Store binary length represented by the transition
  * @param dataChunkCount Store binary chunk count represented by the transition
-	 * @param resolutionCrc32c checksum carried by the terminal marker
+ * @param resolutionCrc32c checksum of the represented Store binary; an abort
+ *        keeps that source metadata even though its terminal marker has no
+ *        payload CRC
  */
 public record AeronReplicationCheckpoint(
 	RecordType recordType,

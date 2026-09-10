@@ -194,12 +194,12 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 			if (archiveFirst) this.publisher.failClosed();
 			throw failure;
 		}
-		prepared.onAbort(() ->
+		prepared.onAbort(abortPosition ->
 		{
 			try
 			{
 				this.listener.onState(AeronReplicationCheckpoint.State.REJECTED, prepared.sequence(),
-					prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), -1);
+					prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), abortPosition);
 			}
 			catch (final RuntimeException | Error failure)
 			{
@@ -232,6 +232,13 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		{
 			// ENQUEUE_THEN_ARCHIVE fenced the local write before preparation; do
 			// not emit a second identical state transition after publication.
+			return;
+		}
+		if (this.durabilityMode == ReplicationDurabilityMode.ARCHIVE_FIRST)
+		{
+			/* PREPARING is already a durable refusal fence for this mode.  Replacing
+			 * it with ENQUEUED adds another forced file+directory sync without adding
+			 * recovery information; COMMITTED/REJECTED is the next meaningful state. */
 			return;
 		}
 		try
@@ -280,7 +287,31 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 			this.listener.onState(AeronReplicationCheckpoint.State.REJECTED, -1,
 				local.metadata().dataLength(), local.metadata().dataChunkCount(),
 				local.metadata().crc32c(), -1);
+		}
+		catch (final RuntimeException | Error failure)
+		{
+			this.publisher.failClosed();
+			try
+			{
+				this.publisher.releaseReservedSequence(local.sequence());
+			}
+			catch (final RuntimeException | Error releaseFailure)
+			{
+				failure.addSuppressed(releaseFailure);
+			}
+			this.localAcceptanceFence = null;
+			throw failure;
+		}
+		try
+		{
 			this.publisher.releaseReservedSequence(local.sequence());
+		}
+		catch (final RuntimeException | Error failure)
+		{
+			/* A reservation that cannot be released must never be reused by a later
+			 * write. Fail closed before propagating the cleanup error. */
+			this.publisher.failClosed();
+			throw failure;
 		}
 		finally
 		{
@@ -322,7 +353,7 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		this.localAcceptanceFence = null;
 	}
 
-	synchronized long commit(final AeronReplicationPublisher.PreparedTransaction prepared)
+	synchronized void commit(final AeronReplicationPublisher.PreparedTransaction prepared)
 	{
 		final long position = this.publisher.commit(prepared);
 		this.pendingDictionary = null;
@@ -337,10 +368,9 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 			throw failure;
 		}
 		this.localAcceptanceFence = null;
-		return position;
 	}
 
-	synchronized long abort(final AeronReplicationPublisher.PreparedTransaction prepared)
+	synchronized void abort(final AeronReplicationPublisher.PreparedTransaction prepared)
 	{
 		try
 		{
@@ -356,7 +386,6 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 				throw failure;
 			}
 			this.localAcceptanceFence = null;
-			return position;
 		}
 		catch (final RuntimeException failure)
 		{

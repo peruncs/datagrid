@@ -107,7 +107,9 @@ class StorageBinaryDataClientAeronTest
 	void rejectsSequenceRegressionInsteadOfSilentlySkippingData()
 	{
 		final RecordingReceiver receiver = new RecordingReceiver();
-		final TransactionAssembler assembler = assembler(receiver, 1024, 5);
+		final TransactionAssembler assembler = new TransactionAssembler(
+			AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
+				.maxTransactionBytes(1024).build(), CLUSTER, EPOCH, 5, receiver, () -> { });
 		final byte[] data = { 1 };
 		assertThrows(IllegalStateException.class, () -> accept(assembler,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 4, 0, 1, 0, data, 1, 0)));
@@ -278,6 +280,45 @@ class StorageBinaryDataClientAeronTest
 		assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
 			AeronReplicationEnvelope.crc32c(new byte[] { 1, 2, 3 }), new byte[0])));
+	}
+
+	/** Contradictory terminal markers for one sequence fail closed. */
+	@Test
+	void rejectsContradictoryCommitAndAbortTerminals()
+	{
+		final RecordingReceiver receiver = new RecordingReceiver();
+		final TransactionAssembler committed = assembler(receiver, 1024);
+		final byte[] data = { 1, 2 };
+		accept(committed, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			data, data.length, 0));
+		accept(committed, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
+			AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
+			AeronReplicationEnvelope.crc32c(data), new byte[0]));
+		assertThrows(IllegalStateException.class, () -> accept(committed,
+			AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.ABORT,
+			data.length, 0, 1, 0, 0, new byte[0])));
+
+		final TransactionAssembler aborted = assembler(receiver, 1024);
+		accept(aborted, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
+			AeronReplicationEnvelope.Kind.ABORT, data.length, 0, 1, 0, 0, new byte[0]));
+		assertThrows(IllegalStateException.class, () -> accept(aborted,
+			AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
+			data.length, 0, 1, 0, AeronReplicationEnvelope.crc32c(data), new byte[0])));
+	}
+
+	/** Duplicate terminals must retain their length and chunk-count witness. */
+	@Test
+	void rejectsTerminalWithChangedMetadata()
+	{
+		final RecordingReceiver receiver = new RecordingReceiver();
+		final TransactionAssembler assembler = assembler(receiver, 1024);
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			new byte[0], 0, 0));
+		accept(assembler, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
+			AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[0]));
+		assertThrows(IllegalStateException.class, () -> accept(assembler,
+			AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
+			1, 0, 1, 0, 0, new byte[0])));
 	}
 
 	/** Verifies cursor persistence failure stops further assembly. */
@@ -481,19 +522,6 @@ class StorageBinaryDataClientAeronTest
 			CLUSTER,
 			EPOCH,
 			receiver
-		);
-	}
-
-	private static TransactionAssembler assembler(
-		final RecordingReceiver receiver,
-		final int maxBytes,
-		final long initialSequence
-	)
-	{
-		return new TransactionAssembler(
-			AeronReplicationConfiguration.builder().termLength(64 * 1024)
-				.chunkSize(Math.min(256, maxBytes)).maxTransactionBytes(maxBytes).build(),
-			CLUSTER, EPOCH, initialSequence, receiver, () -> { }
 		);
 	}
 

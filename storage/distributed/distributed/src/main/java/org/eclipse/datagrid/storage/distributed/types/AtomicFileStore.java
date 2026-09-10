@@ -21,9 +21,15 @@ import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.BiConsumer;
 
-/** Writes small replication metadata files with forced temporary replacement. */
+/**
+ * Writes small replication metadata files with forced temporary replacement.
+ * The operation fails when the filesystem cannot provide atomic rename or
+ * directory synchronization; callers must choose a filesystem with those
+ * durability primitives for replication metadata.
+ */
 public final class AtomicFileStore
 {
 	/** Selects checkpoint-specific crash-test phases. */
@@ -115,6 +121,8 @@ public final class AtomicFileStore
 		}
 		catch (final UnsupportedOperationException ignored)
 		{
+			LOGGER.log(System.Logger.Level.WARNING,
+				"POSIX permissions are unavailable for replication metadata temporary file " + absolute);
 			temporary = Files.createTempFile(parent, absolute.getFileName() + ".tmp-", null);
 		}
 		try
@@ -131,10 +139,9 @@ public final class AtomicFileStore
 			{
 				Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
 			}
-			catch (final AtomicMoveNotSupportedException ignored)
+			catch (final AtomicMoveNotSupportedException failure)
 			{
-				LOGGER.log(System.Logger.Level.WARNING, "Atomic move is unavailable for replication metadata {0}; crash atomicity is reduced", absolute);
-				Files.move(temporary, absolute, StandardCopyOption.REPLACE_EXISTING);
+				throw new IOException("Atomic replacement is unavailable for replication metadata " + absolute, failure);
 			}
 			testPoint(afterRenamePhase, absolute);
 			forceDirectory(parent);
@@ -161,6 +168,34 @@ public final class AtomicFileStore
 	}
 
 	/**
+	 * Verifies that the directory containing {@code path} supports the complete
+	 * atomic metadata protocol without changing the target file.
+	 *
+	 * @param path representative metadata path
+	 * @throws IOException if temporary replacement or directory synchronization is unavailable
+	 */
+	public static void verify(final Path path) throws IOException
+	{
+		final Path absolute = path.toAbsolutePath();
+		final Path parent = absolute.getParent();
+		if (parent == null)
+		{
+			throw new IOException("Metadata path has no parent directory: " + path);
+		}
+		Files.createDirectories(parent);
+		final Path probe = parent.resolve(absolute.getFileName() + ".probe-" + UUID.randomUUID());
+		try
+		{
+			write(probe, channel -> channel.write(java.nio.ByteBuffer.wrap(new byte[] {1})));
+		}
+		finally
+		{
+			Files.deleteIfExists(probe);
+			forceDirectory(parent);
+		}
+	}
+
+	/**
 	 * Deletes a metadata file and forces the parent directory when the file was
 	 * present. This is used for short-lived in-flight recovery records: removing
 	 * the record must be durable just like replacing the terminal checkpoint.
@@ -177,7 +212,7 @@ public final class AtomicFileStore
 		}
 	}
 
-	private static void forceDirectory(final Path parent)
+	private static void forceDirectory(final Path parent) throws IOException
 	{
 		if (parent == null)
 		{
@@ -187,11 +222,9 @@ public final class AtomicFileStore
 		{
 			channel.force(true);
 		}
-		catch (final IOException | UnsupportedOperationException failure)
+		catch (final UnsupportedOperationException failure)
 		{
-			LOGGER.log(System.Logger.Level.WARNING,
-				"Directory fsync is unavailable for replication metadata " + parent +
-					"; crash durability is reduced", failure);
+			throw new IOException("Directory fsync is unavailable for replication metadata " + parent, failure);
 		}
 	}
 }

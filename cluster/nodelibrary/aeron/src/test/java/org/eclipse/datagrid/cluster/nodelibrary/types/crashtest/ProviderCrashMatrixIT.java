@@ -14,6 +14,8 @@ package org.eclipse.datagrid.cluster.nodelibrary.types.crashtest;
  * #L%
  */
 
+import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
+import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpointStore;
 import org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode;
 import org.junit.jupiter.api.Test;
 
@@ -25,8 +27,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -279,9 +280,9 @@ class ProviderCrashMatrixIT
 		}
 	}
 
-	/** Verifies double crash during recovery preserves reseed policy. */
+	/** Verifies a second crash after a valid checkpoint is read remains restartable. */
 	@Test
-	void doubleCrashDuringRecoveryPreservesReseedPolicy() throws Exception
+	void doubleCrashDuringRecoveryPreservesCheckpointContinuation() throws Exception
 	{
 		try (DirectoryLayout layout = DirectoryLayout.create())
 		{
@@ -291,19 +292,26 @@ class ProviderCrashMatrixIT
 			Process child = null;
 			try
 			{
-				child = this.launch(base, "phase1", "AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST,
-					false, false, livePort, controlPort);
+				child = this.launch(base, "phase1", "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
+					ReplicationDurabilityMode.ARCHIVE_FIRST, livePort, controlPort);
 				this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
 				this.await(base.resolve("control/milestone.reached"), child, budget("crash.budget.milestone", 60_000L));
 				child.destroyForcibly();
 				assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit");
 
+				final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
+					base.resolve("checkpoint/writer.checkpoint"));
+				assertEquals(AeronReplicationCheckpoint.State.COMMITTED, checkpoint.state(),
+					"phase 1 must leave a valid terminal checkpoint before the recovery crash");
 				child = this.launch(base, "phase2", "AFTER_RECOVERY_CHECKPOINT_READ",
-					ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, livePort, controlPort);
+					ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, livePort, controlPort, 2,
+					(int)checkpoint.transactionSequence());
 				this.await(base.resolve("control/milestone.reached"), child,
 					budget("crash.budget.milestone", 60_000L));
-				assertEquals("AFTER_RECOVERY_CHECKPOINT_READ",
-					ChildMilestone.read(base.resolve("control/milestone.reached")).point());
+				final ChildMilestone recoveryMarker = ChildMilestone.read(base.resolve("control/milestone.reached"));
+				assertEquals("AFTER_RECOVERY_CHECKPOINT_READ", recoveryMarker.point());
+				assertEquals(checkpoint.transactionSequence(), recoveryMarker.sequence(),
+					"recovery barrier must report the checkpoint sequence it loaded");
 				child.destroyForcibly();
 				assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
 
@@ -316,7 +324,7 @@ class ProviderCrashMatrixIT
 					final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
 					restartAttempts++;
 					child = this.launch(base, "phase2", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-						false, false, livePort, controlPort);
+						livePort, controlPort);
 					this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
 					if (!child.waitFor(10, TimeUnit.SECONDS))
 					{
@@ -330,14 +338,15 @@ class ProviderCrashMatrixIT
 					Thread.sleep(1_000L);
 				}
 				while (System.nanoTime() < restartDeadline);
-				assertTrue(!outcome.contains("Active media driver detected"),
+				assertFalse(outcome.contains("Active media driver detected"),
 					"recording never became stopped before recovery retry deadline; attempts=" + restartAttempts +
 						" outcome=" + outcome + "\n" + diagnostics(base.resolve("control")));
-				final CrashOutcome result = CrashOutcome.parse(outcome);
-				assertNotHarnessError(result, outcome);
-				assertEquals(RecoveryPolicy.RESEED_REQUIRED, result.policy(), outcome);
-				assertEquals("RESEED_REQUIRED", result.health(), outcome);
-				assertTrue(result.error() != null && result.error().startsWith("RESEED_REQUIRED:"), outcome);
+					final CrashOutcome result = CrashOutcome.parse(outcome);
+					assertNotHarnessError(result, outcome);
+					assertEquals(RecoveryPolicy.CONTINUE, result.policy(), outcome);
+					assertEquals("LIVE", result.health(), outcome);
+					StoreFixture.assertRecords(base.resolve("store.records"),
+						List.of(payload(0), payload(1), payload(2)));
 			}
 			catch (final Throwable failure)
 			{
@@ -365,14 +374,7 @@ class ProviderCrashMatrixIT
 	private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
 		final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome) throws Exception
 	{
-		this.assertOutcome(point, durability, injectPrepareFailure, rejectLocal, expectedOutcome, null);
-	}
-
-	private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
-		final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome,
-		final String runLabel) throws Exception
-	{
-		this.assertOutcome(point, durability, injectPrepareFailure, rejectLocal, expectedOutcome, runLabel, 2, 1);
+		this.assertOutcome(point, durability, injectPrepareFailure, rejectLocal, expectedOutcome, null, 2, 1);
 	}
 
 	private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
@@ -393,80 +395,80 @@ class ProviderCrashMatrixIT
 			Process child = null;
 			try
 			{
-			child = this.launch(base, "phase1", point, durability, injectPrepareFailure, rejectLocal,
-				livePort, controlPort, writes, targetSequence);
-			this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
-			final Path milestone = base.resolve("control/milestone.reached");
-			this.await(milestone, child, budget("crash.budget.milestone", 60_000L));
-			final ChildMilestone marker = ChildMilestone.read(milestone);
-			assertEquals(point, marker.point(), "unexpected milestone point");
-			assertEquals("BEFORE_PUBLICATION_CONNECTED".equals(point) ? -1L : targetSequence,
-				marker.sequence(), "unexpected milestone sequence");
-			child.destroyForcibly();
-			assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit after kill");
-			final StoreFixture.Evidence phase1Store = StoreFixture.inspect(base.resolve("store.records"));
-			assertTrue(phase1Store.valid(), "phase1 Store fixture is not a complete record");
-			for (int i = 0; i < phase1Store.records().size(); i++)
-			{
-				assertTrue(java.util.Arrays.equals(payload(i), phase1Store.records().get(i)),
-					"unexpected phase1 Store payload at record " + i);
-			}
-			String outcome;
-			final long restartDeadline = System.nanoTime() +
-				TimeUnit.MILLISECONDS.toNanos(budget("crash.budget.archiveStop", 30_000L));
-			int restartAttempts = 0;
-			do
-			{
-				final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
-				restartAttempts++;
-				child = this.launch(base, "phase2", "NONE", durability, false, false, livePort, controlPort);
-				this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
-				assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
-				outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
-				if (!outcome.contains("Active media driver detected")) break;
-				assertEquals(storeSizeBeforeRetry, fileSize(base.resolve("store.records")),
-					"phase2 changed the Store fixture before recovery on retry " + restartAttempts);
-				Thread.sleep(1_000L);
-			}
-			while (System.nanoTime() < restartDeadline);
-			assertTrue(!outcome.contains("Active media driver detected"),
-				"recording never became stopped before phase2 restart deadline; attempts=" + restartAttempts +
-					" outcome=" + outcome + "\n" + diagnostics(base.resolve("control")));
-			final CrashOutcome result;
-			try
-			{
-				result = CrashOutcome.parse(outcome);
-			}
-			catch (final RuntimeException parseFailure)
-			{
-				throw new AssertionError("invalid child outcome: " + outcome, parseFailure);
-			}
-			assertNotHarnessError(result, outcome);
-			assertEquals(RecoveryPolicy.valueOf(expectedOutcome), result.policy(), outcome);
-			assertEquals("CONTINUE".equals(expectedOutcome) ? "LIVE" : "RESEED_REQUIRED",
-				result.health(), outcome);
-		assertTrue(result.storeValid(), outcome);
-		if (result.crc32c() != null &&
-			("COMMITTED".equals(result.checkpointState()) || "COMMITTING_UNCERTAIN".equals(result.checkpointState())))
-		{
-			final long checkpointCrc = Integer.toUnsignedLong(result.crc32c());
-			assertTrue(checkpointCrc == Integer.toUnsignedLong(crc(payload(0))) ||
-				checkpointCrc == Integer.toUnsignedLong(crc(payload(1))) ||
-				checkpointCrc == Integer.toUnsignedLong(crc(payload(2))),
-				"checkpoint CRC is not one of the test transaction payloads\n" + outcome);
-		}
-		if (result.policy() == RecoveryPolicy.CONTINUE && result.recordingId() != null && result.recordingId() >= 0)
-		{
-			assertTrue(result.recordingPosition() != null && result.recordingPosition() >= 0,
-				"checkpoint has recording identity without a replayable position\n" + outcome);
-		}
-		if (!"CONTINUE".equals(expectedOutcome))
-			{
-				assertTrue(result.error() != null && !result.error().isBlank(), outcome);
-			}
-			final List<byte[]> expectedStore = new java.util.ArrayList<>(phase1Store.records());
-			if ("CONTINUE".equals(expectedOutcome)) expectedStore.add(payload(2));
-			StoreFixture.assertRecords(base.resolve("store.records"), expectedStore);
+				child = this.launch(base, "phase1", point, durability, injectPrepareFailure, rejectLocal,
+					livePort, controlPort, writes, targetSequence);
+				this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
+				final Path milestone = base.resolve("control/milestone.reached");
+				this.await(milestone, child, budget("crash.budget.milestone", 60_000L));
+				final ChildMilestone marker = ChildMilestone.read(milestone);
+				assertEquals(point, marker.point(), "unexpected milestone point");
+				assertEquals("BEFORE_PUBLICATION_CONNECTED".equals(point) ? -1L : targetSequence,
+					marker.sequence(), "unexpected milestone sequence");
+				child.destroyForcibly();
+				assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit after kill");
+				final StoreFixture.Evidence phase1Store = StoreFixture.inspect(base.resolve("store.records"));
+				assertTrue(phase1Store.valid(), "phase1 Store fixture is not a complete record");
+				for (int i = 0; i < phase1Store.records().size(); i++)
+				{
+					assertArrayEquals(payload(i), phase1Store.records().get(i),
+						"unexpected phase1 Store payload at record " + i);
+				}
+				String outcome;
+				final long restartDeadline = System.nanoTime() +
+					TimeUnit.MILLISECONDS.toNanos(budget("crash.budget.archiveStop", 30_000L));
+				int restartAttempts = 0;
+				do
+				{
+					final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
+					restartAttempts++;
+					child = this.launch(base, "phase2", "NONE", durability, livePort, controlPort);
+					this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
+					assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
+					outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
+					if (!outcome.contains("Active media driver detected")) break;
+					assertEquals(storeSizeBeforeRetry, fileSize(base.resolve("store.records")),
+						"phase2 changed the Store fixture before recovery on retry " + restartAttempts);
+					Thread.sleep(1_000L);
+				}
+				while (System.nanoTime() < restartDeadline);
+				assertFalse(outcome.contains("Active media driver detected"),
+					"recording never became stopped before phase2 restart deadline; attempts=" + restartAttempts +
+						" outcome=" + outcome + "\n" + diagnostics(base.resolve("control")));
+				final CrashOutcome result;
+				try
+				{
+					result = CrashOutcome.parse(outcome);
+				}
+				catch (final RuntimeException parseFailure)
+				{
+					throw new AssertionError("invalid child outcome: " + outcome, parseFailure);
+				}
+				assertNotHarnessError(result, outcome);
+				assertEquals(RecoveryPolicy.valueOf(expectedOutcome), result.policy(), outcome);
+				assertEquals("CONTINUE".equals(expectedOutcome) ? "LIVE" : "RESEED_REQUIRED",
+					result.health(), outcome);
+				assertTrue(result.storeValid(), outcome);
+				if (result.crc32c() != null &&
+					("COMMITTED".equals(result.checkpointState()) || "COMMITTING_UNCERTAIN".equals(result.checkpointState())))
+				{
+					final long checkpointCrc = Integer.toUnsignedLong(result.crc32c());
+					assertTrue(checkpointCrc == Integer.toUnsignedLong(crc(payload(0))) ||
+						checkpointCrc == Integer.toUnsignedLong(crc(payload(1))) ||
+						checkpointCrc == Integer.toUnsignedLong(crc(payload(2))),
+						"checkpoint CRC is not one of the test transaction payloads\n" + outcome);
+				}
+				if (result.policy() == RecoveryPolicy.CONTINUE && result.recordingId() != null && result.recordingId() >= 0)
+				{
+					assertTrue(result.recordingPosition() != null && result.recordingPosition() >= 0,
+						"checkpoint has recording identity without a replayable position\n" + outcome);
+				}
+				if (!"CONTINUE".equals(expectedOutcome))
+				{
+					assertTrue(result.error() != null && !result.error().isBlank(), outcome);
+				}
+				final List<byte[]> expectedStore = new java.util.ArrayList<>(phase1Store.records());
+				if ("CONTINUE".equals(expectedOutcome)) expectedStore.add(payload(2));
+				StoreFixture.assertRecords(base.resolve("store.records"), expectedStore);
 			}
 			catch (final Throwable failure)
 			{
@@ -494,12 +496,9 @@ class ProviderCrashMatrixIT
 	}
 
 	private Process launch(final Path base, final String mode, final String point,
-		final ReplicationDurabilityMode durability, final boolean injectPrepareFailure,
-		final boolean rejectLocal,
-		final int livePort, final int controlPort) throws IOException
+		final ReplicationDurabilityMode durability, final int livePort, final int controlPort) throws IOException
 	{
-		return this.launch(base, mode, point, durability, injectPrepareFailure, rejectLocal,
-			livePort, controlPort, 2, 1);
+		return this.launch(base, mode, point, durability, false, false, livePort, controlPort, 2, 1);
 	}
 
 	private Process launch(final Path base, final String mode, final String point,

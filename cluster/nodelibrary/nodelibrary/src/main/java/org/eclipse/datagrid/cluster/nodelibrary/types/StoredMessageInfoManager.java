@@ -42,7 +42,15 @@ public interface StoredMessageInfoManager extends AutoCloseable
         return new Default(notNull(messageInfoFile), notNull(messageInfoParser));
     }
 
-    /** Creates a forced temporary-file replacement manager for a native path. */
+    /**
+     * Creates a forced temporary-file replacement manager for a native path.
+     *
+	 * <p>The manager verifies the atomic-filesystem capability lazily on its first
+	 * cursor write. Aeron transport startup also probes the shared metadata
+	 * directory before creating a reader, while callers using this manager alone
+	 * retain the lazy behavior. If a first write fails, the caller must retain
+	 * uncertainty and fail closed rather than treating the import as checkpointed.</p>
+     */
     static StoredMessageInfoManager NewAtomic(final Path messageInfoPath, final MessageInfoParser messageInfoParser)
     {
         return new Default(notNull(messageInfoPath), notNull(messageInfoParser));
@@ -64,6 +72,7 @@ public interface StoredMessageInfoManager extends AutoCloseable
 
         private boolean closed = false;
         private boolean initialized = false;
+        private boolean atomicVerified = false;
 
         private MessageInfo messageInfo;
 
@@ -99,6 +108,11 @@ public interface StoredMessageInfoManager extends AutoCloseable
                 final long written;
                 if (this.atomicPath != null)
                 {
+					if (!this.atomicVerified)
+					{
+						AtomicFileStore.verify(this.atomicPath);
+						this.atomicVerified = true;
+					}
 					AtomicFileStore.write(this.atomicPath, channel ->
 					{
 						final ByteBuffer buffer = ByteBuffer.wrap(serialized);

@@ -348,13 +348,10 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		return recordingId[0];
 	}
 
-	/** Returns the Archive position, or {@link Aeron#NULL_VALUE} when unknown. */
-	public long recordedPosition()
+	/** Returns whether publication or durability failure made this writer fail closed. */
+	public boolean isFailed()
 	{
-		final CountersReader counters = this.archive.context().aeron().countersReader();
-		final int counterId = this.recordingCounterId(counters);
-		if (counterId >= 0) return counters.getCounterValue(counterId);
-		return this.recordingIdHint >= 0 ? this.archive.getRecordingPosition(this.recordingIdHint) : Aeron.NULL_VALUE;
+		return this.publisher.isFailed();
 	}
 
 	private static long awaitRecorded(
@@ -371,16 +368,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		boolean lastActive = false;
 		while (true)
 		{
-			final String archiveError = archive.pollForErrorResponse();
-			if (archiveError != null) throw new IllegalStateException("Aeron archive error: " + archiveError);
-			if (recordingIdHint >= 0)
-			{
-				final long archivePosition = archive.getRecordingPosition(recordingIdHint);
-				if (archivePosition >= commitPosition)
-				{
-					return archivePosition;
-				}
-			}
 			int counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId(), archive.archiveId());
 			if (counterId < 0 && recordingIdHint >= 0)
 			{
@@ -401,6 +388,22 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 					throw new IllegalStateException("Aeron archive recording stopped before commit position " + commitPosition);
 				}
 			}
+			if (recordingIdHint >= 0)
+			{
+				/* Embedded recordings expose a local counter; avoid a synchronous Archive
+				 * control round-trip on the normal commit path. */
+				final long archivePosition = archive.getRecordingPosition(recordingIdHint);
+				if (archivePosition >= commitPosition)
+				{
+					return archivePosition;
+				}
+			}
+			/* Embedded recordings expose a local counter. Check it before polling the
+			 * control channel so the normal commit path does not pay a synchronous
+			 * Archive request once the local recording has already advanced. Remote
+			 * recordings still use this poll to surface control-session failures. */
+			final String archiveError = archive.pollForErrorResponse();
+			if (archiveError != null) throw new IllegalStateException("Aeron archive error: " + archiveError);
 			if (System.nanoTime() >= deadline)
 			{
 				throw new IllegalStateException("Aeron archive did not record commit position " + commitPosition +
@@ -508,6 +511,17 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		{
 			failure = recordingFailure;
 		}
+		try
+		{
+			/* Abort pending data before stopping the recording, otherwise the abort
+			 * marker can be offered to an already-stopped recording. */
+			this.publisher.close();
+		}
+		catch (final RuntimeException closeFailure)
+		{
+			if (failure == null) failure = closeFailure;
+			else failure.addSuppressed(closeFailure);
+		}
 		if (recordingId >= 0)
 		{
 			try
@@ -519,15 +533,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				if (failure == null) failure = stopFailure;
 				else failure.addSuppressed(stopFailure);
 			}
-		}
-		try
-		{
-			this.publisher.close();
-		}
-		catch (final RuntimeException closeFailure)
-		{
-			if (failure == null) failure = closeFailure;
-			else failure.addSuppressed(closeFailure);
 		}
 		if (recordingId >= 0)
 		{

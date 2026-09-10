@@ -52,8 +52,14 @@ final class AeronReaderLifecycle
 				}
 				if (timedOut.getAsBoolean())
 				{
-					onTimeout.run();
-					active.set(false);
+					try
+					{
+						onTimeout.run();
+					}
+					finally
+					{
+						active.set(false);
+					}
 					break;
 				}
 				LockSupport.parkNanos(1_000_000L);
@@ -63,8 +69,8 @@ final class AeronReaderLifecycle
 
 	/**
 	 * Stops polling, waits up to five seconds for a different polling thread, and
-	 * closes the subscription. The callback runs after the wait so a fragment
-	 * cannot use a subscription while it is being closed.
+	 * closes the subscription only after that thread has exited. On timeout the
+	 * subscription remains open so the caller can retry without a use-after-close.
 	 *
 	 * @param active reader running flag
 	 * @param thread reader polling thread, or {@code null}
@@ -91,6 +97,13 @@ final class AeronReaderLifecycle
 					{
 						failure = new IllegalStateException("Aeron reader polling thread did not stop");
 					}
+					else
+					{
+						/* The latch is released from the polling thread's finally block;
+						 * join until that thread has returned so callers never observe a
+						 * live reader after shutdown completes. */
+						thread.join();
+					}
 				}
 				catch (final InterruptedException interrupted)
 				{
@@ -99,14 +112,19 @@ final class AeronReaderLifecycle
 				}
 			}
 		}
+		/* Do not close a subscription while a polling thread is still able to
+		 * access it. The caller retains ownership and may retry after it stops. */
+		if (failure != null)
+		{
+			throw failure;
+		}
 		try
 		{
 			closeSubscription.run();
 		}
 		catch (final RuntimeException closeFailure)
 		{
-			if (failure == null) failure = closeFailure;
-			else failure.addSuppressed(closeFailure);
+			failure = closeFailure;
 		}
 		if (failure != null)
 		{

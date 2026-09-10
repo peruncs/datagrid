@@ -34,7 +34,12 @@ public interface ClusterReplicationTransport extends AutoCloseable
 	/** Returns the stable provider id, for example {@code kafka}, {@code aeron}, or {@code none}. */
 	String id();
 
-	/** Creates a writer-side binary distributor for the named logical stream. */
+	/**
+	 * Creates a writer-side binary distributor for the named logical stream.
+	 * Implementations may reject direct data publication when local Store
+	 * acceptance must be coordinated; use {@link #persistenceTargetFactory(String,
+	 * StorageBinaryDataDistributor)} for that transaction boundary.
+	 */
 	ClusterStorageBinaryDataDistributor distributor(String streamName, boolean asynchronous);
 
 	/** Creates a reader-side client starting at the supplied durable cursor. */

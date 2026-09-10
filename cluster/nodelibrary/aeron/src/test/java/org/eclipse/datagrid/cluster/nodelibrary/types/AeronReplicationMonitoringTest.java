@@ -55,6 +55,18 @@ class AeronReplicationMonitoringTest
 		}
 	}
 
+	/** Retention must fail explicitly while authenticated watermarks are absent. */
+	@Test
+	void retentionRejectsDeletionUntilWatermarksAreConfigured()
+	{
+		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+			.create(properties("writer")))
+		{
+			assertThrows(UnsupportedOperationException.class,
+				() -> transport.retention().deleteThrough(new ReplicationCursor("aeron", null, -1, new byte[0])));
+		}
+	}
+
 	/** Verifies reader provider surfaces replay and failure states. */
 	@Test
 	void readerProviderSurfacesReplayAndFailureStates()
@@ -64,7 +76,7 @@ class AeronReplicationMonitoringTest
 		{
 			final TestClient replaying = new TestClient(true, false, null);
 			final ReplicationHealth health = transport.health(() -> true, replaying);
-			assertTrue(health.isReady());
+			assertFalse(health.isReady(), "a replaying reader is not ready to serve traffic");
 			assertTrue(health.isHealthy());
 			assertEquals(ReplicationHealth.State.REPLAYING, health.state());
 
@@ -73,6 +85,8 @@ class AeronReplicationMonitoringTest
 			assertFalse(failedHealth.isReady());
 			assertFalse(failedHealth.isHealthy());
 			assertEquals(ReplicationHealth.State.FAILED, failedHealth.state());
+			assertThrows(UnsupportedOperationException.class, () -> transport.positionProvider("stream").latest(),
+				"a reader must not report its applied cursor as the writer latest boundary");
 			health.close();
 			failedHealth.close();
 		}

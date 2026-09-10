@@ -22,7 +22,12 @@ public interface ReplicationPositionProvider extends AutoCloseable
 	/** Initializes any provider client needed to resolve the current position. */
 	void init() throws NodelibraryException;
 
-	/** Returns the newest position that can be used as a backup/bootstrap boundary. */
+	/**
+	 * Returns the newest position that can be used as a backup/bootstrap boundary.
+	 *
+	 * @throws UnsupportedOperationException when this role cannot obtain a writer
+	 * latest boundary (for example, a reader without a control/status channel)
+	 */
 	ReplicationCursor latest() throws NodelibraryException;
 
 	default long latestSequence() throws NodelibraryException

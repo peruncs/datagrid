@@ -52,7 +52,7 @@ record CrashOutcome(
 			optionalLong(values, "SEQUENCE"),
 			optionalLong(values, "RECORDING_ID"),
 			optionalLong(values, "RECORDING_POSITION"),
-			optionalInt(values, "CRC32C"),
+			optionalInt(values),
 			Boolean.parseBoolean(required(values, "PROOF_STORE_VALID"))
 		);
 	}
@@ -70,9 +70,9 @@ record CrashOutcome(
 		return value == null ? null : Long.valueOf(value);
 	}
 
-	private static Integer optionalInt(final Map<String, String> values, final String key)
+	private static Integer optionalInt(final Map<String, String> values)
 	{
-		final String value = values.get(key);
+		final String value = values.get("CRC32C");
 		return value == null ? null : (int)Long.parseUnsignedLong(value);
 	}
 }

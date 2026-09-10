@@ -47,17 +47,6 @@ class AeronCrashBoundaryTest
 		AeronReplicationPublisher.clearCrashHook();
 		AeronReplicationWriteCoordinator.clearCrashHook();
 		AeronStorageBinaryTargetDistributing.clearCrashHook();
-		try
-		{
-			final var method = Class.forName("org.eclipse.datagrid.storage.distributed.types.AtomicFileStore")
-				.getDeclaredMethod("clearTestHook");
-			method.setAccessible(true);
-			method.invoke(null);
-		}
-		catch (final ReflectiveOperationException failure)
-		{
-			throw new AssertionError("cannot clear AtomicFileStore crash hook", failure);
-		}
 	}
 
 	/** Verifies prepared tail failure always publishes abort and fails closed. */

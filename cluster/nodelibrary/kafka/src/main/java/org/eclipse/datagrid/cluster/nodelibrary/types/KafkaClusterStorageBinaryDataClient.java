@@ -80,13 +80,16 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
         private final boolean doCommitOffset;
 
         private final AtomicReference<MessageInfo> messageInfo;
-        private long cachedMessageIndex;
+	private long cachedMessageIndex;
+	private int discardedPackets;
         private final AtomicBoolean stopAtLatestMessage = new AtomicBoolean();
         private final AtomicBoolean requestStop = new AtomicBoolean();
         private final AtomicBoolean running = new AtomicBoolean();
 
-    private volatile Thread runner;
-    private volatile boolean disposed;
+	private volatile Thread runner;
+	private volatile KafkaConsumer<String, byte[]> consumer;
+	private volatile boolean disposed;
+	private volatile RuntimeException failure;
 
     private KafkaClusterStorageBinaryDataClient(
             final ClusterStorageBinaryDataPacketAcceptor packetAcceptor,
@@ -121,10 +124,11 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
         }
 
         @Override
-        public synchronized void start()
-        {
-            if (this.disposed) throw new IllegalStateException("Kafka data client is disposed");
-            if (this.running.get()) return;
+	public synchronized void start()
+	{
+		if (this.disposed) throw new IllegalStateException("Kafka data client is disposed");
+		if (this.failure != null) throw new IllegalStateException("Kafka data client has failed", this.failure);
+		if (this.running.get()) return;
             if (LOG.isInfoEnabled())
             {
                 LOG.info("Starting kafka data client at message index {}", this.messageInfo.get().messageIndex());
@@ -142,12 +146,24 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                 this.run();
                 this.running.set(false);
             }
-			catch (final Throwable t)
+		catch (final Throwable t)
+		{
+			this.running.set(false);
+			if (!this.disposed && !this.requestStop.get())
 			{
-				this.running.set(false);
-				GlobalErrorHandling.handleFatalError(t);
+				this.failure = t instanceof RuntimeException runtime
+					? runtime
+					: new IllegalStateException("Kafka data client stopped unexpectedly", t);
+				LOG.error("Kafka data client stopped unexpectedly", t);
 			}
 		}
+	}
+
+	@Override
+	public RuntimeException failure()
+	{
+		return this.failure;
+	}
 
 		private void run()
         {
@@ -159,9 +175,17 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
             properties.setProperty(AUTO_OFFSET_RESET_CONFIG, "none"); // required so we can detect out-of-date consumers
             properties.setProperty(ISOLATION_LEVEL_CONFIG, READ_COMMITTED.toString().toLowerCase(Locale.ROOT));
 
-            try (final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(properties))
-            {
-                consumer.subscribe(Collections.singletonList(this.topicName));
+	try (final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(properties))
+	{
+		this.consumer = consumer;
+		final int partitionCount = consumer.partitionsFor(this.topicName).size();
+		if (partitionCount != 1)
+		{
+			throw new IllegalStateException(
+				"Kafka replication topic must have exactly one partition; found " + partitionCount
+			);
+		}
+		consumer.subscribe(Collections.singletonList(this.topicName));
 
                 // Wait for assignment
                 LOG.trace("Waiting for partition assignment");
@@ -188,7 +212,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 
                 // Seek to correct offsets
                 final var cachedMessageInfo = this.messageInfo.get();
-                final var startingOffsets = KafkaCursorCodec.decode(cachedMessageInfo);
+				final var startingOffsets = KafkaCursorCodec.decode(cachedMessageInfo, this.topicName);
                 for (final var entry : startingOffsets)
                 {
                     final var partition = entry.key();
@@ -249,8 +273,15 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 					}
 				}
 			}
+			finally
+			{
+				this.consumer = null;
+			}
 
-			this.requestStop.set(false);
+			if (!this.disposed)
+			{
+				this.requestStop.set(false);
+			}
             LOG.info("DataClient run finished");
         }
 
@@ -283,8 +314,8 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
          * Polls the kafka consumer and consumes fully completed messages. Invalid
          * packets are skipped and incomplete messages will be cached.
          */
-        private void pollAndConsume(final KafkaConsumer<String, byte[]> consumer)
-        {
+		private void pollAndConsume(final KafkaConsumer<String, byte[]> consumer)
+		{
             // only consume complete messages, to do this we need to look ahead to see if all packets
             // are here yet. If not read more, if it starts at 0 again then we know that something went
             // wrong on the writer side and that we should just skip all the packets in that series
@@ -298,8 +329,8 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 
             final var packets = new ArrayList<ClusterStorageBinaryDataPacket>(this.cachedPackets.size());
 
-            outer:
-            while (!this.cachedPackets.isEmpty())
+			outer:
+			while (!this.cachedPackets.isEmpty())
             {
                 final var rootPacket = this.cachedPackets.peek();
                 if (rootPacket == null)
@@ -307,12 +338,20 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                     break;
                 }
 
-                if (rootPacket.packetIndex() != 0)
+				if (rootPacket.packetIndex() != 0)
                 {
-                    LOG.error("First packet has index {}, expected 0 skipping packet...", rootPacket.packetIndex());
-                    this.cachedPackets.remove();
-                    continue;
-                }
+					LOG.error("First packet has index {}, expected 0 skipping packet...", rootPacket.packetIndex());
+					this.cachedPackets.remove();
+					this.recordDiscardedPacket();
+					continue;
+				}
+				if (rootPacket.packetCount() <= 0)
+				{
+					LOG.error("Invalid packet count {}", rootPacket.packetCount());
+					this.cachedPackets.remove();
+					this.recordDiscardedPacket();
+					continue;
+				}
 
                 if (this.cachedPackets.size() < rootPacket.packetCount())
                 {
@@ -330,16 +369,18 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                         break outer;
                     }
 
-                    if (packet.packetIndex() != i)
-                    {
-                        LOG.error(
-                            "Unexpected Packet Index {}, expected 0 skipping packet...",
-                            rootPacket.packetIndex()
-                        );
-                        continue outer;
+				if (packet.packetIndex() != i)
+				{
+					LOG.error(
+						"Unexpected Packet Index {}, expected {} skipping packet...",
+						packet.packetIndex(), i
+					);
+					this.cachedPackets.remove();
+					this.recordDiscardedPacket();
+					continue outer;
                     }
 
-                    if (packet.packetCount() != rootPacket.packetCount())
+				if (packet.packetCount() != rootPacket.packetCount())
                     {
                         LOG.error(
                             "Unexpected Packet Count {} of Packet at Index {}, expected {} skipping packet...",
@@ -347,7 +388,9 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                             packet.packetIndex(),
                             rootPacket.packetCount()
                         );
-                        continue outer;
+					this.cachedPackets.remove();
+					this.recordDiscardedPacket();
+					continue outer;
                     }
 
                     newMessagePackets.add(this.cachedPackets.remove());
@@ -356,8 +399,23 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                 packets.addAll(newMessagePackets);
             }
 
-            this.consumeFullMessage(packets, consumer);
-        }
+		final long previousMessageIndex = this.cachedMessageIndex;
+		this.consumeFullMessage(packets, consumer);
+		if (this.cachedMessageIndex > previousMessageIndex)
+		{
+			this.discardedPackets = 0;
+		}
+		}
+
+		private void recordDiscardedPacket()
+		{
+			if (++this.discardedPackets > 1_024)
+			{
+				throw new IllegalStateException(
+					"Kafka packet stream discarded more than 1024 packets without forward progress"
+				);
+			}
+		}
 
         private List<ClusterStorageBinaryDataPacket> createPackets(final ConsumerRecords<String, byte[]> records)
         {
@@ -413,8 +471,13 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                 {
                     LOG.debug("Applying packets at offset {}", this.cachedMessageIndex);
                 }
-                this.packetAcceptor.accept(newPackets);
-                final var newInfo = this.updateOffsets(consumer);
+				this.packetAcceptor.accept(newPackets);
+				final RuntimeException mergerFailure = this.packetAcceptor.failure();
+				if (mergerFailure != null)
+				{
+					throw new IllegalStateException("Kafka reader merger has failed", mergerFailure);
+				}
+				final var newInfo = this.updateOffsets(consumer);
                 this.offsetChangedListener.onChange(newInfo);
             }
         }
@@ -446,44 +509,63 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
         }
 
         @Override
-        public void resume() throws NodelibraryException
+	public void resume() throws NodelibraryException
         {
             if (this.stopAtLatestMessage.get())
             {
                 throw new NodelibraryException(
-                    new IllegalStateException("Client is sill reading up to the latest message index")
+				new IllegalStateException("Client is still reading up to the latest message index")
                 );
             }
             if (this.isRunning())
             {
-                throw new NodelibraryException(new IllegalStateException("Client is sill active"));
+				throw new NodelibraryException(new IllegalStateException("Client is still active"));
             }
             this.start();
         }
 
-        @Override
-        public synchronized void dispose()
+	/**
+	 * Wakes the Kafka poll before joining the reader. Downstream packet resources
+	 * are closed only after the reader has stopped; a timeout leaves them open so
+	 * the caller can retry disposal safely.
+	 */
+	@Override
+	public synchronized void dispose()
         {
             if (this.disposed) return;
             this.disposed = true;
             LOG.trace("Disposing data client");
-            this.requestStop.set(true);
+			this.requestStop.set(true);
             RuntimeException failure = null;
             final Thread current = this.runner;
-            if (current != null && current != Thread.currentThread())
-            {
-                current.interrupt();
+			if (current != null && current != Thread.currentThread())
+			{
+				final KafkaConsumer<String, byte[]> consumer = this.consumer;
+				if (consumer != null)
+				{
+					consumer.wakeup();
+				}
+				current.interrupt();
                 try
                 {
                     LOG.trace("Waiting for runner to stop");
                     current.join(5_000L);
                 }
-                catch (final InterruptedException e)
-                {
-                    Thread.currentThread().interrupt();
-                    failure = new NodelibraryException(e);
-                }
-            }
+				catch (final InterruptedException e)
+				{
+					Thread.currentThread().interrupt();
+					failure = new NodelibraryException(e);
+				}
+				if (current.isAlive())
+				{
+					this.disposed = false;
+					final IllegalStateException timeout = new IllegalStateException(
+						"Kafka data client reader did not stop before disposal timeout"
+					);
+					if (failure != null) timeout.addSuppressed(failure);
+					throw timeout;
+				}
+			}
             try
             {
                 this.packetAcceptor.dispose();

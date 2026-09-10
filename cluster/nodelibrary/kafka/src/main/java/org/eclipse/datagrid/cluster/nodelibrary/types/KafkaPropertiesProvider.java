@@ -23,10 +23,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Properties;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/** Loads and snapshots the Kafka client properties used by a transport. */
 public interface KafkaPropertiesProvider
 {
     void init() throws NodelibraryException;
@@ -55,7 +58,7 @@ public interface KafkaPropertiesProvider
     {
         private static final Logger LOG = LoggerFactory.getLogger(KafkaPropertiesProvider.class);
         private final Path configDirectoryPath;
-        private Properties properties;
+		private volatile Properties properties;
 
         private Default(final Path configDirectoryPath)
         {
@@ -63,32 +66,42 @@ public interface KafkaPropertiesProvider
         }
 
         @Override
-        public void init() throws NodelibraryException
-        {
-            try (final var configDirectoryStream = Files.list(this.configDirectoryPath))
-            {
-                configDirectoryStream.filter(Files::isRegularFile).forEach(configFile ->
-                {
-                    LOG.debug("Reading Kafka config file at {}", configFile);
-                    try (final var fileInputStream = new FileInputStream(configFile.toFile()))
-                    {
-                        this.properties = new Properties();
-                        this.properties.load(fileInputStream);
-                    }
-                    catch (final IOException e)
-                    {
-                        throw new NodelibraryException(
-                            "Failed to load Kafka properties config file at " + configFile,
-                            e
-                        );
-                    }
-                });
-            }
-            catch (final IOException e)
-            {
-                throw new NodelibraryException("Failed to list Kafka config files at " + this.configDirectoryPath, e);
-            }
-        }
+		public void init() throws NodelibraryException
+		{
+			final List<Path> configFiles;
+			try (final var configDirectoryStream = Files.list(this.configDirectoryPath))
+			{
+				configFiles = configDirectoryStream
+					.filter(Files::isRegularFile)
+					.sorted(Comparator.comparing(Path::toString))
+					.toList();
+			}
+			catch (final IOException e)
+			{
+				throw new NodelibraryException("Failed to list Kafka config files at " + this.configDirectoryPath, e);
+			}
+			if (configFiles.isEmpty())
+			{
+				throw new NodelibraryException("No Kafka configuration files found at " + this.configDirectoryPath);
+			}
+
+			final Properties loaded = new Properties();
+			for (final Path configFile : configFiles)
+			{
+				LOG.debug("Reading Kafka config file at {}", configFile);
+				try (final var fileInputStream = new FileInputStream(configFile.toFile()))
+				{
+					loaded.load(fileInputStream);
+				}
+				catch (final IOException e)
+				{
+					throw new NodelibraryException(
+						"Failed to load Kafka properties config file at " + configFile, e
+					);
+				}
+			}
+			this.properties = loaded;
+		}
 
         @Override
         public Properties provide()

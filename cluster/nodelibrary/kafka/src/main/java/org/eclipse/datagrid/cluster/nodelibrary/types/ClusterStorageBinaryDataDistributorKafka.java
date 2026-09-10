@@ -31,6 +31,9 @@ import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.kafka.clients.producer.ProducerConfig.*;
 import static org.eclipse.serializer.chars.XChars.notEmpty;
@@ -38,6 +41,8 @@ import static org.eclipse.serializer.util.X.notNull;
 
 public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorageBinaryDataDistributor
 {
+	/** Stable key used to keep every packet for a stream on one Kafka partition. */
+	String PARTITION_KEY = "eclipse-datagrid-replication";
 	static ClusterStorageBinaryDataDistributorKafka Sync(
 		final String topicName,
 		final KafkaPropertiesProvider kafkaPropertiesProvider
@@ -63,8 +68,10 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 
 		private final String topicName;
 		private final KafkaProducer<String, byte[]> producer;
-		private long messageIndex = Long.MIN_VALUE;
-		private boolean ignoreDistribution = false;
+		private final AtomicLong messageIndex = new AtomicLong(Long.MIN_VALUE);
+		private final AtomicLong droppedAfterFailure = new AtomicLong();
+		private final AtomicBoolean ignoreDistribution = new AtomicBoolean();
+		private volatile RuntimeException failure;
 
 		protected Abstract(final String topicName, final KafkaPropertiesProvider kafkaPropertiesProvider)
 		{
@@ -75,13 +82,22 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			properties.setProperty(VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
 			properties.setProperty(COMPRESSION_TYPE_CONFIG, CompressionType.ZSTD.name);
 			this.producer = new KafkaProducer<>(properties);
+			final int partitionCount = this.producer.partitionsFor(topicName).size();
+			if (partitionCount != 1)
+			{
+				this.producer.close();
+				throw new IllegalArgumentException(
+					"Kafka replication topic must have exactly one partition; found " + partitionCount
+				);
+			}
 		}
 
 		protected abstract void execute(Runnable action);
 
 		private void distribute(final MessageType messageType, final Binary data)
 		{
-			if (this.ignoreDistribution)
+			if (this.failure != null) throw new IllegalStateException("Kafka distributor has failed", this.failure);
+			if (this.ignoreDistribution.get())
 			{
 				LOG.trace("Ignoring distribution for data of type {}", messageType);
 				return;
@@ -91,15 +107,30 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 
 		private void tryExecuteDistribution(final MessageType messageType, final Binary data)
 		{
+			if (this.failure != null)
+			{
+				final long dropped = this.droppedAfterFailure.incrementAndGet();
+				LOG.warn("Dropping queued Kafka distribution {} after terminal failure", dropped);
+				return;
+			}
 			try
 			{
 				this.executeDistribution(messageType, data);
 			}
 			catch (final Throwable t)
 			{
-				// handle error here instead of the call site since async distribution would not cause
-				// the application to shut down
-				GlobalErrorHandling.handleFatalError(t);
+				this.recordFailure(t);
+				LOG.error("Kafka distribution failed", t);
+			}
+		}
+
+		private synchronized void recordFailure(final Throwable failure)
+		{
+			if (this.failure == null)
+			{
+				this.failure = failure instanceof RuntimeException runtime
+					? runtime
+					: new IllegalStateException("Kafka distribution failed", failure);
 			}
 		}
 
@@ -107,9 +138,10 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		{
 			StorageBinaryDataChunker.forEach(data, ClusterStorageBinaryDistributedKafka.maxPacketSize(), chunk ->
 			{
-				final var kafkaRecord = new ProducerRecord<String, byte[]>(this.topicName, chunk.bytes());
+				final var kafkaRecord = new ProducerRecord<String, byte[]>(
+					this.topicName, PARTITION_KEY, chunk.bytes());
 
-				++this.messageIndex;
+				final long messageIndex = this.messageIndex.incrementAndGet();
 
 				ClusterStorageBinaryDistributedKafka.addPacketHeaders(
 					kafkaRecord.headers(),
@@ -117,12 +149,12 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 					chunk.messageLength(),
 					chunk.index(),
 					chunk.count(),
-					this.messageIndex
+					messageIndex
 				);
 
-				if (LOG.isDebugEnabled() && this.messageIndex % 10_000 == 0)
+				if (LOG.isDebugEnabled() && messageIndex % 10_000 == 0)
 				{
-					LOG.debug("Sending kafka packet at message index {}", this.messageIndex);
+					LOG.debug("Sending kafka packet at message index {}", messageIndex);
 				}
 
 				try
@@ -160,29 +192,37 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			);
 		}
 
+		/** Set the next packet index; callers must do this while the distributor is quiescent. */
 		@Override
 		public void messageIndex(final long index)
 		{
 			LOG.info("Setting distributor message index to {}", index);
-			this.messageIndex = index;
+			this.messageIndex.set(index);
 		}
 
+		/** Returns the latest packet index; concurrent writes may advance it immediately. */
 		@Override
 		public long messageIndex()
 		{
-			return this.messageIndex;
+			return this.messageIndex.get();
+		}
+
+		/** Returns the terminal send failure, or {@code null} while healthy. */
+		public RuntimeException failure()
+		{
+			return this.failure;
 		}
 
 		@Override
 		public boolean ignoreDistribution()
 		{
-			return this.ignoreDistribution;
+			return this.ignoreDistribution.get();
 		}
 
 		@Override
 		public void ignoreDistribution(final boolean ignore)
 		{
-			this.ignoreDistribution = ignore;
+			this.ignoreDistribution.set(ignore);
 		}
 
 		@Override
@@ -193,6 +233,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		}
 	}
 
+	/** Sends records on the calling thread; distribution blocks until Kafka acknowledges them. */
 	class Sync extends Abstract
 	{
 		private Sync(final String topicName, final KafkaPropertiesProvider kafkaPropertiesProvider)
@@ -227,6 +268,8 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		@Override
 		protected void execute(final Runnable action)
 		{
+			// Async submission is drained by dispose(); tryExecuteDistribution owns
+			// failure capture so queued actions use the same terminal-state policy.
 			this.executor.execute(action);
 		}
 
@@ -237,7 +280,19 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			{
 				this.executor.shutdown();
 			}
-
+			try
+			{
+				if (!this.executor.awaitTermination(30, TimeUnit.SECONDS))
+				{
+					this.executor.shutdownNow();
+					this.executor.awaitTermination(5, TimeUnit.SECONDS);
+				}
+			}
+			catch (final InterruptedException interrupted)
+			{
+				this.executor.shutdownNow();
+				Thread.currentThread().interrupt();
+			}
 			super.dispose();
 		}
 	}

@@ -43,6 +43,11 @@ class AeronReaderCrashMatrixIT
 {
 	private static final UUID CLUSTER_ID = UUID.nameUUIDFromBytes("reader-crash-cluster".getBytes(StandardCharsets.UTF_8));
 	private static final long EPOCH = 2L;
+	private static final String CONTROL_RESPONSE_CHANNEL = "aeron:udp?endpoint=localhost:0";
+	private static final String LIVE_CHANNEL = "aeron:ipc?term-length=1048576|mtu=1408";
+	private static final String REPLAY_CHANNEL = "aeron:udp?endpoint=localhost:0";
+	private static final long RECORDING_ID_TIMEOUT_MILLIS = 15_000L;
+	private static final long CHILD_FILE_TIMEOUT_MILLIS = 30_000L;
 
 	/** Verifies replay before import leaves uncertain marker and requires reseed. */
 	@Test
@@ -72,6 +77,27 @@ class AeronReaderCrashMatrixIT
 		this.assertReseed("AFTER_STORE_IMPORT_BEFORE_CURSOR_WRITE", true);
 	}
 
+	/** Verifies a crash during cursor encoding retains the uncertainty marker. */
+	@Test
+	void cursorWriteFailureLeavesUncertainMarkerAndRequiresReseed() throws Exception
+	{
+		this.assertReseed("DURING_CURSOR_FILE_WRITE", true);
+	}
+
+	/** Verifies a crash after cursor force but before replacement retains the prior cursor. */
+	@Test
+	void cursorRenameWindowLeavesUncertainMarkerAndRequiresReseed() throws Exception
+	{
+		this.assertReseed("AFTER_CURSOR_TEMP_WRITE_BEFORE_RENAME", true);
+	}
+
+	/** Verifies a crash after cursor replacement but before directory sync is fail-closed. */
+	@Test
+	void cursorDirectorySyncWindowLeavesUncertainMarkerAndRequiresReseed() throws Exception
+	{
+		this.assertReseed("AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC", true);
+	}
+
 	private void assertReseed(final String point, final boolean expectStoreRecord)
 		throws IOException, InterruptedException
 	{
@@ -80,9 +106,6 @@ class AeronReaderCrashMatrixIT
 		final Path mediaDirectory = base.resolve("archive-aeron");
 		final Path archiveDirectory = base.resolve("archive");
 		final String controlChannel = "aeron:udp?endpoint=localhost:" + controlPort;
-		final String controlResponseChannel = "aeron:udp?endpoint=localhost:0";
-		final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
-		final String replayChannel = "aeron:udp?endpoint=localhost:0";
 		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
 			.termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
 			.maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
@@ -96,35 +119,33 @@ class AeronReaderCrashMatrixIT
 			.deleteArchiveOnStart(true)
 			.threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
 			.controlChannel(controlChannel)
-			.replicationChannel(replayChannel);
+			.replicationChannel(REPLAY_CHANNEL);
 		Process child = null;
 		Process recovery = null;
 		try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
 			 AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
 				.aeronDirectoryName(mediaDirectory.toString())
 				.controlRequestChannel(controlChannel)
-				.controlResponseChannel(controlResponseChannel)
+				.controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
 				.messageTimeoutNs(configuration.offerTimeoutNanos())))
 		{
 			try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
-				archive, liveChannel, 1001, configuration, CLUSTER_ID, EPOCH, 0))
+				archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0))
 			{
 				publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(payload(0)) });
 				publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(payload(1)) });
-				final long recordingId = awaitRecordingId(publisher, 15_000L);
-				child = launch(base, "phase1", point, recordingId, controlChannel, controlResponseChannel,
-					liveChannel, replayChannel, mediaDirectory);
-				awaitFile(base.resolve("control/ready"), child, 30_000L);
+				final long recordingId = awaitRecordingId(publisher);
+				child = launch(base, "phase1", point, recordingId, controlChannel, mediaDirectory);
+				awaitFile(base.resolve("control/ready"), child);
 				final Path milestonePath = base.resolve("control/milestone.reached");
-				awaitFile(milestonePath, child, 30_000L);
+				awaitFile(milestonePath, child);
 				final ReaderMilestone milestone = ReaderMilestone.read(milestonePath);
-				assertTrue(point.equals(milestone.point()), "unexpected reader milestone " + milestone);
+                assertEquals(point, milestone.point(), "unexpected reader milestone " + milestone);
 				assertTrue(milestone.sequence() >= 0, "reader milestone has no sequence");
 				child.destroyForcibly();
 				assertTrue(child.waitFor(10, TimeUnit.SECONDS), "reader child did not exit after kill");
-				recovery = launch(base, "phase2", "NONE", recordingId, controlChannel,
-					controlResponseChannel, liveChannel, replayChannel, mediaDirectory);
-				awaitFile(base.resolve("control/outcome"), recovery, 30_000L);
+				recovery = launch(base, "phase2", "NONE", recordingId, controlChannel, mediaDirectory);
+				awaitFile(base.resolve("control/outcome"), recovery);
 				assertTrue(recovery.waitFor(15, TimeUnit.SECONDS), "reader recovery child did not exit");
 				final String outcome = Files.readString(base.resolve("control/outcome"));
 				assertTrue(outcome.lines().anyMatch(line -> line.equals("OUTCOME=RESEED_REQUIRED")), outcome);
@@ -135,8 +156,7 @@ class AeronReaderCrashMatrixIT
 				assertEquals(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, checkpoint.state());
 				assertEquals(milestone.sequence(), checkpoint.transactionSequence());
 				assertEquals(milestone.position(), checkpoint.recordingPosition());
-				assertTrue(Files.exists(base.resolve("reader.store")) == expectStoreRecord,
-					"unexpected Store fixture state for " + point);
+                assertEquals(Files.exists(base.resolve("reader.store")), expectStoreRecord, "unexpected Store fixture state for " + point);
 			}
 		}
 		finally
@@ -148,8 +168,7 @@ class AeronReaderCrashMatrixIT
 	}
 
 	private static Process launch(final Path base, final String mode, final String point, final long recordingId,
-		final String controlChannel, final String controlResponseChannel, final String liveChannel,
-		final String replayChannel, final Path aeronDirectory) throws IOException
+		final String controlChannel, final Path aeronDirectory) throws IOException
 	{
 		final Path control = base.resolve("control");
 		Files.createDirectories(control);
@@ -165,9 +184,9 @@ class AeronReaderCrashMatrixIT
 			"-Ddg.reader.barrier=" + point,
 			"-Ddg.reader.recordingId=" + recordingId,
 			"-Ddg.reader.controlChannel=" + controlChannel,
-			"-Ddg.reader.controlResponseChannel=" + controlResponseChannel,
-			"-Ddg.reader.liveChannel=" + liveChannel,
-			"-Ddg.reader.replayChannel=" + replayChannel,
+			"-Ddg.reader.controlResponseChannel=" + CONTROL_RESPONSE_CHANNEL,
+			"-Ddg.reader.liveChannel=" + LIVE_CHANNEL,
+			"-Ddg.reader.replayChannel=" + REPLAY_CHANNEL,
 			"-Ddg.reader.aeronDirectory=" + aeronDirectory,
 			"-Ddg.reader.sharedDriver=true",
 			ReaderCrashChildMain.class.getName())
@@ -184,10 +203,10 @@ class AeronReaderCrashMatrixIT
 		return result;
 	}
 
-	private static long awaitRecordingId(final AeronArchiveReplicationPublisher publisher, final long timeout)
+	private static long awaitRecordingId(final AeronArchiveReplicationPublisher publisher)
 		throws InterruptedException
 	{
-		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(RECORDING_ID_TIMEOUT_MILLIS);
 		while (System.nanoTime() < deadline)
 		{
 			final long recordingId = publisher.recordingId();
@@ -197,10 +216,10 @@ class AeronReaderCrashMatrixIT
 		throw new AssertionError("recording id not available");
 	}
 
-	private static void awaitFile(final Path path, final Process process, final long timeout)
-		throws IOException, InterruptedException
+	private static void awaitFile(final Path path, final Process process)
+		throws  InterruptedException
 	{
-		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CHILD_FILE_TIMEOUT_MILLIS);
 		while (!Files.exists(path) && System.nanoTime() < deadline)
 		{
 			if (!process.isAlive())

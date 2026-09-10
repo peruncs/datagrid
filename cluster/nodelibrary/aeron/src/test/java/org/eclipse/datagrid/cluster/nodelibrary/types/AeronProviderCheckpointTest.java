@@ -28,6 +28,8 @@ import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -41,7 +43,8 @@ class AeronProviderCheckpointTest
 	{
 		final Path directory = Files.createTempDirectory("datagrid-aeron-provider-");
 		final Path archive = directory.resolveSibling(directory.getFileName() + ".archive");
-		final Path checkpoint = directory.resolveSibling(directory.getFileName() + ".writer.checkpoint");
+		final Path checkpointDirectory = directory.resolveSibling(directory.getFileName() + ".checkpoint");
+		final Path checkpoint = checkpointDirectory.resolve("writer.checkpoint");
 		final int controlPort = freePort();
 		final int livePort = freePort();
 		final String clusterId = UUID.randomUUID().toString();
@@ -60,7 +63,8 @@ class AeronProviderCheckpointTest
 					case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> directory.toString();
 					case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> archive.toString();
 					case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> checkpoint.toString();
-					case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> "aeron:udp?endpoint=localhost:" + livePort;
+					case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" ->
+						"aeron:udp?control=localhost:" + livePort + "|control-mode=dynamic|fc=max";
 					case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:" + controlPort;
 					case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
 						"ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
@@ -80,32 +84,46 @@ class AeronProviderCheckpointTest
 				@Override public void write(final Binary ignored) { }
 				@Override public boolean isWritable() { return true; }
 			});
-		try (Aeron subscriberAeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(directory.toString()));
-			Subscription subscriber = subscriberAeron.addSubscription("aeron:udp?endpoint=localhost:" + livePort, 1001))
+		try
 		{
 			target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1, 2, 3 })));
-			final AeronReplicationCheckpoint saved = AeronReplicationCheckpointStore.read(checkpoint);
-			assertEquals(AeronReplicationCheckpoint.State.COMMITTED, saved.state());
-			assertEquals(0, saved.transactionSequence());
-			assertTrue(saved.recordingId() >= 0);
-			transport.close();
-			transport = new AeronClusterReplicationTransportProvider().create(properties);
-			final ClusterStorageBinaryDataDistributor resumedDistributor = transport.distributor("stream", false);
-			final PersistenceTarget<Binary> resumedTarget = transport.persistenceTargetFactory("stream", resumedDistributor)
-				.apply(new PersistenceTarget<>()
-				{
-					@Override public void write(final Binary ignored) { }
-					@Override public boolean isWritable() { return true; }
-				});
-			try (Aeron resumedAeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(directory.toString()));
-				Subscription resumedSubscription = resumedAeron.addSubscription("aeron:udp?endpoint=localhost:" + livePort, 1001))
+		final AeronReplicationCheckpoint saved = AeronReplicationCheckpointStore.read(checkpoint);
+		assertEquals(AeronReplicationCheckpoint.State.COMMITTED, saved.state());
+		assertEquals(0, saved.transactionSequence());
+		assertTrue(saved.recordingId() >= 0);
+		transport.close();
+		transport = new AeronClusterReplicationTransportProvider().create(properties);
+		final ClusterStorageBinaryDataDistributor resumedDistributor = transport.distributor("stream", false);
+		final PersistenceTarget<Binary> resumedTarget = transport.persistenceTargetFactory("stream", resumedDistributor)
+			.apply(new PersistenceTarget<>()
 			{
-				resumedTarget.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 4, 5 })));
+				@Override public void write(final Binary ignored) { }
+				@Override public boolean isWritable() { return true; }
+			});
+		final AtomicInteger receivedFrames = new AtomicInteger();
+		try (Aeron subscriberAeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(directory.toString()));
+			final Subscription subscriber = subscriberAeron.addSubscription(
+				"aeron:udp?endpoint=localhost:0|control=localhost:" + livePort + "|control-mode=dynamic", 1001))
+		{
+			final long connectDeadline = System.nanoTime() + 10_000_000_000L;
+			while (!subscriber.isConnected() && System.nanoTime() < connectDeadline)
+			{
+				LockSupport.parkNanos(1_000_000L);
 			}
-			final AeronReplicationCheckpoint resumed = AeronReplicationCheckpointStore.read(checkpoint);
-			assertEquals(AeronReplicationCheckpoint.State.COMMITTED, resumed.state());
-			assertEquals(1, resumed.transactionSequence());
-			assertEquals(saved.recordingId(), resumed.recordingId());
+			assertTrue(subscriber.isConnected(), "dynamic-MDC subscriber did not connect");
+			resumedTarget.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 4, 5 })));
+			final long receiveDeadline = System.nanoTime() + 10_000_000_000L;
+			while (receivedFrames.get() == 0 && System.nanoTime() < receiveDeadline)
+			{
+				subscriber.poll((buffer, offset, length, header) -> receivedFrames.incrementAndGet(), 10);
+				LockSupport.parkNanos(1_000_000L);
+			}
+		}
+		assertTrue(receivedFrames.get() > 0, "dynamic-MDC subscriber received no published envelopes");
+		final AeronReplicationCheckpoint resumed = AeronReplicationCheckpointStore.read(checkpoint);
+		assertEquals(AeronReplicationCheckpoint.State.COMMITTED, resumed.state());
+		assertEquals(1, resumed.transactionSequence());
+		assertEquals(saved.recordingId(), resumed.recordingId());
 		}
 		finally
 		{
@@ -118,6 +136,16 @@ class AeronProviderCheckpointTest
 				});
 			}
 			Files.deleteIfExists(checkpoint);
+			if (Files.exists(checkpointDirectory))
+			{
+				try (var paths = Files.walk(checkpointDirectory))
+				{
+					paths.sorted(java.util.Comparator.reverseOrder()).forEach(path ->
+					{
+						try { Files.deleteIfExists(path); } catch (final Exception ignored) { }
+					});
+				}
+			}
 			if (Files.exists(archive))
 			{
 				try (var paths = Files.walk(archive))

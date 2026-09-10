@@ -145,9 +145,10 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 	public synchronized void dispose()
 	{
 		if (this.disposed) return;
-		this.disposed = true;
 		final Thread pollingThread = this.thread;
-		this.thread = null;
 		AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close);
+		this.thread = null;
+		this.assembler.dispose();
+		this.disposed = true;
 	}
 }

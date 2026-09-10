@@ -21,7 +21,8 @@ import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.M
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
-public class ClusterStorageBinaryDistributedKafka
+/** Kafka header codec for the cluster nodelibrary packet stream. */
+public final class ClusterStorageBinaryDistributedKafka
 {
 	public static String keyMessageType()
 	{

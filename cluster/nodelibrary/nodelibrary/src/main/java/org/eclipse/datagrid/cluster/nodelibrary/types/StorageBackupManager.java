@@ -140,10 +140,17 @@ public interface StorageBackupManager
                 if (!useManualSlot)
                 {
                     // delete up to the previous backup to save on Kafka log storage
-                    this.backend.getMessageInfoFromPreviousBackup(1)
-                        .ifPresent(info -> this.retention.deleteThrough(new ReplicationCursor(
-                            info.transport(), info.storeGeneration(), info.messageIndex(), info.providerPosition()
-                        )));
+					if (this.retention.isSupported())
+					{
+						this.backend.getMessageInfoFromPreviousBackup(1)
+							.ifPresent(info -> this.retention.deleteThrough(new ReplicationCursor(
+								info.transport(), info.storeGeneration(), info.messageIndex(), info.providerPosition()
+							)));
+					}
+					else
+					{
+						LOG.warn("Replication retention is unsupported; preserving Archive history");
+					}
                 }
             }
             finally

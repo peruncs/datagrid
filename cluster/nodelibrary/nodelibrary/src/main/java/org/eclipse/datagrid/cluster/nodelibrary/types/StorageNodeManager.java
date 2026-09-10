@@ -259,9 +259,17 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				return this.positionProvider.latestSequence();
 			}
-			catch (final NodelibraryException e)
+			catch (final UnsupportedOperationException unavailable)
 			{
-				throw new IllegalStateException("Failed to read latest replication position", e);
+				/* Reader roles cannot infer the writer boundary from an applied cursor.
+				 * Expose unknown as -1 to monitoring rather than turning a metrics scrape
+				 * into a node failure. */
+				LOG.debug("Latest replication position is unavailable for this node role", unavailable);
+				return -1L;
+			}
+			catch (final NodelibraryException failure)
+			{
+				throw new IllegalStateException("Failed to read latest replication position", failure);
 			}
 		}
 

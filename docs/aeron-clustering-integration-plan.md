@@ -10,18 +10,20 @@ Consensus: intentionally out of scope
 Implementation snapshot: `storage-distributed-aeron` now contains the optional
 fixed-envelope publisher, Archive publisher, live and Archive-backed readers,
 cursor codec, write coordinator, Archive-first persistence-target adapter,
-reader-progress tracker, ACK publisher/receiver, atomic fixed checkpoint files,
-recording extension support, backup replication manifests, and JUnit/unit plus embedded dynamic-MDC UDP/Archive
-integration tests. The cluster lifecycle now has no Kafka imports: `cluster-nodelibrary-kafka`
+atomic fixed checkpoint files, recording extension support, and JUnit/unit plus
+embedded dynamic-MDC UDP/Archive integration
+tests. Reader-progress ACKs and automatic Archive retention are intentionally
+not enabled; the provider exposes retention as an explicit unsupported
+capability until authenticated durable watermarks and disk-admission controls
+are implemented. The cluster lifecycle now has no Kafka imports: `cluster-nodelibrary-kafka`
 and `cluster-nodelibrary-aeron` are selectable provider modules discovered
 through the neutral SPI, while `storage-distributed` remains provider-free.
 The neutral persistence configurator accepts a provider target factory, so the
 Aeron provider can preserve Archive-prepare/local-enqueue/Archive-commit
 ordering without leaking Aeron into the core artifact. The Aeron packet path
 also waits for the neutral merger's completed materialization hook before
-advancing its cursor. Backup manifest writing and the fixed-reader ACK
-publisher/receiver path are now present; manifest precedence/restore
-validation, provider-level ACK/retention and checkpoint integration tests,
+advancing its cursor. Backup manifest precedence/restore validation, provider-
+level ACK/retention and checkpoint integration tests,
 Store durable-completion acknowledgement, provider checkpoint-driven recording
 restart recovery, and
 Lucene/vector readiness remain explicit
@@ -29,9 +31,13 @@ follow-on gates; the release checklist below does not claim those production
 hooks are complete until their phase tests pass. Framework adapters are also
 provider-neutral: Spring Boot, Micronaut, and Helidon depend only on the
 neutral nodelibrary, and an application adds exactly one provider module.
+The neutral storage root defaults to `/storage` and may be overridden with
+`ECLIPSE_DATAGRID_STORAGE_PATH`; the offset file and SaaS backup scratch space
+follow that root.
 The neutral merger's normal coalescing timeout is bypassed at an Aeron
-transaction boundary, so a cursor/ACK is emitted only after synchronous
-object-graph materialization rather than after an arbitrary batching delay.
+transaction boundary, so the resolved-cursor callback is emitted only after
+synchronous object-graph materialization rather than after an arbitrary
+batching delay. The current provider does not emit reader-progress ACKs.
 
 ## 1. Decision and feasibility
 
@@ -138,18 +144,28 @@ Kafka poll
        2. ObjectMaterializer reloads live objects
 ```
 
-Reusable seams already exist, but the cluster layer is not actually transport-neutral:
+Reusable seams already exist, but the cluster layer still carries a few legacy
+transport assumptions:
 
-- `MessageInfo` contains Kafka `TopicPartition` values;
-- `ClusterStorageBinaryDataClient` is a Kafka implementation despite its generic name;
-- `ClusterFoundation`, `StorageNodeManager`, health checks, backup retention, and environment properties directly construct or name Kafka services;
-- the Kafka packet sequence increments per packet instead of identifying one complete logical Store write;
-- `/storage/offset` is truncated then rewritten and is not an atomic, forced checkpoint;
-- storage-node startup currently deletes `/storage/storage` and `/storage/offset` before downloading a backup, so a surviving node-local cursor cannot automatically win over the backup cursor;
-- the asynchronous merger may advance messaging state before delayed object-graph materialization completes;
-- the separate `cache/clustered/kafka` module is another Kafka user but is not part of Store binary replication;
-- no JUnit tests currently protect the replication contract;
-- transient Lucene/JVector runtime state is not proven to refresh when an already-live reader rematerializes persisted objects.
+- legacy Kafka cursor bytes encode `TopicPartition` rows; the neutral
+  `MessageInfo` contract itself no longer exposes Kafka classes;
+- provider-specific clients remain behind the generic
+  `ClusterStorageBinaryDataClient`/distributor interfaces;
+- the old Kafka packet sequence is still packet-oriented, while Aeron uses a
+  complete logical Store-write sequence;
+- the Kafka offset path retains its historical truncate-write behavior; Aeron
+  uses the atomic checkpoint/cursor path and the storage root is configurable;
+- storage-node startup removes the selected local Store/cursor root before a
+  backup restore, so backup precedence remains an explicit lifecycle decision;
+- the asynchronous merger now waits for materialization before Aeron cursor
+  advancement, while the legacy Kafka path retains its adapter semantics;
+- the separate `cache/clustered/kafka` module is another Kafka user but is not
+  part of Store binary replication;
+- unit, crash-matrix, and embedded UDP/Archive tests now protect the main
+  replication contract; full Store/Lucene/JVector rematerialization coverage
+  remains a follow-on gate;
+- transient Lucene/JVector runtime state is not proven to refresh when an
+  already-live reader rematerializes persisted objects.
 
 These are integration concerns, not reasons to fork Eclipse Store serialization or introduce Aeron Cluster.
 
@@ -187,9 +203,19 @@ flowchart LR
 - Writer-local Archive control uses the default IPC local-control channel. The writer creates a separate `Aeron` client and `AeronArchive` client against the `ArchivingMediaDriver` directory; `AeronArchive.addRecordedExclusivePublication(channel, streamId)` creates the exclusive publication and starts its session-specific local recording.
 - Remote Archive control request: reader publication to the writer's UDP control endpoint. Each `AeronArchive.Context` supplies both `controlRequestChannel` and `controlResponseChannel`; the latter binds a routable reader endpoint (port `0` only when the resolved address can be returned through the deployment network).
 - Replay: writer Archive publication to the reader's resolved UDP replay endpoint.
-- Progress acknowledgements: each reader publishes small versioned envelope messages to one writer UDP subscription.
+- Future retention designs may use progress acknowledgements from each reader;
+  the current provider publishes no ACK stream and does not expose this UDP
+  subscription.
 
 Dynamic MDC avoids requiring multicast support from Kubernetes/cloud networks while still sending one logical stream to N readers. `fc=max` is made explicit even though it is the normal MDC default: the fastest live receiver advances the publication, while a slow reader recovers from Archive. It applies to the MDC publication, not plain unicast channels. Aeron flow control and the application wait for `RecordingPos` are independent gates.
+
+The current provider does not configure application authentication or
+authorization for Archive control and replay. Those UDP endpoints are therefore
+trusted deployment surfaces: production must bind them to private interfaces
+and enforce NetworkPolicies/security groups that permit only the configured
+writer/readers. Cluster UUIDs and CRC32C values authenticate neither endpoint;
+ACK-driven deletion remains disabled until a real authenticated watermark
+protocol exists.
 
 The writer must wait until the local recording subscription is active before becoming writable. Once active, it is the receiver that permits progress with zero external readers. `NOT_CONNECTED` before that point is a startup/not-ready condition, never a reason to bypass the Archive. Phase 0 must prove this with the exact recorded dynamic-MDC channel, not a simpler unicast sample.
 
@@ -197,7 +223,9 @@ For Kubernetes, the writer MDC control endpoint and Archive control endpoint req
 
 ### Runtime ownership
 
-- Writer owns one persistent `ArchivingMediaDriver`, one `Aeron` client, one `AeronArchive` client, one recorded `ExclusivePublication`, and one reader-progress subscription.
+- Writer owns one persistent `ArchivingMediaDriver`, one `Aeron` client, one
+  `AeronArchive` client, and one recorded `ExclusivePublication`. No
+  reader-progress subscription is created by the current provider.
 - Each reader owns one `MediaDriver`, one `Aeron` client, and one `PersistentSubscription` connected to the writer Archive.
 - Production Archive storage is a persistent filesystem, never `/dev/shm`; the Media Driver directory may use `/dev/shm`. If no directory is configured, derive a node-specific name; never let two node processes share one Aeron directory.
 - Tests use shared threading mode, loopback UDP, unique temporary directories, and dynamically allocated ports.
@@ -273,16 +301,23 @@ public record PreparedReplication(
 
 `OwnedBinarySnapshot` is a package-private, bounded, `AutoCloseable` sequence of read-only buffers; it exists only when bytes must outlive the intercepted call and releases direct storage deterministically. The coordinator and `StorageTypeDictionaryExporterDistributing` share a per-thread pending-dictionary holder. Each exporter callback replaces the prior full snapshot for that thread; `beforeLocalEnqueue` consumes and clears it. The coordinator's single writer lock covers sequence reservation, complete prepare publication, local enqueue, and commit publication, so transactions cannot interleave. Phase 0 must verify this with concurrent application commits and multiple new types. Kafka continues through an adapter that preserves its current local-enqueue-then-distribute behavior.
 
-Retain the existing public `StorageBinaryDataDistributor` as a compatibility adapter for callers that only need enqueue-then-distribute. New durability semantics use `ReplicationWriteCoordinator`; do not add prepare/commit methods to Kafka-shaped public APIs under misleading names.
+Retain the existing public `StorageBinaryDataDistributor` as a compatibility
+adapter for dictionary/lifecycle operations. The Aeron provider rejects direct
+data publication through that adapter because it cannot fence a local Store
+acceptance that already happened; callers must obtain the provider's
+`persistenceTargetFactory` for the coordinated transaction boundary. New
+durability semantics use `ReplicationWriteCoordinator`; do not add
+prepare/commit methods to Kafka-shaped public APIs under misleading names.
 
 ### `ARCHIVE_FIRST` writer state machine
 
 For every `PersistenceTarget.write(Binary data)`:
 
 1. Acquire the writer transaction lock and reject work unless the publication, Store, Archive client, and active recording counter are healthy.
-2. Reserve the next sequence. Intermediate states remain in memory; only terminal
-   `COMMITTED`/`REJECTED` checkpoints are persisted so a torn write cannot overwrite
-   the last restartable checkpoint.
+2. Reserve the next sequence and persist a `PREPARING` fence in the
+   `.inflight` checkpoint. Intermediate states remain non-terminal; only
+   `COMMITTED`/`REJECTED` checkpoints are restartable, so a torn write cannot
+   overwrite the last known terminal checkpoint.
 3. Duplicate/slice or copy all `Binary` buffers without changing caller positions. Capture the committing thread's latest pending full dictionary snapshot.
 4. Offer all dictionary and data chunks on the recorded `ExclusivePublication`. `BACK_PRESSURED`, `ADMIN_ACTION`, and transient `NOT_CONNECTED` use a deadline plus `BackoffIdleStrategy`; `CLOSED` and `MAX_POSITION_EXCEEDED` are fatal. `NOT_CONNECTED` is not tolerated after writer readiness.
 5. Save the positive position returned by the final prepare offer. Resolve the recording counter with `RecordingPos.findCounterIdByRecording(counters, recordingId, archiveId)` and wait until its value reaches that position. Re-resolve a missing/stale counter and require `RecordingPos.isActive(...)`; timeout and fail closed when the Archive does not advance.
@@ -303,9 +338,11 @@ Readers assemble chunks but call neither `receiveTypeDictionary` nor `receiveDat
 5. materialize changed live objects through DataGrid's `ObjectGraphUpdateHandler` write-side contract;
 6. finish transient-index invalidation/refresh or durably mark the derived index `REBUILDING`;
 7. persist the cursor using `Header.position()` from the fully assembled `TransactionCommit`; Aeron defines this as the position immediately after the final frame of that message;
-8. publish a monotonic `ReaderProgress` asynchronously and release owned buffers.
+8. invoke the configured transaction-resolved callback after materialization and
+   cursor handling, then release owned buffers. No reader-progress/ACK stream is
+   emitted by the current provider.
 
-On `TransactionAbort`, validate the same cluster/epoch/sequence rule, discard buffered chunks, persist a cursor at that abort message's `Header.position()`, advance `lastResolved`, and ACK it without importing data. Aborted sequences therefore do not create a false gap before the next committed sequence. Track `lastApplied` as an observability value separate from the durable ordering cursor.
+On `TransactionAbort`, validate the same cluster/epoch/sequence rule, discard buffered chunks, persist a cursor at that abort message's `Header.position()`, advance `lastResolved`, and invoke the configured resolved-cursor callback without importing data. Aborted sequences therefore do not create a false gap before the next committed sequence. Track `lastApplied` as an observability value separate from the durable ordering cursor.
 
 If any step through cursor persistence fails, close the `PersistentSubscription`, preserve the prior cursor, set readiness to `FAILED`, and let the node supervisor recreate it from that cursor. Merely ceasing `poll()` is forbidden because `PersistentSubscription` performs its Archive control and replay/live state machine inside `poll`/`controlledPoll`. Corrupt transactions are never logged-and-skipped.
 
@@ -544,13 +581,17 @@ PersistentSubscription.create(new PersistentSubscription.Context()
 
 ### ACK, membership, and retention algorithm
 
+The following is the planned retention protocol, not a deployed API: the
+current provider emits no ACK/ReaderProgress stream and rejects retention
+requests. These rules are prerequisites for a future authenticated release.
+
 The writer loads the fixed reader-ID set from configuration plus persisted retirement tombstones. It keeps `{position, sequence, lastSeen}` per reader on the ACK subscription's single owner thread. A valid ACK must match cluster, recording, epoch and configured reader ID; it may only advance monotonically and may not exceed the writer's resolved commit/abort sequence and position. Duplicate, stale, or reordered ACKs are ignored. Each reader sends immediately after cursor force and repeats its last ACK periodically, so loss delays deletion but never makes it more aggressive.
 
 An absent/stale reader remains in the minimum and raises an alert. Only an explicit operator retirement tombstone removes it; timeouts never authorize deletion. The raw ACK stream is trusted only inside the authenticated/private network boundary described in section 15.
 
 With an empty fixed-reader set, the backup position alone gates retention. Adding a reader initializes its watermark to the backup cursor selected for that reader, so it blocks newer purges until its first durable ACK.
 
-Retention is currently fail-closed and returns a no-op policy. The unused ACK/tracker implementation is removed; no ACK wire type can delete Archive segments. A future retention phase must first define authenticated durable watermarks, then compute `safePosition = min(newestRestorableBackupPosition, allNonRetiredReaderPositions)`, round down to complete inactive segments, and add authentication and durable-watermark tests before enabling deletion.
+Retention is currently fail-closed and `deleteThrough` rejects with an explicit unsupported-capability error. No ACK wire type can delete Archive segments. A future retention phase must first define authenticated durable watermarks, then compute `safePosition = min(newestRestorableBackupPosition, allNonRetiredReaderPositions)`, round down to complete inactive segments, and add authentication and durable-watermark tests before enabling deletion. Operators must monitor Archive capacity and provision/rotate storage before exhaustion; acknowledged writes are not protected by automatic purge in this release.
 
 Apply the replay limit with `Archive.Context.maxConcurrentReplays(...)`. A reader rejected because the limit is full stays `REPLAYING`, retains its cursor, and retries with bounded exponential backoff plus stable node-ID jitter; it never falls back to live-only delivery.
 
@@ -868,7 +909,8 @@ Export at least:
 - writer publication position and Archive recording position;
 - Archive acknowledgement latency and offer retry counts by result code;
 - Archive bytes, segment count, usable disk, and oldest/newest positions;
-- per-reader durable sequence/position, reported ACK, replay lag bytes, time since apply, live/replay state;
+- per-reader durable sequence/position, and (once the planned ACK protocol is
+  enabled) reported ACK, replay lag bytes, time since apply, and live/replay state;
 - transaction bytes/chunks and assembly memory;
 - import/materialization latency;
 - Lucene/vector rebuild state, duration, and pending structural version;
@@ -891,7 +933,7 @@ Set absolute latency/throughput SLOs only after Phase 0 measurements; invented n
 Aeron reliable UDP is not TLS. The initial open-source design therefore requires:
 
 - private network interfaces only;
-- Kubernetes NetworkPolicies/security groups restricting live, ACK, replay, and Archive-control ports to configured nodes;
+- Kubernetes NetworkPolicies/security groups restricting live, replay, and Archive-control ports to configured nodes;
 - separate cluster UUID and fixed node IDs checked in every application envelope;
 - filesystem permissions protecting Archive and cursor data;
 - no user data in operational logs;
@@ -899,7 +941,7 @@ Aeron reliable UDP is not TLS. The initial open-source design therefore requires
 
 If network isolation is insufficient, add Aeron Archive authentication/authorisation or a standard network encryption layer such as IPsec/WireGuard. Do not design ad-hoc payload encryption in this integration.
 
-Archive authentication protects Archive control sessions, not the separate live or `ReaderProgress` streams. Without a trusted/authenticated network overlay, disable ACK-driven automatic purge and require an operator-confirmed backup watermark; a forged high ACK must never be able to delete required history.
+Archive authentication protects Archive control sessions, not the separate live stream. The current provider has no ACK stream and disables automatic purge; a future authenticated watermark protocol must reject forged progress before it can authorize deletion.
 
 ## 16. Migration and rollback
 

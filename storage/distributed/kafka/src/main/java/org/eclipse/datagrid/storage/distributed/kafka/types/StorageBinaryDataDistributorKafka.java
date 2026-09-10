@@ -32,14 +32,17 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.eclipse.serializer.chars.XChars.notEmpty;
 import static org.eclipse.serializer.util.X.notNull;
 
 public interface StorageBinaryDataDistributorKafka
 	extends
-	StorageBinaryDataDistributor
+		StorageBinaryDataDistributor
 {
+	/** Stable key used to keep every packet for a stream on one Kafka partition. */
+	String PARTITION_KEY = "eclipse-datagrid-replication";
 	static StorageBinaryDataDistributorKafka Sync(
             final Properties kafkaProperties,
             final String topicName
@@ -64,9 +67,12 @@ public interface StorageBinaryDataDistributorKafka
 
 	abstract class Abstract implements StorageBinaryDataDistributorKafka
 	{
+		protected static final System.Logger LOG = System.getLogger(StorageBinaryDataDistributorKafka.class.getName());
 		private final Properties kafkaProperties;
 		private final String topicName;
 		private KafkaProducer<String, byte[]> kafkaProducer;
+		private volatile RuntimeException failure;
+		protected final AtomicLong droppedAfterFailure = new AtomicLong();
 
 		Abstract(
 			final Properties kafkaProperties,
@@ -94,7 +100,16 @@ public interface StorageBinaryDataDistributorKafka
 			properties.setProperty(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
 			properties.setProperty(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
 
-			return new KafkaProducer<>(properties);
+			final KafkaProducer<String, byte[]> producer = new KafkaProducer<>(properties);
+			final int partitionCount = producer.partitionsFor(this.topicName).size();
+			if (partitionCount != 1)
+			{
+				producer.close();
+				throw new IllegalArgumentException(
+					"Kafka replication topic must have exactly one partition; found " + partitionCount
+				);
+			}
+			return producer;
 		}
 
 		private void distribute(
@@ -102,7 +117,33 @@ public interface StorageBinaryDataDistributorKafka
 			final Binary data
 		)
 		{
-			this.execute(() -> this.executeDistribution(messageType, data));
+			if (this.failure != null) throw new IllegalStateException("Kafka distributor has failed", this.failure);
+			try
+			{
+				this.execute(() -> this.executeDistribution(messageType, data));
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				/* Sync execution and executor submission failures must establish the same
+				 * terminal state; otherwise a later write can silently retry a broken log. */
+				this.recordFailure(failure);
+				throw failure;
+			}
+		}
+
+		protected final synchronized void recordFailure(final Throwable failure)
+		{
+			if (this.failure == null)
+			{
+				this.failure = failure instanceof RuntimeException runtime
+					? runtime
+					: new IllegalStateException("Kafka distribution failed", failure);
+			}
+		}
+
+		public final RuntimeException failure()
+		{
+			return this.failure;
 		}
 
 		private void executeDistribution(
@@ -113,7 +154,8 @@ public interface StorageBinaryDataDistributorKafka
 			final KafkaProducer<String, byte[]> producer = this.ensureProducer();
 			StorageBinaryDataChunker.forEach(data, StorageBinaryDistributedKafka.maxPacketSize(), chunk ->
 			{
-				final ProducerRecord<String, byte[]> record = new ProducerRecord<>(this.topicName, chunk.bytes());
+				final ProducerRecord<String, byte[]> record = new ProducerRecord<>(
+					this.topicName, PARTITION_KEY, chunk.bytes());
 				StorageBinaryDistributedKafka.addPacketHeaders(
 					record.headers(),
 					messageType,
@@ -180,6 +222,7 @@ public interface StorageBinaryDataDistributorKafka
 
 	}
 
+	/** Sends records on the calling thread; distribution blocks until Kafka acknowledges them. */
 	class Sync extends Abstract
 	{
 		Sync(
@@ -221,7 +264,29 @@ public interface StorageBinaryDataDistributorKafka
 		@Override
 		protected void execute(final Runnable action)
 		{
-			this.executor.execute(action);
+			// The wrapper records failures because the base implementation submits
+			// arbitrary actions; the cluster distributor performs this capture in its
+			// own tryExecuteDistribution method.
+			this.executor.execute(() ->
+			{
+				if (failure() != null)
+				{
+					final long dropped = this.droppedAfterFailure.incrementAndGet();
+					// The caller already handed off this asynchronous action; retain evidence
+					// that it was dropped after the distributor entered its terminal state.
+					LOG.log(System.Logger.Level.WARNING,
+							"Dropping queued Kafka distribution " + dropped + " after terminal failure");
+					return;
+				}
+				try
+				{
+					action.run();
+				}
+				catch (final Throwable failure)
+				{
+					recordFailure(failure);
+				}
+			});
 		}
 
 		@Override

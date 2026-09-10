@@ -36,6 +36,12 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDataPacketAcceptor, Disposable
 {
+	/** Returns a failure reported by the asynchronous merger, or {@code null}. */
+	default RuntimeException failure()
+	{
+		return null;
+	}
+
 	default void awaitApplied()
 	{
 	}
@@ -65,6 +71,12 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 			{
 				this.handleCompleteMessages(result.completed());
 			}
+		}
+
+		@Override
+		public RuntimeException failure()
+		{
+			return this.merger.failure();
 		}
 
 		private void handleCompleteMessages(final List<StorageBinaryDataMessage> messages)

@@ -45,8 +45,16 @@ envelope; no SBE or second serialization pass is required.
 Writer checkpoint persistence is enabled in the provider. ACK-driven retention
 is intentionally not part of this release: the unused ACK/tracker implementation
 was removed rather than shipped as a misleading public surface. The nodelibrary
-provider exposes a safe no-op retention policy until authenticated reader
-identities and durable watermarks are designed and implemented.
+provider rejects retention requests with an explicit unsupported-capability
+error until authenticated reader identities and durable watermarks are designed
+and implemented; it never pretends that history was reclaimed. Operators must
+monitor Archive capacity and rotate or expand storage before it is exhausted.
+
+Aeron Archive control and replay channels have no application authentication in
+this provider. Production deployments must isolate those endpoints with private
+interfaces, firewall rules, and Kubernetes NetworkPolicies/security groups.
+Cluster UUIDs and CRCs validate data identity and integrity only; they are not
+credentials. Do not enable ACK-driven deletion on an untrusted network.
 
 Fixed-writer/no-consensus operation is intentional. Writer fencing and manual
 promotion remain deployment responsibilities.

@@ -54,6 +54,12 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger, Disposable
 {
+	/** Returns an asynchronous materialization failure, or {@code null} while healthy. */
+	default RuntimeException failure()
+	{
+		return null;
+	}
+
 	static ClusterStorageBinaryDataMerger New(
 		final BinaryPersistenceFoundation<?> foundation,
 		final StorageConnection storage,
@@ -98,6 +104,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		private final long cachingTimeoutMs;
 		private final long cacheLimit;
 		private volatile boolean disposed;
+		private volatile RuntimeException failure;
 
 		private Future<?> updateFuture = CompletableFuture.completedFuture(null);
 
@@ -119,6 +126,10 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		@Override
 		public synchronized void receiveData(final Binary data)
 		{
+			if (this.failure != null)
+			{
+				throw new IllegalStateException("Storage binary merger has failed", this.failure);
+			}
 			if (this.disposed)
 			{
 				return;
@@ -143,7 +154,12 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 							this.releaseCachedData();
 							return;
 						}
-						GlobalErrorHandling.handleFatalError(t);
+						this.failure = t instanceof RuntimeException runtime
+							? runtime
+							: new IllegalStateException("Storage binary merger failed", t);
+						LOG.error("Storage binary merger failed", this.failure);
+						this.releaseCachedData();
+						throw this.failure;
 					}
 				});
 			}
@@ -158,12 +174,21 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 					}
 					catch (final InterruptedException e)
 					{
-						LOG.debug("Interrupted while waiting for import data task", e);
 						Thread.currentThread().interrupt();
+						/* A Kafka reader can be interrupted while disposal is waiting for this
+						 * backpressure loop. Do not continue calling Future.get() with the
+						 * interrupt flag set: that creates a hot loop and prevents shutdown. */
+						throw new IllegalStateException("Interrupted while waiting for import data task", e);
 					}
 					catch (final ExecutionException e)
 					{
-						// does not happen as any throwables are handled
+						// The worker records its terminal failure before completing exceptionally.
+						final RuntimeException mergerFailure = this.failure;
+						if (mergerFailure != null)
+						{
+							throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
+						}
+						throw new IllegalStateException("Storage binary merger task failed", e.getCause());
 					}
 					catch (final TimeoutException e)
 					{
@@ -171,6 +196,12 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 					}
 				}
 			}
+		}
+
+		@Override
+		public RuntimeException failure()
+		{
+			return this.failure;
 		}
 
 		private void applyData()
@@ -249,6 +280,10 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		@Override
 		public synchronized void receiveTypeDictionary(final String typeDictionaryData)
 		{
+			if (this.failure != null)
+			{
+				throw new IllegalStateException("Storage binary merger has failed", this.failure);
+			}
 			if (this.disposed) return;
 			final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
 				.setClassLoaderProvider(this.foundation.getClassLoaderProvider())
@@ -305,6 +340,10 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		@Override
 		public synchronized void awaitApplied()
 		{
+			if (this.failure != null)
+			{
+				throw new IllegalStateException("Storage binary merger has failed", this.failure);
+			}
 			/*
 			 * The normal merger deliberately delays materialization to coalesce updates.
 			 * A replication cursor/ACK, however, is a durability boundary: waiting for

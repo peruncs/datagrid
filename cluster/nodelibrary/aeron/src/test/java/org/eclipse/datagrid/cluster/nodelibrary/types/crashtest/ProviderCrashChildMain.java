@@ -265,7 +265,7 @@ public final class ProviderCrashChildMain
 				try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE))
 				{
 					final ByteBuffer bytes = StandardCharsets.UTF_8.encode(value);
-					while (bytes.hasRemaining()) channel.write(bytes);
+					writeFully(channel, bytes);
 					channel.force(true);
 				}
 				Files.move(temporary, destination, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
@@ -296,6 +296,8 @@ public final class ProviderCrashChildMain
 		private ClusterReplicationTransport transport;
 		private Thread subscriberThread;
 		private volatile Throwable subscriberFailure;
+		private final AtomicBoolean subscriberReady = new AtomicBoolean();
+		private final AtomicBoolean runtimeReady = new AtomicBoolean();
 		private int writes;
 
 		private ChildRuntime(final Path base, final Path control,
@@ -315,7 +317,10 @@ public final class ProviderCrashChildMain
 			// publication's reader. A second local subscription would bind the same
 			// UDP endpoint and make the external recording impossible to start.
 			if (Boolean.parseBoolean(System.getProperty("dg.crash.subscriber", "true")) &&
-				!Boolean.getBoolean("dg.crash.externalArchive")) this.startSubscriber();
+				!Boolean.getBoolean("dg.crash.externalArchive"))
+			{
+				this.startSubscriber();
+			}
 		}
 
 		private void startSubscriber()
@@ -325,14 +330,17 @@ public final class ProviderCrashChildMain
 			{
 				try
 				{
+					while (this.running.get() && !this.runtimeReady.get()) sleep();
+					if (!this.running.get()) return;
 					final Path aeronDir = this.base.resolve(
 						Boolean.getBoolean("dg.crash.externalArchive") ? "writer-aeron" : "aeron");
-					while (this.running.get() && !Files.exists(aeronDir.resolve("cnc.dat"))) sleep(10L);
+					while (this.running.get() && !Files.exists(aeronDir.resolve("cnc.dat"))) sleep();
 					if (!this.running.get()) return;
 					try (io.aeron.Aeron aeron = io.aeron.Aeron.connect(
 						new io.aeron.Aeron.Context().aeronDirectoryName(aeronDir.toString()));
-						io.aeron.Subscription subscription = aeron.addSubscription(liveChannel(), STREAM_ID))
+						io.aeron.Subscription subscription = aeron.addSubscription(subscriberLiveChannel(), STREAM_ID))
 					{
+						this.subscriberReady.set(true);
 						while (this.running.get()) subscription.poll((buffer, offset, length, header) -> { }, 50);
 					}
 				}
@@ -347,7 +355,8 @@ public final class ProviderCrashChildMain
 
 		private void write(final byte[] payload)
 		{
-			if (this.subscriberFailure != null) throw new IllegalStateException("subscriber failed", this.subscriberFailure);
+			if (this.subscriberFailure != null)
+				throw new IllegalStateException("subscriber failed: " + this.subscriberFailure, this.subscriberFailure);
 			final ClusterStorageBinaryDataDistributor distributor = this.transport.distributor(STREAM, false);
 			if (this.writes > 0 && "AFTER_DICTIONARY_CHUNKS".equals(this.barrierPoint))
 			{
@@ -355,9 +364,25 @@ public final class ProviderCrashChildMain
 			}
 			final PersistenceTarget<Binary> target = this.transport.persistenceTargetFactory(STREAM, distributor)
 				.apply(new FileStoreTarget(this.base.resolve("store.records"), this.writes));
+			this.runtimeReady.set(true);
+			this.awaitSubscriber();
 			final Binary binary = ChunksWrapper.New(XMemory.toDirectByteBuffer(payload));
 			target.write(binary);
 			this.writes++;
+		}
+
+		private void awaitSubscriber()
+		{
+			if (this.subscriberThread == null) return;
+			final long deadline = System.nanoTime() + 10_000_000_000L;
+			while (!this.subscriberReady.get() && this.subscriberFailure == null &&
+				System.nanoTime() < deadline)
+			{
+				sleep();
+			}
+			if (this.subscriberFailure != null)
+				throw new IllegalStateException("subscriber failed: " + this.subscriberFailure, this.subscriberFailure);
+			if (!this.subscriberReady.get()) throw new IllegalStateException("subscriber did not start");
 		}
 
 		private AeronReplicationCheckpoint checkpoint()
@@ -411,11 +436,11 @@ public final class ProviderCrashChildMain
 					}
 					final ByteBuffer header = ByteBuffer.allocate(Integer.BYTES * 2)
 						.putInt(length).putInt((int)crc.getValue()).flip();
-					while (header.hasRemaining()) channel.write(header);
+					writeFully(channel, header);
 					for (final ByteBuffer source : buffers)
 					{
 						final ByteBuffer duplicate = source.duplicate();
-						while (duplicate.hasRemaining()) channel.write(duplicate);
+						writeFully(channel, duplicate);
 					}
 					channel.force(true);
 				}
@@ -433,12 +458,21 @@ public final class ProviderCrashChildMain
 		}
 	}
 
+	private static void writeFully(final FileChannel channel, final ByteBuffer buffer) throws IOException
+	{
+		while (buffer.hasRemaining())
+		{
+			if (channel.write(buffer) == 0) Thread.onSpinWait();
+		}
+	}
+
 	private static void installCrashHooks(final Path control, final String point)
 	{
 		final long targetSequence = Long.getLong("dg.crash.sequence", 1L);
 		final BiConsumer<String, Long> hook = (name, sequence) ->
 		{
-			if (sequence != targetSequence) return;
+			if (sequence != targetSequence &&
+				!(sequence == -1L && "BEFORE_PUBLICATION_CONNECTED".equals(point))) return;
 			if ("AFTER_DATA_CHUNKS".equals(name) && Boolean.getBoolean("dg.crash.injectPrepareFailure"))
 			{
 				throw new IllegalStateException("injected prepare failure after data chunks");
@@ -545,12 +579,12 @@ public final class ProviderCrashChildMain
 
 	private static void awaitParent(final Path release)
 	{
-		while (!Files.exists(release)) sleep(10L);
+		while (!Files.exists(release)) sleep();
 	}
 
-	private static void sleep(final long millis)
+	private static void sleep()
 	{
-		try { Thread.sleep(millis); }
+		try { Thread.sleep(10L); }
 		catch (final InterruptedException interrupted)
 		{
 			Thread.currentThread().interrupt();
@@ -558,9 +592,18 @@ public final class ProviderCrashChildMain
 		}
 	}
 
-	private static String liveChannel()
+	private static String writerLiveChannel()
 	{
-		return "aeron:udp?endpoint=localhost:" + Integer.getInteger("dg.crash.livePort", 40123);
+		final int port = Integer.getInteger("dg.crash.livePort", 40123);
+		return Boolean.getBoolean("dg.crash.externalArchive")
+			? "aeron:udp?endpoint=localhost:" + port
+			: "aeron:udp?control=localhost:" + port + "|control-mode=dynamic|fc=max";
+	}
+
+	private static String subscriberLiveChannel()
+	{
+		return "aeron:udp?endpoint=localhost:0|control=localhost:" +
+			Integer.getInteger("dg.crash.livePort", 40123) + "|control-mode=dynamic";
 	}
 
 	private static final class ChildProperties implements NodelibraryPropertiesProvider
@@ -609,7 +652,7 @@ public final class ProviderCrashChildMain
 					this.externalArchive ? "writer-aeron" : "aeron").toString();
 				case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> this.base.resolve("archive").toString();
 				case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> this.base.resolve("checkpoint/writer.checkpoint").toString();
-				case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> liveChannel();
+				case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> writerLiveChannel();
 				case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" ->
 					"aeron:udp?endpoint=localhost:" + Integer.getInteger("dg.crash.controlPort", 40124);
 				case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
