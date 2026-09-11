@@ -14,8 +14,6 @@ package org.eclipse.datagrid.cache.clustered.kafka.types;
  * #L%
  */
 
-import javax.cache.event.*;
-
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageSender;
@@ -24,6 +22,8 @@ import org.eclipse.serializer.Serializer;
 import org.eclipse.serializer.typing.Disposable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.cache.event.*;
 
 import static org.eclipse.serializer.util.X.notNull;
 

@@ -14,9 +14,6 @@ package org.eclipse.datagrid.cache.clustered.types;
  * #L%
  */
 
-import java.lang.reflect.InvocationTargetException;
-import java.util.Map;
-
 import org.eclipse.serializer.Serializer;
 import org.eclipse.serializer.SerializerFoundation;
 import org.eclipse.store.cache.hibernate.types.CacheRegionFactory;
@@ -29,6 +26,9 @@ import org.hibernate.cache.spi.CacheKeysFactory;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.lang.reflect.InvocationTargetException;
+import java.util.Map;
 
 public class ClusteredCacheRegionFactory extends CacheRegionFactory
 {

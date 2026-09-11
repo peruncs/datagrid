@@ -14,9 +14,9 @@ package org.eclipse.datagrid.cache.clustered.types;
  * #L%
  */
 
-import javax.cache.event.CacheEntryListener;
-
 import org.eclipse.serializer.typing.Disposable;
+
+import javax.cache.event.CacheEntryListener;
 
 public interface ClusteredCacheMessageSender<K, V> extends CacheEntryListener<K, V>, Disposable
 {

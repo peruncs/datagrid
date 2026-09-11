@@ -14,12 +14,12 @@ package org.eclipse.datagrid.cache.clustered.types;
  * #L%
  */
 
+import org.hibernate.cache.internal.BasicCacheKeyImplementation;
+import org.hibernate.cache.internal.CacheKeyImplementation;
+
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
-
-import org.hibernate.cache.internal.BasicCacheKeyImplementation;
-import org.hibernate.cache.internal.CacheKeyImplementation;
 
 public interface SerializationTypesProvider
 {

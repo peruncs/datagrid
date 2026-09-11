@@ -14,11 +14,6 @@ package org.eclipse.datagrid.cache.clustered.kafka.types;
  * #L%
  */
 
-import java.time.Duration;
-import java.util.Collections;
-import java.util.Properties;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -30,6 +25,11 @@ import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageReceiver;
 import org.eclipse.serializer.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.util.Collections;
+import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageReceiver
 {

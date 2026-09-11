@@ -14,9 +14,9 @@ package org.eclipse.datagrid.cache.clustered.types;
  * #L%
  */
 
-import java.util.Map;
-
 import org.eclipse.serializer.Serializer;
+
+import java.util.Map;
 
 public interface ClusteredCacheMessageComProvider<K, V>
 {

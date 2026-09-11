@@ -14,10 +14,6 @@ package org.eclipse.datagrid.cache.clustered.kafka.types;
  * #L%
  */
 
-import java.util.Map;
-import java.util.Properties;
-import java.util.UUID;
-
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -29,6 +25,10 @@ import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageSender;
 import org.eclipse.serializer.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.Map;
+import java.util.Properties;
+import java.util.UUID;
 
 import static org.eclipse.datagrid.cache.clustered.kafka.types.KafkaClusteredConfigurationPropertyNames.KAFKA_CONSUMER_CONFIG_PREFIX;
 import static org.eclipse.datagrid.cache.clustered.kafka.types.KafkaClusteredConfigurationPropertyNames.KAFKA_PRODUCER_CONFIG_PREFIX;
