@@ -79,8 +79,12 @@ public record AeronReplicationCheckpoint(
 		RecordType(final int code) { this.code = code; }
 		static RecordType from(final int code)
 		{
-			for (final RecordType value : values()) if (value.code == code) return value;
-			throw new IllegalArgumentException("unknown checkpoint record type: " + code);
+			return switch (code)
+			{
+				case 1 -> WRITER_CHECKPOINT;
+				case 2 -> READER_CURSOR;
+				default -> throw new IllegalArgumentException("unknown checkpoint record type: " + code);
+			};
 		}
 	}
 
@@ -94,8 +98,12 @@ public record AeronReplicationCheckpoint(
 		DurabilityMode(final int code) { this.code = code; }
 		static DurabilityMode from(final int code)
 		{
-			for (final DurabilityMode value : values()) if (value.code == code) return value;
-			throw new IllegalArgumentException("unknown checkpoint durability mode: " + code);
+			return switch (code)
+			{
+				case 1 -> ARCHIVE_FIRST;
+				case 2 -> ENQUEUE_THEN_ARCHIVE;
+				default -> throw new IllegalArgumentException("unknown checkpoint durability mode: " + code);
+			};
 		}
 	}
 
@@ -115,8 +123,15 @@ public record AeronReplicationCheckpoint(
 		State(final int code) { this.code = code; }
 		static State from(final int code)
 		{
-			for (final State value : values()) if (value.code == code) return value;
-			throw new IllegalArgumentException("unknown checkpoint state: " + code);
+			return switch (code)
+			{
+				case 1 -> PREPARING;
+				case 2 -> ENQUEUED;
+				case 3 -> COMMITTING_UNCERTAIN;
+				case 4 -> COMMITTED;
+				case 5 -> REJECTED;
+				default -> throw new IllegalArgumentException("unknown checkpoint state: " + code);
+			};
 		}
 	}
 

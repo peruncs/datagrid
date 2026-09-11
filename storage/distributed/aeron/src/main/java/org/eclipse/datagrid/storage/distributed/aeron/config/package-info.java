@@ -11,11 +11,8 @@
  * SPDX-License-Identifier: EPL-2.0
  * #L%
  */
+
 /**
- * Validated limits shared by Aeron replication participants.
- *
- * <p>The writer and readers must agree on framing and transaction limits.
- * Validation happens before a publication or subscription is created, so a
- * bad deployment fails at startup rather than producing an unreadable stream.</p>
+ * Configuration and framing limits for the Aeron storage replication wire.
  */
 package org.eclipse.datagrid.storage.distributed.aeron.config;

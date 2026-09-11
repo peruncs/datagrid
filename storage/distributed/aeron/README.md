@@ -5,7 +5,7 @@
 this module or the existing Kafka provider.
 
 The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque and
-adds a 64-byte versioned envelope for cluster identity, sequence, chunking,
+adds a 68-byte versioned envelope for cluster identity, sequence, chunking,
 CRC32C, and commit/abort markers. A writer should use
 `AeronStorageBinaryTargetDistributing` with an
 `AeronReplicationWriteCoordinator` so the ordering is:
@@ -46,6 +46,12 @@ Archive-control channels to private interfaces and restrict them with firewall
 or network-policy rules; do not enable ACK-driven retention on an untrusted
 network. Transport-level authentication/encryption must be supplied by the
 deployment (for example, an authenticated network overlay).
+
+Embedded-Archive writers may set
+`ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES` to reject new transactions
+before the Archive filesystem falls below a safety margin. The value is
+reported through `ReplicationHealth.archiveUsableSpaceBytes()`; external
+Archive deployments must enforce capacity on the Archive host.
 
 Run the transport and UDP/Archive integration tests with:
 

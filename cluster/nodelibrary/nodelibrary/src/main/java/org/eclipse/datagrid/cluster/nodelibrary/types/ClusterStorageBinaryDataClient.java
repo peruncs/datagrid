@@ -37,6 +37,24 @@ public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 		return null;
 	}
 
+	/**
+	 * Returns the latest lifecycle result. Implementations that can distinguish a
+	 * resolved transaction boundary should override this method; the fallback
+	 * preserves the historic "stopped means complete" contract of simple clients.
+	 */
+	default StopOutcome stopOutcome()
+	{
+		if (this.failure() != null) return StopOutcome.FAILED;
+		return this.isRunning() ? StopOutcome.RUNNING : StopOutcome.RESOLVED_BOUNDARY;
+	}
+
+	/** Returns the stop outcome together with the last resolved cursor. */
+	default StopResult stopResult()
+	{
+		final MessageInfo info = this.messageInfo();
+		return new StopResult(this.stopOutcome(), info.messageIndex(), -1L);
+	}
+
 	default boolean isLive()
 	{
 		return isRunning();

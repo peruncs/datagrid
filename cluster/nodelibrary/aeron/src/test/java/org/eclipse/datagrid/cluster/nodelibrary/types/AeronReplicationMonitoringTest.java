@@ -14,9 +14,14 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
+import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -55,6 +60,25 @@ class AeronReplicationMonitoringTest
 		}
 	}
 
+	/** The embedded writer commits through its local Archive spy with no remote reader. */
+	@Test
+	void writerCommitsWithoutRemoteReader()
+	{
+		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+			.create(properties("writer")))
+		{
+			final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+			final PersistenceTarget<Binary> target = transport.persistenceTargetFactory("stream", distributor)
+				.apply(new PersistenceTarget<>()
+				{
+					public void write(final Binary ignored) { }
+					public boolean isWritable() { return true; }
+				});
+			target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1, 2, 3 })));
+			assertEquals(0L, transport.positionProvider("stream").latest().logicalSequence());
+		}
+	}
+
 	/** Retention must fail explicitly while authenticated watermarks are absent. */
 	@Test
 	void retentionRejectsDeletionUntilWatermarksAreConfigured()
@@ -74,13 +98,13 @@ class AeronReplicationMonitoringTest
 		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
 			.create(properties("reader")))
 		{
-			final TestClient replaying = new TestClient(true, false, null);
+			final TestClient replaying = new TestClient(true, null);
 			final ReplicationHealth health = transport.health(() -> true, replaying);
 			assertFalse(health.isReady(), "a replaying reader is not ready to serve traffic");
 			assertTrue(health.isHealthy());
 			assertEquals(ReplicationHealth.State.REPLAYING, health.state());
 
-			final TestClient failed = new TestClient(false, false, new IllegalStateException("archive unavailable"));
+			final TestClient failed = new TestClient(false, new IllegalStateException("archive unavailable"));
 			final ReplicationHealth failedHealth = transport.health(() -> true, failed);
 			assertFalse(failedHealth.isReady());
 			assertFalse(failedHealth.isHealthy());
@@ -100,6 +124,56 @@ class AeronReplicationMonitoringTest
 			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_EPOCH", "-1")));
 		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
 			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_STREAM_ID", "-1")));
+	}
+
+	/** Rejects an invalid Archive free-space admission threshold. */
+	@Test
+	void rejectsNegativeArchiveCapacityThreshold()
+	{
+		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES", "-1")));
+	}
+
+	/** The writer admission gate and health state fail closed when usable space is below the threshold. */
+	@Test
+	void reportsArchiveCapacityDegradationBeforeAcceptingWrites()
+	{
+		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES",
+				Long.toString(Long.MAX_VALUE))))
+		{
+			final ClusterStorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
+			final ReplicationHealth health = transport.health(() -> true, client);
+			health.init();
+			assertFalse(health.isReady());
+			assertFalse(health.isHealthy());
+			assertEquals(ReplicationHealth.State.DEGRADED_ARCHIVE, health.state());
+			health.close();
+		}
+	}
+
+	/** Rejects channel framing overrides that disagree with the shared configuration. */
+	@Test
+	void rejectsConflictingChannelFraming()
+	{
+		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+				"aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=1m")));
+		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
+				"aeron:udp?endpoint=localhost:0|mtu=1024k")));
+	}
+
+	/** Writer topology validation is semantic, not a substring match. */
+	@Test
+	void rejectsNonDynamicWriterTopology()
+	{
+		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+				"aeron:udp?control=localhost:40123|control-mode=manual|fc=max")));
+		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+				"aeron:udp?control=localhost:40123|control-mode=dynamic|fc=min")));
 	}
 
 	/** Verifies rejection of malformed numeric and production temporary directory settings. */
@@ -123,6 +197,17 @@ class AeronReplicationMonitoringTest
 		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider().create(production));
 	}
 
+	/** Production mode rejects the two common configuration forms that weaken network/durability guarantees. */
+	@Test
+	void rejectsProductionSyncLevelZeroAndIpv6Wildcard()
+	{
+		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL", "0", true)));
+		assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+			.create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+				"aeron:udp?control=[::]:40123|control-mode=dynamic|fc=max", true)));
+	}
+
 	private static NodelibraryPropertiesProvider properties(final String role)
 	{
 		return propertiesWith(role, null, null);
@@ -131,22 +216,37 @@ class AeronReplicationMonitoringTest
 	private static NodelibraryPropertiesProvider propertiesWith(
 		final String role, final String overrideName, final String overrideValue)
 	{
+		return propertiesWith(role, overrideName, overrideValue, false);
+	}
+
+	private static NodelibraryPropertiesProvider propertiesWith(
+		final String role, final String overrideName, final String overrideValue, final boolean production)
+	{
 		final String clusterId = UUID.randomUUID().toString();
+		final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
+			"datagrid-aeron-monitoring-" + UUID.randomUUID());
 		return new NodelibraryPropertiesProvider.Env()
 		{
 			@Override public String replicationRole() { return role; }
 			@Override public boolean replicationRoleConfigured() { return true; }
+			@Override public boolean isProdMode() { return production; }
 			@Override public String replicationProperty(final String name)
 			{
 				if ("ECLIPSE_DATAGRID_AERON_CLUSTER_ID".equals(name)) return clusterId;
 				if ("ECLIPSE_DATAGRID_AERON_NODE_ID".equals(name)) return UUID.randomUUID().toString();
 				if ("ECLIPSE_DATAGRID_AERON_STORE_GENERATION".equals(name)) return UUID.randomUUID().toString();
+				if ("ECLIPSE_DATAGRID_AERON_DIRECTORY".equals(name)) return root.resolve("driver").toString();
+				if ("ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY".equals(name)) return root.resolve("archive").toString();
+				if ("ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH".equals(name))
+				{
+					return root.resolve("checkpoint/writer.checkpoint").toString();
+				}
 				return overrideName != null && overrideName.equals(name) ? overrideValue : null;
 			}
 		};
 	}
 
-    private record TestClient(boolean isRunning, boolean isLive, RuntimeException failure) implements ClusterStorageBinaryDataClient {
+	private record TestClient(boolean isRunning, RuntimeException failure) implements ClusterStorageBinaryDataClient {
 
         @Override
         public void start() {
@@ -163,7 +263,12 @@ class AeronReplicationMonitoringTest
 
 
         @Override
-        public void resume() throws NodelibraryException {
+        public void resume() {
+        }
+
+        @Override
+        public boolean isLive() {
+            return false;
         }
 
         @Override

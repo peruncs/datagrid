@@ -15,11 +15,10 @@ package org.eclipse.datagrid.cluster.nodelibrary.micronaut.types;
  */
 
 
-import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
-import org.eclipse.serializer.concurrency.LockedExecutor;
-
 import io.micronaut.context.annotation.Factory;
 import jakarta.inject.Singleton;
+import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
+import org.eclipse.serializer.concurrency.LockedExecutor;
 
 @Factory
 public class ObjectGraphUpdateHandlerFactory

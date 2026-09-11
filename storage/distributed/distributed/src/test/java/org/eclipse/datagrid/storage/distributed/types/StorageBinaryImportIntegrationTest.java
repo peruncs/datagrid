@@ -17,7 +17,10 @@ package org.eclipse.datagrid.storage.distributed.types;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
+import org.eclipse.store.storage.types.Storage;
+import org.eclipse.store.storage.types.StorageConfiguration;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 
@@ -39,10 +42,13 @@ class StorageBinaryImportIntegrationTest
 		final Path root = Files.createTempDirectory("datagrid-store-import-");
 		final Path sourcePath = root.resolve("source");
 		final Path readerPath = root.resolve("reader");
-			final CapturingDistributor capture = new CapturingDistributor();
+		final CapturingDistributor capture = new CapturingDistributor();
 		try
 		{
-			final EmbeddedStorageManager writer = start(sourcePath, new Root(), capture);
+			final Root initialRoot = new Root();
+			initialRoot.values.add("initial");
+			initialRoot.entries.add(new Entry("seed", "created"));
+			final EmbeddedStorageManager writer = start(sourcePath, initialRoot, capture);
 			writer.storeRoot();
 			writer.shutdown();
 			copyDirectory(sourcePath, readerPath);
@@ -50,14 +56,27 @@ class StorageBinaryImportIntegrationTest
 
 			final EmbeddedStorageManager resumedWriter = startExisting(sourcePath, capture);
 			final Root resumedRoot = resumedWriter.root();
+			final Entry entry = resumedRoot.entries.get(0);
+			resumedWriter.store(resumedRoot.entries);
+			entry.value = "updated";
+			resumedWriter.store(entry);
+			resumedRoot.entries.remove(entry);
+			resumedWriter.store(resumedRoot.entries);
 			resumedRoot.values.add("one");
 			resumedWriter.store(resumedRoot.values);
 			resumedRoot.values.add("two");
 			resumedWriter.store(resumedRoot.values);
+			for (int i = 0; i < 512; i++)
+			{
+				resumedRoot.values.add("channel-value-" + i);
+			}
+			resumedWriter.store(resumedRoot.values);
 			resumedWriter.shutdown();
-			assertTrue(capture.transactions.size() >= 2, "writer must produce replayable Store transactions");
+			assertTrue(capture.transactions.size() >= 3, "writer must produce replayable Store transactions");
+			assertTrue(capture.maximumChannelCount >= 4,
+				"the real Store fixture must capture data from all four channels");
 
-			final EmbeddedStorageManager reader = EmbeddedStorage.Foundation(readerPath).start();
+			final EmbeddedStorageManager reader = foundation(readerPath).start();
 			final StorageConnection connection = reader.createConnection();
 			for (final List<ByteBuffer> transaction : capture.transactions)
 			{
@@ -66,8 +85,10 @@ class StorageBinaryImportIntegrationTest
 			}
 			reader.shutdown();
 
-			final EmbeddedStorageManager restarted = EmbeddedStorage.Foundation(readerPath).start();
-			assertTrue(((Root)restarted.root()).values.containsAll(List.of("one", "two")));
+			final EmbeddedStorageManager restarted = foundation(readerPath).start();
+			final Root importedRoot = (Root)restarted.root();
+			assertTrue(importedRoot.values.containsAll(List.of("one", "two")));
+			assertTrue(importedRoot.entries.isEmpty(), "deleted Store objects must remain deleted after import");
 			restarted.shutdown();
 		}
 		finally
@@ -78,7 +99,7 @@ class StorageBinaryImportIntegrationTest
 
 	private static EmbeddedStorageManager startExisting(final Path path, final CapturingDistributor capture)
 	{
-		final var foundation = EmbeddedStorage.Foundation(path);
+		final var foundation = foundation(path);
 		DistributedStorage.configureWriting(foundation, capture);
 		return foundation.start();
 	}
@@ -89,9 +110,18 @@ class StorageBinaryImportIntegrationTest
 		final CapturingDistributor capture
 	)
 	{
-		final var foundation = EmbeddedStorage.Foundation(path);
+		final var foundation = foundation(path);
 		DistributedStorage.configureWriting(foundation, capture);
 		return foundation.start(initialRoot);
+	}
+
+	private static EmbeddedStorageFoundation<?> foundation(final Path path)
+	{
+		final StorageConfiguration configuration = StorageConfiguration.Builder()
+			.setStorageFileProvider(Storage.FileProvider(path))
+			.setChannelCountProvider(Storage.ChannelCountProvider(4))
+			.createConfiguration();
+		return EmbeddedStorage.Foundation(configuration);
 	}
 
 	private static List<ByteBuffer> copy(final List<ByteBuffer> source)
@@ -128,10 +158,7 @@ class StorageBinaryImportIntegrationTest
 			for (final Path path : paths.toList())
 			{
 				final Path destination = target.resolve(source.relativize(path));
-				if (Files.isDirectory(path))
-				{
-					Files.createDirectories(destination);
-				}
+				if (Files.isDirectory(path)) Files.createDirectories(destination);
 				else
 				{
 					Files.createDirectories(destination.getParent());
@@ -144,6 +171,7 @@ class StorageBinaryImportIntegrationTest
 	private static final class CapturingDistributor implements StorageBinaryDataDistributor
 	{
 		private final List<List<ByteBuffer>> transactions = new ArrayList<>();
+		private int maximumChannelCount;
 		private int dictionariesSinceTransaction;
 
 		@Override
@@ -155,13 +183,16 @@ class StorageBinaryImportIntegrationTest
 			}
 			this.dictionariesSinceTransaction = 0;
 			final List<ByteBuffer> copy = new ArrayList<>();
+			final int[] channelCount = { 0 };
 			data.iterateChannelChunks(chunk ->
 			{
+				channelCount[0]++;
 				for (final ByteBuffer buffer : chunk.buffers())
 				{
 					copy.add(copy(List.of(buffer)).get(0));
 				}
 			});
+			this.maximumChannelCount = Math.max(this.maximumChannelCount, channelCount[0]);
 			this.transactions.add(copy);
 		}
 
@@ -175,5 +206,21 @@ class StorageBinaryImportIntegrationTest
 	public static final class Root
 	{
 		public final List<String> values = new ArrayList<>();
+		public final List<Entry> entries = new ArrayList<>();
 	}
+
+	public static final class Entry
+	{
+		public String id;
+		public String value;
+
+		public Entry() { }
+
+		Entry(final String id, final String value)
+		{
+			this.id = id;
+			this.value = value;
+		}
+	}
+
 }

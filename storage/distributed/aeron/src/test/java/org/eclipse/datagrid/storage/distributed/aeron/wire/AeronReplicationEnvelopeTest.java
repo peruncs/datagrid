@@ -66,6 +66,18 @@ class AeronReplicationEnvelopeTest
 		));
 	}
 
+	/** Decision-bearing terminal fields are protected even when the payload is empty. */
+	@Test
+	void rejectsTerminalKindMutationWithHeaderChecksum()
+	{
+		final byte[] encoded = AeronReplicationEnvelope.encode(
+			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
+			1, 0, 1, 0, AeronReplicationEnvelope.crc32c(new byte[] {7}), new byte[0]);
+		encoded[6] = 4;
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+			new UnsafeBuffer(encoded), 0, encoded.length));
+	}
+
 	/** Verifies rejection of truncated and unknown version. */
 	@Test
 	void rejectsTruncatedAndUnknownVersion()
@@ -80,7 +92,7 @@ class AeronReplicationEnvelopeTest
 			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
 			0, 0, 1, 0, 0, new byte[0]
 		);
-		encoded[5] = 2;
+		encoded[5] = 3;
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, encoded.length
 		));
@@ -126,6 +138,16 @@ class AeronReplicationEnvelopeTest
 		));
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.encode(
 			CLUSTER, 1, -1, AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0, 0, new byte[0]
+		));
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.encode(
+			CLUSTER, 1, Long.MAX_VALUE, AeronReplicationEnvelope.Kind.STORE_BINARY,
+			0, 0, 1, 0, 0, new byte[0]
+		));
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.encode(
+			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.ABORT, 0, 1, 2, 0, 0, new byte[0]
+		));
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.encode(
+			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.ABORT, 0, 0, 1, 0, 7, new byte[0]
 		));
 	}
 

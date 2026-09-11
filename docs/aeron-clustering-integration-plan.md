@@ -14,8 +14,10 @@ atomic fixed checkpoint files, recording extension support, and JUnit/unit plus
 embedded dynamic-MDC UDP/Archive integration
 tests. Reader-progress ACKs and automatic Archive retention are intentionally
 not enabled; the provider exposes retention as an explicit unsupported
-capability until authenticated durable watermarks and disk-admission controls
-are implemented. The cluster lifecycle now has no Kafka imports: `cluster-nodelibrary-kafka`
+capability until authenticated durable watermarks exist. Embedded writers now
+provide a configurable local Archive free-space admission threshold and expose
+the measured usable space through health; external Archives must enforce their
+own capacity policy. The cluster lifecycle now has no Kafka imports: `cluster-nodelibrary-kafka`
 and `cluster-nodelibrary-aeron` are selectable provider modules discovered
 through the neutral SPI, while `storage-distributed` remains provider-free.
 The neutral persistence configurator accepts a provider target factory, so the
@@ -34,6 +36,15 @@ neutral nodelibrary, and an application adds exactly one provider module.
 The neutral storage root defaults to `/storage` and may be overridden with
 `ECLIPSE_DATAGRID_STORAGE_PATH`; the offset file and SaaS backup scratch space
 follow that root.
+
+The current v1 provider requires `ECLIPSE_DATAGRID_AERON_RECORDING_ID` for
+reader and backup-reader startup. Alias/stream-based recording discovery and
+automatic recording selection are not part of this release contract. Embedded
+writers enable Aeron spy connection simulation so the local Archive can keep a
+recorded publication connected with zero remote readers; an explicit
+`ssc=false` channel option disables that behavior. The production default is
+dedicated MediaDriver/Archive threading; shared threading is intended for
+development and tests.
 The neutral merger's normal coalescing timeout is bypassed at an Aeron
 transaction boundary, so the resolved-cursor callback is emitted only after
 synchronous object-graph materialization rather than after an arbitrary
@@ -238,13 +249,13 @@ For Kubernetes, the writer MDC control endpoint and Archive control endpoint req
 
 ### Versioned envelope
 
-Pack serialized Eclipse DataGrid/Eclipse Store payloads **inside** a fixed 64-byte big-endian header. Eclipse Serializer remains authoritative for object identity, circular graphs, Store entity headers, type IDs, schema evolution, and binary persistence. The envelope owns only framing, compatibility, sequencing, checksums, chunk offsets, and transaction state.
+Pack serialized Eclipse DataGrid/Eclipse Store payloads **inside** a fixed 68-byte big-endian header. Eclipse Serializer remains authoritative for object identity, circular graphs, Store entity headers, type IDs, schema evolution, and binary persistence. The envelope owns only framing, compatibility, sequencing, checksums, chunk offsets, and transaction state.
 
 The first implementation is `AeronReplicationEnvelope`; SBE is not required at runtime or build time. This is intentionally a small fixed format encoded directly into a reusable Agrona `MutableDirectBuffer` and decoded into a reusable view before allocating payload memory. The publisher and assembler stage transaction bytes in Eclipse Serializer native buffers; heap copies are limited to compatibility/test accessors and the UTF-8 type dictionary. An SBE schema may replace this envelope in a later wire-version if rolling schema evolution proves necessary, but the transport API will continue to expose opaque Store bytes.
 
 The wire codec package is module-internal and is intentionally not exported; export it only when an external diagnostic or replay tool has a concrete need for the envelope format.
 
-Header fields (big-endian, append-only version 1): magic, version, kind, writer epoch, transaction sequence, logical payload length, chunk index/count/offset, payload CRC32C, commit CRC32C, and cluster UUID. Payload bytes follow the header. Data-stream kinds are `TYPE_DICTIONARY`, `STORE_BINARY`, `COMMIT`, and `ABORT`. ACKs are not currently a wire kind; retention is deferred until authenticated durable watermarks exist.
+Header fields (big-endian, append-only version 2): magic, version, kind, writer epoch, transaction sequence, logical payload length, chunk index/count/offset, payload CRC32C, commit CRC32C, cluster UUID, and a header CRC32C covering every preceding header field. Payload bytes follow the header. Data-stream kinds are `TYPE_DICTIONARY`, `STORE_BINARY`, `COMMIT`, and `ABORT`. ACKs are not currently a wire kind; retention is deferred until authenticated durable watermarks exist.
 
 Rules:
 
@@ -873,6 +884,18 @@ Minimum merge-gating suite:
 | `AeronThreeReaderIT` | All readers converge independently. |
 | `AeronLuceneReplicationIT` | Live reader query sees add/update/delete without restart. |
 | `AeronVectorReplicationIT` | Source vectors propagate and local graph converges. |
+
+The names in this table are acceptance-gate names, not a claim that every
+class already exists under that name. The currently checked-in coverage is
+mapped as follows: `AeronArchiveReplicationIT` covers Archive replay, UDP live
+join, fragmented tails, and recording corruption; `AeronReaderCrashMatrixIT`
+covers reader import/cursor crash boundaries; `ProviderCrashMatrixIT` covers
+writer checkpoint and publication crash cells; and `ExternalArchiveCrashIT`
+covers external-Archive loss. `AeronReplicationMonitoringTest` covers the
+zero-reader writer and readiness/capacity gates. The dictionary-isolation,
+real Store multi-channel, ordinary-reader restart, backup bootstrap,
+retention, three-reader, slow-reader, Lucene, and vector gates still require
+dedicated integration fixtures before they can be marked implemented.
 
 ## 13. Failure behavior and operator action
 

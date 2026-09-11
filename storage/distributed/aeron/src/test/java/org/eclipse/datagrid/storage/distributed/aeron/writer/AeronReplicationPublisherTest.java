@@ -123,20 +123,6 @@ class AeronReplicationPublisherTest
 			configuration, CLUSTER, 1, 0));
 	}
 
-	/** Verifies abort failure also fails closed. */
-	@Test
-	void abortFailureAlsoFailsClosed()
-	{
-		try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
-			(buffer, offset, length) -> Publication.CLOSED,
-			configuration(50_000_000L).maxMessageLength(), configuration(50_000_000L), CLUSTER, 1, 0
-		))
-		{
-		assertThrows(IllegalStateException.class, () -> publisher.publishAbort(0, 1, 1));
-		assertThrows(IllegalStateException.class, () -> publisher.publishAbort(1, 1, 1));
-		}
-	}
-
 	/** Verifies emits dictionary chunks before data and commit. */
 	@Test
 	void emitsDictionaryChunksBeforeDataAndCommit()
@@ -247,36 +233,72 @@ class AeronReplicationPublisherTest
 		assertTrue(abortPosition.get() >= 0);
 	}
 
+	/** Verifies a direct publisher abort invokes the same callback as shutdown abort. */
+	@Test
+	void directAbortInvokesPendingAbortCallback()
+	{
+		final AtomicInteger abortCallbacks = new AtomicInteger();
+		final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+		try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0))
+		{
+			final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {6})});
+			prepared.onAbort(position -> abortCallbacks.incrementAndGet());
+			assertTrue(publisher.abort(prepared) >= 0);
+			assertEquals(1, abortCallbacks.get());
+		}
+	}
+
+	/** A publisher cannot overwrite an outstanding token with a second reservation. */
+	@Test
+	void rejectsSecondPreparedTransactionUntilTheFirstIsTerminal()
+	{
+		final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+		try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0))
+		{
+			final AeronReplicationPublisher.PreparedTransaction first = publisher.prepareTransaction(
+				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})});
+			assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
+				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {2})}));
+			first.close();
+			assertDoesNotThrow(() -> publisher.publishTransaction(
+				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {2})}));
+		}
+	}
+
 	/** Verifies a crash after token creation cannot publish a duplicate abort on shutdown. */
 	@Test
 	void prepareCrashDoesNotPublishDuplicateAbortOnShutdown()
 	{
 		final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
 		final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+		try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
 			(buffer, offset, length) ->
 			{
 				kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
 				return length;
-			}, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0);
-		try
+			}, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0))
 		{
-			AeronReplicationPublisher.setCrashHook((name, ignored) ->
+			try
 			{
-				if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
-			});
-			assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
-				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})}));
-			publisher.close();
-			assertEquals(List.of(
-				AeronReplicationEnvelope.Kind.STORE_BINARY,
-				AeronReplicationEnvelope.Kind.ABORT
-			), kinds);
-		}
-		finally
-		{
-			AeronReplicationPublisher.clearCrashHook();
-			publisher.close();
+				AeronReplicationPublisher.setCrashHook((name, ignored) ->
+				{
+					if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
+				});
+				assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
+					null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})}));
+				publisher.close();
+				assertEquals(List.of(
+					AeronReplicationEnvelope.Kind.STORE_BINARY,
+					AeronReplicationEnvelope.Kind.ABORT
+				), kinds);
+			}
+			finally
+			{
+				AeronReplicationPublisher.clearCrashHook();
+			}
 		}
 	}
 

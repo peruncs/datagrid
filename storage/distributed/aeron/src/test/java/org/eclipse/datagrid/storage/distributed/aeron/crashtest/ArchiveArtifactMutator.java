@@ -14,6 +14,8 @@ package org.eclipse.datagrid.storage.distributed.aeron.crashtest;
  * #L%
  */
 
+import io.aeron.logbuffer.FrameDescriptor;
+import io.aeron.protocol.DataHeaderFlyweight;
 import org.eclipse.datagrid.storage.distributed.aeron.wire.AeronReplicationEnvelope;
 
 import java.io.IOException;
@@ -90,7 +92,7 @@ public final class ArchiveArtifactMutator
 				try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.WRITE))
 				{
 					final ByteBuffer source = ByteBuffer.wrap(bytes);
-					while (source.hasRemaining()) channel.write(source);
+					writeFully(channel, source, 0L);
 					channel.force(true);
 				}
 				return;
@@ -106,11 +108,20 @@ public final class ArchiveArtifactMutator
 			AeronReplicationEnvelope.MAGIC;
 	}
 
+	private static void writeFully(final FileChannel channel, final ByteBuffer source, long position)
+		throws IOException
+	{
+		while (source.hasRemaining())
+		{
+			final int written = channel.write(source, position);
+			if (written == 0) throw new IOException("FileChannel made no progress");
+			position += written;
+		}
+	}
+
 	/**
-	 * Truncates the recorded bytes by one byte, leaving the final frame incomplete.
-	 * The archive segment is preallocated, therefore truncating the physical file
-	 * length alone would only remove unused tail capacity and would not corrupt
-	 * the recording.
+	 * Shortens the final Aeron frame by one byte, leaving its replication envelope
+	 * incomplete while preserving the segment's preallocated physical length.
 	 */
 	public static void truncateFinalFrame(
 		final Path segment,
@@ -129,20 +140,68 @@ public final class ArchiveArtifactMutator
 		{
 			throw new UnsupportedArtifactLayoutException("recording start is outside segment: " + segment);
 		}
-		try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.WRITE))
+		if (physicalEnd > MAX_MUTATION_BYTES)
+		{
+			throw new UnsupportedArtifactLayoutException("segment exceeds mutation bound: " + segment);
+		}
+		try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ, StandardOpenOption.WRITE))
 		{
 			if (physicalEnd > channel.size())
 			{
 				throw new UnsupportedArtifactLayoutException(
 					"recording positions exceed physical segment size: " + segment);
 			}
-			final long truncatedSize = physicalEnd - 1L;
-			channel.truncate(truncatedSize);
-			channel.force(true);
-			if (channel.size() != truncatedSize)
+			final ByteBuffer bytes = ByteBuffer.allocate(Math.toIntExact(physicalEnd))
+			.order(ByteOrder.LITTLE_ENDIAN);
+			for (long position = 0; bytes.hasRemaining(); )
 			{
-				throw new UnsupportedArtifactLayoutException("segment truncation did not change physical length: " + segment);
+				final int read = channel.read(bytes, position);
+					if (read < 0) throw new UnsupportedArtifactLayoutException("segment ended before recording boundary: " + segment);
+					if (read == 0) throw new UnsupportedArtifactLayoutException("cannot read recording boundary: " + segment);
+				position += read;
 			}
+			bytes.flip();
+			final int startOffset = Math.toIntExact(recordingStartPosition - segmentBase);
+			final int endOffset = Math.toIntExact(physicalEnd);
+			int frameOffset = startOffset;
+			int lastFrameOffset = -1;
+			int lastFrameLength = -1;
+			while (frameOffset < endOffset)
+			{
+				if (frameOffset + Integer.BYTES > endOffset)
+				{
+					throw new UnsupportedArtifactLayoutException("recording ends inside an Aeron frame header: " + segment);
+				}
+				final int frameLength = bytes.getInt(frameOffset);
+				if (frameLength < DataHeaderFlyweight.HEADER_LENGTH ||
+					frameLength > endOffset - frameOffset)
+				{
+					throw new UnsupportedArtifactLayoutException("invalid Aeron frame length " + frameLength +
+						" at " + frameOffset + " in " + segment);
+				}
+				if (frameLength > DataHeaderFlyweight.HEADER_LENGTH + AeronReplicationEnvelope.HEADER_LENGTH)
+				{
+					lastFrameOffset = frameOffset;
+					lastFrameLength = frameLength;
+				}
+				final int alignedLength = (frameLength + (FrameDescriptor.FRAME_ALIGNMENT - 1)) &
+					-(FrameDescriptor.FRAME_ALIGNMENT);
+				if (alignedLength <= 0 || alignedLength > endOffset - frameOffset)
+				{
+					throw new UnsupportedArtifactLayoutException("invalid Aeron frame alignment at " + frameOffset +
+						" in " + segment);
+				}
+				frameOffset += alignedLength;
+			}
+			if (lastFrameOffset < 0)
+			{
+				throw new UnsupportedArtifactLayoutException("final Aeron frame is too small to truncate: " + segment);
+			}
+			final ByteBuffer length = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN)
+				.putInt(lastFrameLength - 1);
+			length.flip();
+			writeFully(channel, length, lastFrameOffset);
+			channel.force(true);
 		}
 	}
 

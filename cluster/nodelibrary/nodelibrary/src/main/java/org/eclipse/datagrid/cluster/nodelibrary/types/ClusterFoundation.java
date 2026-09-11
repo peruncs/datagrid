@@ -22,6 +22,7 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.cronjob.StorageLimitChecke
 import org.eclipse.datagrid.storage.distributed.types.DistributedStorage;
 import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
 import org.eclipse.serializer.exceptions.MissingFoundationPartException;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryAssembler;
 import org.eclipse.serializer.persistence.types.Unpersistable;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.serializer.util.InstanceDispatcher;
@@ -1140,6 +1141,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			this.initializeRoot(embeddedStorageManager);
 
 			this.getClusterStorageBinaryDataDistributor().ignoreDistribution(false);
+			this.queueAeronWriterDictionary(embeddedStorageManager);
 
 			final var scheduler = this.getQuartzCronJobScheduler();
 
@@ -1233,6 +1235,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			this.initializeRoot(embeddedStorageManager);
 
 			this.getClusterStorageBinaryDataDistributor().ignoreDistribution(false);
+			this.queueAeronWriterDictionary(embeddedStorageManager);
 
 			final var scheduler = this.getQuartzCronJobScheduler();
 
@@ -1281,6 +1284,23 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 
 			scheduler.start();
+		}
+
+		/**
+		 * Queues the complete persisted dictionary for the first post-restart Aeron
+		 * transaction. This covers types introduced by a rejected transaction whose
+		 incremental export was consumed before the writer crashed.
+		 */
+		private void queueAeronWriterDictionary(final org.eclipse.store.storage.embedded.types.EmbeddedStorageManager storage)
+		{
+			final NodelibraryPropertiesProvider props = this.getNodelibraryPropertiesProvider();
+			if (!"aeron".equalsIgnoreCase(this.getClusterReplicationTransport().id()) ||
+				!"writer".equalsIgnoreCase(props.replicationRole()))
+			{
+				return;
+			}
+			final String dictionary = PersistenceTypeDictionaryAssembler.New().assemble(storage.typeDictionary());
+			this.getClusterStorageBinaryDataDistributor().queueTypeDictionaryForNextTransaction(dictionary);
 		}
 
 		private EmbeddedStorageFoundation<?> prepareEmbeddedStorage(final Path storageRootPath)

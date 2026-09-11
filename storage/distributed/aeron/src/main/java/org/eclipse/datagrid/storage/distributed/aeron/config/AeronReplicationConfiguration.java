@@ -43,6 +43,8 @@ public final class AeronReplicationConfiguration
 	public static final int DEFAULT_MTU_LENGTH = 1408;
 	public static final int DEFAULT_CHUNK_SIZE = 1024 * 1024;
 	public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
+	/** Hard upper bound prevents a configuration from requesting near-Integer.MAX_VALUE native buffers. */
+	public static final int MAX_SUPPORTED_TRANSACTION_BYTES = 1024 * 1024 * 1024;
 
 	private final int termLength;
 	private final int mtuLength;
@@ -259,6 +261,11 @@ public final class AeronReplicationConfiguration
 			if (this.mtuLength < 512 || this.mtuLength > 64 * 1024 || (this.mtuLength & 7) != 0)
 			{
 				throw new IllegalArgumentException("mtuLength must be an aligned value between 512 and 65536");
+			}
+			if (this.maxTransactionBytes <= 0 || this.maxTransactionBytes > MAX_SUPPORTED_TRANSACTION_BYTES)
+			{
+				throw new IllegalArgumentException(
+					"maxTransactionBytes must be between 1 and " + MAX_SUPPORTED_TRANSACTION_BYTES);
 			}
 			if (this.chunkSize <= 0 || this.chunkSize > this.maxTransactionBytes)
 			{

@@ -45,17 +45,19 @@ final class TransactionAssembler
 	private final Runnable transactionResolved;
 	private final ReaderDeliveryListener deliveryListener;
 	private volatile long lastResolvedSequence;
+	/* Materialisation can succeed before the durable cursor callback completes.
+	 * Keep that observation separate for health/lag reporting. */
+	private volatile long lastAppliedSequence;
 	/* The next sequence is reserved while the assembler monitor is held. It
 	 * closes the gap between accepting a terminal marker and invoking the
 	 * receiver callback (which deliberately runs outside the monitor). */
 	private long nextExpectedSequence;
-	private volatile long lastResolvedPosition = -1;
+	private volatile long lastResolvedPosition;
 	/* The commit/abort witness for the last resolved sequence. A resumed
 	 * assembler has no witness until it resolves one message locally. These
 	 * fields are accessed only on the subscription owner thread; cursorSnapshot()
 	 * is the synchronized cross-thread boundary. */
 	private int lastResolutionCrc32c;
-	private boolean hasLastResolutionCrc;
 	private AeronReplicationEnvelope.Kind lastResolutionKind;
 	private int lastResolutionDataLength;
 	private int lastResolutionDataChunkCount;
@@ -108,17 +110,34 @@ final class TransactionAssembler
 		final ReaderDeliveryListener deliveryListener
 	)
 	{
+		this(configuration, clusterId, epoch, initialSequence, -1L, receiver, transactionResolved,
+			deliveryListener);
+	}
+
+	TransactionAssembler(
+		final AeronReplicationConfiguration configuration,
+		final UUID clusterId,
+		final long epoch,
+		final long initialSequence,
+		final long initialPosition,
+		final StorageBinaryDataReceiver receiver,
+		final Runnable transactionResolved,
+		final ReaderDeliveryListener deliveryListener
+	)
+	{
 		this.configuration = configuration;
 		this.clusterId = clusterId;
 		this.epoch = epoch;
 		this.receiver = receiver;
 		this.transactionResolved = transactionResolved;
 		this.deliveryListener = deliveryListener;
-		if (initialSequence < -1 || initialSequence == Long.MAX_VALUE)
+		if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1)
 		{
-			throw new IllegalArgumentException("initialSequence must be in [-1, Long.MAX_VALUE)");
+			throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
 		}
 		this.lastResolvedSequence = initialSequence;
+		this.lastAppliedSequence = initialSequence;
+		this.lastResolvedPosition = initialPosition;
 		this.nextExpectedSequence = initialSequence + 1;
 	}
 
@@ -173,19 +192,26 @@ final class TransactionAssembler
 				throw new IllegalStateException("replayed data for an already resolved sequence " +
 					this.lastResolvedSequence);
 			}
-			if (this.lastResolutionKind != null && envelope.kind() != this.lastResolutionKind)
+			if (this.lastResolutionKind == null)
+			{
+				/* A resumed reader has only a cursor, not the terminal witness.  It
+				 * must not silently accept a contradictory terminal at that cursor;
+				 * restart from the persisted position instead. */
+				throw new IllegalStateException("terminal witness is unavailable for resolved sequence " +
+					this.lastResolvedSequence);
+			}
+			if (envelope.kind() != this.lastResolutionKind)
 			{
 				throw new IllegalStateException("duplicate terminal has a different kind: expected " +
 					this.lastResolutionKind + ", received " + envelope.kind());
 			}
-			if (this.lastResolutionKind != null &&
-				(envelope.payloadLength() != this.lastResolutionDataLength ||
-					envelope.chunkCount() != this.lastResolutionDataChunkCount))
+			if (envelope.payloadLength() != this.lastResolutionDataLength ||
+				envelope.chunkCount() != this.lastResolutionDataChunkCount)
 			{
 				throw new IllegalStateException("duplicate terminal has different transaction metadata");
 			}
 			if (envelope.kind() == AeronReplicationEnvelope.Kind.COMMIT &&
-				this.hasLastResolutionCrc && envelope.commitCrc32c() != this.lastResolutionCrc32c)
+				envelope.commitCrc32c() != this.lastResolutionCrc32c)
 			{
 				throw new IllegalStateException("duplicate commit has a different payload checksum");
 			}
@@ -204,6 +230,14 @@ final class TransactionAssembler
 		}
 		if (envelope.kind() == AeronReplicationEnvelope.Kind.ABORT)
 		{
+			/* decodeView() already enforces this canonical form. Keep the semantic
+			 * check at the state-machine boundary too: a future decoder or test
+			 * adapter must not turn an abort with a commit witness into a valid
+			 * terminal decision. */
+			if (envelope.commitCrc32c() != 0)
+			{
+				throw new IllegalStateException("abort marker carries a non-zero commit checksum");
+			}
 			if (this.transaction != null)
 			{
 				this.transaction.dispose();
@@ -240,8 +274,8 @@ final class TransactionAssembler
 				throw new IllegalStateException("commit without data chunks");
 			}
 			this.nextExpectedSequence = envelope.sequence() + 1;
-				this.delivery.prepare(null, null, null, envelope.sequence(), position, envelope.payloadLength(),
-					envelope.chunkCount(), envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
+			this.delivery.prepare(null, null, null, envelope.sequence(), position, 0, 0,
+				envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
 			return;
 		}
 		if (this.transaction.dataLength != envelope.payloadLength() ||
@@ -338,10 +372,10 @@ final class TransactionAssembler
 				}
 				synchronized (TransactionAssembler.this)
 				{
+					lastAppliedSequence = this.sequence;
 					lastResolvedSequence = this.sequence;
 					lastResolvedPosition = this.position;
 					lastResolutionCrc32c = this.resolutionCrc32c;
-					hasLastResolutionCrc = true;
 					lastResolutionKind = this.resolutionKind;
 					lastResolutionDataLength = this.resolutionDataLength;
 					lastResolutionDataChunkCount = this.resolutionDataChunkCount;
@@ -364,6 +398,7 @@ final class TransactionAssembler
 	}
 
 	long lastResolvedSequence() { return this.lastResolvedSequence; }
+	long lastAppliedSequence() { return this.lastAppliedSequence; }
 	UUID clusterId() { return this.clusterId; }
 	long epoch() { return this.epoch; }
 	long lastResolvedPosition() { return this.lastResolvedPosition; }
@@ -373,7 +408,11 @@ final class TransactionAssembler
 		return new CursorSnapshot(this.lastResolvedSequence, this.lastResolvedPosition);
 	}
 
-	record CursorSnapshot(long sequence, long position) { }
+	/** Returns whether chunks are waiting for a terminal marker. */
+	synchronized boolean hasIncompleteTransaction()
+	{
+		return this.transaction != null;
+	}
 
 	RuntimeException failure() { return this.failure; }
 
@@ -426,7 +465,7 @@ final class TransactionAssembler
 		void add(final AeronReplicationEnvelope.EnvelopeView envelope)
 		{
 			final int payloadLength = envelope.payloadLength();
-			final int wireLength = envelope.payloadLengthOnWire;
+			final int wireLength = envelope.payloadLengthOnWire();
 			if (payloadLength > this.maxBytes) throw new IllegalArgumentException("payload exceeds maxTransactionBytes");
 			final boolean dictionary = envelope.kind() == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY;
 			if (dictionary && this.dataNextChunk != 0) throw new IllegalStateException("type dictionary follows Store binary chunks");
@@ -462,7 +501,7 @@ final class TransactionAssembler
 				if (wireLength != 0)
 				{
 					if (this.dictionary == null) throw new IllegalStateException("dictionary storage is unavailable");
-					this.dictionary.putBytes(offset, envelope.source, envelope.payloadOffset, wireLength);
+					this.dictionary.putBytes(offset, envelope.source(), envelope.payloadOffset(), wireLength);
 				}
 				this.dictionaryOffset += wireLength;
 				this.dictionaryNextChunk++;
@@ -480,7 +519,7 @@ final class TransactionAssembler
 				if (wireLength != 0)
 				{
 					if (this.data == null) throw new IllegalStateException("Store data storage is unavailable");
-					this.data.putBytes(offset, envelope.source, envelope.payloadOffset, wireLength);
+					this.data.putBytes(offset, envelope.source(), envelope.payloadOffset(), wireLength);
 				}
 				this.dataOffset += wireLength;
 				this.dataNextChunk++;

@@ -75,6 +75,26 @@ class NeutralTransportTest
 		assertEquals("dictionary-2", dictionaries.get("cluster-writer-2"));
 	}
 
+	/** A restart dictionary queued by startup is consumed by the first Store thread. */
+	@Test
+	void queuedDictionaryCrossesTheStartupThreadBoundary()
+	{
+		final ClusterStorageBinaryDataDistributor delegate = new ClusterStorageBinaryDataDistributor()
+		{
+			public void messageIndex(final long value) { }
+			public long messageIndex() { return -1; }
+			public void ignoreDistribution(final boolean value) { }
+			public boolean ignoreDistribution() { return false; }
+			public void distributeTypeDictionary(final String value) { }
+			public void distributeData(final org.eclipse.serializer.persistence.binary.types.Binary value) { }
+			public void dispose() { }
+		};
+		final ClusterStorageBinaryDataDistributor caching = ClusterStorageBinaryDataDistributor.Caching(delegate);
+		caching.queueTypeDictionaryForNextTransaction("full-dictionary");
+		assertEquals("full-dictionary", caching.consumeTypeDictionary());
+		assertEquals(null, caching.consumeTypeDictionary());
+	}
+
 	private static Thread dictionaryThread(
 		final String name,
 		final ClusterStorageBinaryDataDistributor distributor,

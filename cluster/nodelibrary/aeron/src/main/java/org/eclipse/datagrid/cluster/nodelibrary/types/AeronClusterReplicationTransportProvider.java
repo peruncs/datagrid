@@ -15,24 +15,27 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 import io.aeron.Aeron;
+import io.aeron.ChannelUri;
+import io.aeron.CommonContext;
 import io.aeron.archive.Archive;
+import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.driver.exceptions.ActiveDriverException;
+import org.agrona.SystemUtil;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpointStore;
-import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
+import org.eclipse.datagrid.storage.distributed.aeron.reader.CursorSnapshot;
 import org.eclipse.datagrid.storage.distributed.aeron.reader.ReaderDeliveryListener;
 import org.eclipse.datagrid.storage.distributed.aeron.reader.StorageBinaryDataClientAeronArchive;
 import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronArchiveReplicationPublisher;
 import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronReplicationWriteCoordinator;
 import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronStorageBinaryTargetDistributing;
 import org.eclipse.datagrid.storage.distributed.types.AtomicFileStore;
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 
@@ -43,7 +46,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
@@ -65,6 +67,8 @@ public final class AeronClusterReplicationTransportProvider
 	implements ClusterReplicationTransportProvider
 {
 	/* Test-only, thread-confined seam used by the forked crash harness. */
+	private static final System.Logger LOGGER =
+		System.getLogger(AeronClusterReplicationTransportProvider.class.getName());
 	private static final ThreadLocal<BiConsumer<String, Long>> CRASH_HOOK = new ThreadLocal<>();
 	private static final ThreadLocal<Long> CHECKPOINT_SEQUENCE = new ThreadLocal<>();
 	private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;
@@ -102,7 +106,10 @@ public final class AeronClusterReplicationTransportProvider
 	@Override
 	public ClusterReplicationTransport create(final NodelibraryPropertiesProvider properties)
 	{
-		return new Transport(AeronSettings.fromEnvironment(properties));
+		final Transport transport = new Transport(AeronSettings.fromEnvironment(properties));
+		/* Probe metadata durability before any synchronized runtime startup path. */
+		transport.verifyMetadataStorage();
+		return transport;
 	}
 
 	/**
@@ -142,8 +149,15 @@ public final class AeronClusterReplicationTransportProvider
 		UUID nodeId,
 		UUID storeGeneration,
 		int archiveFileSyncLevel,
+		long minimumArchiveFreeBytes,
 		boolean externalArchive,
-		String role
+		String role,
+		ThreadingMode threadingMode,
+		ArchiveThreadingMode archiveThreadingMode,
+		int archiveSegmentFileLength,
+		long archiveLowStorageSpaceThreshold,
+		int maxConcurrentReplays,
+		String archiveReplicationChannel
 	)
 	{
 		private static AeronSettings fromEnvironment(final NodelibraryPropertiesProvider properties)
@@ -224,6 +238,17 @@ public final class AeronClusterReplicationTransportProvider
 			{
 				throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL must be 0, 1, or 2");
 			}
+			if (properties.isProdMode() && archiveFileSyncLevel == 0)
+			{
+				throw new IllegalArgumentException(
+					"ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL=0 is only allowed outside production mode");
+			}
+			final long minimumArchiveFreeBytes = parseLong(
+				properties, "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES", "0");
+			if (minimumArchiveFreeBytes < 0)
+			{
+				throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES must be >= 0");
+			}
 			final String externalArchiveValue = value(
 				properties, "ECLIPSE_DATAGRID_AERON_EXTERNAL_ARCHIVE", "false");
 			if (!"true".equalsIgnoreCase(externalArchiveValue) &&
@@ -232,15 +257,57 @@ public final class AeronClusterReplicationTransportProvider
 				throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_EXTERNAL_ARCHIVE must be true or false");
 			}
 			final boolean externalArchive = Boolean.parseBoolean(externalArchiveValue);
+			if (externalArchive && minimumArchiveFreeBytes > 0)
+			{
+				throw new IllegalArgumentException(
+					"ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES is only supported for embedded Archive writers");
+			}
+			/* Keep development defaults self-contained, but make them match the
+			 * production topology: explicit framing, dynamic MDC, and a stable
+			 * channel alias. Production deployments must override localhost endpoints
+			 * and are rejected below when they do not. */
+			final String channelAlias = "datagrid-" + cluster;
 			final String liveChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
-				"aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max");
-			final String replayChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL", "aeron:udp?endpoint=localhost:0");
+				"aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=" + channelAlias);
+			final String replayChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
+				"aeron:udp?endpoint=localhost:0|control=localhost:40123|control-mode=dynamic");
+			final String archiveReplicationChannel = channel(properties,
+				"ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL", "aeron:udp?endpoint=localhost:0");
 			final String controlChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL", "aeron:udp?endpoint=localhost:40124");
 			final String controlResponseChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL", "aeron:udp?endpoint=localhost:0");
+			final ThreadingMode threadingMode = threadingMode(properties);
+			final ArchiveThreadingMode archiveThreadingMode = threadingMode == ThreadingMode.DEDICATED
+				? ArchiveThreadingMode.DEDICATED : ArchiveThreadingMode.SHARED;
+			final int archiveSegmentFileLength = parseInt(properties, "ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH",
+				Integer.toString(Archive.Configuration.segmentFileLength()));
+			final long archiveLowStorageSpaceThreshold = parseLong(properties,
+				"ECLIPSE_DATAGRID_AERON_ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD",
+				Long.toString(Archive.Configuration.lowStorageSpaceThreshold()));
+			final int maxConcurrentReplays = parseInt(properties, "ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS",
+				Integer.toString(Archive.Configuration.maxConcurrentReplays()));
+			if (archiveSegmentFileLength <= 0 || archiveLowStorageSpaceThreshold < 0 || maxConcurrentReplays <= 0)
+			{
+				throw new IllegalArgumentException(
+					"Archive segment length, low-storage threshold, and max concurrent replays must be positive");
+			}
+			validateFraming(liveChannel, "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL", replication);
+			validateFraming(replayChannel, "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL", replication);
+			if ("writer".equals(role) && !externalArchive)
+			{
+				validateWriterTopology(liveChannel);
+			}
 			if (properties.isProdMode() && (wildcardEndpoint(liveChannel) || wildcardEndpoint(replayChannel) ||
-				wildcardEndpoint(controlChannel) || wildcardEndpoint(controlResponseChannel)))
+				wildcardEndpoint(controlChannel) || wildcardEndpoint(controlResponseChannel) ||
+				wildcardEndpoint(archiveReplicationChannel)))
 			{
 				throw new IllegalArgumentException("wildcard Aeron endpoints are not allowed in production mode");
+			}
+			if (properties.isProdMode() && (loopbackEndpoint(liveChannel) || loopbackEndpoint(replayChannel) ||
+				loopbackEndpoint(controlChannel) || loopbackEndpoint(controlResponseChannel) ||
+				loopbackEndpoint(archiveReplicationChannel)))
+			{
+				throw new IllegalArgumentException(
+					"loopback Aeron endpoints are not allowed in production mode; configure routable node addresses");
 			}
 			return new AeronSettings(
 				replication,
@@ -258,9 +325,29 @@ public final class AeronClusterReplicationTransportProvider
 				nodeId,
 				storeGeneration,
 				archiveFileSyncLevel,
+				minimumArchiveFreeBytes,
 				externalArchive,
-				role
+				role,
+				threadingMode,
+				archiveThreadingMode,
+				archiveSegmentFileLength,
+				archiveLowStorageSpaceThreshold,
+				maxConcurrentReplays,
+				archiveReplicationChannel
 			);
+		}
+
+		private static ThreadingMode threadingMode(final NodelibraryPropertiesProvider properties)
+		{
+			final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_THREADING_MODE",
+				properties.isProdMode() ? "DEDICATED" : "SHARED");
+			return switch (configured.trim().toUpperCase(java.util.Locale.ROOT))
+			{
+				case "SHARED" -> ThreadingMode.SHARED;
+				case "DEDICATED" -> ThreadingMode.DEDICATED;
+				default -> throw new IllegalArgumentException(
+					"ECLIPSE_DATAGRID_AERON_THREADING_MODE must be SHARED or DEDICATED");
+			};
 		}
 
 		private static void put(final Properties values, final NodelibraryPropertiesProvider properties,
@@ -275,9 +362,12 @@ public final class AeronClusterReplicationTransportProvider
 
 		private static String value(final NodelibraryPropertiesProvider properties, final String name, final String fallback)
 		{
+			/* The provider owns the precedence rule.  Falling back directly to the
+			 * process environment here would let an ambient variable override a
+			 * deliberately isolated application/test provider. Nodelibrary's Env
+			 * implementation already reads environment variables at its boundary. */
 			final String configured = properties.replicationProperty(name);
-			final String value = configured == null ? System.getenv(name) : configured;
-			return value == null || value.isBlank() ? fallback : value;
+			return configured == null || configured.isBlank() ? fallback : configured;
 		}
 
 		private static String channel(final NodelibraryPropertiesProvider properties, final String name, final String fallback)
@@ -313,6 +403,22 @@ public final class AeronClusterReplicationTransportProvider
 				}
 			}
 			return channel;
+		}
+
+		/**
+		 * Returns whether the configured channel explicitly disables Aeron spy
+		 * connection simulation. The driver-level setting must not silently
+		 * override an operator's explicit {@code ssc=false} choice.
+		 */
+		private static boolean explicitlyDisablesSpySimulation(final String channel)
+		{
+			final int query = channel.indexOf('?');
+			if (query < 0) return false;
+			for (final String option : channel.substring(query + 1).split("\\|"))
+			{
+				if (option.trim().equalsIgnoreCase("ssc=false")) return true;
+			}
+			return false;
 		}
 
 		private static void validateUdpAddress(final String address, final String name)
@@ -354,7 +460,72 @@ public final class AeronClusterReplicationTransportProvider
 
 		private static boolean wildcardEndpoint(final String channel)
 		{
-			return channel.contains("=0.0.0.0:") || channel.contains("=*:");
+			return channel.contains("=0.0.0.0:") || channel.contains("=*:") ||
+				channel.contains("=[::]:") || channel.contains("=:::");
+		}
+
+		private static boolean loopbackEndpoint(final String channel)
+		{
+			return channel.contains("=localhost:") || channel.contains("=127.0.0.1:") ||
+				channel.contains("=[::1]:") || channel.contains("=::1:");
+		}
+
+		/**
+		 * Reject channel-level framing overrides that disagree with the values used
+		 * to configure the MediaDriver and replication envelope. Without this check
+		 * the channel silently wins and a writer and reader can use different term or
+		 * MTU limits even though they share one replication configuration.
+		 */
+		private static void validateFraming(final String channel, final String name,
+			final AeronReplicationConfiguration replication)
+		{
+			final ChannelUri uri;
+			try
+			{
+				uri = ChannelUri.parse(channel);
+			}
+			catch (final RuntimeException failure)
+			{
+				throw new IllegalArgumentException("Invalid Aeron channel for " + name + ": " + channel, failure);
+			}
+			validateFramingOption(uri, CommonContext.TERM_LENGTH_PARAM_NAME, replication.termLength(), name);
+			if (uri.isUdp())
+			{
+				validateFramingOption(uri, CommonContext.MTU_LENGTH_PARAM_NAME, replication.mtuLength(), name);
+			}
+		}
+
+		private static void validateFramingOption(final ChannelUri uri, final String option,
+			final int expected, final String name)
+		{
+			final String configured = uri.get(option);
+			if (configured == null) return;
+			final long value;
+			try
+			{
+				value = SystemUtil.parseSize(option, configured);
+			}
+			catch (final RuntimeException failure)
+			{
+				throw new IllegalArgumentException("Invalid " + option + " in " + name + ": " + configured, failure);
+			}
+			if (value != expected)
+			{
+				throw new IllegalArgumentException(name + " " + option + "=" + configured +
+					" conflicts with replication configuration value " + expected);
+			}
+		}
+
+		private static void validateWriterTopology(final String channel)
+		{
+			final ChannelUri uri = ChannelUri.parse(channel);
+			if (!uri.isUdp() || !CommonContext.MDC_CONTROL_MODE_DYNAMIC.equalsIgnoreCase(
+				uri.get(CommonContext.MDC_CONTROL_MODE_PARAM_NAME)) ||
+				!"max".equalsIgnoreCase(uri.get(CommonContext.FLOW_CONTROL_PARAM_NAME)))
+			{
+				throw new IllegalArgumentException(
+					"Aeron writer live channel must use dynamic MDC with fc=max: " + channel);
+			}
 		}
 
 		private static int parseInt(final NodelibraryPropertiesProvider properties, final String name, final String fallback)
@@ -419,6 +590,76 @@ public final class AeronClusterReplicationTransportProvider
 			this.writerRecordingId = settings.recordingId();
 		}
 
+		private void verifyMetadataStorage()
+		{
+			final Path parent = this.settings.checkpointPath().toAbsolutePath().getParent();
+			if (parent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
+			ensurePrivateDirectory(parent);
+			try
+			{
+				AtomicFileStore.verify(this.settings.checkpointPath());
+			}
+			catch (final IOException failure)
+			{
+				throw new IllegalStateException(
+					"Aeron replication metadata storage does not support atomic replacement", failure);
+			}
+		}
+
+		/** Serializes dictionary/lifecycle control for the provider's single writer stream. */
+		private final class AeronDistributor implements ClusterStorageBinaryDataDistributor
+		{
+			private volatile long index = -1;
+			private volatile boolean ignored;
+			private String dictionary;
+
+			@Override
+			public void messageIndex(final long value)
+			{
+				if (value < -1 || value == Long.MAX_VALUE)
+				{
+					throw new IllegalArgumentException("message index must be in [-1, Long.MAX_VALUE)");
+				}
+				this.index = value;
+				nextSequence.accumulateAndGet(value + 1, Math::max);
+				if (writer != null) writer.synchronizeNextSequence(value + 1);
+			}
+
+			@Override public long messageIndex() { return this.index; }
+			@Override public void ignoreDistribution(final boolean value) { this.ignored = value; }
+			@Override public boolean ignoreDistribution() { return this.ignored; }
+
+			@Override
+			public synchronized void distributeTypeDictionary(final String value)
+			{
+				this.dictionary = value;
+			}
+
+			@Override
+			public synchronized String consumeTypeDictionary()
+			{
+				final String value = this.dictionary;
+				this.dictionary = null;
+				return value;
+			}
+
+			@Override
+			public synchronized void distributeData(final Binary data)
+			{
+				if (this.ignored) return;
+				if (!"writer".equals(settings.role()))
+				{
+					throw new IllegalStateException("Aeron replication distributor is writer-only");
+				}
+				throw new UnsupportedOperationException(
+					"Aeron data distribution must use persistenceTargetFactory so local Store acceptance " +
+					"and the durable replication fence share one transaction boundary");
+			}
+
+			/** The provider owns the shared Aeron/archive runtime. */
+			@Override public void dispose() { }
+		}
+
 		@Override
 		public String id()
 		{
@@ -450,52 +691,7 @@ public final class AeronClusterReplicationTransportProvider
 				throw new IllegalStateException("Aeron transport supports one replication stream per provider");
 			}
 			this.distributorStream = streamName;
-			this.distributor = new ClusterStorageBinaryDataDistributor()
-			{
-				private volatile long index = -1;
-				private volatile boolean ignored;
-				private String dictionary;
-
-				@Override public void messageIndex(final long value)
-				{
-					if (value < -1 || value == Long.MAX_VALUE)
-					{
-						throw new IllegalArgumentException("message index must be in [-1, Long.MAX_VALUE)");
-					}
-					this.index = value;
-					nextSequence.accumulateAndGet(value + 1, Math::max);
-					if (writer != null) writer.synchronizeNextSequence(value + 1);
-				}
-				@Override public long messageIndex() { return this.index; }
-				@Override public void ignoreDistribution(final boolean value) { this.ignored = value; }
-				@Override public boolean ignoreDistribution() { return this.ignored; }
-				@Override public synchronized void distributeTypeDictionary(final String value)
-				{
-					this.dictionary = value;
-				}
-				@Override public synchronized String consumeTypeDictionary()
-				{
-					final String value = this.dictionary;
-					this.dictionary = null;
-					return value;
-				}
-
-				@Override
-				public synchronized void distributeData(final org.eclipse.serializer.persistence.binary.types.Binary data)
-				{
-					if (this.ignored) return;
-					if (!"writer".equals(settings.role()))
-					{
-						throw new IllegalStateException("Aeron replication distributor is writer-only");
-					}
-					throw new UnsupportedOperationException(
-						"Aeron data distribution must use persistenceTargetFactory so local Store acceptance " +
-						"and the durable replication fence share one transaction boundary");
-				}
-
-				/** The provider owns the shared Aeron/archive runtime. */
-				@Override public void dispose() { }
-			};
+			this.distributor = new AeronDistributor();
 			return this.distributor;
 		}
 
@@ -534,7 +730,12 @@ public final class AeronClusterReplicationTransportProvider
 		)
 		{
 			this.ensureOpen();
-			if ("writer".equals(this.settings.role()) && !this.settings.externalArchive())
+		/* A writer owns publication only. Even with an external Archive it must not
+		 * create a second subscription against its own recording; that would violate
+		 * the one-writer/N-reader topology and expose a partially initialized reader
+		 * through the writer's health path. Configure a separate reader/backup-reader
+		 * node when replay is required. */
+		if ("writer".equals(this.settings.role()))
 			{
 				return ClusterStorageBinaryDataClient.NoOp(startingCursor, cursorListener);
 			}
@@ -546,8 +747,8 @@ public final class AeronClusterReplicationTransportProvider
 			if (this.reader != null)
 			{
 				final StorageBinaryDataClientAeronArchive previous = this.reader;
-				this.reader = null;
 				previous.dispose();
+				this.reader = null;
 			}
 			this.ensureRuntime();
 			final ReplicationCursor cursor = startingCursor == null
@@ -612,17 +813,20 @@ public final class AeronClusterReplicationTransportProvider
 					final StorageBinaryDataClientAeronArchive current = readerRef.get();
 					if (current != null && current == this.reader)
 					{
-						final AeronReplicationCursor snapshot = current.cursor(
-							this.settings.nodeId(), this.settings.storeGeneration(), this.settings.recordingId());
+						final CursorSnapshot snapshot = current.cursorSnapshot();
 						this.nextSequence.accumulateAndGet(snapshot.sequence() + 1, Math::max);
-						if (commitPosition && cursorListener != null)
+						/* Aeron has no broker offset to commit. Its cursor is the
+						 * durability boundary for every reader, including ordinary readers;
+						 * the neutral commitPosition flag only controls broker transports. */
+						if (cursorListener != null)
 						{
-							cursorListener.onChange(MessageInfo.New(snapshot.sequence(), "aeron",
-								this.settings.storeGeneration(), encodePosition(snapshot.recordingId(), snapshot.recordingPosition())));
+								cursorListener.onChange(MessageInfo.New(snapshot.sequence(), "aeron",
+									this.settings.storeGeneration(), encodePosition(this.settings.recordingId(), snapshot.position())));
 						}
 					}
 				},
-				this.readerDeliveryListener()
+				this.readerDeliveryListener(),
+				aeronCursor ? cursorPosition : -1
 			);
 			readerRef.set(this.reader);
 			return new ClientAdapter(this.reader, this.settings.recordingId(), this.settings.storeGeneration());
@@ -702,15 +906,19 @@ public final class AeronClusterReplicationTransportProvider
 			{
 				public void init() { }
 				public synchronized ReplicationCursor latest()
-				{
-					synchronized (Transport.this)
 					{
-						if (!"writer".equals(Transport.this.settings.role()))
+						synchronized (Transport.this)
 						{
-							throw new UnsupportedOperationException(
-								"Aeron reader cannot provide the writer's latest committed position");
-						}
-						final WriterBoundary boundary = Transport.this.writerBoundary;
+							if (!"writer".equals(Transport.this.settings.role()))
+							{
+								throw new UnsupportedOperationException(
+									"Aeron reader cannot provide the writer's latest committed position");
+							}
+							/* Resolve the writer session before returning a boundary. This makes
+							 * latest() a durable checkpoint query rather than a snapshot of an
+							 * unstarted provider. */
+							Transport.this.ensureWriter();
+							final WriterBoundary boundary = Transport.this.writerBoundary;
 						// Keep the position self-describing even before a recording or
 						// reader has produced a concrete position (-1). This preserves
 						// the recording identity and lets consumers distinguish an
@@ -761,14 +969,27 @@ public final class AeronClusterReplicationTransportProvider
 			{
 				private volatile boolean active = true;
 				public void init() { }
+				public long archiveUsableSpaceBytes() { return Transport.this.archiveUsableSpaceBytes(); }
+				public long writerDurablePosition() { return Transport.this.writerBoundary.position(); }
+				public long writerDurableSequence() { return Transport.this.writerBoundary.sequence(); }
+				public long appliedSequence()
+				{
+					return client instanceof ClientAdapter adapter
+						? adapter.delegate().lastAppliedSequence() : -1L;
+				}
+				private boolean capacityAvailable() { return Transport.this.archiveCapacityAvailable(); }
 				public boolean isReady() { return active && !Transport.this.closed && storage.isReady() &&
-					Transport.this.driverFailure == null && writerCheckpointState() == null && ("writer".equals(settings.role()) ||
-						client != null && client.isLive()); }
+					Transport.this.driverFailure == null && capacityAvailable() &&
+					writerCheckpointState() == null && ("writer".equals(settings.role()) ||
+						client != null && client.failure() == null && client.isRunning() && client.isLive()); }
 				public boolean isHealthy() { return active && !Transport.this.closed && storage.isReady() &&
-					Transport.this.driverFailure == null && writerCheckpointState() == null && ("writer".equals(settings.role()) ||
-						client != null && client.isRunning()); }
+					Transport.this.driverFailure == null && capacityAvailable() &&
+					writerCheckpointState() == null && ("writer".equals(settings.role()) ||
+						client != null && client.failure() == null && client.isRunning()); }
 				public ReplicationHealth.State state()
 				{
+					if ("writer".equals(settings.role()) && !Transport.this.archiveCapacityAvailable())
+						return ReplicationHealth.State.DEGRADED_ARCHIVE;
 					final ReplicationHealth.State checkpointState = writerCheckpointState();
 					if (checkpointState != null) return checkpointState;
 					if (!active || Transport.this.closed || Transport.this.driverFailure != null ||
@@ -928,9 +1149,37 @@ public final class AeronClusterReplicationTransportProvider
 			if (this.coordinator == null)
 			{
 				this.coordinator = this.ensureWriter().newWriteCoordinator(
-					this.settings.replication().durabilityMode(), this::persistWriterCheckpoint);
+					this.settings.replication().durabilityMode(), this::persistWriterCheckpoint,
+					this::archiveCapacityAvailable);
 			}
 			return this.coordinator;
+		}
+
+		private boolean archiveCapacityAvailable()
+		{
+			final long minimum = this.settings.minimumArchiveFreeBytes();
+			if (minimum == 0 || this.settings.externalArchive()) return true;
+			try
+			{
+				return Files.getFileStore(this.settings.archiveDirectory()).getUsableSpace() >= minimum;
+			}
+			catch (final IOException failure)
+			{
+				return false;
+			}
+		}
+
+		private long archiveUsableSpaceBytes()
+		{
+			if (this.settings.externalArchive()) return -1L;
+			try
+			{
+				return Files.getFileStore(this.settings.archiveDirectory()).getUsableSpace();
+			}
+			catch (final IOException failure)
+			{
+				return -1L;
+			}
 		}
 
 		private AeronReplicationCheckpoint loadWriterCheckpoint()
@@ -1187,9 +1436,17 @@ public final class AeronClusterReplicationTransportProvider
 			final long discoveredRecordingId = this.writer == null ? Aeron.NULL_VALUE : this.writer.recordingId();
 			if (discoveredRecordingId >= 0) this.writerRecordingId = discoveredRecordingId;
 			final long recordingId = this.writerRecordingId >= 0 ? this.writerRecordingId : this.settings.recordingId();
+			final AeronReplicationCheckpoint.DurabilityMode checkpointMode = switch (
+				this.settings.replication().durabilityMode())
+			{
+				case ARCHIVE_FIRST -> AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST;
+				case ENQUEUE_THEN_ARCHIVE -> AeronReplicationCheckpoint.DurabilityMode.ENQUEUE_THEN_ARCHIVE;
+				case LOCAL_DURABLE_FIRST -> throw new IllegalStateException(
+					"LOCAL_DURABLE_FIRST is not supported by the Aeron provider");
+			};
 			return new AeronReplicationCheckpoint(
 				AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-				AeronReplicationCheckpoint.DurabilityMode.valueOf(this.settings.replication().durabilityMode().name()),
+				checkpointMode,
 				state, this.settings.clusterId(), this.settings.nodeId(), this.settings.storeGeneration(),
 				recordingId, this.settings.epoch(), sequence, position, dataLength, dataChunkCount, dataCrc32c);
 		}
@@ -1208,33 +1465,21 @@ public final class AeronClusterReplicationTransportProvider
 				throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
 			}
 			ensurePrivateDirectory(checkpointParent);
-			try
-			{
-				/* Verify the metadata boundary before launching any driver. Both writer
-				 * checkpoints and reader uncertainty markers use this directory, so a
-				 * failed probe must be reported before either role can import or publish. */
-				AtomicFileStore.verify(this.settings.checkpointPath());
-			}
-			catch (final IOException failure)
-			{
-				throw new IllegalStateException(
-					"Aeron replication metadata storage does not support atomic replacement", failure
-				);
-			}
 			if ("writer".equals(this.settings.role()))
 			{
 				ensurePrivateDirectory(this.settings.archiveDirectory());
 			}
 			final MediaDriver.Context media = new MediaDriver.Context()
 				.aeronDirectoryName(this.settings.aeronDirectory().toString())
-				.threadingMode(ThreadingMode.SHARED)
+				.threadingMode(this.settings.threadingMode())
 				.mtuLength(this.settings.replication().mtuLength())
 				.publicationTermBufferLength(this.settings.replication().termLength())
 				/* A local Archive spy is the writer's durable publication when no remote
 				 * reader is connected.  Make that connection explicit; relying on the
 				 * channel's ssc option alone leaves the MediaDriver default (false) in
 				 * control and turns a zero-reader writer into NOT_CONNECTED. */
-				.spiesSimulateConnection("writer".equals(this.settings.role()) && !this.settings.externalArchive())
+				.spiesSimulateConnection("writer".equals(this.settings.role()) && !this.settings.externalArchive() &&
+					!AeronSettings.explicitlyDisablesSpySimulation(this.settings.liveChannel()))
 				.errorHandler(this::recordDriverFailure)
 				.dirDeleteOnStart(false)
 				.dirDeleteOnShutdown(false);
@@ -1244,7 +1489,10 @@ public final class AeronClusterReplicationTransportProvider
 				{
 					crashPoint("BEFORE_PUBLICATION_CONNECTED", -1L);
 					this.driver = launchDriver(media, () -> MediaDriver.launch(media.clone()));
-					this.aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(this.settings.aeronDirectory().toString()));
+					this.aeron = Aeron.connect(new Aeron.Context()
+						.aeronDirectoryName(this.settings.aeronDirectory().toString())
+						.errorHandler(this::recordDriverFailure)
+						.subscriberErrorHandler(this::recordDriverFailure));
 					this.archive = AeronArchive.connect(this.archiveContext());
 				}
 				catch (final RuntimeException | Error failure)
@@ -1259,10 +1507,14 @@ public final class AeronClusterReplicationTransportProvider
 				.aeronDirectoryName(this.settings.aeronDirectory().toString())
 				.archiveDir(this.settings.archiveDirectory().toFile())
 				.deleteArchiveOnStart(false)
-				.threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+				.threadingMode(this.settings.archiveThreadingMode())
 				.controlChannel(this.settings.controlChannel())
 				.localControlChannel("aeron:ipc")
-				.replicationChannel(this.settings.replayChannel())
+				.replicationChannel(this.settings.archiveReplicationChannel())
+				.segmentFileLength(this.settings.archiveSegmentFileLength())
+				.lowStorageSpaceThreshold(this.settings.archiveLowStorageSpaceThreshold())
+				.maxConcurrentReplays(this.settings.maxConcurrentReplays())
+				.errorHandler(this::recordDriverFailure)
 				.fileSyncLevel(this.settings.archiveFileSyncLevel())
 				.catalogFileSyncLevel(this.settings.archiveFileSyncLevel());
 			try
@@ -1270,7 +1522,10 @@ public final class AeronClusterReplicationTransportProvider
 				crashPoint("BEFORE_PUBLICATION_CONNECTED", -1L);
 				this.driver = launchDriver(media,
 					() -> ArchivingMediaDriver.launch(media.clone(), archiveContext.clone()));
-				this.aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(this.settings.aeronDirectory().toString()));
+				this.aeron = Aeron.connect(new Aeron.Context()
+					.aeronDirectoryName(this.settings.aeronDirectory().toString())
+					.errorHandler(this::recordDriverFailure)
+					.subscriberErrorHandler(this::recordDriverFailure));
 				this.archive = AeronArchive.connect(this.archiveContext());
 			}
 			catch (final RuntimeException | Error failure)
@@ -1286,9 +1541,20 @@ public final class AeronClusterReplicationTransportProvider
 			final RuntimeException normalized = failure instanceof RuntimeException runtime
 				? runtime
 				: new IllegalStateException("Aeron MediaDriver failed", failure);
-			if (this.driverFailure == null)
+		if (this.driverFailure == null)
+		{
+			this.driverFailure = normalized;
+		}
+		else if (this.driverFailure != normalized)
+		{
+			/* Health keeps the first terminal cause, but later callbacks still carry
+			 * useful diagnostics (and must not disappear silently). */
+			LOGGER.log(System.Logger.Level.WARNING, "Additional Aeron transport failure", normalized);
+		}
+			final StorageBinaryDataClientAeronArchive current = this.reader;
+			if (current != null)
 			{
-				this.driverFailure = normalized;
+				current.fail(normalized);
 			}
 		}
 
@@ -1411,6 +1677,7 @@ public final class AeronClusterReplicationTransportProvider
 				.aeronDirectoryName(this.settings.aeronDirectory().toString())
 				.controlRequestChannel(this.settings.controlChannel())
 				.controlResponseChannel(this.settings.controlResponseChannel())
+				.errorHandler(this::recordDriverFailure)
 				.messageTimeoutNs(this.settings.replication().offerTimeoutNanos());
 		}
 
@@ -1531,23 +1798,11 @@ public final class AeronClusterReplicationTransportProvider
 	{
 		public void receiveTypeDictionary(final String value)
 		{
-			final byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-			this.packetAcceptor().accept(java.util.List.of(StorageBinaryDataPacket.New(
-				MessageType.TYPE_DICTIONARY, bytes.length, 0, 1, ByteBuffer.wrap(bytes))));
+			this.packetAcceptor().acceptTypeDictionary(value);
 		}
 		public void receiveData(final org.eclipse.serializer.persistence.binary.types.Binary value)
 		{
-			final ByteBuffer[] buffers = value.buffers();
-			int totalLength = 0;
-			for (final ByteBuffer buffer : buffers) totalLength = Math.addExact(totalLength, buffer.remaining());
-			if (totalLength == 0) return;
-			final List<StorageBinaryDataPacket> packets = new ArrayList<>(buffers.length);
-			for (int i = 0; i < buffers.length; i++)
-			{
-				packets.add(StorageBinaryDataPacket.New(
-					MessageType.DATA, totalLength, i, buffers.length, buffers[i].duplicate()));
-			}
-			this.packetAcceptor().accept(packets);
+			this.packetAcceptor().acceptData(value);
 			this.packetAcceptor().awaitApplied();
 		}
 	}
@@ -1562,13 +1817,15 @@ public final class AeronClusterReplicationTransportProvider
 		public void stopAtLatestMessage() { this.delegate().stopAtLatestMessage(); }
 		public MessageInfo messageInfo()
 		{
-			final StorageBinaryDataClientAeronArchive.CursorSnapshot snapshot = this.delegate().cursorSnapshot();
+					final CursorSnapshot snapshot = this.delegate().cursorSnapshot();
 			return MessageInfo.New(snapshot.sequence(), "aeron", this.storeGeneration(),
 				Transport.encodePosition(this.recordingId(), snapshot.position()));
 		}
 		public boolean isRunning() { return this.delegate().isRunning(); }
 		public boolean isLive() { return this.delegate().isLive(); }
 		public RuntimeException failure() { return this.delegate().failure(); }
+		public StorageBinaryDataClient.StopOutcome stopOutcome() { return this.delegate().stopOutcome(); }
+		public StorageBinaryDataClient.StopResult stopResult() { return this.delegate().stopResult(); }
 		public void resume() { this.delegate().resume(); }
 		public void dispose() { this.delegate().dispose(); }
 	}

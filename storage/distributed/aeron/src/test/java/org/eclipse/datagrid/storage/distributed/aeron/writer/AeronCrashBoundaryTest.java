@@ -126,7 +126,7 @@ class AeronCrashBoundaryTest
 		}
 	}
 
-	/** Verifies recorded commit before checkpoint is converted to uncertainty. */
+	/** Verifies a recorded commit whose terminal checkpoint was not written leaves the refusal fence. */
 	@Test
 	void recordedCommitBeforeCheckpointIsConvertedToUncertainty()
 	{
@@ -148,8 +148,10 @@ class AeronCrashBoundaryTest
 		{
 			assertThrows(CrashBarrier.SimulatedCrash.class, () -> coordinator.distributeData(
 				ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {5}))));
-			assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
-				AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
+			/* The Archive terminal is known durable, so converting the checkpoint to
+			 * COMMITTING_UNCERTAIN would be misleading. The surviving PREPARING fence
+			 * deliberately forces restart validation to report RESEED_REQUIRED. */
+			assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING), states);
 		}
 		finally
 		{

@@ -132,7 +132,6 @@ writer-child/reader-child overlap remains optional topology coverage:
 storage/distributed/aeron/src/test/java/
   org/eclipse/datagrid/storage/distributed/aeron/crashtest/
     CrashPoint.java
-    RecoveryPolicy.java
     CrashBarrier.java              // shared blocking barrier used by process cells
     ChildMilestone.java              // CRC-protected binary milestone value
     CrashOutcome.java                // strict typed outcome parser
@@ -149,6 +148,7 @@ cluster/nodelibrary/aeron/src/test/java/
     DirectoryLayout.java             // isolated roots and reserved ports
     StoreFixture.java                // CRC-protected Store oracle
     DiagnosticCollector.java         // failure artifact collector
+    RecoveryPolicy.java              // provider-child recovery outcome policy
     ProviderCrashChildMain.java      // real provider child
     ProviderCrashMatrixIT.java       // real controller
     ArchiveProcessMain.java           // external Archive child

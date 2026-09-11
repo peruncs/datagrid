@@ -17,6 +17,7 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -72,6 +73,110 @@ class AeronReaderLifecycleTest
 		assertFalse(active.get());
 	}
 
+	/** A timeout retains ownership so a later disposal can finish cleanup safely. */
+	@Test
+	void timeoutLeavesSubscriptionOpenForRetry()
+	{
+		final AtomicBoolean active = new AtomicBoolean(true);
+		final AtomicBoolean closed = new AtomicBoolean();
+		final CountDownLatch stopped = new CountDownLatch(1);
+		final CountDownLatch release = new CountDownLatch(1);
+		final Thread pollingThread = new Thread(() ->
+		{
+			try
+			{
+				while (!release.await(1L, TimeUnit.MILLISECONDS))
+				{
+					// Deliberately ignore interruption until the owner releases the poller.
+				}
+			}
+			catch (final InterruptedException ignored)
+			{
+				try
+				{
+					while (!release.await(1L, TimeUnit.MILLISECONDS))
+					{
+						// Keep the simulated callback blocked after interruption.
+					}
+				}
+				catch (final InterruptedException retryInterrupted)
+				{
+					Thread.currentThread().interrupt();
+				}
+			}
+			finally
+			{
+				stopped.countDown();
+			}
+		});
+		pollingThread.setDaemon(true);
+		pollingThread.start();
+		try
+		{
+			assertThrows(IllegalStateException.class, () -> AeronReaderLifecycle.stopAndClose(
+				active, pollingThread, stopped, () -> closed.set(true), TimeUnit.MILLISECONDS.toNanos(1L)));
+			assertFalse(closed.get());
+			release.countDown();
+			AeronReaderLifecycle.stopAndClose(
+				active, pollingThread, stopped, () -> closed.set(true), TimeUnit.SECONDS.toNanos(1L));
+			assertTrue(closed.get());
+			assertFalse(pollingThread.isAlive());
+		}
+		finally
+		{
+			release.countDown();
+		}
+	}
+
+	/** An interrupted disposer keeps subscription ownership for a later retry. */
+	@Test
+	void interruptedDisposalDoesNotCloseSubscription()
+		throws Exception
+	{
+		final AtomicBoolean active = new AtomicBoolean(true);
+		final AtomicBoolean closed = new AtomicBoolean();
+		final CountDownLatch stopped = new CountDownLatch(1);
+		final CountDownLatch release = new CountDownLatch(1);
+		final Thread pollingThread = new Thread(() ->
+		{
+			try { release.await(); }
+			catch (final InterruptedException ignored)
+			{
+				try { release.await(); }
+				catch (final InterruptedException retry) { Thread.currentThread().interrupt(); }
+			}
+			finally { stopped.countDown(); }
+		});
+		pollingThread.setDaemon(true);
+		pollingThread.start();
+		final AtomicBoolean interrupted = new AtomicBoolean();
+		final Thread disposer = new Thread(() ->
+		{
+			try
+			{
+				AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, () -> closed.set(true));
+			}
+			catch (final IllegalStateException expected)
+			{
+				interrupted.set(Thread.currentThread().isInterrupted());
+			}
+		});
+		disposer.start();
+		final long disposeStart = System.nanoTime();
+		while (active.get() && System.nanoTime() - disposeStart < TimeUnit.SECONDS.toNanos(1L))
+		{
+			Thread.yield();
+		}
+		disposer.interrupt();
+		disposer.join(1_000L);
+		assertTrue(interrupted.get());
+		assertFalse(closed.get());
+		release.countDown();
+		pollingThread.join(1_000L);
+		AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, () -> closed.set(true));
+		assertTrue(closed.get());
+	}
+
 	/** Verifies shared polling loop stops only after an idle poll. */
 	@Test
 	void sharedPollingLoopStopsOnlyAfterAnIdlePoll()
@@ -117,5 +222,17 @@ class AeronReaderLifecycleTest
 
 		assertSame(expected, actual);
 		assertFalse(active.get());
+	}
+
+	/** Verifies an assembler failure stops polling before another fragment is consumed. */
+	@Test
+	void pollingLoopStopsWhenAssemblerFails()
+	{
+		final AtomicBoolean active = new AtomicBoolean(true);
+		final AtomicInteger polls = new AtomicInteger();
+		AeronReaderLifecycle.runPollingLoop(
+			active, () -> polls.get() == 0, polls::incrementAndGet,
+			() -> false, () -> false, () -> { });
+		assertEquals(0, polls.get());
 	}
 }

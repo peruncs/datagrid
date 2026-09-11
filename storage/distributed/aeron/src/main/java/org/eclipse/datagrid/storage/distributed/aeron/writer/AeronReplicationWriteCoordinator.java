@@ -2,13 +2,13 @@ package org.eclipse.datagrid.storage.distributed.aeron.writer;
 
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
 import org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode;
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.typing.Disposable;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 
 /*-
  * #%L
@@ -31,8 +31,13 @@ import java.util.function.BiConsumer;
  * <p>The coordinator owns the pending dictionary and prepared transaction for
  * its write path. It reports state changes to the checkpoint writer so
  * restart can distinguish a committed transaction from an uncertain one.</p>
+ *
+ * <p>This is an Aeron-only write coordinator. Store integration must use
+ * {@link AeronStorageBinaryTargetDistributing}; exposing this object as the
+ * transport-neutral distributor would allow publication without local Store
+ * acceptance and would bypass the durable fence.</p>
  */
-public final class AeronReplicationWriteCoordinator implements StorageBinaryDataDistributor, Disposable
+public final class AeronReplicationWriteCoordinator implements Disposable
 {
 	static void setCrashHook(final BiConsumer<String, Long> hook) { CrashHook.install(hook); }
 	static void clearCrashHook() { CrashHook.clear(); }
@@ -41,35 +46,42 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		CrashHook.invoke(name, sequence);
 	}
 
-	/** Receives primitive checkpoint data without exposing the wire record type. */
-	@FunctionalInterface
-	interface CheckpointListener
-	{
-		void onState(AeronReplicationCheckpoint.State state, long sequence, int dataLength,
-			int dataChunkCount, int dataCrc32c, long position);
-	}
-
 	private final AeronReplicationPublisher publisher;
 	private final ReplicationDurabilityMode durabilityMode;
-	private final CheckpointListener listener;
+	private final AeronArchiveReplicationPublisher.CheckpointWriter listener;
+	private final BooleanSupplier writeAdmission;
 	private byte[] pendingDictionary;
 	private LocalEnqueue localAcceptanceFence;
+	/* Set only after publisher.commit() has returned.  A checkpoint cleanup
+	 * failure after that point must not overwrite a durable COMMITTED record with
+	 * COMMITTING_UNCERTAIN. */
+	private boolean commitMarkerPublished;
 
 	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher)
 	{
 		this(publisher, ReplicationDurabilityMode.ARCHIVE_FIRST,
-			(state, sequence, length, chunks, crc, position) -> { });
+			(state, sequence, length, chunks, crc, position) -> { }, () -> true);
 	}
 
-	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher, final CheckpointListener listener)
+	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
+		final AeronArchiveReplicationPublisher.CheckpointWriter listener)
 	{
 		this(publisher, ReplicationDurabilityMode.ARCHIVE_FIRST, listener);
 	}
 
 	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
-		final ReplicationDurabilityMode durabilityMode, final CheckpointListener listener)
+		final ReplicationDurabilityMode durabilityMode,
+		final AeronArchiveReplicationPublisher.CheckpointWriter listener)
 	{
-		if (publisher == null || durabilityMode == null || listener == null) throw new NullPointerException();
+		this(publisher, durabilityMode, listener, () -> true);
+	}
+
+	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
+		final ReplicationDurabilityMode durabilityMode,
+		final AeronArchiveReplicationPublisher.CheckpointWriter listener,
+		final BooleanSupplier writeAdmission)
+	{
+		if (publisher == null || durabilityMode == null || listener == null || writeAdmission == null) throw new NullPointerException();
 		if (durabilityMode == ReplicationDurabilityMode.LOCAL_DURABLE_FIRST)
 		{
 			throw new IllegalArgumentException("Store durable completion callback is required for LOCAL_DURABLE_FIRST");
@@ -77,6 +89,8 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		this.publisher = publisher;
 		this.durabilityMode = durabilityMode;
 		this.listener = listener;
+		this.writeAdmission = writeAdmission;
+		this.publisher.claimCoordinator(this);
 	}
 
 	ReplicationDurabilityMode durabilityMode()
@@ -90,15 +104,13 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 	}
 
 	/** Saves a type dictionary for the next transaction. */
-	@Override
-	public synchronized void distributeTypeDictionary(final String typeDictionaryData)
+	synchronized void distributeTypeDictionary(final String typeDictionaryData)
 	{
 		this.pendingDictionary = typeDictionaryData == null ? null : typeDictionaryData.getBytes(StandardCharsets.UTF_8);
 	}
 
 	/** Returns and clears the dictionary saved for the next transaction. */
-	@Override
-	public synchronized String consumeTypeDictionary()
+	synchronized String consumeTypeDictionary()
 	{
 		final byte[] dictionary = this.pendingDictionary;
 		this.pendingDictionary = null;
@@ -106,8 +118,7 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 	}
 
 	/** Publishes and commits one Store binary. */
-	@Override
-	public synchronized void distributeData(final Binary data)
+	synchronized void distributeData(final Binary data)
 	{
 		try (final AeronReplicationPublisher.PreparedTransaction prepared = this.prepare(data))
 		{
@@ -121,21 +132,37 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 	 */
 	synchronized void commitOrMarkUncertain(final AeronReplicationPublisher.PreparedTransaction prepared)
 	{
+		this.commitMarkerPublished = false;
 		try
 		{
 			this.commit(prepared);
 		}
 		catch (final RuntimeException | Error failure)
 		{
-			try
+			if (!this.commitMarkerPublished)
 			{
-				this.markCommittingUncertain(prepared);
+				try
+				{
+					this.markCommittingUncertain(prepared);
+				}
+				catch (final RuntimeException | Error uncertainFailure)
+				{
+					failure.addSuppressed(uncertainFailure);
+				}
 			}
-			catch (final RuntimeException | Error uncertainFailure)
+			else
 			{
-				failure.addSuppressed(uncertainFailure);
+				/* The Archive terminal marker is known durable. Keep the checkpoint
+				 * state already written by notifyState(COMMITTED); a failed fence
+				 * cleanup is a degraded shutdown, not an uncertain commit. */
+				failure.addSuppressed(new IllegalStateException(
+					"Aeron commit is durable but its checkpoint cleanup failed"));
 			}
 			throw failure;
+		}
+		finally
+		{
+			this.commitMarkerPublished = false;
 		}
 	}
 
@@ -149,14 +176,24 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 	 */
 	synchronized AeronReplicationPublisher.PreparedTransaction prepare(final Binary data)
 	{
+		this.ensureWriteAdmitted();
 		if (data == null)
 		{
 			this.pendingDictionary = null;
 			throw new NullPointerException("data");
 		}
-		final ByteBuffer[] buffers = data.buffers();
+		if (this.publisher.hasPendingTransaction())
+		{
+			throw new IllegalStateException("an Aeron prepared transaction is already pending");
+		}
 		final AeronReplicationPublisher.PreparedTransaction prepared;
-		final boolean archiveFirst = this.localAcceptanceFence == null;
+		final LocalEnqueue local = this.localAcceptanceFence;
+		/* ENQUEUE_THEN_ARCHIVE already collected the channel-ordered buffer array while
+		 * fencing the local Store write. Reuse that view after the Store
+		 * restores the marked positions; collecting again would repeat the channel
+		 * walk and allocate another array for the same transaction. */
+		final ByteBuffer[] buffers = local == null ? AeronBinaryBuffers.collect(data) : local.buffers();
+		final boolean archiveFirst = local == null;
 		AeronReplicationPublisher.TransactionMetadata metadata = null;
 		long sequence = -1L;
 		/* ARCHIVE_FIRST used to publish before it left any durable local
@@ -168,15 +205,14 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		{
 			metadata = this.publisher.transactionMetadata(buffers);
 			sequence = this.publisher.reserveSequence();
-			final AeronReplicationPublisher.PreparedTransaction fence = this.fence(sequence, metadata);
 			try
 			{
-				this.notifyState(AeronReplicationCheckpoint.State.PREPARING, fence, -1);
+				this.notifyState(AeronReplicationCheckpoint.State.PREPARING, sequence,
+					metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c(), -1);
 			}
 			catch (final RuntimeException | Error failure)
 			{
 				this.publisher.failClosed();
-				this.pendingDictionary = null;
 				throw failure;
 			}
 		}
@@ -185,12 +221,10 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 			prepared = archiveFirst
 				? this.publisher.prepareTransaction(this.pendingDictionary, buffers, sequence, metadata)
 				: this.publisher.prepareTransaction(this.pendingDictionary, buffers,
-					this.localAcceptanceFence.sequence(), this.localAcceptanceFence.metadata());
-			this.pendingDictionary = null;
+					local.sequence(), local.metadata());
 		}
 		catch (final RuntimeException | Error failure)
 		{
-			this.pendingDictionary = null;
 			if (archiveFirst) this.publisher.failClosed();
 			throw failure;
 		}
@@ -207,21 +241,6 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 				throw failure;
 			}
 		});
-		if (this.localAcceptanceFence != null)
-		{
-			try
-			{
-				this.notifyState(AeronReplicationCheckpoint.State.PREPARING, prepared, -1);
-			}
-			catch (final RuntimeException | Error failure)
-			{
-				try { this.publisher.abort(prepared); }
-				catch (final RuntimeException | Error abortFailure) { failure.addSuppressed(abortFailure); }
-				this.publisher.failClosed();
-				this.pendingDictionary = null;
-				throw failure;
-			}
-		}
 		return prepared;
 	}
 
@@ -243,7 +262,8 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		}
 		try
 		{
-			this.notifyState(AeronReplicationCheckpoint.State.ENQUEUED, prepared, -1);
+			this.notifyState(AeronReplicationCheckpoint.State.ENQUEUED, prepared.sequence(),
+				prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), -1);
 		}
 		catch (final RuntimeException | Error failure)
 		{
@@ -260,17 +280,47 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 	 */
 	synchronized long markLocalEnqueue(final Binary data)
 	{
+		this.ensureWriteAdmitted();
 		if (data == null) throw new NullPointerException("data");
+		final ByteBuffer[] buffers = AeronBinaryBuffers.collect(data);
 		final AeronReplicationPublisher.TransactionMetadata metadata =
-			this.publisher.transactionMetadata(data.buffers());
+			this.publisher.transactionMetadata(buffers);
 		/* Reserve the sequence before writing the fence.  The ENQUEUE_THEN_ARCHIVE
 		 * preparation must reuse this exact reservation; reading nextSequence()
 		 * here would leave the fence one sequence behind the published data. */
 		final long sequence = this.publisher.reserveSequence();
-		this.localAcceptanceFence = new LocalEnqueue(sequence, metadata);
-		final AeronReplicationPublisher.PreparedTransaction marker = this.fence(sequence, metadata);
-		this.notifyState(AeronReplicationCheckpoint.State.ENQUEUED, marker, -1);
+		this.localAcceptanceFence = new LocalEnqueue(sequence, metadata, buffers);
+		try
+		{
+			this.notifyState(AeronReplicationCheckpoint.State.ENQUEUED, sequence,
+				metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c(), -1);
+		}
+		catch (final RuntimeException | Error failure)
+		{
+			/* A failed fence write must not leave a live reservation that a later
+			 * transaction could accidentally skip or reuse. The publisher is failed
+			 * closed because the durable boundary itself is no longer trustworthy. */
+			this.publisher.failClosed();
+			try
+			{
+				this.publisher.releaseReservedSequence(sequence);
+			}
+			catch (final RuntimeException | Error releaseFailure)
+			{
+				failure.addSuppressed(releaseFailure);
+			}
+			this.localAcceptanceFence = null;
+			throw failure;
+		}
 		return sequence;
+	}
+
+	private void ensureWriteAdmitted()
+	{
+		if (!this.writeAdmission.getAsBoolean())
+		{
+			throw new IllegalStateException("Aeron Archive free capacity is below the configured write threshold");
+		}
 	}
 
 	/** Clears the pre-enqueue fence when the Store rejected the write. */
@@ -337,13 +387,11 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		final int dataLength = failed == null ? local.metadata().dataLength() : failed.dataLength();
 		final int dataChunkCount = failed == null ? local.metadata().dataChunkCount() : failed.dataChunkCount();
 		final int crc32c = failed == null ? local.metadata().crc32c() : failed.crc32c();
-		final AeronReplicationPublisher.PreparedTransaction marker =
-			AeronReplicationPublisher.PreparedTransaction.checkpointOnly(this.publisher, sequence,
-				dataLength, dataChunkCount, crc32c);
 		try
 		{
 			crashPoint("DURING_COMMITTING_UNCERTAIN_WRITE", sequence);
-			this.notifyState(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, marker, -1);
+			this.notifyState(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, sequence,
+				dataLength, dataChunkCount, crc32c, -1);
 		}
 		catch (final RuntimeException | Error failure)
 		{
@@ -355,12 +403,34 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 
 	synchronized void commit(final AeronReplicationPublisher.PreparedTransaction prepared)
 	{
+		this.commitMarkerPublished = false;
 		final long position = this.publisher.commit(prepared);
+		this.commitMarkerPublished = true;
 		this.pendingDictionary = null;
 		try
 		{
 			crashPoint("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", prepared.sequence());
-			this.notifyState(AeronReplicationCheckpoint.State.COMMITTED, prepared, position);
+			this.notifyState(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
+				prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), position);
+		}
+		catch (final RuntimeException | Error failure)
+		{
+			this.publisher.failClosed();
+			throw failure;
+		}
+		this.localAcceptanceFence = null;
+		this.commitMarkerPublished = false;
+	}
+
+	synchronized void abort(final AeronReplicationPublisher.PreparedTransaction prepared)
+	{
+		try
+		{
+			/* prepare() registers the rejection callback on the token. The publisher
+			 * invokes it for every successful abort path, including direct publisher
+			 * aborts and shutdown, so the checkpoint transition cannot be skipped or
+			 * emitted twice. */
+			this.publisher.abort(prepared);
 		}
 		catch (final RuntimeException | Error failure)
 		{
@@ -370,46 +440,17 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		this.localAcceptanceFence = null;
 	}
 
-	synchronized void abort(final AeronReplicationPublisher.PreparedTransaction prepared)
+	private record LocalEnqueue(long sequence, AeronReplicationPublisher.TransactionMetadata metadata,
+		ByteBuffer[] buffers)
 	{
-		try
-		{
-			final long position = this.publisher.abort(prepared);
-			this.pendingDictionary = null;
-			try
-			{
-				this.notifyState(AeronReplicationCheckpoint.State.REJECTED, prepared, position);
-			}
-			catch (final RuntimeException | Error failure)
-			{
-				this.publisher.failClosed();
-				throw failure;
-			}
-			this.localAcceptanceFence = null;
-		}
-		catch (final RuntimeException failure)
-		{
-			this.pendingDictionary = null;
-			throw failure;
-		}
-	}
-
-	private record LocalEnqueue(long sequence, AeronReplicationPublisher.TransactionMetadata metadata)
-	{
-	}
-
-	private AeronReplicationPublisher.PreparedTransaction fence(final long sequence,
-		final AeronReplicationPublisher.TransactionMetadata metadata)
-	{
-		return AeronReplicationPublisher.PreparedTransaction.checkpointOnly(this.publisher, sequence,
-			metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c());
 	}
 
 	synchronized void markCommittingUncertain(final AeronReplicationPublisher.PreparedTransaction prepared)
 	{
 		try
 		{
-			this.notifyState(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, prepared, -1);
+			this.notifyState(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, prepared.sequence(),
+				prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), -1);
 		}
 		catch (final RuntimeException | Error failure)
 		{
@@ -418,17 +459,17 @@ public final class AeronReplicationWriteCoordinator implements StorageBinaryData
 		}
 	}
 
-	private void notifyState(final AeronReplicationCheckpoint.State state,
-		final AeronReplicationPublisher.PreparedTransaction transaction, final long position)
+	private void notifyState(final AeronReplicationCheckpoint.State state, final long sequence,
+		final int dataLength, final int dataChunkCount, final int dataCrc32c, final long position)
 	{
-		this.listener.onState(state, transaction.sequence(), transaction.dataLength(),
-			transaction.dataChunkCount(), transaction.dataCrc32c(), position);
+		this.listener.onState(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
 	}
 
 	/** Closes the publisher owned by this coordinator. */
 	@Override
 	public synchronized void dispose()
 	{
+		this.publisher.releaseCoordinator(this);
 		this.publisher.close();
 	}
 }

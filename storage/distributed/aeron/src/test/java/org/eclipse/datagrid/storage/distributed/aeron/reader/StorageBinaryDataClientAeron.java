@@ -39,7 +39,6 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 	private volatile Thread thread;
 	private volatile CountDownLatch stopped = new CountDownLatch(0);
 	private volatile boolean disposed;
-	private volatile boolean stopAtLatest;
 
 	public StorageBinaryDataClientAeron(
 		final Subscription subscription,
@@ -75,7 +74,6 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 	{
 		if (this.disposed) throw new IllegalStateException("Aeron reader is disposed");
 		if (this.active.getAndSet(true)) return;
-		this.stopAtLatest = false;
 		this.stopped = new CountDownLatch(1);
 		this.thread = new Thread(this::run, "datagrid-aeron-reader");
 		this.thread.setDaemon(true);
@@ -88,9 +86,9 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 		{
 			AeronReaderLifecycle.runPollingLoop(
 				this.active,
-				() -> false,
-				() -> this.subscription.poll(this.fragmentAssembler, 10),
-				() -> this.stopAtLatest,
+					() -> false,
+					() -> this.subscription.poll(this.fragmentAssembler, 10),
+					() -> false,
 				() -> false,
 				() -> { }
 			);
@@ -110,30 +108,11 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
 		}
 	}
 
-	public synchronized void resume()
-	{
-		final RuntimeException failure = this.failure();
-		if (failure != null)
-		{
-			throw new IllegalStateException(
-				"cannot resume a failed Aeron reader; create a new reader from its durable cursor", failure);
-		}
-		this.stopAtLatest = false;
-		this.start();
-	}
-
-	public synchronized void stopAtLatestMessage()
-	{
-		if (!this.disposed) this.stopAtLatest = true;
-	}
-
 	public long lastResolvedSequence() { return this.assembler.lastResolvedSequence(); }
-	public boolean isRunning() { return this.active.get() && this.failure() == null; }
-	public long lastResolvedPosition() { return this.assembler.lastResolvedPosition(); }
 
 	public AeronReplicationCursor cursor(final UUID nodeId, final UUID storeGeneration, final long recordingId)
 	{
-		final TransactionAssembler.CursorSnapshot snapshot = this.assembler.cursorSnapshot();
+		final CursorSnapshot snapshot = this.assembler.cursorSnapshot();
 		return new AeronReplicationCursor(
 			this.assembler.clusterId(), nodeId, storeGeneration, this.assembler.epoch(), recordingId,
 			snapshot.position(), snapshot.sequence());

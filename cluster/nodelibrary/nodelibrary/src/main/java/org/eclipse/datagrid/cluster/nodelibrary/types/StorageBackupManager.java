@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static org.eclipse.serializer.math.XMath.positive;
@@ -76,7 +77,8 @@ public interface StorageBackupManager
 
     class Default implements StorageBackupManager
     {
-        private static final Logger LOG = LoggerFactory.getLogger(StorageBackupManager.class);
+		private static final Logger LOG = LoggerFactory.getLogger(StorageBackupManager.class);
+		private static final long STOP_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(1);
 
         private final StorageConnection storageConnection;
         private final int maxBackupCount;
@@ -107,10 +109,15 @@ public interface StorageBackupManager
         {
             LOG.trace("Creating new storage backup");
 
-            final var newBackup = new BackupMetadata(System.currentTimeMillis(), useManualSlot);
-            final List<BackupMetadata> backups = this.listBackups();
+			final var newBackup = new BackupMetadata(System.currentTimeMillis(), useManualSlot);
+			final List<BackupMetadata> backups = this.listBackups();
+			final RuntimeException readerFailure = this.dataClient.failure();
+			if (readerFailure != null)
+			{
+				throw new IllegalStateException("Cannot create backup after replication reader failure", readerFailure);
+			}
 
-            if (!backups.isEmpty())
+			if (!backups.isEmpty())
             {
                 if (useManualSlot)
                 {
@@ -131,7 +138,10 @@ public interface StorageBackupManager
 
 			final boolean isRunning = this.dataClient.isRunning();
 
-            this.stopDataClient();
+			if (isRunning)
+			{
+				this.stopDataClient();
+			}
 
             try
             {
@@ -212,15 +222,38 @@ public interface StorageBackupManager
             return this.backend.listBackups();
         }
 
-        private void stopDataClient()
-        {
-            LOG.trace("Waiting for data client to stop reading");
-            this.dataClient.stopAtLatestMessage();
-			while (this.dataClient.isRunning())
-            {
-                XThreads.sleep(500);
-            }
-        }
+		private void stopDataClient()
+		{
+			LOG.trace("Waiting for data client to stop reading");
+			this.dataClient.stopAtLatestMessage();
+			final long deadline = System.nanoTime() + STOP_TIMEOUT_NANOS;
+			while (true)
+			{
+				final ClusterStorageBinaryDataClient.StopResult result = this.dataClient.stopResult();
+				final ClusterStorageBinaryDataClient.StopOutcome outcome = result.outcome();
+				if (outcome == ClusterStorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY)
+				{
+					return;
+				}
+				final RuntimeException failure = this.dataClient.failure();
+				if (failure != null)
+				{
+					throw new IllegalStateException("Cannot create backup after replication reader failure", failure);
+				}
+				if (outcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
+					outcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED)
+				{
+					throw new IllegalStateException("Cannot create backup after replication reader stop " + outcome);
+				}
+				if (System.nanoTime() >= deadline)
+				{
+					throw new IllegalStateException("Timed out waiting for replication reader boundary at " +
+						this.dataClient.messageInfo() + " (last resolved sequence=" + result.sequence() +
+						", position=" + result.position() + ")");
+				}
+				XThreads.sleep(100);
+			}
+		}
 
         private BackupMetadata oldestBackup(final List<BackupMetadata> backups)
         {

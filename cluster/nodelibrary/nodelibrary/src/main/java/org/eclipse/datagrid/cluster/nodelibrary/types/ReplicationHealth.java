@@ -29,6 +29,30 @@ public interface ReplicationHealth extends AutoCloseable
 	/** Returns true when the provider is operating without a fatal condition. */
 	boolean isHealthy();
 
+	/** Returns local Archive usable bytes, or {@code -1} when not applicable/known. */
+	default long archiveUsableSpaceBytes()
+	{
+		return -1L;
+	}
+
+	/** Returns the last durable writer position, or {@code -1} when unavailable. */
+	default long writerDurablePosition()
+	{
+		return -1L;
+	}
+
+	/** Returns the last durable writer sequence, or {@code -1} when unavailable. */
+	default long writerDurableSequence()
+	{
+		return -1L;
+	}
+
+	/** Returns the locally applied reader sequence, or {@code -1} when unavailable. */
+	default long appliedSequence()
+	{
+		return -1L;
+	}
+
 	default State state()
 	{
 		return isReady() ? State.LIVE : State.STARTING;

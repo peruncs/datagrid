@@ -19,6 +19,7 @@ import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.datagrid.storage.distributed.types.Crc32c;
 
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.UUID;
 import java.util.zip.CRC32C;
@@ -43,8 +44,11 @@ public final class AeronReplicationEnvelope
 	private static final ThreadLocal<byte[]> CRC_SCRATCH =
 		ThreadLocal.withInitial(() -> new byte[CRC_SCRATCH_BYTES]);
 	public static final int MAGIC = 0x44474152; // DGAR
-	public static final short VERSION = 1;
-	public static final int HEADER_LENGTH = 64;
+	/** Wire version with a checksum covering every decision-bearing header field. */
+	public static final short VERSION = 2;
+	/** Header bytes, including the final header CRC32C at offset 64. */
+	public static final int HEADER_LENGTH = 68;
+	private static final int HEADER_CRC_OFFSET = 64;
 
 	/** Identifies the data or terminal marker carried by an envelope. */
 	public enum Kind
@@ -58,8 +62,14 @@ public final class AeronReplicationEnvelope
 		Kind(final int code) { this.code = code; }
 		private static Kind fromCode(final int code)
 		{
-			for (final Kind kind : values()) if (kind.code == code) return kind;
-			throw new IllegalArgumentException("unknown envelope kind=" + code);
+			return switch (code)
+			{
+			case 1 -> TYPE_DICTIONARY;
+			case 2 -> STORE_BINARY;
+			case 3 -> COMMIT;
+			case 4 -> ABORT;
+			default -> throw new IllegalArgumentException("unknown envelope kind=" + code);
+			};
 		}
 	}
 
@@ -140,7 +150,7 @@ public final class AeronReplicationEnvelope
 	)
 	{
 		validate(clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
-			chunkOffset, payload, payloadOffset, chunkLength);
+			chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength);
 		final int encodedLength = Math.addExact(HEADER_LENGTH, chunkLength);
 		if (target == null || targetOffset < 0 || targetOffset > target.capacity() - encodedLength)
 		{
@@ -160,6 +170,8 @@ public final class AeronReplicationEnvelope
 		target.putInt(targetOffset + 44, commitCrc32c, ByteOrder.BIG_ENDIAN);
 		target.putLong(targetOffset + 48, clusterId.getMostSignificantBits(), ByteOrder.BIG_ENDIAN);
 		target.putLong(targetOffset + 56, clusterId.getLeastSignificantBits(), ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + HEADER_CRC_OFFSET,
+			crc32c(target, targetOffset, HEADER_CRC_OFFSET), ByteOrder.BIG_ENDIAN);
 		// The publisher can stage a multi-buffer chunk directly in the destination
 		// payload area. Avoid copying that already-staged range a second time.
 		if (payload != target || payloadOffset != targetOffset + HEADER_LENGTH)
@@ -178,13 +190,14 @@ public final class AeronReplicationEnvelope
 		final int chunkIndex,
 		final int chunkCount,
 		final int chunkOffset,
+		final int commitCrc32c,
 		final DirectBuffer payload,
 		final int payloadOffset,
 		final int chunkLength
 	)
 	{
 		if (clusterId == null || kind == null || payload == null) throw new NullPointerException();
-		if (epoch < 0 || sequence < 0 || payloadLength < 0 || chunkIndex < 0 || chunkCount <= 0 ||
+		if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 || chunkIndex < 0 || chunkCount <= 0 ||
 			chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
 			payloadOffset > payload.capacity() - chunkLength)
 		{
@@ -194,6 +207,11 @@ public final class AeronReplicationEnvelope
 			(kind == Kind.COMMIT || kind == Kind.ABORT) && chunkLength != 0)
 		{
 			throw new IllegalArgumentException("invalid payload length");
+		}
+		if ((kind == Kind.COMMIT || kind == Kind.ABORT) &&
+			(chunkIndex != 0 || chunkOffset != 0 || kind == Kind.ABORT && commitCrc32c != 0))
+		{
+			throw new IllegalArgumentException("non-canonical terminal marker");
 		}
 		if (kind != Kind.COMMIT && kind != Kind.ABORT)
 		{
@@ -248,6 +266,11 @@ public final class AeronReplicationEnvelope
 		{
 			throw new IllegalArgumentException("unknown DataGrid envelope");
 		}
+		if (source.getInt(offset + HEADER_CRC_OFFSET, ByteOrder.BIG_ENDIAN) !=
+			crc32c(source, offset, HEADER_CRC_OFFSET))
+		{
+			throw new IllegalArgumentException("envelope header CRC32C mismatch");
+		}
 		final int kindCode = source.getByte(offset + 6) & 0xff;
 		if (source.getByte(offset + 7) != 0)
 		{
@@ -271,6 +294,12 @@ public final class AeronReplicationEnvelope
 		if ((kind == Kind.COMMIT || kind == Kind.ABORT) && length != HEADER_LENGTH)
 		{
 			throw new IllegalArgumentException("marker carries a payload");
+		}
+		if ((kind == Kind.COMMIT || kind == Kind.ABORT) &&
+			(chunkIndex != 0 || chunkOffset != 0 || (kind == Kind.ABORT && source.getInt(offset + 44,
+				ByteOrder.BIG_ENDIAN) != 0)))
+		{
+			throw new IllegalArgumentException("non-canonical terminal marker");
 		}
 		final int payloadOnWire = length - HEADER_LENGTH;
 		if (kind != Kind.COMMIT && kind != Kind.ABORT &&
@@ -304,6 +333,20 @@ public final class AeronReplicationEnvelope
 		}
 		final CRC32C crc = DIRECT_CRC.get();
 		crc.reset();
+		final ByteBuffer byteBuffer = payload.byteBuffer();
+		if (byteBuffer != null)
+		{
+			final int start = Math.addExact(payload.wrapAdjustment(), offset);
+			final ByteBuffer slice = byteBuffer.duplicate();
+			if (start < 0 || start > slice.capacity() - length)
+			{
+				throw new IllegalArgumentException("invalid CRC32C range");
+			}
+			slice.position(start);
+			slice.limit(start + length);
+			crc.update(slice);
+			return (int)crc.getValue();
+		}
 		/* Agrona's bulk copy keeps this path allocation-free after the first use
 		 * on a polling thread and lets CRC32C use the JDK's vectorized update. */
 		final byte[] scratch = CRC_SCRATCH.get();
@@ -320,9 +363,9 @@ public final class AeronReplicationEnvelope
 	/** Reusable view over one decoded envelope; it does not own the payload. */
 	public static final class EnvelopeView
 	{
-		public DirectBuffer source;
-		public int payloadOffset;
-		public int payloadLengthOnWire;
+		private DirectBuffer source;
+		private int payloadOffset;
+		private int payloadLengthOnWire;
 		long clusterMostSignificantBits;
 		long clusterLeastSignificantBits;
 		long epoch;
@@ -372,6 +415,12 @@ public final class AeronReplicationEnvelope
 		public int chunkCount() { return this.chunkCount; }
 		public int chunkOffset() { return this.chunkOffset; }
 		public int commitCrc32c() { return this.commitCrc32c; }
+		/** Returns the borrowed source buffer; valid until the next decode into this view. */
+		public DirectBuffer source() { return this.source; }
+		/** Returns the payload offset in {@link #source()}. */
+		public int payloadOffset() { return this.payloadOffset; }
+		/** Returns the number of payload bytes present in this envelope. */
+		public int payloadLengthOnWire() { return this.payloadLengthOnWire; }
 	}
 
 	/** Owned decoded envelope returned by the allocation-friendly codec path. */

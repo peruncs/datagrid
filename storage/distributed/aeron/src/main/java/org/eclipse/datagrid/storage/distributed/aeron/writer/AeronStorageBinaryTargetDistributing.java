@@ -54,7 +54,12 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 		this(delegate, coordinator, null, ignored -> { }, () -> true);
 	}
 
-	/** Creates a target whose distribution can be enabled or disabled per write. */
+	/**
+	 * Creates a target with the provider-owned dictionary, sequence and admission
+	 * callbacks.  The callbacks are deliberately supplied by the provider so that
+	 * local Store acceptance and the Aeron checkpoint transition remain one owner-
+	 * serialized operation.
+	 */
 	public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
 		final AeronReplicationWriteCoordinator coordinator, final StorageBinaryDataDistributor dictionarySource,
 		final LongConsumer committedSequence, final BooleanSupplier distributionEnabled)
@@ -86,7 +91,14 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 			if (this.dictionarySource != null)
 			{
 				final String dictionary = this.dictionarySource.consumeTypeDictionary();
-				if (dictionary != null) this.coordinator.distributeTypeDictionary(dictionary);
+				if (dictionary != null)
+				{
+					/* consumeTypeDictionary() only transfers ownership to the coordinator.
+					 * The coordinator deliberately retains the bytes until commit(), so a
+					 * local rejection or uncertain publication can retry the same dictionary
+					 * even though the source has already cleared its staging slot. */
+					this.coordinator.distributeTypeDictionary(dictionary);
+				}
 			}
 			data.iterateChannelChunks(Binary::mark);
 			if (this.coordinator.durabilityMode() == org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)

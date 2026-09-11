@@ -53,6 +53,16 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 
 	boolean ignoreDistribution();
 
+	/**
+	 * Queues a complete dictionary for the next data transaction, regardless of
+	 * which Store thread performs that transaction. This is used after writer
+	 * restart to re-establish the reader schema before new binaries arrive.
+	 */
+	default void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
+	{
+		this.distributeTypeDictionary(typeDictionaryData);
+	}
+
 	static ClusterStorageBinaryDataDistributor Caching(final ClusterStorageBinaryDataDistributor delegate)
 	{
 		return new Caching(notNull(delegate));
@@ -62,6 +72,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 	{
 		private final ClusterStorageBinaryDataDistributor delegate;
 		private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();
+		private volatile String queuedTypeDictionary;
 
 		private Caching(final ClusterStorageBinaryDataDistributor delegate)
 		{
@@ -100,11 +111,20 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		}
 
 		@Override
+		public synchronized void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
+		{
+			this.queuedTypeDictionary = typeDictionaryData;
+		}
+
+		@Override
 		public synchronized String consumeTypeDictionary()
 		{
 			final String value = this.typeDictionaryData.get();
 			this.typeDictionaryData.remove();
-			return value;
+			if (value != null) return value;
+			final String queued = this.queuedTypeDictionary;
+			this.queuedTypeDictionary = null;
+			return queued;
 		}
 
 		@Override
@@ -135,6 +155,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		public void dispose()
 		{
 			this.typeDictionaryData.remove();
+			this.queuedTypeDictionary = null;
 			this.delegate.dispose();
 		}
 	}

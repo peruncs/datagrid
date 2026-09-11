@@ -6,18 +6,20 @@ import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationCon
 import org.eclipse.datagrid.storage.distributed.aeron.wire.AeronReplicationEnvelope;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.ChunksBuffer;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.serializer.util.BufferSizeProviderIncremental;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /*-
  * #%L
@@ -36,6 +38,52 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /** Verifies checkpoint transitions and fail-closed writer coordination. */
 class AeronReplicationWriteCoordinatorTest
 {
+	/** A publisher has one owner so dictionaries and reservations cannot diverge. */
+	@Test
+	void rejectsMultipleCoordinatorsForOnePublisher()
+	{
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.chunkSize(256).maxTransactionBytes(512).build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator first = new AeronReplicationWriteCoordinator(publisher);
+		assertThrows(IllegalStateException.class, () -> new AeronReplicationWriteCoordinator(publisher));
+		first.dispose();
+	}
+
+	/** Coordinator ownership prevents callers from bypassing the fenced path. */
+	@Test
+	void coordinatorOwnedPublisherRejectsUnfencedPreparation()
+	{
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
+		assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(null,
+			new ByteBuffer[] { ByteBuffer.wrap(new byte[] {1}) }));
+		coordinator.dispose();
+	}
+
+	/** Rejects a new transaction when the Archive free-space admission guard is closed. */
+	@Test
+	void rejectsWritesBelowArchiveCapacityThreshold()
+	{
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.chunkSize(256).maxTransactionBytes(512).build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> { },
+			() -> false);
+		assertThrows(IllegalStateException.class,
+			() -> coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }))));
+		coordinator.dispose();
+	}
+
 	/** Verifies reporting of prepare commit and abort checkpoint states. */
 	@Test
 	void reportsPrepareCommitAndAbortCheckpointStates()
@@ -101,8 +149,8 @@ class AeronReplicationWriteCoordinatorTest
 		};
 		new AeronStorageBinaryTargetDistributing(local, coordinator)
 			.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 7 })));
-		assertEquals(List.of("ENQUEUED", "local", "archive", "PREPARING", "archive", "COMMITTED"), events);
-		assertEquals(List.of(0L, 0L, 0L), sequences);
+		assertEquals(List.of("ENQUEUED", "local", "archive", "archive", "COMMITTED"), events);
+		assertEquals(List.of(0L, 0L), sequences);
 		coordinator.dispose();
 	}
 
@@ -165,6 +213,38 @@ class AeronReplicationWriteCoordinatorTest
 		assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryTargetDistributing(failing, coordinator)
 			.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }))));
 		assertEquals(List.of("PREPARING", "archive", "archive", "REJECTED"), events);
+		coordinator.dispose();
+	}
+
+	/** A rejected transaction retains its dictionary for the next successful commit. */
+	@Test
+	void rejectedTransactionRetainsDictionaryForRetry()
+	{
+		final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) ->
+			{
+				kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
+				return length;
+			}, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
+		coordinator.distributeTypeDictionary("new.Type");
+		final AtomicInteger writes = new AtomicInteger();
+		final PersistenceTarget<Binary> local = new PersistenceTarget<>()
+		{
+			@Override public void write(final Binary data)
+			{
+				if (writes.getAndIncrement() == 0) throw new IllegalStateException("reject once");
+			}
+			@Override public boolean isWritable() { return true; }
+		};
+		final AeronStorageBinaryTargetDistributing target = new AeronStorageBinaryTargetDistributing(local, coordinator);
+		assertThrows(IllegalStateException.class,
+			() -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {1}))));
+		target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {2})));
+		assertEquals(2, kinds.stream().filter(kind -> kind == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY).count());
 		coordinator.dispose();
 	}
 
@@ -292,6 +372,79 @@ class AeronReplicationWriteCoordinatorTest
 		assertEquals(List.of(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY,
 			AeronReplicationEnvelope.Kind.STORE_BINARY, AeronReplicationEnvelope.Kind.COMMIT), kinds);
 		coordinator.dispose();
+	}
+
+	/** A dictionary transferred from a shared source survives local rejection. */
+	@Test
+	void sharedDictionarySourceIsRetainedAcrossRejectedStoreWrite()
+	{
+		final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
+		final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
+			.chunkSize(256).maxTransactionBytes(1024).build();
+		final var publisher = new AeronReplicationPublisher((buffer, offset, length) ->
+		{
+			kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
+			return length;
+		}, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
+		final var coordinator = new AeronReplicationWriteCoordinator(publisher);
+		final var source = new org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataDistributor()
+		{
+			private String dictionary = "type";
+			public void distributeData(final Binary ignored) { }
+			public void distributeTypeDictionary(final String ignored) { }
+			public String consumeTypeDictionary()
+			{
+				final String value = this.dictionary;
+				this.dictionary = null;
+				return value;
+			}
+			public void dispose() { }
+		};
+		final AtomicInteger writes = new AtomicInteger();
+		final PersistenceTarget<Binary> local = new PersistenceTarget<>()
+		{
+			public void write(final Binary ignored)
+			{
+				if (writes.getAndIncrement() == 0) throw new IllegalStateException("reject once");
+			}
+			public boolean isWritable() { return true; }
+		};
+		final var target = new AeronStorageBinaryTargetDistributing(local, coordinator, source,
+			ignored -> { }, () -> true);
+		final var first = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {1}));
+		assertThrows(IllegalStateException.class, () -> target.write(first));
+		target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {2})));
+		assertEquals(2, kinds.stream().filter(kind -> kind == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY).count());
+		coordinator.dispose();
+	}
+
+	/** All Serializer channels, not only the channel-zero view, are published. */
+	@Test
+	void collectsEverySerializerChannelForReplication()
+	{
+		final ChunksBuffer[] channels = new ChunksBuffer[4];
+		final BufferSizeProviderIncremental sizes = BufferSizeProviderIncremental.New(64);
+		for (int channelIndex = 0; channelIndex < channels.length; channelIndex++)
+		{
+			channels[channelIndex] = ChunksBuffer.New(channels, sizes);
+		}
+		for (int channelIndex = 0; channelIndex < channels.length; channelIndex++)
+		{
+			final int payloadLength = channelIndex + 2;
+			channels[channelIndex].storeEntityHeader(payloadLength, 1, channelIndex + 1);
+			for (int byteIndex = 0; byteIndex < payloadLength; byteIndex++)
+			{
+				channels[channelIndex].store_byte(byteIndex, (byte)(channelIndex + byteIndex));
+			}
+			channels[channelIndex].complete();
+		}
+
+		final java.nio.ByteBuffer[] buffers = AeronBinaryBuffers.collect(channels[0]);
+		assertEquals(channels.length, buffers.length);
+		for (int channelIndex = 0; channelIndex < buffers.length; channelIndex++)
+		{
+			assertTrue(buffers[channelIndex].remaining() > 0);
+		}
 	}
 
 	/** Verifies ignored distribution writes locally without offering aeron frames. */

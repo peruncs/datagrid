@@ -3,8 +3,7 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
 import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.PersistentSubscription;
-import io.aeron.logbuffer.Header;
-import org.agrona.DirectBuffer;
+import io.aeron.logbuffer.ControlledFragmentHandler;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
@@ -46,8 +45,15 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	private volatile Thread thread;
 	private volatile CountDownLatch stopped = new CountDownLatch(0);
 	private volatile boolean disposed;
+	/* A disposal request is permanent even when its bounded wait times out.  Keep
+	 * it separate from disposed so callers can retry disposal without starting a
+	 * second poller against the same subscription and assembler. */
+	private volatile boolean disposeRequested;
+	private volatile boolean live;
 	private volatile boolean stopAtLatest;
 	private volatile long stopDeadlineNanos;
+	private volatile StorageBinaryDataClient.StopOutcome stopOutcome =
+		StorageBinaryDataClient.StopOutcome.NOT_STARTED;
 
 
 
@@ -57,6 +63,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		final UUID clusterId,
 		final long epoch,
 		final long initialSequence,
+		final long initialPosition,
 		final StorageBinaryDataReceiver receiver,
 		final Runnable transactionResolved,
 		final ReaderDeliveryListener deliveryListener
@@ -67,7 +74,8 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		{
 			this.stopTimeoutNanos = java.util.Objects.requireNonNull(configuration, "configuration").offerTimeoutNanos();
 			this.assembler = new TransactionAssembler(
-				configuration, clusterId, epoch, initialSequence, receiver, transactionResolved, deliveryListener
+				configuration, clusterId, epoch, initialSequence, initialPosition, receiver, transactionResolved,
+				deliveryListener
 			);
 		}
 		catch (final RuntimeException | Error failure)
@@ -122,7 +130,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	{
 		return New(aeron, archiveContext, recordingId, startPosition, liveChannel, liveStreamId,
 			replayChannel, replayStreamId, configuration, clusterId, epoch, initialSequence, receiver,
-			transactionResolved, null);
+			transactionResolved, null, startPosition);
 	}
 
 	/**
@@ -166,6 +174,38 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		final ReaderDeliveryListener deliveryListener
 	)
 	{
+		return New(aeron, archiveContext, recordingId, startPosition, liveChannel, liveStreamId,
+			replayChannel, replayStreamId, configuration, clusterId, epoch, initialSequence, receiver,
+			transactionResolved, deliveryListener, startPosition);
+	}
+
+	/**
+	 * Creates a reader with a complete recovered sequence and recording position.
+	 * The initial position is retained in the atomic cursor snapshot until the
+	 * first newly resolved transaction, so a reader that has not caught up cannot
+	 * expose an unrelated position.
+	 *
+	 * @param initialPosition last resolved Archive position, or {@code -1} for a new reader
+	 */
+	public static StorageBinaryDataClientAeronArchive New(
+		final Aeron aeron,
+		final AeronArchive.Context archiveContext,
+		final long recordingId,
+		final long startPosition,
+		final String liveChannel,
+		final int liveStreamId,
+		final String replayChannel,
+		final int replayStreamId,
+		final AeronReplicationConfiguration configuration,
+		final UUID clusterId,
+		final long epoch,
+		final long initialSequence,
+		final StorageBinaryDataReceiver receiver,
+		final Runnable transactionResolved,
+		final ReaderDeliveryListener deliveryListener,
+		final long initialPosition
+	)
+	{
 		final AeronArchive.Context subscriptionArchiveContext = archiveContext.clone().aeron(aeron);
 		final PersistentSubscription.Context subscriptionContext = new PersistentSubscription.Context()
 			.aeron(aeron)
@@ -182,8 +222,8 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		{
 			subscription = PersistentSubscription.create(subscriptionContext);
 			return new StorageBinaryDataClientAeronArchive(
-				subscription, configuration, clusterId, epoch, initialSequence, receiver, transactionResolved,
-				deliveryListener
+				subscription, configuration, clusterId, epoch, initialSequence, initialPosition, receiver,
+				transactionResolved, deliveryListener
 			);
 		}
 		catch (final RuntimeException | Error failure)
@@ -218,9 +258,14 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	@Override
 	public synchronized void start()
 	{
-		if (this.disposed)
+		if (this.disposed || this.disposeRequested)
 		{
-			throw new IllegalStateException("Aeron Archive reader is disposed");
+			throw new IllegalStateException("Aeron Archive reader is disposed or stopping for disposal");
+		}
+		final Thread existing = this.thread;
+		if (existing != null && existing.isAlive())
+		{
+			throw new IllegalStateException("Aeron Archive reader is still stopping");
 		}
 		if (this.active.getAndSet(true))
 		{
@@ -228,6 +273,8 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		}
 		this.stopAtLatest = false;
 		this.stopDeadlineNanos = 0L;
+		this.live = false;
+		this.stopOutcome = StorageBinaryDataClient.StopOutcome.RUNNING;
 		this.stopped = new CountDownLatch(1);
 		this.thread = new Thread(this::run, "datagrid-aeron-archive-reader");
 		this.thread.setDaemon(true);
@@ -236,17 +283,37 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 
 	private void run()
 	{
+		final CountDownLatch lifecycleStopped = this.stopped;
 		try
 		{
 			AeronReaderLifecycle.runPollingLoop(
 				this.active,
-				this.subscription::hasFailed,
-				() -> this.subscription.poll(this::onMessage, 10),
-				() -> this.stopAtLatest && this.subscription.isLive(),
+				() -> this.subscription.hasFailed() || this.assembler.failure() != null,
+				() ->
+				{
+						final int work = this.subscription.controlledPoll((buffer, offset, length, header) ->
+						{
+							this.assembler.onFragment(buffer, offset, length, header);
+							return ControlledFragmentHandler.Action.CONTINUE;
+						}, 10);
+					this.live = this.subscription.isLive();
+					return work;
+				},
+				() -> this.stopAtLatest && this.live && !this.assembler.hasIncompleteTransaction(),
 				() -> this.stopAtLatest && System.nanoTime() >= this.stopDeadlineNanos,
-				() -> this.assembler.failure(new IllegalStateException(
-					"Timed out waiting for Aeron Archive replay to reach the live tail"))
+				() ->
+				{
+					this.stopOutcome = StorageBinaryDataClient.StopOutcome.TIMED_OUT;
+					this.assembler.failure(new IllegalStateException(
+						"Timed out waiting for Aeron Archive replay to reach the live tail"));
+				}
 			);
+			if (this.stopOutcome != StorageBinaryDataClient.StopOutcome.TIMED_OUT)
+			{
+				this.stopOutcome = this.stopAtLatest && this.live
+					? StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY
+					: StorageBinaryDataClient.StopOutcome.STOPPED;
+			}
 			if (this.subscription.hasFailed())
 			{
 				this.assembler.failure(new IllegalStateException(
@@ -263,8 +330,14 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		}
 		finally
 		{
+			if (this.assembler.failure() != null &&
+				this.stopOutcome != StorageBinaryDataClient.StopOutcome.TIMED_OUT)
+			{
+				this.stopOutcome = StorageBinaryDataClient.StopOutcome.FAILED;
+			}
 			this.active.set(false);
-			this.stopped.countDown();
+			this.live = false;
+			lifecycleStopped.countDown();
 		}
 	}
 
@@ -292,12 +365,8 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		{
 			this.stopAtLatest = true;
 			this.stopDeadlineNanos = System.nanoTime() + this.stopTimeoutNanos;
+			if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
 		}
-	}
-
-	private void onMessage(final DirectBuffer buffer, final int offset, final int length, final Header header)
-	{
-		this.assembler.onFragment(buffer, offset, length, header);
 	}
 
 	/** Returns the last sequence delivered after commit and checksum validation. */
@@ -306,16 +375,22 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		return this.assembler.lastResolvedSequence();
 	}
 
+	/** Returns the last sequence materialized by the Store receiver. */
+	public long lastAppliedSequence()
+	{
+		return this.assembler.lastAppliedSequence();
+	}
+
 	/** Returns whether the polling thread is active and has not failed. */
 	public boolean isRunning()
 	{
-		return this.active.get() && this.failure() == null;
+		return this.active.get() && !this.disposeRequested && this.failure() == null;
 	}
 
 	/** Returns whether replay has transitioned to the live subscription. */
 	public boolean isLive()
 	{
-		return this.subscription.isLive();
+		return this.live;
 	}
 
 	/** Returns the Archive position of the last resolved commit. */
@@ -327,11 +402,8 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	/** Returns an atomic sequence/position snapshot for cursor persistence. */
 	public CursorSnapshot cursorSnapshot()
 	{
-		final TransactionAssembler.CursorSnapshot snapshot = this.assembler.cursorSnapshot();
-		return new CursorSnapshot(snapshot.sequence(), snapshot.position());
+		return this.assembler.cursorSnapshot();
 	}
-
-	public record CursorSnapshot(long sequence, long position) {}
 
 	/** Builds a cursor that can resume this reader from the same recording. */
 	public AeronReplicationCursor cursor(
@@ -340,8 +412,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		final long recordingId
 	)
 	{
-		final TransactionAssembler.CursorSnapshot snapshot =
-			this.assembler.cursorSnapshot();
+		final CursorSnapshot snapshot = this.assembler.cursorSnapshot();
 		return new AeronReplicationCursor(
 			this.assembler.clusterId(),
 			nodeId,
@@ -359,6 +430,28 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		return this.assembler.failure();
 	}
 
+	/** Returns the stop boundary outcome and never infers success from a dead thread. */
+	public StorageBinaryDataClient.StopOutcome stopOutcome()
+	{
+		return this.stopOutcome;
+	}
+
+	/** Returns the terminal stop state and the last resolved sequence/position. */
+	@Override
+	public StorageBinaryDataClient.StopResult stopResult()
+	{
+		final CursorSnapshot cursor = this.assembler.cursorSnapshot();
+		return new StorageBinaryDataClient.StopResult(this.stopOutcome, cursor.sequence(), cursor.position());
+	}
+
+	/** Stops polling after a terminal Aeron client or MediaDriver failure. */
+	public void fail(final RuntimeException failure)
+	{
+		this.assembler.failure(java.util.Objects.requireNonNull(failure, "failure"));
+		this.active.set(false);
+		this.live = false;
+	}
+
 	/**
 	 * Stops polling and releases this reader's subscriptions.
 	 *
@@ -372,10 +465,13 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	public synchronized void dispose()
 	{
 		if (this.disposed) return;
+		this.disposeRequested = true;
+		if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
 		final Thread pollingThread = this.thread;
 		AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close);
 		this.assembler.dispose();
 		this.thread = null;
 		this.disposed = true;
+		this.stopOutcome = StorageBinaryDataClient.StopOutcome.CLOSED;
 	}
 }

@@ -14,13 +14,13 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
+import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
+import org.eclipse.store.storage.types.StorageConnection;
+
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-
-import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
-import org.eclipse.store.storage.types.StorageConnection;
 
 import static org.eclipse.serializer.math.XMath.positive;
 

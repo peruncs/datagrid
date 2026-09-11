@@ -15,6 +15,12 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
+import com.fasterxml.jackson.core.JacksonException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -24,13 +30,6 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-
-import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.fasterxml.jackson.core.JacksonException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import static org.eclipse.serializer.util.X.notNull;
 

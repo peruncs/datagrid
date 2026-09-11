@@ -91,6 +91,8 @@ class AeronReplicationConfigurationTest
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
 			.maxTransactionBytes(0).build());
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
+			.maxTransactionBytes(1024 * 1024 * 1024 + 1).build());
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
 			.termLength(1 << 30).chunkSize(20 * 1024 * 1024).maxTransactionBytes(20 * 1024 * 1024).build());
 	}
 

@@ -14,9 +14,11 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
  * #L%
  */
 
+import org.agrona.concurrent.BackoffIdleStrategy;
+import org.agrona.concurrent.IdleStrategy;
+
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
@@ -41,29 +43,44 @@ final class AeronReaderLifecycle
 		final Runnable onTimeout
 	)
 	{
+		final IdleStrategy idleStrategy = new BackoffIdleStrategy();
 		while (active.get() && !stopPolling.getAsBoolean())
 		{
-			if (poller.getAsInt() == 0)
+			if (timedOut.getAsBoolean())
 			{
-				if (stopWhenIdle.getAsBoolean())
+				try
+				{
+					onTimeout.run();
+				}
+				finally
 				{
 					active.set(false);
-					break;
 				}
-				if (timedOut.getAsBoolean())
-				{
-					try
-					{
-						onTimeout.run();
-					}
-					finally
-					{
-						active.set(false);
-					}
-					break;
-				}
-				LockSupport.parkNanos(1_000_000L);
+				return;
 			}
+			final int work = poller.getAsInt();
+			/* A live image only means the subscription is attached; it does not mean
+			 * the current poll drained the replay.  Stop at the boundary only after an
+			 * actually idle poll, otherwise a prepared chunk can be left without its
+			 * terminal marker. */
+			if (work == 0 && stopWhenIdle.getAsBoolean())
+			{
+				active.set(false);
+				return;
+			}
+			if (timedOut.getAsBoolean())
+			{
+				try
+				{
+					onTimeout.run();
+				}
+				finally
+				{
+					active.set(false);
+				}
+				return;
+			}
+			idleStrategy.idle(work);
 		}
 	}
 
@@ -84,32 +101,53 @@ final class AeronReaderLifecycle
 		final Runnable closeSubscription
 	)
 	{
+		stopAndClose(active, thread, stopped, closeSubscription,
+			java.util.concurrent.TimeUnit.SECONDS.toNanos(5L));
+	}
+
+	/**
+	 * Variant with an explicit wait budget used by deterministic lifecycle tests.
+	 * Production callers should use the five-second overload above.
+	 */
+	static void stopAndClose(
+		final AtomicBoolean active,
+		final Thread thread,
+		final CountDownLatch stopped,
+		final Runnable closeSubscription,
+		final long timeoutNanos
+	)
+	{
+		if (timeoutNanos <= 0L) throw new IllegalArgumentException("timeoutNanos must be positive");
 		active.set(false);
 		RuntimeException failure = null;
 		if (thread != null)
 		{
-			thread.interrupt();
-			if (thread != Thread.currentThread())
+			if (thread == Thread.currentThread())
 			{
-				try
+				/* A delivery callback may request shutdown, but the polling thread must
+				 * leave its duty cycle before its subscription is closed. Let the caller
+				 * retry after this thread reaches its finally block. */
+				throw new IllegalStateException("cannot dispose Aeron reader from its polling thread");
+			}
+			thread.interrupt();
+			try
+			{
+				if (!stopped.await(timeoutNanos, java.util.concurrent.TimeUnit.NANOSECONDS))
 				{
-					if (!stopped.await(5L, java.util.concurrent.TimeUnit.SECONDS))
-					{
-						failure = new IllegalStateException("Aeron reader polling thread did not stop");
-					}
-					else
-					{
-						/* The latch is released from the polling thread's finally block;
-						 * join until that thread has returned so callers never observe a
-						 * live reader after shutdown completes. */
-						thread.join();
-					}
+					failure = new IllegalStateException("Aeron reader polling thread did not stop");
 				}
-				catch (final InterruptedException interrupted)
+				else
 				{
-					Thread.currentThread().interrupt();
-					failure = new IllegalStateException("interrupted while stopping Aeron reader", interrupted);
+					/* The latch is released from the polling thread's finally block;
+					 * join until that thread has returned so callers never observe a
+					 * live reader after shutdown completes. */
+					thread.join();
 				}
+			}
+			catch (final InterruptedException interrupted)
+			{
+				Thread.currentThread().interrupt();
+				failure = new IllegalStateException("interrupted while stopping Aeron reader", interrupted);
 			}
 		}
 		/* Do not close a subscription while a polling thread is still able to

@@ -19,6 +19,7 @@ import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacketAcceptor;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacketAssembler;
+import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.typing.Disposable;
 
@@ -31,7 +32,9 @@ import static org.eclipse.serializer.util.X.notNull;
  * A {@link StorageBinaryDataPacketAcceptor} that forwards completed messages to
  * the merger and then disposes their packet-owned buffers. The merger copies
  * data it needs for deferred materialization, so ownership remains local to
- * this acceptor. This class will also call
+ * this acceptor. Complete-binary delivery is a borrowed, synchronous call:
+ * implementations must consume or copy the supplied {@link Binary} before
+ * returning and must not retain it. This class will also call
  * {@link #dispose()} on the {@link ClusterStorageBinaryDataMerger}
  */
 public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDataPacketAcceptor, Disposable
@@ -44,6 +47,23 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 
 	default void awaitApplied()
 	{
+	}
+
+	/**
+	 * Accepts a complete binary without rebuilding packets. Aeron readers use
+	 * this boundary because their assembler has already validated and reassembled
+	 * the transaction. The binary is borrowed for the duration of this call;
+	 * packet transports continue to use {@link #accept(List)}.
+	 */
+	default void acceptData(final Binary data)
+	{
+		throw new UnsupportedOperationException("complete-binary delivery is not supported");
+	}
+
+	/** Accepts a type dictionary already decoded by the transport. */
+	default void acceptTypeDictionary(final String dictionary)
+	{
+		throw new UnsupportedOperationException("decoded dictionary delivery is not supported");
 	}
 	static ClusterStorageBinaryDataPacketAcceptor New(final ClusterStorageBinaryDataMerger merger)
 	{
@@ -77,6 +97,18 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		public RuntimeException failure()
 		{
 			return this.merger.failure();
+		}
+
+		@Override
+		public void acceptData(final Binary data)
+		{
+			this.merger.receiveData(data);
+		}
+
+		@Override
+		public void acceptTypeDictionary(final String dictionary)
+		{
+			this.merger.receiveTypeDictionary(dictionary);
 		}
 
 		private void handleCompleteMessages(final List<StorageBinaryDataMessage> messages)

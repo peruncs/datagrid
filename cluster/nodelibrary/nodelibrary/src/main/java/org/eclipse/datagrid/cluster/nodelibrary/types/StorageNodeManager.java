@@ -192,6 +192,15 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				return;
 			}
+			if ("aeron".equalsIgnoreCase(this.replicationTransport))
+			{
+				/* Aeron roles are fixed at transport creation.  A reader owns a
+				 * persistent subscription and its provider deliberately has no writer
+				 * publication factory, so promoting it would report a distributor that
+				 * cannot replicate.  Reject the transition before stopping the reader. */
+				throw new UnsupportedOperationException(
+					"Aeron reader promotion is unsupported; start a node configured as writer");
+			}
 
 			LOG.info("Turning on distribution.");
 			this.isSwitchingToDistributor = true;
@@ -209,6 +218,13 @@ public interface StorageNodeManager extends ClusterNodeManager
 			if (this.isDistributor)
 			{
 				return true;
+			}
+			if ("aeron".equalsIgnoreCase(this.replicationTransport))
+			{
+				/* Keep the invariant defensive if a stale flag or an older caller reaches
+				 * this method without passing through switchToDistribution(). */
+				throw new UnsupportedOperationException(
+					"Aeron reader promotion is unsupported; start a node configured as writer");
 			}
 
 			if (this.dataClient.isRunning())

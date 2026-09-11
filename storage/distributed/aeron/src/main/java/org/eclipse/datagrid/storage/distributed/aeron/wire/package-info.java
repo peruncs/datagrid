@@ -11,12 +11,8 @@
  * SPDX-License-Identifier: EPL-2.0
  * #L%
  */
+
 /**
- * The private envelope format used on the Aeron stream.
- *
- * <p>The checksum catches accidental corruption and framing mistakes. It does
- * not authenticate a sender. This package is intentionally not exported; an
- * external diagnostic tool should be added only when the wire format becomes
- * a supported operational interface.</p>
+ * Internal, versioned envelope format used on the Aeron replication stream.
  */
 package org.eclipse.datagrid.storage.distributed.aeron.wire;

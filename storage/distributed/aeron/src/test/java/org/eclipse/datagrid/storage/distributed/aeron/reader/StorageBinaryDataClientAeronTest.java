@@ -41,9 +41,9 @@ class StorageBinaryDataClientAeronTest
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		final byte[] data = new byte[] { 4, 3, 2, 1 };
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY, 0, 0, 1, 0,
-			"types".getBytes(), 5, 0));
+			"types".getBytes(), 5));
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 
 		assertEquals(-1, assembler.lastResolvedSequence());
         assertNull(receiver.data);
@@ -73,15 +73,15 @@ class StorageBinaryDataClientAeronTest
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		assertThrows(IllegalStateException.class, () -> accept(assembler,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0,
-				new byte[] { 1 }, 1, 0)));
+				new byte[] { 1 }, 1)));
 		assertEquals(0, receiver.dataCalls);
 
 		final TransactionAssembler second = assembler(receiver, 1024);
 		accept(second, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 2, 0,
-			new byte[] { 1 }, 2, 0));
+			new byte[] { 1 }, 2));
 		assertThrows(IllegalStateException.class, () -> accept(second,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0,
-				new byte[] { 2 }, 1, 0)));
+				new byte[] { 2 }, 1)));
 	}
 
 	/** Verifies live reader fails closed when writer leaves an orphan tail. */
@@ -91,11 +91,11 @@ class StorageBinaryDataClientAeronTest
 		final RecordingReceiver receiver = new RecordingReceiver();
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			new byte[] { 1 }, 1, 0));
+			new byte[] { 1 }, 1));
 
 		final IllegalStateException failure = assertThrows(IllegalStateException.class, () -> accept(assembler,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0,
-				new byte[] { 2 }, 1, 0)));
+				new byte[] { 2 }, 1)));
 
 		assertEquals("replication sequence gap: expected 0, received 1", failure.getMessage());
 		assertEquals(0, receiver.dataCalls);
@@ -112,7 +112,7 @@ class StorageBinaryDataClientAeronTest
 				.maxTransactionBytes(1024).build(), CLUSTER, EPOCH, 5, receiver, () -> { });
 		final byte[] data = { 1 };
 		assertThrows(IllegalStateException.class, () -> accept(assembler,
-			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 4, 0, 1, 0, data, 1, 0)));
+			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 4, 0, 1, 0, data, 1)));
 	}
 
 	/** Verifies abort advances cursor and does not import. */
@@ -122,7 +122,7 @@ class StorageBinaryDataClientAeronTest
 		final RecordingReceiver receiver = new RecordingReceiver();
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			new byte[] { 1 }, 1, 0));
+			new byte[] { 1 }, 1));
 		accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.ABORT,
 			1, 0, 1, 0, 0, new byte[0]
@@ -138,7 +138,7 @@ class StorageBinaryDataClientAeronTest
 		final RecordingReceiver receiver = new RecordingReceiver();
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			new byte[0], 0, 0));
+			new byte[0], 0));
 		accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
 			0, 0, 1, 0, 0, new byte[0]
@@ -162,7 +162,7 @@ class StorageBinaryDataClientAeronTest
 					.maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver, callbacks::incrementAndGet);
 		final byte[] data = {1, 2};
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 		accept(assembler, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
 			AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
 			AeronReplicationEnvelope.crc32c(data), new byte[0]));
@@ -208,7 +208,7 @@ class StorageBinaryDataClientAeronTest
 		);
 		final byte[] data = {1, 2, 3};
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 		assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
 			AeronReplicationEnvelope.crc32c(data), new byte[0])));
@@ -226,14 +226,14 @@ class StorageBinaryDataClientAeronTest
 		final TransactionAssembler assembler = assembler(receiver, 4);
 		assertThrows(IllegalArgumentException.class, () -> accept(assembler,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-				new byte[] { 1 }, 5, 0)));
+				new byte[] { 1 }, 5)));
 
 		final TransactionAssembler second = assembler(receiver, 10);
 		accept(second, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 2, 0,
-			new byte[] { 1 }, 2, 0));
+			new byte[] { 1 }, 2));
 		assertThrows(IllegalArgumentException.class, () -> accept(second,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 1, 2, 2,
-				new byte[] { 2 }, 2, 0)));
+				new byte[] { 2 }, 2)));
 	}
 
 	/** Verifies resumes from persisted sequence. */
@@ -255,13 +255,47 @@ class StorageBinaryDataClientAeronTest
 			);
 		final byte[] data = new byte[] { 9, 8, 7 };
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 42, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 		accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 42, AeronReplicationEnvelope.Kind.COMMIT,
 			data.length, 0, 1, 0, AeronReplicationEnvelope.crc32c(data), new byte[0]
 		));
 		assertArrayEquals(data, receiver.data);
 		assertEquals(42, assembler.lastResolvedSequence());
+	}
+
+	/** A reader resumed at the tail retains both cursor components before new data arrives. */
+	@Test
+	void resumesFromPersistedCursorAtTail()
+	{
+		final TransactionAssembler assembler = new TransactionAssembler(
+			AeronReplicationConfiguration.builder()
+				.termLength(64 * 1024)
+				.chunkSize(256)
+				.maxTransactionBytes(1024)
+				.build(),
+			CLUSTER,
+			EPOCH,
+			41,
+			987,
+			new RecordingReceiver(),
+			() -> { },
+			null
+		);
+
+		assertEquals(new CursorSnapshot(41, 987), assembler.cursorSnapshot());
+	}
+
+	/** Disposal releases native storage for a transaction that never reached a terminal marker. */
+	@Test
+	void disposalReleasesIncompleteTransactionStorage()
+	{
+		final TransactionAssembler assembler = assembler(new RecordingReceiver(), 1024);
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			new byte[] { 1, 2, 3 }, 3));
+		assertTrue(assembler.hasIncompleteTransaction());
+		assembler.dispose();
+		assertFalse(assembler.hasIncompleteTransaction());
 	}
 
 	/** Verifies rejection of an equal sequence commit with a different payload checksum. */
@@ -272,7 +306,7 @@ class StorageBinaryDataClientAeronTest
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		final byte[] data = { 9, 8, 7 };
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 		accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
 			AeronReplicationEnvelope.crc32c(data), new byte[0]));
@@ -290,7 +324,7 @@ class StorageBinaryDataClientAeronTest
 		final TransactionAssembler committed = assembler(receiver, 1024);
 		final byte[] data = { 1, 2 };
 		accept(committed, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 		accept(committed, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
 			AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
 			AeronReplicationEnvelope.crc32c(data), new byte[0]));
@@ -313,7 +347,7 @@ class StorageBinaryDataClientAeronTest
 		final RecordingReceiver receiver = new RecordingReceiver();
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			new byte[0], 0, 0));
+			new byte[0], 0));
 		accept(assembler, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
 			AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[0]));
 		assertThrows(IllegalStateException.class, () -> accept(assembler,
@@ -334,7 +368,7 @@ class StorageBinaryDataClientAeronTest
 			);
 		final byte[] data = { 1, 2, 3 };
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 		assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
 			AeronReplicationEnvelope.crc32c(data), new byte[0])));
@@ -371,7 +405,7 @@ class StorageBinaryDataClientAeronTest
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		final byte[] data = {1, 2, 3};
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, data.length, 0));
+			data, data.length));
 		assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
 			data.length, 0, 1, 0, AeronReplicationEnvelope.crc32c(new byte[] {7, 7, 7}), new byte[0])));
@@ -388,7 +422,7 @@ class StorageBinaryDataClientAeronTest
 		final RecordingReceiver receiver = new RecordingReceiver();
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		final byte[] first = envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 2, 0,
-			new byte[] {1}, 2, 0);
+			new byte[] {1}, 2);
 		accept(assembler, first);
 		assertThrows(IllegalStateException.class, () -> accept(assembler, first));
 
@@ -396,7 +430,7 @@ class StorageBinaryDataClientAeronTest
 		accept(changedCount, first);
 		assertThrows(IllegalArgumentException.class, () -> accept(changedCount,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 1, 3, 1,
-				new byte[] {2}, 3, 0)));
+				new byte[] {2}, 3)));
 	}
 
 	/** Verifies rejection of dictionary after data and data before dictionary completes. */
@@ -406,17 +440,17 @@ class StorageBinaryDataClientAeronTest
 		final RecordingReceiver receiver = new RecordingReceiver();
 		final TransactionAssembler afterData = assembler(receiver, 1024);
 		accept(afterData, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			new byte[] {1}, 1, 0));
+			new byte[] {1}, 1));
 		assertThrows(IllegalStateException.class, () -> accept(afterData,
 			envelope(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY, 0, 0, 1, 0,
-				new byte[] {2}, 1, 0)));
+				new byte[] {2}, 1)));
 
 		final TransactionAssembler beforeDictionary = assembler(receiver, 1024);
 		accept(beforeDictionary, envelope(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY, 0, 0, 2, 0,
-			new byte[] {2}, 2, 0));
+			new byte[] {2}, 2));
 		assertThrows(IllegalStateException.class, () -> accept(beforeDictionary,
 			envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-				new byte[] {1}, 1, 0)));
+				new byte[] {1}, 1)));
 	}
 
 	/** Verifies rejection of commit before chunks and incomplete dictionary. */
@@ -432,7 +466,7 @@ class StorageBinaryDataClientAeronTest
 
 		final TransactionAssembler incomplete = assembler(receiver, 1024);
 		accept(incomplete, envelope(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY, 0, 0, 2, 0,
-			new byte[] {1}, 2, 0));
+			new byte[] {1}, 2));
 		assertThrows(IllegalStateException.class, () -> accept(incomplete, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
 			0, 0, 1, 0, 0, new byte[0])));
@@ -454,7 +488,7 @@ class StorageBinaryDataClientAeronTest
 					}, () -> { });
 			final byte[] data = {4};
 		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-			data, 1, 0));
+			data, 1));
 		assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelope.encode(
 			CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT, 1, 0, 1, 0,
 			AeronReplicationEnvelope.crc32c(data), new byte[0])));
@@ -479,10 +513,10 @@ class StorageBinaryDataClientAeronTest
 			{
 				final byte[] dictionary = ("Type" + sequence).getBytes(java.nio.charset.StandardCharsets.UTF_8);
 				accept(assembler, envelope(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY, sequence, 0, 1, 0,
-					dictionary, dictionary.length, 0));
+					dictionary, dictionary.length));
 			}
 			accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, sequence, 0, 1, 0,
-				data, data.length, 0));
+				data, data.length));
 			accept(assembler, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, sequence,
 				AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
 				AeronReplicationEnvelope.crc32c(data), new byte[0]));
@@ -532,12 +566,11 @@ class StorageBinaryDataClientAeronTest
 		final int count,
 		final int offset,
 		final byte[] payload,
-		final int length,
-		final int commitCrc
+		final int length
 	)
 	{
 		return AeronReplicationEnvelope.encode(
-			CLUSTER, EPOCH, sequence, kind, length, index, count, offset, commitCrc, payload
+			CLUSTER, EPOCH, sequence, kind, length, index, count, offset, 0, payload
 		);
 	}
 

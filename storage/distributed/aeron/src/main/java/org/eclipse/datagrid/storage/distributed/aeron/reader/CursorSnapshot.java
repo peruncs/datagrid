@@ -1,3 +1,5 @@
+package org.eclipse.datagrid.storage.distributed.aeron.reader;
+
 /*-
  * #%L
  * Eclipse Data Grid Storage Distributed Aeron
@@ -12,10 +14,7 @@
  * #L%
  */
 
-/**
- * Durable Aeron replication checkpoints and restart cursors.
- *
- * <p>Records in this package are versioned persistence boundaries. They are
- * validated before a writer or reader reuses an Archive recording.</p>
- */
-package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
+/** Immutable sequence/recording-position pair captured at one reader boundary. */
+public record CursorSnapshot(long sequence, long position)
+{
+}

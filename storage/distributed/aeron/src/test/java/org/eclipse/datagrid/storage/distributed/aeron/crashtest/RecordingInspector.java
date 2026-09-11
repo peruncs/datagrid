@@ -23,6 +23,7 @@ import org.eclipse.datagrid.storage.distributed.aeron.wire.AeronReplicationEnvel
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.zip.CRC32C;
 
@@ -75,6 +76,28 @@ public final class RecordingInspector
 		final long stopPosition
 	)
 	{
+		return inspect(archive, recordingId, replayChannel, streamId, clusterId, epoch, timeoutMillis,
+			stopPosition, 20);
+	}
+
+	/**
+	 * Inspects a recording prefix with a caller-selected fragment limit. A limit
+	 * of one is useful for proving that a fragmented data frame and its terminal
+	 * marker are validated across separate poll calls.
+	 */
+	public static RecordingEvidence inspect(
+		final AeronArchive archive,
+		final long recordingId,
+		final String replayChannel,
+		final int streamId,
+		final UUID clusterId,
+		final long epoch,
+		final long timeoutMillis,
+		final long stopPosition,
+		final int fragmentLimit
+	)
+	{
+		if (fragmentLimit <= 0) throw new IllegalArgumentException("fragmentLimit must be positive");
 		final long start = archive.getStartPosition(recordingId);
 		final long effectiveStop = stopPosition >= 0 ? stopPosition : archive.getStopPosition(recordingId);
 		if (start < 0 || effectiveStop < start)
@@ -96,20 +119,37 @@ public final class RecordingInspector
 			final Map<Long, Integer> terminalLengths = new HashMap<>();
 			final Map<Long, Integer> terminalChunks = new HashMap<>();
 			final AtomicLong lastPosition = new AtomicLong(start);
+			final AtomicReference<RuntimeException> callbackFailure = new AtomicReference<>();
 			final AeronReplicationEnvelope.EnvelopeView view = new AeronReplicationEnvelope.EnvelopeView();
 			final FragmentAssembler assembler = new FragmentAssembler((buffer, offset, fragmentLength, header) ->
 			{
-				lastPosition.set(Math.max(lastPosition.get(), header.position() + fragmentLength));
-				inspectEnvelope(buffer, offset, fragmentLength, view, clusterId, epoch,
-					transactions, dictionaries, terminals, terminalCrc, terminalLengths, terminalChunks);
+				try
+				{
+					/* Header.position() is already the replay image's end position for
+					 * this fragment. Adding the payload length can jump over a terminal
+					 * frame and make the scanner return incomplete evidence. */
+					lastPosition.accumulateAndGet(header.position(), Math::max);
+					inspectEnvelope(buffer, offset, fragmentLength, view, clusterId, epoch,
+						transactions, dictionaries, terminals, terminalCrc, terminalLengths, terminalChunks);
+				}
+				catch (final RuntimeException failure)
+				{
+					callbackFailure.compareAndSet(null, failure);
+				}
 			});
 			final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
-			while (lastPosition.get() < effectiveStop && System.nanoTime() < deadline)
+			while (lastPosition.get() < effectiveStop && callbackFailure.get() == null &&
+				System.nanoTime() < deadline)
 			{
-				if (subscription.poll(assembler, 20) == 0)
+				if (subscription.poll(assembler, fragmentLimit) == 0)
 				{
 					LockSupport.parkNanos(100_000L);
 				}
+			}
+			final RuntimeException failure = callbackFailure.get();
+			if (failure != null)
+			{
+				throw new AssertionError("Archive envelope validation failed for recording " + recordingId, failure);
 			}
 			if (lastPosition.get() < effectiveStop)
 			{
@@ -176,8 +216,8 @@ public final class RecordingInspector
 			}
 			final TransactionFrames frames = dictionaries.computeIfAbsent(view.sequence(), ignored ->
 				new TransactionFrames(view.payloadLength(), view.chunkCount()));
-			final byte[] payload = new byte[view.payloadLengthOnWire];
-			buffer.getBytes(view.payloadOffset, payload);
+			final byte[] payload = new byte[view.payloadLengthOnWire()];
+			buffer.getBytes(view.payloadOffset(), payload);
 			frames.put(view.chunkOffset(), payload);
 			return;
 		}
@@ -196,8 +236,8 @@ public final class RecordingInspector
 		}
 		final TransactionFrames frames = transactions.computeIfAbsent(view.sequence(), ignored ->
 			new TransactionFrames(view.payloadLength(), view.chunkCount()));
-		final byte[] payload = new byte[view.payloadLengthOnWire];
-		buffer.getBytes(view.payloadOffset, payload);
+		final byte[] payload = new byte[view.payloadLengthOnWire()];
+		buffer.getBytes(view.payloadOffset(), payload);
 		frames.put(view.chunkOffset(), payload);
 	}
 

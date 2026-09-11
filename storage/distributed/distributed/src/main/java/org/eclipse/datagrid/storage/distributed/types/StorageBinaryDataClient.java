@@ -20,5 +20,39 @@ import org.eclipse.serializer.typing.Disposable;
 /** Minimal lifecycle contract for a reader-side binary replication client. */
 public interface StorageBinaryDataClient extends Disposable
 {
+	/** Result of a requested stop-at-latest operation. */
+	enum StopOutcome
+	{
+		NOT_STARTED,
+		RUNNING,
+		STOPPING,
+		RESOLVED_BOUNDARY,
+		TIMED_OUT,
+		FAILED,
+		STOPPED,
+		CLOSED
+	}
+
+	/** Immutable result of a stop-at-latest request. */
+	record StopResult(StopOutcome outcome, long sequence, long position)
+	{
+		public StopResult
+		{
+			if (outcome == null) throw new NullPointerException("outcome");
+		}
+	}
+
+	/** Returns the most recent stop outcome, or {@link StopOutcome#NOT_STARTED}. */
+	default StopOutcome stopOutcome()
+	{
+		return StopOutcome.NOT_STARTED;
+	}
+
+	/** Returns the stop outcome together with the last resolved cursor. */
+	default StopResult stopResult()
+	{
+		return new StopResult(this.stopOutcome(), -1L, -1L);
+	}
+
 	void start();
 }

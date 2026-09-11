@@ -14,11 +14,18 @@ ECLIPSE_DATAGRID_AERON_STORE_GENERATION=<store-generation-uuid>
 ```
 
 The remaining `ECLIPSE_DATAGRID_AERON_*` settings select the UDP live,
-Archive-control, replay, directory, archive directory, writer checkpoint,
-file-sync, term, MTU, chunk, and transaction limits. Set
+Archive-control, replay and Archive-replication channels, directory, archive
+directory, writer checkpoint, file-sync, term, MTU, chunk, transaction,
+threading, segment, low-storage, and replay-concurrency limits. Production
+defaults to dedicated MediaDriver/Archive threads; development and tests use
+shared threads. Override with `ECLIPSE_DATAGRID_AERON_THREADING_MODE` when the
+deployment deliberately chooses another supported mode. Set
 `ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH` to a durable, owner-only path. The
 MediaDriver directory is recreated by Aeron on startup, so archive and
 checkpoint paths must not be children of `ECLIPSE_DATAGRID_AERON_DIRECTORY`.
+Production deployments must replace the loopback channel defaults with
+routable node/Service addresses; the provider rejects loopback and wildcard
+endpoints when production mode is enabled.
 The provider owns its embedded MediaDriver/Archive lifecycle and closes those
 resources from the DataGrid storage-manager shutdown callback.
 
@@ -29,8 +36,10 @@ network address.
 One provider instance owns one configured replication stream; use separate
 provider instances/channels for multiple streams.
 The development live-channel default is a dynamic MDC loopback channel
-(`control=localhost:40123|control-mode=dynamic|fc=max`) so multiple readers
-can attach. Production deployments must configure a routable control endpoint.
+(`control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=datagrid-<cluster>`)
+so multiple readers can attach. The replay default points at the same local
+control endpoint with a dynamic response stream. Production deployments must
+configure routable control and replay endpoints.
 The default wire tuning is a 16 MiB term, 1 MiB Store chunk, 1,408-byte MTU,
 and 64 MiB transaction limit; override with the full environment keys
 `ECLIPSE_DATAGRID_AERON_TERM_LENGTH`,
@@ -38,6 +47,12 @@ and 64 MiB transaction limit; override with the full environment keys
 `ECLIPSE_DATAGRID_AERON_CHUNK_SIZE`,
 `ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES`, and
 `ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS`.
+Archive runtime tuning is controlled by
+`ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL`,
+`ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH`,
+`ECLIPSE_DATAGRID_AERON_ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD`, and
+`ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS`. The provider maps the
+configured threading mode to matching MediaDriver and Archive threading.
 `CHUNK_SIZE + 64` must fit Aeron's publication maximum (`term-length / 8`,
 capped at 16 MiB). Store bytes are sent directly inside the fixed replication
 envelope; no SBE or second serialization pass is required.
@@ -49,6 +64,14 @@ provider rejects retention requests with an explicit unsupported-capability
 error until authenticated reader identities and durable watermarks are designed
 and implemented; it never pretends that history was reclaimed. Operators must
 monitor Archive capacity and rotate or expand storage before it is exhausted.
+The supported capacity procedure is: alert when
+`archiveUsableSpaceBytes()` approaches the configured
+`ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES`, stop acknowledged writes (the
+provider will reject them below the threshold), take a matched Store+Archive
+backup, stop the writer, provision or attach a larger Archive filesystem, and
+restart with the same recording and checkpoint. Do not delete active recording
+segments or manually advance a reader cursor; if the Archive cannot be
+restored, initialize a new epoch and reseed every reader.
 
 Aeron Archive control and replay channels have no application authentication in
 this provider. Production deployments must isolate those endpoints with private

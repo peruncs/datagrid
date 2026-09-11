@@ -57,10 +57,16 @@ public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binar
 		public void write(final Binary data) throws PersistenceExceptionTransfer
 		{
 			data.iterateChannelChunks(Binary::mark);
-
-			this.delegate.write(data);
-
-			data.iterateChannelChunks(Binary::reset);
+			try
+			{
+				this.delegate.write(data);
+			}
+			finally
+			{
+				/* A failed local write must not leave channel positions marked. The
+				 * same Binary instance is commonly retried by the Store thread. */
+				data.iterateChannelChunks(Binary::reset);
+			}
 
 			this.distributor.distributeData(data);
 		}

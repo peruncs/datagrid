@@ -15,15 +15,15 @@ package org.eclipse.datagrid.cluster.nodelibrary.types.cronjob;
  */
 
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.function.Supplier;
-
 import org.quartz.Job;
 import org.quartz.Scheduler;
 import org.quartz.SchedulerException;
 import org.quartz.spi.JobFactory;
 import org.quartz.spi.TriggerFiredBundle;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Supplier;
 
 public interface QuartzCronJobJobFactory extends JobFactory
 {

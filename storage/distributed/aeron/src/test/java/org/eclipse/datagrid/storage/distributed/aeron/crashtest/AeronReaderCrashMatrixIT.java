@@ -23,6 +23,7 @@ import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicatio
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpointStore;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
 import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronArchiveReplicationPublisher;
+import org.eclipse.datagrid.storage.distributed.aeron.writer.RawArchivePublisher;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -34,6 +35,7 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -132,8 +134,8 @@ class AeronReaderCrashMatrixIT
 			try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
 				archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0))
 			{
-				publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(payload(0)) });
-				publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(payload(1)) });
+				RawArchivePublisher.publish(publisher, null, new ByteBuffer[] { ByteBuffer.wrap(payload(0)) });
+				RawArchivePublisher.publish(publisher, null, new ByteBuffer[] { ByteBuffer.wrap(payload(1)) });
 				final long recordingId = awaitRecordingId(publisher);
 				child = launch(base, "phase1", point, recordingId, controlChannel, mediaDirectory);
 				awaitFile(base.resolve("control/ready"), child);
@@ -204,20 +206,18 @@ class AeronReaderCrashMatrixIT
 	}
 
 	private static long awaitRecordingId(final AeronArchiveReplicationPublisher publisher)
-		throws InterruptedException
 	{
 		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(RECORDING_ID_TIMEOUT_MILLIS);
 		while (System.nanoTime() < deadline)
 		{
 			final long recordingId = publisher.recordingId();
 			if (recordingId >= 0) return recordingId;
-			Thread.sleep(10L);
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10L));
 		}
 		throw new AssertionError("recording id not available");
 	}
 
 	private static void awaitFile(final Path path, final Process process)
-		throws  InterruptedException
 	{
 		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CHILD_FILE_TIMEOUT_MILLIS);
 		while (!Files.exists(path) && System.nanoTime() < deadline)
@@ -231,7 +231,7 @@ class AeronReaderCrashMatrixIT
 					System.getProperty("java.class.path") + "\nmodulepath=" +
 					System.getProperty("jdk.module.path"));
 			}
-			Thread.sleep(10L);
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10L));
 		}
 		assertTrue(Files.exists(path), "timed out waiting for " + path);
 	}

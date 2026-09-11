@@ -95,6 +95,12 @@ final class AeronOfferRetryer
 			if (position == Publication.BACK_PRESSURED) backPressured++;
 			else if (position == Publication.NOT_CONNECTED) notConnected++;
 			else if (position == Publication.ADMIN_ACTION) adminActions++;
+			else
+			{
+				/* Aeron adds result codes rarely; retrying an unknown value would
+				 * hide a protocol/API change behind a misleading timeout. */
+				throw new IllegalStateException("unknown Aeron publication result: " + position);
+			}
 			if (System.nanoTime() - started >= this.configuration.offerTimeoutNanos())
 			{
 				final String reason;
@@ -106,13 +112,9 @@ final class AeronOfferRetryer
 				{
 					reason = "NOT_CONNECTED retries=" + notConnected;
 				}
-				else if (position == Publication.ADMIN_ACTION)
-				{
-					reason = "ADMIN_ACTION retries=" + adminActions;
-				}
 				else
 				{
-					reason = "status=" + position;
+					reason = "ADMIN_ACTION retries=" + adminActions;
 				}
 				throw new IllegalStateException("Aeron offer timed out: " + reason +
 					", connected=" + this.offerer.isConnected());

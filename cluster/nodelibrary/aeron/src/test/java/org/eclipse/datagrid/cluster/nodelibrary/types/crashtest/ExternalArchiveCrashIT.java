@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -183,19 +184,19 @@ class ExternalArchiveCrashIT
 	}
 
 	private static void await(final Path path, final Process process, final long timeout)
-		throws IOException, InterruptedException
+		throws IOException
 	{
 		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
 		while (!Files.exists(path) && System.nanoTime() < deadline)
 		{
 			if (!process.isAlive())
 			{
-				final Path log = path.getParent().resolve(path.getFileName().toString().contains("milestone")
-					? "phase1.log" : "archive.log");
+				final boolean archiveControlFile = path.getFileName().toString().startsWith("archive-");
+				final Path log = path.getParent().resolve(archiveControlFile ? "archive.log" : "phase1.log");
 				throw new AssertionError("process exited before " + path + ": " +
 					(Files.exists(log) ? Files.readString(log) : "no process log"));
 			}
-			Thread.sleep(10L);
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10L));
 		}
 		assertTrue(Files.exists(path), "timed out waiting for " + path);
 	}
