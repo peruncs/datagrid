@@ -50,6 +50,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention
 	private final long writerEpoch;
 	private final IntSupplier termLength;
 	private final IntSupplier segmentLength;
+	private final boolean watermarkDeliveryAvailable;
 	private final Path statePath;
 	private boolean closed;
 
@@ -64,25 +65,8 @@ final class AeronArchiveRetention implements ReplicationLogRetention
 		final UUID storeGeneration,
 		final long writerEpoch,
 		final IntSupplier termLength,
-		final IntSupplier segmentLength
-	)
-	{
-		this(secret, readers, ensureWriter, archive, recordingId, writerBoundary, clusterId, storeGeneration,
-			writerEpoch, termLength, segmentLength, null);
-	}
-
-	AeronArchiveRetention(
-		final byte[] secret,
-		final Set<UUID> readers,
-		final Runnable ensureWriter,
-		final Supplier<AeronArchive> archive,
-		final LongSupplier recordingId,
-		final Supplier<AeronWriterBoundary> writerBoundary,
-		final UUID clusterId,
-		final UUID storeGeneration,
-		final long writerEpoch,
-		final IntSupplier termLength,
 		final IntSupplier segmentLength,
+		final boolean watermarkDeliveryAvailable,
 		final Path statePath
 	)
 	{
@@ -97,6 +81,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention
 		this.writerEpoch = writerEpoch;
 		this.termLength = termLength;
 		this.segmentLength = segmentLength;
+		this.watermarkDeliveryAvailable = watermarkDeliveryAvailable;
 		this.statePath = statePath;
 		this.restoreState();
 	}
@@ -104,13 +89,18 @@ final class AeronArchiveRetention implements ReplicationLogRetention
 	@Override
 	public synchronized boolean isSupported()
 	{
-		return !this.closed && this.quorum.isComplete();
+		return !this.closed && this.watermarkDeliveryAvailable && this.quorum.isComplete();
 	}
 
 	@Override
 	public synchronized void deleteThrough(final ReplicationCursor cursor)
 	{
 		if (this.closed) throw new IllegalStateException("Aeron retention is closed");
+		if (!this.watermarkDeliveryAvailable)
+		{
+			throw new UnsupportedOperationException(
+				"Aeron retention requires a deployed reader-to-writer watermark channel");
+		}
 		if (cursor == null || !"aeron".equalsIgnoreCase(cursor.transport()))
 			throw new IllegalArgumentException("Aeron retention requires an Aeron cursor");
 		if (cursor.logicalSequence() < 0)
@@ -165,6 +155,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention
 	public synchronized void recordReaderWatermark(final ReplicationCursor cursor)
 	{
 		if (this.closed) throw new IllegalStateException("Aeron retention is closed");
+		if (!this.watermarkDeliveryAvailable)
+		{
+			throw new UnsupportedOperationException(
+				"Aeron retention watermark delivery is not configured");
+		}
 		if (cursor == null || !"aeron".equalsIgnoreCase(cursor.transport()))
 			throw new IllegalArgumentException("Aeron retention requires an Aeron cursor");
 		if (cursor.logicalSequence() < 0)

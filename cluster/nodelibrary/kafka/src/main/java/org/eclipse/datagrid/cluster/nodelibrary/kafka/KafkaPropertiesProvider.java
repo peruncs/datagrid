@@ -32,16 +32,29 @@ import static org.eclipse.serializer.util.X.notNull;
 /** Loads and snapshots the Kafka client properties used by a transport. */
 public interface KafkaPropertiesProvider
 {
+	/** Loads the provider's properties.
+	 * @throws NodelibraryException if loading fails
+	 */
     void init() throws NodelibraryException;
 
+	/** Returns a defensive properties snapshot.
+	 * @return Kafka properties
+	 */
     Properties provide();
 
+	/** Creates a provider for the default configuration directory.
+	 * @return properties provider
+	 */
     static KafkaPropertiesProvider ConfigDirectory()
     {
         return ConfigDirectory(Defaults.configDirectoryPath());
     }
 
-    static KafkaPropertiesProvider ConfigDirectory(final Path configDirectoryPath)
+	/** Creates a provider for a configuration directory.
+	 * @param configDirectoryPath configuration directory
+	 * @return properties provider
+	 */
+	static KafkaPropertiesProvider ConfigDirectory(final Path configDirectoryPath)
     {
         return new Default(notNull(configDirectoryPath));
     }
@@ -49,6 +62,9 @@ public interface KafkaPropertiesProvider
     /** Supplies the default location used by the configuration-directory factory. */
     interface Defaults
     {
+		/** Returns the default configuration directory.
+		 * @return default directory
+		 */
         static Path configDirectoryPath()
         {
             return Paths.get("/kafka");

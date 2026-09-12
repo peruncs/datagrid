@@ -40,8 +40,8 @@ import java.util.function.BooleanSupplier;
  */
 public final class AeronArchiveReplicationPublisher implements AutoCloseable
 {
-	@FunctionalInterface
 	/** Persists the writer checkpoint after an Archive position is known. */
+	@FunctionalInterface
 	public interface CheckpointWriter
 	{
 		/**
@@ -50,14 +50,19 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		 * must not treat them as committed data.
 		 *
 		 * @param state state reached by the writer
-		 * @param sequence transaction sequence, or {@code -1} for a local rejection
+		 * @param sequence transaction sequence
 		 * @param dataLength Store binary length
 		 * @param dataChunkCount Store binary chunk count
 		 * @param dataCrc32c Store binary checksum
 		 * @param position Archive position of the terminal marker, or {@code -1}
 		 */
-		void onState(AeronReplicationCheckpoint.State state, long sequence, int dataLength,
-			int dataChunkCount, int dataCrc32c, long position);
+			void onState(AeronReplicationCheckpoint.State state, long sequence, int dataLength,
+				int dataChunkCount, int dataCrc32c, long position);
+
+		/** Removes a local acceptance fence for a Store write that was rejected. */
+		default void clearEnqueueFence()
+		{
+		}
 	}
 
 	private final AeronArchive archive;
@@ -113,6 +118,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	 * Creates a recording for a publication recorded by a separate Archive.
 	 * The caller still supplies the connected Archive client used for the
 	 * recording commands.
+	 *
+	 * @param archive Archive client that owns the recording
+	 * @param channel publication channel
+	 * @param streamId publication stream
+	 * @param configuration shared framing and timeout limits
+	 * @param clusterId replication cluster identity
+	 * @param epoch writer epoch
+	 * @param initialSequence first sequence to publish
+	 * @return a publisher that owns the publication and recording
 	 */
 	public static AeronArchiveReplicationPublisher NewRemote(
 		final AeronArchive archive,
@@ -189,6 +203,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	 * The recording must belong to {@code streamId}; the same initial-position
 	 * URI is used for the new publication and the Archive extension.
 	 *
+	 * @param archive Archive client that owns the recording
+	 * @param recordingId stopped recording to extend
+	 * @param streamId publication stream
+	 * @param configuration shared framing and timeout limits
+	 * @param clusterId replication cluster identity
+	 * @param epoch writer epoch
+	 * @param initialSequence first sequence to publish
+	 * @return a publisher that owns the extended publication and recording
+	 *
 	 * @throws IllegalArgumentException if the recording is unknown, uses another
 	 *         stream, or has different framing
 	 * @throws IllegalStateException if the recording is still active
@@ -207,7 +230,18 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			SourceLocation.LOCAL);
 	}
 
-	/** Reopens a stopped recording whose source publication uses another driver. */
+	/**
+	 * Reopens a stopped recording whose source publication uses another driver.
+	 *
+	 * @param archive Archive client that owns the recording
+	 * @param recordingId stopped recording to extend
+	 * @param streamId publication stream
+	 * @param configuration shared framing and timeout limits
+	 * @param clusterId replication cluster identity
+	 * @param epoch writer epoch
+	 * @param initialSequence first sequence to publish
+	 * @return a publisher that owns the extended publication and recording
+	 */
 	public static AeronArchiveReplicationPublisher ExtendRemote(
 		final AeronArchive archive,
 		final long recordingId,
@@ -310,6 +344,12 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		return this.publisher.publishTransaction(dictionary, data);
 	}
 
+	/**
+	 * Returns the recording identity, discovering it from Aeron or the Archive
+	 * catalog when the local counter is unavailable.
+	 *
+	 * @return recording identity, or {@link Aeron#NULL_VALUE} when none is known
+	 */
 	public long recordingId()
 	{
 		final CountersReader counters = this.archive.context().aeron().countersReader();
@@ -369,7 +409,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		return recordingId[0];
 	}
 
-	/** Returns whether publication or durability failure made this writer fail closed. */
+	/**
+	 * Returns whether publication or durability failure made this writer fail closed.
+	 *
+	 * @return {@code true} when the writer must reject further transactions
+	 */
 	public boolean isFailed()
 	{
 		return this.publisher.isFailed();
@@ -471,7 +515,24 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			else
 			{
 				final long discovered = recordingIdHint >= 0 ? recordingIdHint : findRecordingId(archive, publication);
-				if (discovered >= 0) return discovered;
+				if (discovered >= 0)
+				{
+					/* A catalog entry is only a hint. A stopped entry can be found while
+					 * the new publication is still being wired, so accept it only while
+					 * the Archive reports the recording as active. */
+					try
+					{
+						/* A catalog entry is active only when it has no stop position
+						 * and the Archive can report its current recording position. */
+						if (archive.getStopPosition(discovered) < 0 &&
+							archive.getRecordingPosition(discovered) >= 0) return discovered;
+					}
+					catch (final RuntimeException ignored)
+					{
+						/* The catalog may lag the publication. The next iteration retries
+						 * discovery and pollForErrorResponse() reports real control errors. */
+					}
+				}
 			}
 			if (System.nanoTime() >= deadline)
 			{
@@ -530,7 +591,14 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		return this.newWriteCoordinator(durabilityMode, writer, () -> true);
 	}
 
-	/** Creates a coordinator with a local write-admission predicate. */
+	/**
+	 * Creates a coordinator with a local write-admission predicate.
+	 *
+	 * @param durabilityMode ordering between local acceptance and Archive
+	 * @param writer receiver for checkpoint transitions
+	 * @param writeAdmission predicate checked before local acceptance
+	 * @return a coordinator backed by this publisher
+	 */
 	public AeronReplicationWriteCoordinator newWriteCoordinator(
 		final ReplicationDurabilityMode durabilityMode,
 		final CheckpointWriter writer,
@@ -555,10 +623,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	@Override
 	public synchronized void close()
 	{
-		synchronized (this)
-		{
-			if (this.closed) return;
-		}
+		if (this.closed) return;
 		RuntimeException failure = null;
 		Error fatalFailure = null;
 		long recordingId = Aeron.NULL_VALUE;
@@ -625,11 +690,12 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			if (failure == null) failure = identityFailure;
 			else failure.addSuppressed(identityFailure);
 		}
+		boolean stopRequestSent = false;
 		if (recordingId >= 0)
 		{
 			try
 			{
-				this.archive.tryStopRecording(recordingId);
+				stopRequestSent = this.archive.tryStopRecordingByIdentity(recordingId);
 			}
 			catch (final RuntimeException stopFailure)
 			{
@@ -642,9 +708,12 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				else fatalFailure.addSuppressed(stopFailure);
 			}
 		}
-		if (recordingId >= 0)
+		if (stopRequestSent)
 		{
-			try { awaitStopped(this.archive, recordingId, this.configuration); }
+			try
+			{
+				awaitStopped(this.archive, recordingId, this.configuration);
+			}
 			catch (final RuntimeException stopFailure)
 			{
 				if (failure == null) failure = stopFailure;
@@ -656,6 +725,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				else fatalFailure.addSuppressed(stopFailure);
 			}
 		}
+		/* The publication close releases all local native resources. If the Archive
+		 * vanished meanwhile, the stop failure is still reported, but a retry cannot
+		 * make the already-closed publication any safer. Let the transport finish
+		 * closing its client and driver instead of retaining their threads forever. */
+		if (this.publisher.isClosed()) this.closed = true;
 		if (fatalFailure != null)
 		{
 			if (failure != null) fatalFailure.addSuppressed(failure);
@@ -701,25 +775,29 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			}
 			if (recordingId >= 0)
 			{
+				boolean stopRequestSent = false;
 				try
 				{
-					archive.tryStopRecording(recordingId);
+					stopRequestSent = archive.tryStopRecordingByIdentity(recordingId);
 				}
-			catch (final RuntimeException | Error stopFailure)
-			{
-				failure = stopFailure;
-			}
-				try
+				catch (final RuntimeException | Error stopFailure)
 				{
-					/* Stopping is asynchronous.  Construction must not leak a recording
-					 * when a later setup step fails, otherwise the next startup sees an
-					 * apparently active recording and refuses to extend it. */
-					awaitStopped(archive, recordingId, configuration);
+					failure = stopFailure;
 				}
-			catch (final RuntimeException | Error awaitFailure)
+				if (stopRequestSent)
 				{
-					if (failure == null) failure = awaitFailure;
-					else if (failure != awaitFailure) failure.addSuppressed(awaitFailure);
+					try
+					{
+						/* Stopping is asynchronous. Construction must not leak a recording
+						 * when a later setup step fails, otherwise the next startup sees an
+						 * apparently active recording and refuses to extend it. */
+						awaitStopped(archive, recordingId, configuration);
+					}
+					catch (final RuntimeException | Error awaitFailure)
+					{
+						if (failure == null) failure = awaitFailure;
+						else if (failure != awaitFailure) failure.addSuppressed(awaitFailure);
+					}
 				}
 			}
 		}

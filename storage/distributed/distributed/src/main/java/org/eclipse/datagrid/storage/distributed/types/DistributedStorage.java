@@ -31,9 +31,15 @@ import java.util.function.UnaryOperator;
  * reach the supplied distributor. The utility changes the foundation in place
  * and returns it for fluent setup.</p>
  */
-public final class DistributedStorage
+	public final class DistributedStorage
 {
-	public static EmbeddedStorageFoundation<?> configureWriting(
+		/** Adds distributed writing to an embedded storage foundation.
+		 *
+		 * @param foundation foundation to configure
+		 * @param distributor destination for committed data
+		 * @return the configured foundation
+		 */
+		public static EmbeddedStorageFoundation<?> configureWriting(
 		final EmbeddedStorageFoundation<?> foundation,
 		final StorageBinaryDataDistributor distributor
 	)
@@ -43,7 +49,14 @@ public final class DistributedStorage
 		return foundation;
 	}
 
-	public static EmbeddedStorageFoundation<?> configureWriting(
+		/** Adds distributed writing with a custom local target wrapper.
+		 *
+		 * @param foundation foundation to configure
+		 * @param distributor destination for committed data
+		 * @param targetFactory wrapper for the local persistence target
+		 * @return the configured foundation
+		 */
+		public static EmbeddedStorageFoundation<?> configureWriting(
 		final EmbeddedStorageFoundation<?> foundation,
 		final StorageBinaryDataDistributor distributor,
 		final UnaryOperator<PersistenceTarget<Binary>> targetFactory

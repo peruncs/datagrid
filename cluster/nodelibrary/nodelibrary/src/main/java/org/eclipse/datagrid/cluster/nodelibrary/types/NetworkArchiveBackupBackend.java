@@ -40,7 +40,15 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface NetworkArchiveBackupBackend extends StorageBackupBackend
 {
-    static NetworkArchiveBackupBackend New(
+	/** Creates a network-backed backup backend.
+	 *
+	 * @param storageExportScratchSpacePath local scratch directory
+	 * @param backupProxyHttpClient remote backup client
+	 * @param storedMessageInfoManagerCreator message-info manager factory
+	 * @param messageInfoParser message-info parser
+	 * @return network backup backend
+	 */
+	static NetworkArchiveBackupBackend New(
         final Path storageExportScratchSpacePath,
         final BackupProxyHttpClient backupProxyHttpClient,
         final StoredMessageInfoManager.Creator storedMessageInfoManagerCreator,

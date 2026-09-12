@@ -34,6 +34,17 @@ import org.eclipse.serializer.concurrency.LockedExecutor;
 @ApplicationScoped
 public class EclipseDataGridCluster
 {
+	/** Creates the Helidon application producers. */
+	public EclipseDataGridCluster()
+	{
+	}
+
+	/**
+	 * Creates the graph update handler used by the cluster services.
+	 *
+	 * @param executor shared locked executor
+	 * @return graph update handler
+	 */
 	@ApplicationScoped
 	@Produces
 	public ObjectGraphUpdateHandler objectGraphUpdateHandler(final LockedExecutor executor)
@@ -41,6 +52,11 @@ public class EclipseDataGridCluster
 		return updater -> executor.write(updater::updateObjectGraph);
 	}
 
+	/**
+	 * Creates the lock used to serialize graph updates.
+	 *
+	 * @return new locked executor
+	 */
 	@ApplicationScoped
 	@Produces
 	public LockedExecutor lockedExecutor()
@@ -48,6 +64,12 @@ public class EclipseDataGridCluster
 		return LockedExecutor.New();
 	}
 
+	/**
+	 * Starts the cluster-aware storage manager and registers its shutdown hook.
+	 *
+	 * @param foundation cluster foundation
+	 * @return started cluster storage manager
+	 */
 	@SuppressWarnings("rawtypes")
 	@ApplicationScoped
 	@Produces
@@ -58,6 +80,12 @@ public class EclipseDataGridCluster
 		return manager;
 	}
 
+	/**
+	 * Starts the neutral request controller and registers its shutdown hook.
+	 *
+	 * @param foundation cluster foundation
+	 * @return started request controller
+	 */
 	@SuppressWarnings("rawtypes")
 	@ApplicationScoped
 	@Produces
@@ -68,6 +96,14 @@ public class EclipseDataGridCluster
 		return controller;
 	}
 
+	/**
+	 * Creates the cluster foundation.
+	 *
+	 * @param rootProvider application root provider
+	 * @param objectGraphUpdateHandler graph update handler
+	 * @param async whether distribution may use asynchronous delivery
+	 * @return configured cluster foundation
+	 */
 	@SuppressWarnings("rawtypes")
 	@ApplicationScoped
 	@Produces

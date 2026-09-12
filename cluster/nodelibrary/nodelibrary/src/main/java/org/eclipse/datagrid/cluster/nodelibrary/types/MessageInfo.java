@@ -27,14 +27,34 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface MessageInfo
 {
+	/** Returns the logical message index.
+	 * @return message index
+	 */
 	long messageIndex();
 
+	/** Returns the transport name.
+	 * @return transport name
+	 */
 	String transport();
 
+	/** Returns the Store generation.
+	 * @return Store generation, or {@code null}
+	 */
 	UUID storeGeneration();
 
+	/** Returns the provider cursor bytes.
+	 * @return provider cursor copy
+	 */
 	byte[] providerPosition();
 
+	/** Creates complete message information.
+	 *
+	 * @param messageIndex logical message index
+	 * @param transport transport name
+	 * @param storeGeneration Store generation
+	 * @param providerPosition provider cursor bytes
+	 * @return message information
+	 */
 	static MessageInfo New(
 		final long messageIndex,
 		final String transport,
@@ -45,6 +65,11 @@ public interface MessageInfo
 		return new Default(messageIndex, notNull(transport), storeGeneration, providerPosition);
 	}
 
+	/** Creates legacy message information.
+	 *
+	 * @param messageIndex logical message index
+	 * @return message information
+	 */
 	static MessageInfo New(final long messageIndex)
 	{
 		return New(messageIndex, "unknown", null, new byte[0]);

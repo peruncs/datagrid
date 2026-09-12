@@ -41,7 +41,14 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface FilesystemVolumeBackupBackend extends StorageBackupBackend
 {
-    static FilesystemVolumeBackupBackend New(
+	/** Creates a filesystem backup backend.
+	 *
+	 * @param backupVolumePath backup volume path
+	 * @param storedMessageInfoManagerCreator message-info manager factory
+	 * @param messageInfoParser message-info parser
+	 * @return filesystem backup backend
+	 */
+	static FilesystemVolumeBackupBackend New(
         final Path backupVolumePath,
         final StoredMessageInfoManager.Creator storedMessageInfoManagerCreator,
         final MessageInfoParser messageInfoParser

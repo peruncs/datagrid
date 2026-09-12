@@ -45,11 +45,22 @@ public class MicronautClusterController
 {
 	private final ClusterRestRequestController controller;
 
+	/**
+	 * Creates an HTTP controller backed by the neutral request controller.
+	 *
+	 * @param controller neutral cluster request controller
+	 */
 	public MicronautClusterController(final ClusterRestRequestController controller)
 	{
 		this.controller = controller;
 	}
 
+	/**
+	 * Converts a neutral request failure into an HTTP response.
+	 *
+	 * @param e request failure
+	 * @return response with the failure status and headers
+	 */
 	@io.micronaut.http.annotation.Error
 	public HttpResponse<Void> handleNodelibraryException(final HttpResponseException e)
 	{
@@ -61,12 +72,23 @@ public class MicronautClusterController
 		return response;
 	}
 
+	/**
+	 * Returns whether the distributor is active.
+	 *
+	 * @return distributor state
+	 * @throws HttpResponseException if the request cannot be served
+	 */
 	@Get(value = GetDistributor.PATH, produces = GetDistributor.PRODUCES)
 	public boolean getDistributor() throws HttpResponseException
 	{
 		return this.controller.getDistributor();
 	}
 
+	/**
+	 * Starts distributor activation.
+	 *
+	 * @throws HttpResponseException if activation cannot start
+	 */
 	@Post(
 		value = PostActivateDistributorStart.PATH,
 		consumes = PostActivateDistributorStart.CONSUMES,
@@ -77,6 +99,12 @@ public class MicronautClusterController
 		this.controller.postActivateDistributorStart();
 	}
 
+	/**
+	 * Finishes distributor activation.
+	 *
+	 * @return whether activation finished successfully
+	 * @throws HttpResponseException if activation cannot finish
+	 */
 	@Post(
 		value = PostActivateDistributorFinish.PATH,
 		consumes = PostActivateDistributorFinish.CONSUMES,
@@ -87,12 +115,22 @@ public class MicronautClusterController
 		return this.controller.postActivateDistributorFinish();
 	}
 
+	/**
+	 * Checks the node health.
+	 *
+	 * @throws HttpResponseException if the health check fails
+	 */
 	@Get(value = GetHealth.PATH, produces = GetHealth.PRODUCES)
 	public void getHealth() throws HttpResponseException
 	{
 		this.controller.getHealth();
 	}
 
+	/**
+	 * Checks whether the node is ready to serve traffic.
+	 *
+	 * @throws HttpResponseException if the readiness check fails
+	 */
 	@Get(value = GetHealthReady.PATH, produces = GetHealthReady.PRODUCES)
 	@ExecuteOn(TaskExecutors.IO)
 	public void getHealthReady() throws HttpResponseException
@@ -100,6 +138,12 @@ public class MicronautClusterController
 		this.controller.getHealthReady();
 	}
 
+	/**
+	 * Returns the storage usage report.
+	 *
+	 * @return storage usage report
+	 * @throws HttpResponseException if the report cannot be read
+	 */
 	@Get(value = GetStorageBytes.PATH, produces = GetStorageBytes.PRODUCES)
 	@ExecuteOn(TaskExecutors.IO)
 	public String getStorageBytes() throws HttpResponseException
@@ -107,6 +151,12 @@ public class MicronautClusterController
 		return this.controller.getStorageBytes();
 	}
 
+	/**
+	 * Returns the replication metrics report.
+	 *
+	 * @return replication metrics report
+	 * @throws HttpResponseException if the report cannot be read
+	 */
 	@Get(value = GetReplicationMetrics.PATH, produces = GetReplicationMetrics.PRODUCES)
 	@ExecuteOn(TaskExecutors.IO)
 	public String getReplicationMetrics() throws HttpResponseException
@@ -114,6 +164,12 @@ public class MicronautClusterController
 		return this.controller.getReplicationMetrics();
 	}
 
+	/**
+	 * Starts the backup operation described by the request body.
+	 *
+	 * @param body backup request
+	 * @throws HttpResponseException if the backup cannot start
+	 */
 	@Post(
 		value = PostBackup.PATH,
 		consumes = PostBackup.CONSUMES,
@@ -124,12 +180,23 @@ public class MicronautClusterController
 		this.controller.postBackup(body);
 	}
 
+	/**
+	 * Returns whether backup is active.
+	 *
+	 * @return backup state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@Get(value = GetBackup.PATH, produces = GetBackup.PRODUCES)
 	public boolean getBackup() throws HttpResponseException
 	{
 		return this.controller.getBackup();
 	}
 
+	/**
+	 * Pauses update delivery.
+	 *
+	 * @throws HttpResponseException if updates cannot be paused
+	 */
 	@Post(
 		value = PostUpdates.PATH,
 		consumes = PostUpdates.CONSUMES,
@@ -140,12 +207,23 @@ public class MicronautClusterController
 		this.controller.postUpdates();
 	}
 
+	/**
+	 * Returns whether update delivery is active.
+	 *
+	 * @return update-delivery state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@Get(value = GetUpdates.PATH, produces = GetUpdates.PRODUCES)
 	public boolean getUpdates() throws HttpResponseException
 	{
 		return this.controller.getUpdates();
 	}
 
+	/**
+	 * Resumes update delivery.
+	 *
+	 * @throws HttpResponseException if updates cannot be resumed
+	 */
 	@Post(
 		value = PostResumeUpdates.PATH,
 		consumes = PostResumeUpdates.CONSUMES,
@@ -156,12 +234,23 @@ public class MicronautClusterController
 		this.controller.postResumeUpdates();
 	}
 
+	/**
+	 * Starts garbage collection.
+	 *
+	 * @throws HttpResponseException if garbage collection cannot start
+	 */
 	@Post(value = PostGc.PATH, consumes = PostGc.CONSUMES, produces = PostGc.PRODUCES)
 	public void postGc() throws HttpResponseException
 	{
 		this.controller.postGc();
 	}
 
+	/**
+	 * Returns whether garbage collection is active.
+	 *
+	 * @return garbage-collection state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@Get(value = GetGc.PATH, produces = GetGc.PRODUCES)
 	public boolean getGc() throws HttpResponseException
 	{

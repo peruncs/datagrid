@@ -108,6 +108,6 @@ class AeronArchiveRetentionTest
 	{
 		return new AeronArchiveRetention(SECRET, Set.of(READER), ensureWriter, () -> null, () -> 17,
 			() -> new AeronWriterBoundary(4, 17, 8_192), CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
-			state);
+			true, state);
 	}
 }

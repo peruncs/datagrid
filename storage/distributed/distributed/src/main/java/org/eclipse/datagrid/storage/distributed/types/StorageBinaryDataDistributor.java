@@ -25,19 +25,35 @@ import static org.eclipse.serializer.util.X.notNull;
  * Implementations decide how bytes are transported; callers only require that
  * dictionary data precede the matching binary transaction.
  */
-public interface StorageBinaryDataDistributor extends Disposable
-{
-	void distributeData(Binary data);
+	public interface StorageBinaryDataDistributor extends Disposable
+	{
+		/** Publishes one complete Store binary.
+		 *
+		 * @param data binary to publish
+		 */
+		void distributeData(Binary data);
 
-	void distributeTypeDictionary(String typeDictionaryData);
+		/** Publishes a type dictionary needed by later Store data.
+		 *
+		 * @param typeDictionaryData assembled type dictionary
+		 */
+		void distributeTypeDictionary(String typeDictionaryData);
 
-	/** Returns and clears a dictionary staged for the next binary transaction. */
+		/** Returns and clears a dictionary staged for the next binary transaction.
+		 *
+		 * @return staged dictionary, or {@code null}
+		 */
 	default String consumeTypeDictionary()
 	{
 		return null;
 	}
 
-	static StorageBinaryDataDistributor Caching(final StorageBinaryDataDistributor delegate)
+		/** Creates a distributor that stages the latest type dictionary per thread.
+		 *
+		 * @param delegate destination distributor
+		 * @return caching decorator
+		 */
+		static StorageBinaryDataDistributor Caching(final StorageBinaryDataDistributor delegate)
 	{
 		return new StorageBinaryDataDistributor.Caching(
 			notNull(delegate)
@@ -48,7 +64,8 @@ public interface StorageBinaryDataDistributor extends Disposable
 	 * Only distribute optional new type dictionary before actual data to minimize
 	 * traffic.
 	 */
-    class Caching implements StorageBinaryDataDistributor
+		/** Stages a type dictionary until the matching binary is published. */
+		class Caching implements StorageBinaryDataDistributor
 	{
 		private final StorageBinaryDataDistributor delegate;
 		/*

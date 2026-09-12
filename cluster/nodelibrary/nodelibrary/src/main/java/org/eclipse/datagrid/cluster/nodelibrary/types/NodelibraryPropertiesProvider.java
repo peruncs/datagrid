@@ -23,17 +23,25 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 public interface NodelibraryPropertiesProvider
 {
-	/** Existing Kafka topic contract retained for source compatibility. */
+	/** Existing Kafka topic contract retained for source compatibility.
+	 * @return Kafka topic, or {@code null}
+	 */
 	default String kafkaTopicName()
 	{
 		return null;
 	}
 
+	/** Returns the logical replication stream name.
+	 * @return stream name
+	 */
 	default String replicationStreamName()
 	{
 		return this.kafkaTopicName();
 	}
 
+	/** Returns the selected replication transport.
+	 * @return transport name
+	 */
 	default String replicationTransport()
 	{
 		return "none";
@@ -43,46 +51,89 @@ public interface NodelibraryPropertiesProvider
 	 * Optional provider-specific setting, allowing embedded applications to avoid
 	 * environment variables. {@code ECLIPSE_DATAGRID_STORAGE_PATH} overrides the
 	 * default {@code /storage} root used for the Store and durable offset file.
+	 *
+	 * @param name provider-specific property name
+	 * @return property value, or {@code null}
 	 */
 	default String replicationProperty(final String name)
 	{
 		return null;
 	}
 
-	/** Fixed-topology node role: {@code writer}, {@code reader}, or {@code backup-reader}. */
+	/** Fixed-topology node role: {@code writer}, {@code reader}, or {@code backup-reader}.
+	 * @return node role
+	 */
 	default String replicationRole()
 	{
 		return isBackupNode() ? "backup-reader" : "writer";
 	}
 
-	/** Returns whether the role was explicitly configured rather than inherited from the Kafka-era default. */
+	/** Returns whether the role was explicitly configured rather than inherited from the Kafka-era default.
+	 * @return {@code true} when explicitly configured
+	 */
 	default boolean replicationRoleConfigured()
 	{
 		return false;
 	}
 
+	/** Reports whether this node restores backups.
+	 * @return {@code true} for a backup node
+	 */
 	boolean isBackupNode();
 
+	/** Returns the number of backups to retain.
+	 * @return retained backup count
+	 */
 	Integer keptBackupsCount();
 
+	/** Returns the backup target.
+	 * @return backup target
+	 */
 	BackupTarget backupTarget();
 
+	/** Returns the backup proxy URL.
+	 * @return proxy URL
+	 */
 	String backupProxyServiceUrl();
 
+	/** Returns the storage check interval in minutes.
+	 * @return interval in minutes
+	 */
 	Integer storageLimitCheckerIntervalMinutes();
 
+	/** Returns the storage limit in gigabytes.
+	 * @return storage limit
+	 */
 	Integer storageLimitGB();
 
+	/** Returns the pod name.
+	 * @return pod name
+	 */
 	String myPodName();
 
+	/** Returns the pod namespace.
+	 * @return namespace
+	 */
 	String myNamespace();
 
+	/** Reports whether production mode is enabled.
+	 * @return {@code true} in production mode
+	 */
 	boolean isProdMode();
 
+	/** Returns the merger timeout in milliseconds.
+	 * @return timeout, or {@code null}
+	 */
 	Long dataMergerTimeoutMs();
 
+	/** Returns the merger cache limit.
+	 * @return cache limit, or {@code null}
+	 */
 	Long dataMergerCachedDataLimit();
 
+	/** Creates an environment-backed provider.
+	 * @return properties provider
+	 */
 	static NodelibraryPropertiesProvider Env()
 	{
 		return new Env();
@@ -91,24 +142,44 @@ public interface NodelibraryPropertiesProvider
 	/** Reads node properties from environment variables. */
 	class Env implements NodelibraryPropertiesProvider
 	{
+		/** Creates an environment-backed provider. */
+		public Env()
+		{
+		}
+
 		/** Names of the environment variables understood by the provider. */
 		public static final class EnvKeys
 		{
+			/** Legacy Kafka topic environment variable. */
 			public static final String KAFKA_TOPIC_NAME = "MSCNL_KAFKA_TOPIC_NAME";
+			/** Replication stream environment variable. */
 			public static final String REPLICATION_STREAM_NAME = "ECLIPSE_DATAGRID_REPLICATION_STREAM";
+			/** Replication transport environment variable. */
 			public static final String REPLICATION_TRANSPORT = "ECLIPSE_DATAGRID_REPLICATION_TRANSPORT";
+			/** Store path environment variable. */
 			public static final String STORAGE_PATH = "ECLIPSE_DATAGRID_STORAGE_PATH";
+			/** Backup-node environment variable. */
 			public static final String IS_BACKUP_NODE = "IS_BACKUP_NODE";
+			/** Backup-target environment variable. */
 			public static final String BACKUP_TARGET = "BACKUP_TARGET";
+			/** Retained-backups environment variable. */
 			public static final String KEPT_BACKUPS_COUNT = "KEPT_BACKUPS_COUNT";
+			/** Backup proxy URL environment variable. */
 			public static final String BACKUP_PROXY_SERVICE_URL = "BACKUP_PROXY_SERVICE_URL";
+			/** Storage-check interval environment variable. */
 			public static final String STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES =
 				"STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES";
+			/** Storage limit environment variable. */
 			public static final String STORAGE_LIMIT_GB = "STORAGE_LIMIT_GB";
+			/** Pod name environment variable. */
 			public static final String MY_POD_NAME = "MY_POD_NAME";
+			/** Pod namespace environment variable. */
 			public static final String MY_NAMESPACE = "MY_NAMESPACE";
+			/** Production-mode environment variable. */
 			public static final String IS_PROD_MODE = "MSCNL_PROD_MODE";
+			/** Merger timeout environment variable. */
 			public static final String DATA_MERGER_TIMEOUT_MS = "MSCNL_DATA_MERGER_TIMEOUT";
+			/** Merger cache limit environment variable. */
 			public static final String DATA_MERGER_LIMIT = "MSCNL_DATA_MERGER_LIMIT";
 
 			private EnvKeys()

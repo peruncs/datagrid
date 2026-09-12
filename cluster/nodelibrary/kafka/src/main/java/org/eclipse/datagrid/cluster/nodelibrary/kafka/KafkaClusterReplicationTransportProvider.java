@@ -26,6 +26,11 @@ public final class KafkaClusterReplicationTransportProvider
 {
 	private static final String FALLBACK_READER_IDENTITY = UUID.randomUUID().toString();
 
+	/** Creates the Kafka transport provider. */
+	public KafkaClusterReplicationTransportProvider()
+	{
+	}
+
 	@Override
 	public String id()
 	{

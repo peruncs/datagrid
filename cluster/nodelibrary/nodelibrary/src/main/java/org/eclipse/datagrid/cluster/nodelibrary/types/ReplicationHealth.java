@@ -19,41 +19,68 @@ import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 /** Transport health independent of a Kafka, Aeron, or other client implementation. */
 public interface ReplicationHealth extends AutoCloseable
 {
-	/** States reported while a provider starts, runs, or requires recovery. */
-	enum State
-	{
-		STARTING, REPLAYING, LIVE, DEGRADED_ARCHIVE, RESEED_REQUIRED, FAILED
-	}
-	/** Returns true only when the node may serve the configured replication role. */
+		/** States reported while a provider starts, runs, or requires recovery. */
+		enum State
+		{
+			/** Provider is starting. */
+			STARTING,
+			/** Provider is replaying data. */
+			REPLAYING,
+			/** Provider is live. */
+			LIVE,
+			/** Archive access is degraded. */
+			DEGRADED_ARCHIVE,
+			/** Provider needs a new seed. */
+			RESEED_REQUIRED,
+			/** Provider has failed. */
+			FAILED
+		}
+		/** Returns true only when the node may serve the configured replication role.
+		 * @return {@code true} when ready
+		 * @throws NodelibraryException if readiness cannot be checked
+		 */
 	boolean isReady() throws NodelibraryException;
 
-	/** Returns true when the provider is operating without a fatal condition. */
+		/** Returns true when the provider is operating without a fatal condition.
+		 * @return {@code true} when healthy
+		 */
 	boolean isHealthy();
 
-	/** Returns local Archive usable bytes, or {@code -1} when not applicable/known. */
+		/** Returns local Archive usable bytes, or {@code -1} when not applicable/known.
+		 * @return usable bytes
+		 */
 	default long archiveUsableSpaceBytes()
 	{
 		return -1L;
 	}
 
-	/** Returns the last durable writer position, or {@code -1} when unavailable. */
+		/** Returns the last durable writer position, or {@code -1} when unavailable.
+		 * @return durable position
+		 */
 	default long writerDurablePosition()
 	{
 		return -1L;
 	}
 
-	/** Returns the last durable writer sequence, or {@code -1} when unavailable. */
+		/** Returns the last durable writer sequence, or {@code -1} when unavailable.
+		 * @return durable sequence
+		 */
 	default long writerDurableSequence()
 	{
 		return -1L;
 	}
 
-	/** Returns the locally applied reader sequence, or {@code -1} when unavailable. */
+		/** Returns the locally applied reader sequence, or {@code -1} when unavailable.
+		 * @return applied sequence
+		 */
 	default long appliedSequence()
 	{
 		return -1L;
 	}
 
+	/** Returns the current health state.
+		 * @return health state
+		 */
 	default State state()
 	{
 		return isReady() ? State.LIVE : State.STARTING;

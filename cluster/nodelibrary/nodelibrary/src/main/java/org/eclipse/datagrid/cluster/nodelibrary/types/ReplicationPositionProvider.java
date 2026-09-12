@@ -27,9 +27,14 @@ public interface ReplicationPositionProvider extends AutoCloseable
 	 *
 	 * @throws UnsupportedOperationException when this role cannot obtain a writer
 	 * latest boundary (for example, a reader without a control/status channel)
+	 * @return latest replication cursor
 	 */
 	ReplicationCursor latest() throws NodelibraryException;
 
+	/** Returns the sequence from {@link #latest()}.
+	 * @return latest logical sequence
+	 * @throws NodelibraryException if the position cannot be read
+	 */
 	default long latestSequence() throws NodelibraryException
 	{
 		return this.latest().logicalSequence();

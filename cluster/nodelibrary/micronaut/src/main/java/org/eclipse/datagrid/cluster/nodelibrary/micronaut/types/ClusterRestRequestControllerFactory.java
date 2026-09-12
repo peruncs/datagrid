@@ -25,6 +25,17 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterRestRequestControll
 @Factory
 public class ClusterRestRequestControllerFactory
 {
+	/** Creates a controller factory. */
+	public ClusterRestRequestControllerFactory()
+	{
+	}
+
+	/**
+	 * Starts the neutral request controller.
+	 *
+	 * @param foundation cluster foundation
+	 * @return started request controller
+	 */
 	@Singleton
 	@Bean(preDestroy = "close")
 	public ClusterRestRequestController clusterRequestController(final ClusterFoundation<?> foundation)

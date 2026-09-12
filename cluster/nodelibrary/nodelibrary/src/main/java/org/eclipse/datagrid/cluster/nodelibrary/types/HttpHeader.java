@@ -14,7 +14,11 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-/** A response header carried across the framework-neutral HTTP boundary. */
+/** A response header carried across the framework-neutral HTTP boundary.
+ *
+ * @param key header name
+ * @param value header value
+ */
 public record HttpHeader(String key, String value)
 {
 }

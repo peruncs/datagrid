@@ -30,10 +30,21 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageBackupTaskExecutor extends StorageTaskExecutor
 {
+	/** Starts a backup task.
+	 * @param useManualSlot whether to use the manual slot
+	 */
 	void runBackup(boolean useManualSlot);
 
+	/** Reports whether a backup task is running.
+	 * @return {@code true} when running
+	 */
 	boolean isRunningBackup();
 
+	/** Creates a backup task executor.
+	 * @param connection Store connection
+	 * @param backupManager backup manager
+	 * @return task executor
+	 */
 	static StorageBackupTaskExecutor New(final StorageConnection connection, final StorageBackupManager backupManager)
 	{
 		return new Default(notNull(connection), notNull(backupManager));

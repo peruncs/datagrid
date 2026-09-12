@@ -45,6 +45,8 @@ import static org.eclipse.serializer.util.X.notNull;
  * <p>The wrapper keeps the Store API visible while adding the node's shutdown
  * callback. The full implementation also validates storage size before writes
  * and routes graph updates through the cluster lock.</p>
+ *
+ * @param <T> root type
  */
 public interface ClusterStorageManager<T> extends StorageManager
 {
@@ -55,6 +57,14 @@ public interface ClusterStorageManager<T> extends StorageManager
 	@Override
 	ClusterStorageManager<T> start() throws NodelibraryException;
 
+	/** Creates a manager with size validation and shutdown handling.
+	 *
+	 * @param <T> root type
+	 * @param delegate Store manager
+	 * @param storageSizeValidation size validation policy
+	 * @param shutdownCallback shutdown callback
+	 * @return cluster storage manager
+	 */
 	static <T> ClusterStorageManager<T> New(
 		final StorageManager delegate,
 		final StorageSizeValidation storageSizeValidation,
@@ -67,8 +77,12 @@ public interface ClusterStorageManager<T> extends StorageManager
 	/** Runs node-specific work immediately before Store shuts down. */
 	interface ShutdownCallback
 	{
+		/** Runs node-specific shutdown work. */
 		void onShutdown();
 
+		/** Creates a callback that does nothing.
+		 * @return no-op callback
+		 */
 		static ShutdownCallback NoOp()
 		{
 			return new NoOp();
@@ -92,15 +106,28 @@ public interface ClusterStorageManager<T> extends StorageManager
 	/** Decides whether another Store write may be accepted. */
 	interface StorageSizeValidation
 	{
+		/** Reports whether another Store write is allowed.
+		 * @return {@code true} when the size is valid
+		 */
 		boolean isStorageSizeValid();
 	}
 
+	/** Creates a manager that only adds shutdown handling.
+	 *
+	 * @param <T> root type
+	 * @param delegate Store manager
+	 * @param shutdownCallback shutdown callback
+	 * @return cluster storage manager
+	 */
 	static <T> ClusterStorageManager<T> Wrapper(final StorageManager delegate, final ShutdownCallback shutdownCallback)
 	{
 		return new Wrapper<>(notNull(delegate), notNull(shutdownCallback));
 	}
 
-	/** Adds the shutdown callback while delegating every Store operation. */
+	/** Adds the shutdown callback while delegating every Store operation.
+	 *
+	 * @param <T> root type
+	 */
 	class Wrapper<T> implements ClusterStorageManager<T>
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(Wrapper.class);
@@ -348,7 +375,10 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 	}
 
-	/** Adds size validation and distributed graph-write behavior to Store. */
+	/** Adds size validation and distributed graph-write behavior to Store.
+	 *
+	 * @param <T> root type
+	 */
 	class Default<T> implements ClusterStorageManager<T>
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(Default.class);

@@ -193,12 +193,13 @@ public final class ReaderCrashChildMain
 			}
 			final ByteBuffer[] buffers = value.buffers();
 			int length = 0;
-			for (final ByteBuffer source : buffers) length += source.remaining();
+			for (final ByteBuffer source : buffers) length += source.position();
 			final byte[] bytes = new byte[length];
 			int offset = 0;
 			for (final ByteBuffer source : buffers)
 			{
 				final ByteBuffer duplicate = source.duplicate();
+				duplicate.flip();
 				final int amount = duplicate.remaining();
 				duplicate.get(bytes, offset, amount);
 				offset += amount;

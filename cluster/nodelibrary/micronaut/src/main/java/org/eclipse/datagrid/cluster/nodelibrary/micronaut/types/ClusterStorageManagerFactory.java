@@ -27,6 +27,17 @@ import org.eclipse.store.storage.types.StorageManager;
 @Factory
 public class ClusterStorageManagerFactory
 {
+	/** Creates a storage-manager factory. */
+	public ClusterStorageManagerFactory()
+	{
+	}
+
+	/**
+	 * Starts the cluster-aware storage manager.
+	 *
+	 * @param foundation cluster foundation
+	 * @return started cluster storage manager
+	 */
 	@Replaces(StorageManager.class)
 	@Bean(preDestroy = "shutdown")
 	@Singleton

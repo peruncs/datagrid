@@ -24,6 +24,17 @@ import org.eclipse.serializer.concurrency.LockedExecutor;
 @Factory
 public class ObjectGraphUpdateHandlerFactory
 {
+	/** Creates an object-graph update-handler factory. */
+	public ObjectGraphUpdateHandlerFactory()
+	{
+	}
+
+	/**
+	 * Creates a handler that runs updates under the shared lock.
+	 *
+	 * @param executor shared locked executor
+	 * @return graph update handler
+	 */
 	@Singleton
 	public ObjectGraphUpdateHandler objectGraphUpdateHandler(final LockedExecutor executor)
 	{

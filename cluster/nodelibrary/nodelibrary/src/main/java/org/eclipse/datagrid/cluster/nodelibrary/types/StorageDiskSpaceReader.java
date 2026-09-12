@@ -30,8 +30,15 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageDiskSpaceReader
 {
+	/** Reads used bytes in the storage directory.
+	 * @return used bytes
+	 */
 	long readUsedDiskSpaceBytes();
 
+	/** Creates a disk-space reader.
+	 * @param storageDir storage directory
+	 * @return disk-space reader
+	 */
 	static StorageDiskSpaceReader New(final ADirectory storageDir)
 	{
 		return new Default(notNull(storageDir));

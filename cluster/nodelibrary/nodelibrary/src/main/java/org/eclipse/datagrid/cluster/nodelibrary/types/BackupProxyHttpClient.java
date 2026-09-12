@@ -42,14 +42,42 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface BackupProxyHttpClient
 {
+	/** Uploads a backup file.
+	 *
+	 * @param s3Key remote backup key
+	 * @param filePath local file path
+	 * @throws NodelibraryException if upload fails
+	 */
 	void upload(final String s3Key, final Path filePath) throws NodelibraryException;
 
+	/** Deletes a remote backup.
+	 *
+	 * @param s3Key remote backup key
+	 * @throws NodelibraryException if deletion fails
+	 */
 	void delete(final String s3Key) throws NodelibraryException;
 
+	/** Downloads a remote backup.
+	 *
+	 * @param s3Key remote backup key
+	 * @param destinationFilePath local destination path
+	 * @return destination path
+	 * @throws NodelibraryException if download fails
+	 */
 	Path download(final String s3Key, final Path destinationFilePath) throws NodelibraryException;
 
+	/** Lists remote backups.
+	 *
+	 * @return remote backup metadata
+	 * @throws NodelibraryException if listing fails
+	 */
 	List<BackupMetadataDto> list() throws NodelibraryException;
 
+	/** Creates a client for a backup service.
+	 *
+	 * @param baseUri backup service base URI
+	 * @return backup client
+	 */
 	static BackupProxyHttpClient New(final URI baseUri)
 	{
 		return new Default(notNull(baseUri));

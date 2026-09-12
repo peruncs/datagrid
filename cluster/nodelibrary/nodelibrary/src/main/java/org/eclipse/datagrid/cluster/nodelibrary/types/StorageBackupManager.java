@@ -38,12 +38,29 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageBackupManager
 {
+	/** Creates a storage backup.
+	 * @param useManualSlot whether to use the manual slot
+	 * @throws NodelibraryException if backup creation fails
+	 */
     void createStorageBackup(boolean useManualSlot) throws NodelibraryException;
 
+	/** Downloads the latest backup.
+	 * @param targetRootPath destination root
+	 * @throws NodelibraryException if download fails
+	 */
     void downloadLatestBackup(Path targetRootPath) throws NodelibraryException;
 
+	/** Lists available backups.
+	 * @return backup metadata
+	 * @throws NodelibraryException if listing fails
+	 */
     List<BackupMetadata> listBackups() throws NodelibraryException;
 
+	/** Returns the newest backup allowed by the slot policy.
+	 * @param ignoreManualSlot whether to ignore the manual slot
+	 * @return newest backup, or {@code null}
+	 * @throws NodelibraryException if listing fails
+	 */
     default BackupMetadata latestBackup(final boolean ignoreManualSlot) throws NodelibraryException
     {
         return this.listBackups()
@@ -53,17 +70,47 @@ public interface StorageBackupManager
             .orElse(null);
     }
 
-    void deleteBackup(BackupMetadata backup) throws NodelibraryException;
+	/** Deletes one backup.
+	 * @param backup backup to delete
+	 * @throws NodelibraryException if deletion fails
+	 */
+	void deleteBackup(BackupMetadata backup) throws NodelibraryException;
 
-    void downloadBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodelibraryException;
+	/** Downloads one backup.
+	 * @param storageDestinationParentPath destination parent
+	 * @param backup backup to download
+	 * @throws NodelibraryException if download fails
+	 */
+	void downloadBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodelibraryException;
 
-    boolean hasUserUploadedStorage() throws NodelibraryException;
+	/** Reports whether user storage exists.
+	 * @return {@code true} when user storage exists
+	 * @throws NodelibraryException if the check fails
+	 */
+	boolean hasUserUploadedStorage() throws NodelibraryException;
 
-    void downloadUserUploadedStorage(Path storageDestinationParentPath) throws NodelibraryException;
+	/** Downloads user storage.
+	 * @param storageDestinationParentPath destination parent
+	 * @throws NodelibraryException if download fails
+	 */
+	void downloadUserUploadedStorage(Path storageDestinationParentPath) throws NodelibraryException;
 
-    void deleteUserUploadedStorage() throws NodelibraryException;
+	/** Deletes user storage.
+	 * @throws NodelibraryException if deletion fails
+	 */
+	void deleteUserUploadedStorage() throws NodelibraryException;
 
-    static StorageBackupManager New(
+	/** Creates a backup manager.
+	 *
+	 * @param storageConnection Store connection
+	 * @param maxBackupCount maximum backup count
+	 * @param storageBackupBackend backup backend
+	 * @param messageInfoSupplier message information supplier
+	 * @param dataClient replication client
+	 * @param retention log retention policy
+	 * @return backup manager
+	 */
+	static StorageBackupManager New(
         final StorageConnection storageConnection,
         final int maxBackupCount,
         final StorageBackupBackend storageBackupBackend,

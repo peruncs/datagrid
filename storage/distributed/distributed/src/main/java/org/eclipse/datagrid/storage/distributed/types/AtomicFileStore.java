@@ -68,10 +68,16 @@ public final class AtomicFileStore
 		if (hook != null) hook.accept(phase, path);
 	}
 
+	/** Writes one complete metadata file to an open channel.
+	 */
 	@FunctionalInterface
-	/** Writes one complete metadata file to an open channel. */
 	public interface Encoder
 	{
+		/** Writes the encoded bytes.
+		 *
+		 * @param channel open destination channel
+		 * @throws IOException if writing fails
+		 */
 		void write(FileChannel channel) throws IOException;
 	}
 
@@ -163,7 +169,12 @@ public final class AtomicFileStore
 	}
 
 	/** Writes a file through a forced sibling temporary file and replacement.
-	 * Uses generic phase names for the crash-test hook. */
+	 * Uses generic phase names for the crash-test hook.
+	 *
+	 * @param path destination path
+	 * @param encoder callback that writes the complete encoded contents
+	 * @throws IOException if writing or replacement fails
+	 */
 	public static void write(final Path path, final Encoder encoder) throws IOException
 	{
 		write(path, encoder, null);

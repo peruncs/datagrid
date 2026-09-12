@@ -31,16 +31,42 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface BackupNodeManager extends ClusterNodeManager
 {
+	/** Stops the reader at the latest safe message boundary. */
 	void stopReadingAtLatestMessage();
 
+	/** Resumes the reader after backup work.
+	 *
+	 * @throws NodelibraryException if the reader cannot resume
+	 */
 	void resumeReading() throws NodelibraryException;
 
+	/** Reports whether the reader is active.
+	 *
+	 * @return {@code true} when the reader is active
+	 */
 	boolean isReading();
 
+	/** Creates a storage backup.
+	 *
+	 * @param useManualSlot whether to use the manual backup slot
+	 * @throws NodelibraryException if backup creation fails
+	 */
 	void createStorageBackup(final boolean useManualSlot) throws NodelibraryException;
 
+	/** Reports whether a backup is running.
+	 *
+	 * @return {@code true} when backup work is active
+	 */
 	boolean isBackupRunning();
 
+	/** Creates a backup manager for the supplied collaborators.
+	 *
+	 * @param storageBackupTaskExecutor backup task executor
+	 * @param dataClient replication data client
+	 * @param storageController storage controller
+	 * @param storageDiskSpaceReader storage space reader
+	 * @return backup manager
+	 */
 	static BackupNodeManager New(
 		final StorageBackupTaskExecutor storageBackupTaskExecutor,
 		final ClusterStorageBinaryDataClient dataClient,

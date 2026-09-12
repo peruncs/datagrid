@@ -16,8 +16,6 @@ package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
 
 import org.eclipse.datagrid.storage.distributed.types.AtomicFileStore;
 import org.eclipse.datagrid.storage.distributed.types.Crc32c;
-import org.eclipse.serializer.io.XIO;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -34,6 +32,9 @@ import java.util.UUID;
  */
 public final class AeronReplicationCheckpointStore
 {
+	private static final ThreadLocal<ByteBuffer> ENCODE_BUFFER = ThreadLocal.withInitial(
+		() -> ByteBuffer.allocate(AeronReplicationCheckpoint.ENCODED_BYTES).order(ByteOrder.BIG_ENDIAN));
+
 	private AeronReplicationCheckpointStore() { }
 
 	/**
@@ -46,7 +47,13 @@ public final class AeronReplicationCheckpointStore
 	public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException
 	{
 		final ByteBuffer encoded = encode(checkpoint);
-		AtomicFileStore.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[] { encoded }),
+		AtomicFileStore.write(path, channel ->
+		{
+			while (encoded.hasRemaining())
+			{
+				if (channel.write(encoded) == 0) throw new IOException("Aeron checkpoint write made no progress");
+			}
+		},
 			AtomicFileStore.PHASE_CHECKPOINT);
 	}
 
@@ -101,8 +108,8 @@ public final class AeronReplicationCheckpointStore
 
 	private static ByteBuffer encode(final AeronReplicationCheckpoint checkpoint)
 	{
-		final ByteBuffer buffer = ByteBuffer.allocate(AeronReplicationCheckpoint.ENCODED_BYTES)
-			.order(ByteOrder.BIG_ENDIAN);
+		final ByteBuffer buffer = ENCODE_BUFFER.get();
+		buffer.clear();
 		buffer.putInt(AeronReplicationCheckpoint.MAGIC)
 			.putShort(AeronReplicationCheckpoint.VERSION)
 			.put((byte)checkpoint.recordTypeCode())

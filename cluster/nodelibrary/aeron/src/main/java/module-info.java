@@ -34,6 +34,7 @@ module org.eclipse.datagrid.cluster.nodelibrary.aeron
 	requires io.aeron.client;
 	requires io.aeron.archive;
 	requires io.aeron.driver;
+	requires org.agrona;
 
 	provides org.eclipse.datagrid.cluster.nodelibrary.types.ClusterReplicationTransportProvider
 		with org.eclipse.datagrid.cluster.nodelibrary.aeron.AeronClusterReplicationTransportProvider;

@@ -32,20 +32,31 @@ import java.util.Properties;
 public final class AeronReplicationConfiguration
 {
 	private static final String PREFIX = "eclipsestore.distribution.aeron.";
+	/** Property that sets the Aeron term length in bytes. */
 	public static final String TERM_LENGTH_PROPERTY = PREFIX + "term-length";
+	/** Property that sets the publication MTU in bytes. */
 	public static final String MTU_LENGTH_PROPERTY = PREFIX + "mtu-length";
+	/** Property that sets the logical Store-data chunk size in bytes. */
 	public static final String CHUNK_SIZE_PROPERTY = PREFIX + "chunk-size";
+	/** Property that sets the largest accepted transaction in bytes. */
 	public static final String MAX_TRANSACTION_BYTES_PROPERTY = PREFIX + "max-transaction-bytes";
+	/** Property that sets the publication wait in nanoseconds. */
 	public static final String OFFER_TIMEOUT_NANOS_PROPERTY = PREFIX + "offer-timeout-nanos";
+	/** Property that sets the reader stop wait in nanoseconds. */
 	public static final String READER_STOP_TIMEOUT_NANOS_PROPERTY = PREFIX + "reader-stop-timeout-nanos";
 	private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
 	private static final long DEFAULT_READER_STOP_TIMEOUT_NANOS = 30_000_000_000L;
+	/** Property that selects the local and Archive durability order. */
 	public static final String DURABILITY_MODE_PROPERTY = PREFIX + "durability-mode";
+	/** Default Aeron term length in bytes. */
 	public static final int DEFAULT_TERM_LENGTH = 16 * 1024 * 1024;
+	/** Default publication MTU in bytes. */
 	public static final int DEFAULT_MTU_LENGTH = 1408;
+	/** Default logical Store-data chunk size in bytes. */
 	public static final int DEFAULT_CHUNK_SIZE = 1024 * 1024;
+	/** Default largest accepted transaction in bytes. */
 	public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
-	/** Hard upper bound prevents a configuration from requesting near-Integer.MAX_VALUE native buffers. */
+	/** Hard upper bound for the largest accepted transaction in bytes. */
 	public static final int MAX_SUPPORTED_TRANSACTION_BYTES = 1024 * 1024 * 1024;
 
 	private final int termLength;
@@ -75,13 +86,21 @@ public final class AeronReplicationConfiguration
 		this.durabilityMode = durabilityMode;
 	}
 
-	/** Returns the validated default configuration. */
+	/**
+	 * Returns the validated default configuration.
+	 *
+	 * @return default configuration
+	 */
 	public static AeronReplicationConfiguration defaults()
 	{
 		return builder().build();
 	}
 
-	/** Starts a builder with the documented defaults. */
+	/**
+	 * Starts a builder with the documented defaults.
+	 *
+	 * @return new configuration builder
+	 */
 	public static Builder builder()
 	{
 		return new Builder();
@@ -172,43 +191,71 @@ public final class AeronReplicationConfiguration
 		};
 	}
 
-	/** Returns the Aeron term length in bytes. */
+	/**
+	 * Returns the Aeron term length in bytes.
+	 *
+	 * @return term length in bytes
+	 */
 	public int termLength()
 	{
 		return this.termLength;
 	}
 
-	/** Returns the transport MTU used when the publication is created. */
+	/**
+	 * Returns the transport MTU used when the publication is created.
+	 *
+	 * @return MTU in bytes
+	 */
 	public int mtuLength()
 	{
 		return this.mtuLength;
 	}
 
-	/** Returns the largest logical Store-data chunk in one envelope. */
+	/**
+	 * Returns the largest logical Store-data chunk in one envelope.
+	 *
+	 * @return chunk size in bytes
+	 */
 	public int chunkSize()
 	{
 		return this.chunkSize;
 	}
 
-	/** Returns the largest Store transaction accepted by the writer. */
+	/**
+	 * Returns the largest Store transaction accepted by the writer.
+	 *
+	 * @return maximum transaction size in bytes
+	 */
 	public int maxTransactionBytes()
 	{
 		return this.maxTransactionBytes;
 	}
 
-	/** Returns the deadline used for publication and Archive progress waits. */
+	/**
+	 * Returns the deadline used for publication and Archive progress waits.
+	 *
+	 * @return wait in nanoseconds
+	 */
 	public long offerTimeoutNanos()
 	{
 		return this.offerTimeoutNanos;
 	}
 
-	/** Returns the bounded wait used when a reader is stopped at the live tail. */
+	/**
+	 * Returns the bounded wait used when a reader is stopped at the live tail.
+	 *
+	 * @return wait in nanoseconds
+	 */
 	public long readerStopTimeoutNanos()
 	{
 		return this.readerStopTimeoutNanos;
 	}
 
-	/** Returns the order in which local acceptance and Archive publication occur. */
+	/**
+	 * Returns the order in which local acceptance and Archive publication occur.
+	 *
+	 * @return selected durability mode
+	 */
 	public ReplicationDurabilityMode durabilityMode()
 	{
 		return this.durabilityMode;
@@ -218,6 +265,8 @@ public final class AeronReplicationConfiguration
 	 * Returns the largest envelope message that this publication may offer.
 	 * Aeron fragments that message according to the MTU; the logical chunk must
 	 * still fit within this publication limit.
+	 *
+	 * @return maximum envelope length in bytes
 	 */
 	public int maxMessageLength()
 	{
@@ -235,49 +284,89 @@ public final class AeronReplicationConfiguration
 		private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
 		private ReplicationDurabilityMode durabilityMode = ReplicationDurabilityMode.ARCHIVE_FIRST;
 
-		/** Sets the term length; it must be a power of two of at least 64 KiB. */
+		/** Creates a builder initialized with the documented defaults. */
+		public Builder()
+		{
+		}
+
+		/**
+		 * Sets the term length; it must be a power of two of at least 64 KiB.
+		 *
+		 * @param value term length in bytes
+		 * @return this builder
+		 */
 		public Builder termLength(final int value)
 		{
 			this.termLength = value;
 			return this;
 		}
 
-		/** Sets the aligned network MTU used by the publication. */
+		/**
+		 * Sets the aligned network MTU used by the publication.
+		 *
+		 * @param value MTU in bytes
+		 * @return this builder
+		 */
 		public Builder mtuLength(final int value)
 		{
 			this.mtuLength = value;
 			return this;
 		}
 
-		/** Sets the logical data chunk size. */
+		/**
+		 * Sets the logical data chunk size.
+		 *
+		 * @param value chunk size in bytes
+		 * @return this builder
+		 */
 		public Builder chunkSize(final int value)
 		{
 			this.chunkSize = value;
 			return this;
 		}
 
-		/** Sets the largest complete Store transaction accepted. */
+		/**
+		 * Sets the largest complete Store transaction accepted.
+		 *
+		 * @param value maximum transaction size in bytes
+		 * @return this builder
+		 */
 		public Builder maxTransactionBytes(final int value)
 		{
 			this.maxTransactionBytes = value;
 			return this;
 		}
 
-		/** Sets the maximum wait for publication or Archive progress. */
+		/**
+		 * Sets the maximum wait for publication or Archive progress.
+		 *
+		 * @param value wait in nanoseconds
+		 * @return this builder
+		 */
 		public Builder offerTimeoutNanos(final long value)
 		{
 			this.offerTimeoutNanos = value;
 			return this;
 		}
 
-		/** Sets the maximum wait for a reader to stop at a resolved boundary. */
+		/**
+		 * Sets the maximum wait for a reader to stop at a resolved boundary.
+		 *
+		 * @param value wait in nanoseconds
+		 * @return this builder
+		 */
 		public Builder readerStopTimeoutNanos(final long value)
 		{
 			this.readerStopTimeoutNanos = value;
 			return this;
 		}
 
-		/** Sets the local-versus-Archive ordering used by the writer. */
+		/**
+		 * Sets the local-versus-Archive ordering used by the writer.
+		 *
+		 * @param value durability mode
+		 * @return this builder
+		 */
 		public Builder durabilityMode(final ReplicationDurabilityMode value)
 		{
 			this.durabilityMode = Objects.requireNonNull(value, "durabilityMode");

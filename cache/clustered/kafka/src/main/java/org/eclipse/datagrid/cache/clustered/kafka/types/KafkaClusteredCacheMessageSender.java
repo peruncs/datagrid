@@ -33,10 +33,22 @@ import static org.eclipse.serializer.util.X.notNull;
  * <p>The sender waits for each Kafka send to complete so a local cache event
  * cannot outrun the invalidation it represents. The sender closes the producer
  * when the cache region is released.</p>
+ *
+ * @param <K> cache key type
+ * @param <V> cache value type
  */
 public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListener<K, V>, Disposable
 {
-    /** Creates a sender for the timestamp cache. */
+    /** Creates a sender for the timestamp cache.
+     *
+     * @param <K> cache key type
+     * @param <V> cache value type
+     * @param producer Kafka producer
+     * @param topicName Kafka topic for cache updates
+     * @param clientId identifier used to ignore this client's own updates
+     * @param serializer message serializer
+     * @return timestamp update sender
+     */
     static <K, V> ClusteredCacheMessageSender<K, V> UpdateTimestamps(
         final KafkaProducer<String, byte[]> producer,
         final String topicName,
@@ -52,7 +64,11 @@ public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListen
         );
     }
 
-    /** Shared publishing logic for cache event listeners. */
+    /** Shared publishing logic for cache event listeners.
+     *
+     * @param <K> cache key type
+     * @param <V> cache value type
+     */
     abstract class Abstract<K, V> implements ClusteredCacheMessageSender<K, V>
     {
         private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageSender.Abstract.class);
@@ -61,6 +77,13 @@ public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListen
         private final String clientId;
         private final Serializer<byte[]> serializer;
 
+        /** Creates the shared sender state.
+         *
+         * @param producer Kafka producer
+         * @param topicName Kafka topic for cache updates
+         * @param clientId identifier used to ignore this client's own updates
+         * @param serializer message serializer
+         */
         protected Abstract(
             final KafkaProducer<String, byte[]> producer,
             final String topicName, final String clientId,
@@ -73,8 +96,18 @@ public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListen
             this.serializer = serializer;
         }
 
+        /** Converts one cache event into a cluster update message.
+         *
+         * @param event cache event
+         * @return message for the event
+         */
         protected abstract TimestampsRegionUpdateMessage createMessage(CacheEntryEvent<? extends K, ? extends V> event);
 
+        /** Publishes each event in order.
+         *
+         * @param cacheEntryEvents cache events to publish
+         * @throws CacheEntryListenerException if serialization or publishing fails
+         */
         protected void handleEvents(final Iterable<CacheEntryEvent<? extends K, ? extends V>> cacheEntryEvents)
             throws CacheEntryListenerException
         {
@@ -131,10 +164,21 @@ public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListen
         }
     }
 
-    /** Converts timestamp cache events into cluster update messages. */
+    /** Converts timestamp cache events into cluster update messages.
+     *
+     * @param <K> cache key type
+     * @param <V> cache value type
+     */
     class UpdateTimestamps<K, V> extends Abstract<K, V>
         implements CacheEntryUpdatedListener<K, V>, CacheEntryCreatedListener<K, V>
     {
+        /** Creates a timestamp update sender.
+         *
+         * @param producer Kafka producer
+         * @param topicName Kafka topic for cache updates
+         * @param clientId identifier used to ignore this client's own updates
+         * @param serializer message serializer
+         */
         public UpdateTimestamps(
             final KafkaProducer<String, byte[]> producer,
             final String topicName,

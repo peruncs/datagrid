@@ -18,6 +18,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
 import org.eclipse.datagrid.storage.distributed.aeron.wire.AeronReplicationEnvelope;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataReceiver;
+import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
 
@@ -150,6 +151,31 @@ class StorageBinaryDataClientAeronTest
 		assertNotNull(receiver.data);
 		assertEquals(0, receiver.data.length);
 		assertEquals(0, assembler.lastResolvedSequence());
+	}
+
+	/** Verifies an owned receiver may safely retain the native binary after delivery. */
+	@Test
+	void ownedReceiverRetainsBinaryAfterAssemblerReturns()
+	{
+		final RetainingReceiver receiver = new RetainingReceiver();
+		final TransactionAssembler assembler = assembler(receiver, 1024);
+		final byte[] data = { 7, 6, 5, 4 };
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			data, data.length));
+		accept(assembler, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
+			AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
+			AeronReplicationEnvelope.crc32c(data), new byte[0]));
+
+		try
+		{
+			assertArrayEquals(data, receiver.bytes());
+			assertEquals(0, assembler.lastResolvedSequence());
+		}
+		finally
+		{
+			receiver.release();
+			assembler.dispose();
+		}
 	}
 
 	/** Verifies resolution callback runs exactly once for commit and abort. */
@@ -545,7 +571,7 @@ class StorageBinaryDataClientAeronTest
 	}
 
 	private static TransactionAssembler assembler(
-		final RecordingReceiver receiver,
+		final StorageBinaryDataReceiver receiver,
 		final int maxBytes
 	)
 	{
@@ -594,6 +620,7 @@ class StorageBinaryDataClientAeronTest
 		public void receiveData(final Binary value)
 		{
 			final ByteBuffer buffer = value.buffers()[0].duplicate();
+			buffer.flip();
 			this.data = new byte[buffer.remaining()];
 			buffer.get(this.data);
 			this.dataCalls++;
@@ -603,6 +630,53 @@ class StorageBinaryDataClientAeronTest
 		public void receiveTypeDictionary(final String value)
 		{
 			this.dictionary = value;
+		}
+	}
+
+	private static final class RetainingReceiver implements StorageBinaryDataReceiver
+	{
+		private Binary retained;
+
+		@Override
+		public boolean canReceiveDataOwned()
+		{
+			return true;
+		}
+
+		@Override
+		public boolean receiveDataOwned(final Binary value)
+		{
+			this.retained = value;
+			return true;
+		}
+
+		@Override
+		public void receiveData(final Binary value)
+		{
+			throw new AssertionError("owned delivery was not used");
+		}
+
+		@Override
+		public void receiveTypeDictionary(final String value)
+		{
+		}
+
+		private byte[] bytes()
+		{
+			final ByteBuffer source = this.retained.buffers()[0].duplicate();
+			source.flip();
+			final byte[] bytes = new byte[source.remaining()];
+			source.get(bytes);
+			return bytes;
+		}
+
+		private void release()
+		{
+			if (this.retained != null)
+			{
+				XMemory.deallocateDirectByteBuffer(this.retained.buffers()[0]);
+				this.retained = null;
+			}
 		}
 	}
 }

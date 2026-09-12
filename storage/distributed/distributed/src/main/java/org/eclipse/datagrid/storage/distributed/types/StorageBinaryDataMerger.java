@@ -31,9 +31,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.eclipse.serializer.util.X.notNull;
 
 /** Applies imported Store binaries and schedules object-graph refresh work. */
-public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
-{
-	static StorageBinaryDataMerger New(
+	public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
+	{
+		/** Creates a merger for one Store connection.
+		 *
+		 * @param foundation persistence foundation used for remote types
+		 * @param storage Store connection that receives data
+		 * @param objectGraphUpdateHandler callback that protects graph updates
+		 * @return configured merger
+		 */
+		static StorageBinaryDataMerger New(
 		final BinaryPersistenceFoundation<?> foundation,
 		final StorageConnection storage,
 		final ObjectGraphUpdateHandler objectGraphUpdateHandler
@@ -77,26 +84,6 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 			 * fails.  Do not release again here: native buffers must have exactly one
 			 * owner after importOwned returns. */
 			this.scheduleMaterialization(ownedBuffers);
-		}
-
-		/**
-		 * Imports direct buffers without copying them. The caller transfers ownership
-		 * only after this method returns successfully; failed imports release the
-		 * transferred buffers here.
-		 */
-		@Override
-		public synchronized boolean receiveDataOwned(final Binary data)
-		{
-			logger.debug("Importing owned data");
-			final ByteBuffer[] buffers = StorageBinaryDataChunker.buffers(notNull(data)).toArray(ByteBuffer[]::new);
-			if (!StorageBinaryDataImporter.importDirect(this.storage, buffers))
-			{
-				this.receiveData(data);
-				return false;
-			}
-			/* scheduleMaterialization owns cleanup after the import succeeds. */
-			this.scheduleMaterialization(buffers);
-			return true;
 		}
 
 		private void scheduleMaterialization(final ByteBuffer[] ownedBuffers)

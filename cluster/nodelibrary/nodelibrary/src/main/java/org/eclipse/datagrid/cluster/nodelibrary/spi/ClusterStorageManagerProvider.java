@@ -26,5 +26,8 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageManager;
  */
 public interface ClusterStorageManagerProvider
 {
+	/** Returns the configured cluster storage manager.
+	 * @return cluster storage manager
+	 */
 	ClusterStorageManager<?> provideClusterStorageManager();
 }

@@ -26,9 +26,18 @@ import static org.eclipse.serializer.util.X.notNull;
 /** Reassembles ordered packets and forwards complete messages to a receiver. */
 public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBinaryDataPacket>>
 {
+	/** Forwards a packet batch to the reassembler.
+	 *
+	 * @param packet packet batch
+	 */
 	@Override
     void accept(final List<StorageBinaryDataPacket> packet);
 
+	/** Creates an acceptor for one receiver.
+	 *
+	 * @param receiver destination for complete messages
+	 * @return packet acceptor
+	 */
 	static StorageBinaryDataPacketAcceptor New(final StorageBinaryDataReceiver receiver)
 	{
 		return new StorageBinaryDataPacketAcceptor.Default(
@@ -42,6 +51,10 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
 		private final StorageBinaryDataReceiver receiver;
 		private StorageBinaryDataMessage message;
 
+		/** Creates an acceptor for one receiver.
+		 *
+		 * @param receiver destination for complete messages
+		 */
 		protected Default(final StorageBinaryDataReceiver receiver)
 		{
 			super();

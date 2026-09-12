@@ -29,6 +29,15 @@ import java.util.*;
  * epoch, recording identity, sequence, and recording position. A token copied
  * from a different reader, cluster, generation, recording, or writer epoch
  * therefore cannot authorize deletion.</p>
+ *
+ * @param readerId reader that produced the watermark
+ * @param clusterId replication cluster identity
+ * @param storeGeneration Store image identity
+ * @param writerEpoch writer epoch associated with the recording
+ * @param recordingId Aeron Archive recording identity
+ * @param sequence transaction sequence acknowledged by the reader
+ * @param position Archive position acknowledged by the reader
+ * @param authentication HMAC over the identity and progress fields
  */
 public record AeronAuthenticatedWatermark(
 	UUID readerId,
@@ -45,6 +54,10 @@ public record AeronAuthenticatedWatermark(
 	private static final int AUTHENTICATION_LENGTH = 32;
 	private static final String ALGORITHM = "HmacSHA256";
 
+	/**
+	 * Creates a watermark and copies the authentication bytes so the token is
+	 * immutable after construction.
+	 */
 	public AeronAuthenticatedWatermark
 	{
 		if (readerId == null || clusterId == null || storeGeneration == null || authentication == null)
@@ -59,13 +72,30 @@ public record AeronAuthenticatedWatermark(
 		authentication = authentication.clone();
 	}
 
+	/**
+	 * Returns a defensive copy of the authentication bytes.
+	 *
+	 * @return copied authentication bytes
+	 */
 	@Override
 	public byte[] authentication()
 	{
 		return this.authentication.clone();
 	}
 
-	/** Creates a signed watermark using a caller-owned secret key. */
+	/**
+	 * Creates a signed watermark using a caller-owned secret key.
+	 *
+	 * @param readerId reader that produced the watermark
+	 * @param clusterId replication cluster identity
+	 * @param storeGeneration Store image identity
+	 * @param writerEpoch writer epoch associated with the recording
+	 * @param recordingId Aeron Archive recording identity
+	 * @param sequence transaction sequence acknowledged by the reader
+	 * @param position Archive position acknowledged by the reader
+	 * @param secret HMAC secret
+	 * @return a signed watermark
+	 */
 	public static AeronAuthenticatedWatermark sign(
 		final UUID readerId,
 		final UUID clusterId,
@@ -83,7 +113,12 @@ public record AeronAuthenticatedWatermark(
 			readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position, authentication);
 	}
 
-	/** Verifies the HMAC without accepting a token with a different identity. */
+	/**
+	 * Verifies the HMAC without accepting a token with a different identity.
+	 *
+	 * @param secret HMAC secret
+	 * @return {@code true} when the token was signed with the secret
+	 */
 	public boolean verify(final byte[] secret)
 	{
 		final byte[] expected = authenticate(
@@ -93,7 +128,11 @@ public record AeronAuthenticatedWatermark(
 		return java.security.MessageDigest.isEqual(this.authentication, expected);
 	}
 
-	/** Encodes the signed token for a cursor or a control message. */
+	/**
+	 * Encodes the signed token for a cursor or a control message.
+	 *
+	 * @return serialized watermark bytes
+	 */
 	public byte[] encode()
 	{
 		final byte[] identity = canonical(
@@ -105,7 +144,13 @@ public record AeronAuthenticatedWatermark(
 		return encoded.array();
 	}
 
-	/** Decodes a token; authentication is checked separately with {@link #verify(byte[])}. */
+	/**
+	 * Decodes a token; authentication is checked separately with
+	 * {@link #verify(byte[])}.
+	 *
+	 * @param encoded serialized watermark bytes
+	 * @return decoded watermark
+	 */
 	public static AeronAuthenticatedWatermark decode(final byte[] encoded)
 	{
 		if (encoded == null) throw new NullPointerException("encoded");
@@ -133,6 +178,10 @@ public record AeronAuthenticatedWatermark(
 	 * Creates an authenticated aggregate at the least advanced boundary. The
 	 * aggregate uses the zero UUID as its reader id and is accepted only by a
 	 * caller that has already verified every configured reader token.
+	 *
+	 * @param watermarks authenticated reader watermarks from one writer
+	 * @param secret HMAC secret
+	 * @return a signed watermark at the least advanced boundary
 	 */
 	public static AeronAuthenticatedWatermark aggregate(
 		final Collection<AeronAuthenticatedWatermark> watermarks, final byte[] secret)
@@ -167,13 +216,22 @@ public record AeronAuthenticatedWatermark(
 		private final byte[] secret;
 		private final Map<UUID, AeronAuthenticatedWatermark> latest = new HashMap<>();
 
+		/**
+		 * Creates a validator for one HMAC secret.
+		 *
+		 * @param secret HMAC secret
+		 */
 		public Validator(final byte[] secret)
 		{
 			if (secret == null || secret.length == 0) throw new IllegalArgumentException("watermark secret is empty");
 			this.secret = secret.clone();
 		}
 
-		/** Accepts a verified, monotonically advancing reader watermark. */
+		/**
+		 * Accepts a verified, monotonically advancing reader watermark.
+		 *
+		 * @param watermark watermark to accept
+		 */
 		public synchronized void accept(final AeronAuthenticatedWatermark watermark)
 		{
 			if (watermark == null || !watermark.verify(this.secret))
@@ -187,20 +245,34 @@ public record AeronAuthenticatedWatermark(
 			this.latest.put(watermark.readerId(), watermark);
 		}
 
-		/** Returns the latest accepted watermark for one reader, or {@code null}. */
+		/**
+		 * Returns the latest accepted watermark for one reader, or {@code null}.
+		 *
+		 * @param readerId reader identity
+		 * @return latest accepted watermark, or {@code null}
+		 */
 		public synchronized AeronAuthenticatedWatermark latest(final UUID readerId)
 		{
 			return this.latest.get(readerId);
 		}
 
-		/** Restores one reader entry after a failed durable state write. */
+		/**
+		 * Restores one reader entry after a failed durable state write.
+		 *
+		 * @param readerId reader identity
+		 * @param watermark prior watermark, or {@code null} to remove the entry
+		 */
 		public synchronized void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark)
 		{
 			if (watermark == null) this.latest.remove(readerId);
 			else this.latest.put(readerId, watermark);
 		}
 
-		/** Returns a stable snapshot for aggregation or diagnostics. */
+		/**
+		 * Returns a stable snapshot for aggregation or diagnostics.
+		 *
+		 * @return immutable reader-to-watermark snapshot
+		 */
 		public synchronized Map<UUID, AeronAuthenticatedWatermark> snapshot()
 		{
 			return Map.copyOf(this.latest);
@@ -213,6 +285,12 @@ public record AeronAuthenticatedWatermark(
 		private final Set<UUID> expectedReaders;
 		private final Validator validator;
 
+		/**
+		 * Creates a quorum for the configured readers.
+		 *
+		 * @param expectedReaders reader identities that must acknowledge
+		 * @param secret HMAC secret
+		 */
 		public Quorum(final Collection<UUID> expectedReaders, final byte[] secret)
 		{
 			if (expectedReaders == null || expectedReaders.isEmpty())
@@ -224,7 +302,11 @@ public record AeronAuthenticatedWatermark(
 			this.validator = new Validator(secret);
 		}
 
-		/** Accepts one authenticated acknowledgement from a configured reader. */
+		/**
+		 * Accepts one authenticated acknowledgement from a configured reader.
+		 *
+		 * @param watermark acknowledgement to accept
+		 */
 		public synchronized void accept(final AeronAuthenticatedWatermark watermark)
 		{
 			if (watermark == null || watermark.sequence() < 0 || watermark.position() < 0 ||
@@ -233,7 +315,11 @@ public record AeronAuthenticatedWatermark(
 			this.validator.accept(watermark);
 		}
 
-		/** Returns the least advanced acknowledgement once every reader has reported. */
+		/**
+		 * Returns the least advanced acknowledgement once every reader has reported.
+		 *
+		 * @return least advanced authenticated acknowledgement
+		 */
 		public synchronized AeronAuthenticatedWatermark aggregate()
 		{
 			final Map<UUID, AeronAuthenticatedWatermark> snapshot = this.validator.snapshot();
@@ -243,31 +329,54 @@ public record AeronAuthenticatedWatermark(
 				this.expectedReaders.stream().map(snapshot::get).toList(), this.validator.secret);
 		}
 
-		/** Returns whether every configured reader has supplied a watermark. */
+		/**
+		 * Returns whether every configured reader has supplied a watermark.
+		 *
+		 * @return {@code true} when every configured reader has reported
+		 */
 		public synchronized boolean isComplete()
 		{
 			return this.validator.snapshot().keySet().containsAll(this.expectedReaders);
 		}
 
-		/** Returns whether a reader identity is part of this writer's retention quorum. */
+		/**
+		 * Returns whether a reader identity is part of this writer's retention quorum.
+		 *
+		 * @param readerId reader identity
+		 * @return {@code true} when the reader belongs to the quorum
+		 */
 		public synchronized boolean acceptsReader(final UUID readerId)
 		{
 			return this.expectedReaders.contains(readerId);
 		}
 
-		/** Returns the authenticated per-reader state for durable persistence. */
+		/**
+		 * Returns the authenticated per-reader state for durable persistence.
+		 *
+		 * @return immutable reader-to-watermark snapshot
+		 */
 		public synchronized Map<UUID, AeronAuthenticatedWatermark> snapshot()
 		{
 			return this.validator.snapshot();
 		}
 
-		/** Returns one reader's current acknowledgement for transactional updates. */
+		/**
+		 * Returns one reader's current acknowledgement for transactional updates.
+		 *
+		 * @param readerId reader identity
+		 * @return current acknowledgement, or {@code null}
+		 */
 		public synchronized AeronAuthenticatedWatermark latest(final UUID readerId)
 		{
 			return this.validator.latest(readerId);
 		}
 
-		/** Restores one reader's prior acknowledgement after persistence failure. */
+		/**
+		 * Restores one reader's prior acknowledgement after persistence failure.
+		 *
+		 * @param readerId reader identity
+		 * @param watermark prior watermark, or {@code null} to remove the entry
+		 */
 		public synchronized void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark)
 		{
 			this.validator.restore(readerId, watermark);

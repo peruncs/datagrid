@@ -37,14 +37,27 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StoredMessageInfoManager extends AutoCloseable
 {
-    MessageInfo get() throws NodelibraryException;
+	    /** Returns the last stored message information.
+	     * @return stored message information
+	     * @throws NodelibraryException if reading fails
+	     */
+	    MessageInfo get() throws NodelibraryException;
 
-    void set(MessageInfo messageInfoInfo) throws NodelibraryException;
+	    /** Stores message information as the restart boundary.
+	     * @param messageInfoInfo message information
+	     * @throws NodelibraryException if writing fails
+	     */
+	    void set(MessageInfo messageInfoInfo) throws NodelibraryException;
 
     @Override
     void close();
 
-    static StoredMessageInfoManager New(final AWritableFile messageInfoFile, final MessageInfoParser messageInfoParser)
+	    /** Creates a writable-file message-info manager.
+	     * @param messageInfoFile writable offset file
+	     * @param messageInfoParser message-info parser
+	     * @return message-info manager
+	     */
+	    static StoredMessageInfoManager New(final AWritableFile messageInfoFile, final MessageInfoParser messageInfoParser)
     {
         return new Default(notNull(messageInfoFile), notNull(messageInfoParser));
     }
@@ -56,17 +69,25 @@ public interface StoredMessageInfoManager extends AutoCloseable
 	 * cursor write. Aeron transport startup also probes the shared metadata
 	 * directory before creating a reader, while callers using this manager alone
 	 * retain the lazy behavior. If a first write fails, the caller must retain
-	 * uncertainty and fail closed rather than treating the import as checkpointed.</p>
+     * uncertainty and fail closed rather than treating the import as checkpointed.</p>
+     *
+     * @param messageInfoPath metadata path
+     * @param messageInfoParser message-info parser
+     * @return atomic message-info manager
      */
     static StoredMessageInfoManager NewAtomic(final Path messageInfoPath, final MessageInfoParser messageInfoParser)
     {
         return new Default(notNull(messageInfoPath), notNull(messageInfoParser));
     }
 
-    @FunctionalInterface
-	/** Creates a manager for a writable offset file. */
+	    /** Creates a manager for a writable offset file. */
+	    @FunctionalInterface
 	interface Creator
-    {
+	{
+		/** Creates a manager for the supplied offset file.
+		 * @param offsetFile writable offset file
+		 * @return message-info manager
+		 */
         StoredMessageInfoManager create(AWritableFile offsetFile);
     }
 

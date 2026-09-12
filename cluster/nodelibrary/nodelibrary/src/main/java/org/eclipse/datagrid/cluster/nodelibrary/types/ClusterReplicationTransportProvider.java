@@ -24,9 +24,15 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 public interface ClusterReplicationTransportProvider
 {
-	/** Stable configuration id used to select this provider. */
+		/** Stable configuration id used to select this provider.
+		 * @return provider id
+		 */
 	String id();
 
-	/** Creates a transport using the application's neutral properties. */
+		/** Creates a transport using the application's neutral properties.
+		 *
+		 * @param properties application properties
+		 * @return replication transport
+		 */
 	ClusterReplicationTransport create(NodelibraryPropertiesProvider properties);
 }

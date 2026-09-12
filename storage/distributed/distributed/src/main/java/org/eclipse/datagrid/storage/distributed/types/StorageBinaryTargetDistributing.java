@@ -27,6 +27,12 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binary>
 {
+	/** Creates a target that mirrors local writes to a distributor.
+	 *
+	 * @param delegate local persistence target
+	 * @param distributor destination for committed binaries
+	 * @return distributing target
+	 */
 	static StorageBinaryTargetDistributing New(
             final PersistenceTarget<Binary> delegate,
             final StorageBinaryDataDistributor distributor

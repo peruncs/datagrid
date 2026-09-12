@@ -22,13 +22,27 @@ import java.util.UUID;
 /** Parses the transport-neutral persisted replication cursor format. */
 public interface MessageInfoParser
 {
+	/** Creates the default parser.
+	 * @return message information parser
+	 */
 	static MessageInfoParser New() { return new Default(); }
 
+	/** Parses persisted message information.
+	 *
+	 * @param offsetFileContent persisted cursor text
+	 * @return parsed message information
+	 * @throws NodelibraryException if the text is invalid
+	 */
 	MessageInfo parseMessageInfo(String offsetFileContent) throws NodelibraryException;
 
 	/** Parses both the current cursor format and the older Kafka form. */
 	final class Default implements MessageInfoParser
 	{
+		/** Creates the default parser implementation. */
+		Default()
+		{
+		}
+
 		@Override
 		public MessageInfo parseMessageInfo(final String content) throws NodelibraryException
 		{

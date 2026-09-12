@@ -47,7 +47,12 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 	private final LongConsumer committedSequence;
 	private final BooleanSupplier distributionEnabled;
 
-	/** Creates a target with replication enabled for every write. */
+	/**
+	 * Creates a target with replication enabled for every write.
+	 *
+	 * @param delegate local Store target
+	 * @param coordinator Aeron transaction coordinator
+	 */
 	public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
 		final AeronReplicationWriteCoordinator coordinator)
 	{
@@ -59,6 +64,12 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 	 * callbacks.  The callbacks are deliberately supplied by the provider so that
 	 * local Store acceptance and the Aeron checkpoint transition remain one owner-
 	 * serialized operation.
+	 *
+	 * @param delegate local Store target
+	 * @param coordinator Aeron transaction coordinator
+	 * @param dictionarySource source of staged type dictionaries
+	 * @param committedSequence callback for the committed sequence
+	 * @param distributionEnabled predicate that enables replication
 	 */
 	public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
 		final AeronReplicationWriteCoordinator coordinator, final StorageBinaryDataDistributor dictionarySource,

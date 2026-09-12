@@ -51,7 +51,18 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public final class KafkaClusterStorageBinaryDataClient implements ClusterStorageBinaryDataClient
 {
-    public static ClusterStorageBinaryDataClient New(
+	/** Creates a Kafka storage-data client.
+	 *
+	 * @param packetAcceptor packet destination
+	 * @param topicName Kafka topic
+	 * @param groupId consumer group id
+	 * @param offsetChangedListener applied-message listener
+	 * @param startingMessageInfo starting message information
+	 * @param kafkaPropertiesProvider Kafka properties provider
+	 * @param doCommitOffset whether to commit offsets
+	 * @return Kafka storage-data client
+	 */
+	public static ClusterStorageBinaryDataClient New(
         final ClusterStorageBinaryDataPacketAcceptor packetAcceptor,
         final String topicName,
         final String groupId,

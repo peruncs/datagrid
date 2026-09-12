@@ -50,12 +50,18 @@ public final class StorageBinaryDataImporter
 			for (int i = 0; i < sourceBuffers.length; i++)
 			{
 				final ByteBuffer source = notNull(sourceBuffers[i]).duplicate();
-				if (!source.hasRemaining())
+				/* ChunksWrapper represents its logical length in the source position,
+				 * while Store import reads from offset zero through the limit. An Aeron
+				 * assembled buffer therefore has position == limit and must be rewound;
+				 * ordinary nonzero-position buffers still use their remaining range. */
+				if (source.position() == source.limit()) source.position(0);
+				final int sourceLength = source.remaining();
+				if (sourceLength == 0)
 				{
 					ownedBuffers[i] = ByteBuffer.allocateDirect(0);
 					continue;
 				}
-				final ByteBuffer owned = XMemory.allocateDirectNative(source.remaining());
+				final ByteBuffer owned = XMemory.allocateDirectNative(sourceLength);
 				ownedBuffers[i] = owned;
 				owned.put(source).flip();
 			}
@@ -101,7 +107,10 @@ public final class StorageBinaryDataImporter
 		}
 	}
 
-	/** Releases native buffers returned by {@link #importOwned(StorageConnection, ByteBuffer[])}. */
+	/** Releases native buffers returned by {@link #importOwned(StorageConnection, ByteBuffer[])}.
+	 *
+	 * @param buffers buffers to release
+	 */
 	public static void release(final ByteBuffer[] buffers)
 	{
 		if (buffers == null) return;

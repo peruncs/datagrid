@@ -29,6 +29,9 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDistributor
 {
+	/** Creates a distributor that ignores all transport work.
+	 * @return neutral distributor
+	 */
 	static ClusterStorageBinaryDataDistributor NoOp()
 	{
 		return new ClusterStorageBinaryDataDistributor()
@@ -45,15 +48,29 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		};
 	}
 
+	/** Sets the next message index.
+	 * @param index message index
+	 */
 	void messageIndex(long index);
 
+	/** Returns the current message index.
+	 * @return message index
+	 */
 	long messageIndex();
 
+	/** Sets whether distribution is ignored.
+	 * @param ignore whether to ignore distribution
+	 */
 	void ignoreDistribution(boolean ignore);
 
+	/** Reports whether distribution is ignored.
+	 * @return {@code true} when ignored
+	 */
 	boolean ignoreDistribution();
 
-	/** Returns a terminal distribution failure, or {@code null} while healthy. */
+	/** Returns a terminal distribution failure, or {@code null} while healthy.
+	 * @return terminal failure, or {@code null}
+	 */
 	default RuntimeException failure()
 	{
 		return null;
@@ -63,12 +80,19 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 	 * Queues a complete dictionary for the next data transaction, regardless of
 	 * which Store thread performs that transaction. This is used after writer
 	 * restart to re-establish the reader schema before new binaries arrive.
+	 *
+	 * @param typeDictionaryData assembled type dictionary
 	 */
 	default void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
 	{
 		this.distributeTypeDictionary(typeDictionaryData);
 	}
 
+	/** Creates a distributor that keeps dictionary data beside its next binary.
+	 *
+	 * @param delegate destination distributor
+	 * @return caching distributor
+	 */
 	static ClusterStorageBinaryDataDistributor Caching(final ClusterStorageBinaryDataDistributor delegate)
 	{
 		return new Caching(notNull(delegate));

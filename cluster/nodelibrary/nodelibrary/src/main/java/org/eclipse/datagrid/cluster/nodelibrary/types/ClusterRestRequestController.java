@@ -35,42 +35,97 @@ import static org.eclipse.serializer.util.X.unbox;
  */
 public interface ClusterRestRequestController extends AutoCloseable
 {
+	/** Reports whether the distributor is active.
+	 * @return distributor state
+	 * @throws HttpResponseException if the request fails
+	 */
 	boolean getDistributor() throws HttpResponseException;
 
+	/** Starts distributor activation.
+	 * @throws HttpResponseException if the request fails
+	 */
 	void postActivateDistributorStart() throws HttpResponseException;
 
+	/** Finishes distributor activation.
+	 * @return whether activation finished
+	 * @throws HttpResponseException if the request fails
+	 */
 	boolean postActivateDistributorFinish() throws HttpResponseException;
 
+	/** Checks node health.
+	 * @throws HttpResponseException if the request fails
+	 */
 	void getHealth() throws HttpResponseException;
 
+	/** Checks node readiness.
+	 * @throws HttpResponseException if the request fails
+	 */
 	void getHealthReady() throws HttpResponseException;
 
 	// TODO: Rename to get statistics or monitoring etc.
+	/** Returns current storage size.
+	 * @return storage size text
+	 * @throws HttpResponseException if the request fails
+	 */
 	String getStorageBytes() throws HttpResponseException;
 
-	/** Returns Prometheus metrics including provider id, state, sequence, and lag. */
+	/** Returns Prometheus metrics including provider id, state, sequence, and lag.
+	 * @return metrics text
+	 * @throws HttpResponseException if the request fails
+	 */
 	default String getReplicationMetrics() throws HttpResponseException
 	{
 		return "";
 	}
 
+	/** Starts a backup.
+	 * @param body backup request body
+	 * @throws HttpResponseException if the request fails
+	 */
 	void postBackup(PostBackup.Body body) throws HttpResponseException;
 
+	/** Reports whether a backup is running.
+	 * @return backup state
+	 * @throws HttpResponseException if the request fails
+	 */
 	boolean getBackup() throws HttpResponseException;
 
+	/** Stops or pauses updates.
+	 * @throws HttpResponseException if the request fails
+	 */
 	void postUpdates() throws HttpResponseException;
 
+	/** Reports whether updates are active.
+	 * @return update state
+	 * @throws HttpResponseException if the request fails
+	 */
 	boolean getUpdates() throws HttpResponseException;
 
+	/** Resumes updates.
+	 * @throws HttpResponseException if the request fails
+	 */
 	void postResumeUpdates() throws HttpResponseException;
 
+	/** Starts storage checks.
+	 * @throws HttpResponseException if the request fails
+	 */
 	void postGc() throws HttpResponseException;
 
+	/** Reports whether storage checks are running.
+	 * @return check state
+	 * @throws HttpResponseException if the request fails
+	 */
 	boolean getGc() throws HttpResponseException;
 
 	@Override
 	void close();
 
+	/** Creates a controller for a storage node.
+	 *
+	 * @param storageNodeManager storage node manager
+	 * @param properties node properties
+	 * @return request controller
+	 */
 	static ClusterRestRequestController StorageNode(
 		final StorageNodeManager storageNodeManager,
 		final NodelibraryPropertiesProvider properties
@@ -79,11 +134,20 @@ public interface ClusterRestRequestController extends AutoCloseable
 		return new StorageNode(notNull(storageNodeManager), notNull(properties));
 	}
 
+	/** Creates a controller for a development node.
+	 * @return request controller
+	 */
 	static ClusterRestRequestController DevNode()
 	{
 		return new DevNode();
 	}
 
+	/** Creates a controller for a backup node.
+	 *
+	 * @param backupNodeManager backup node manager
+	 * @param properties node properties
+	 * @return request controller
+	 */
 	static ClusterRestRequestController BackupNode(
 		final BackupNodeManager backupNodeManager,
 		final NodelibraryPropertiesProvider properties
@@ -100,6 +164,11 @@ public interface ClusterRestRequestController extends AutoCloseable
 		private final ClusterNodeManager nodeManager;
 		private final NodelibraryPropertiesProvider properties;
 
+		/** Creates the shared request controller.
+		 *
+		 * @param nodeManager node manager
+		 * @param properties node properties
+		 */
 		protected Abstract(final ClusterNodeManager nodeManager, final NodelibraryPropertiesProvider properties)
 		{
 			this.nodeManager = nodeManager;
@@ -273,6 +342,11 @@ public interface ClusterRestRequestController extends AutoCloseable
 			throw new BadRequestException();
 		}
 
+		/** Runs a request and maps failures to HTTP exceptions.
+		 *
+		 * @param request request action
+		 * @throws HttpResponseException if the request fails
+		 */
 		protected void handleRequest(final Runnable request) throws HttpResponseException
 		{
 			try
@@ -292,6 +366,13 @@ public interface ClusterRestRequestController extends AutoCloseable
 			}
 		}
 
+		/** Runs a value request and maps failures to HTTP exceptions.
+		 *
+		 * @param <T> result type
+		 * @param request request action
+		 * @return request result
+		 * @throws HttpResponseException if the request fails
+		 */
 		protected <T> T handleRequest(final Supplier<T> request) throws HttpResponseException
 		{
 			try

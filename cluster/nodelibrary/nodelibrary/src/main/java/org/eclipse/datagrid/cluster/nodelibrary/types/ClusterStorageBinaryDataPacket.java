@@ -34,8 +34,21 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
 {
+	/** Returns the complete message index.
+	 * @return message index
+	 */
 	long messageIndex();
 
+	/** Creates a packet with cluster message metadata.
+	 *
+	 * @param messageType message kind
+	 * @param messageLength complete message length
+	 * @param packetIndex packet index
+	 * @param packetCount packet count
+	 * @param messageIndex complete message index
+	 * @param buffer packet payload
+	 * @return new packet
+	 */
 	static ClusterStorageBinaryDataPacket New(
             final MessageType messageType,
             final int messageLength,

@@ -36,18 +36,42 @@ import org.springframework.context.annotation.Import;
 @Import(SpringBootClusterController.class)
 public class EclipseDataGridCluster
 {
+	/** Creates the Spring configuration. */
+	public EclipseDataGridCluster()
+	{
+	}
+
+	/**
+	 * Creates the graph update handler used by the cluster services.
+	 *
+	 * @param executor shared locked executor
+	 * @return graph update handler
+	 */
 	@Bean
 	public ObjectGraphUpdateHandler objectGraphUpdateHandler(final LockedExecutor executor)
 	{
 		return updater -> executor.write(updater::updateObjectGraph);
 	}
 
+	/**
+	 * Creates the lock used to serialize graph updates.
+	 *
+	 * @return new locked executor
+	 */
 	@Bean
 	public LockedExecutor lockedExecutor()
 	{
 		return LockedExecutor.New();
 	}
 
+	/**
+	 * Creates the cluster foundation.
+	 *
+	 * @param rootProvider application root provider
+	 * @param objectGraphUpdateHandler graph update handler
+	 * @param async whether distribution may use asynchronous delivery
+	 * @return configured cluster foundation
+	 */
 	@Bean
 	public ClusterFoundation<?> clusterFoundation(
 		final RootProvider<?> rootProvider,
@@ -61,12 +85,24 @@ public class EclipseDataGridCluster
 			.setRootSupplier(rootProvider::root);
 	}
 
+	/**
+	 * Starts the neutral request controller.
+	 *
+	 * @param foundation cluster foundation
+	 * @return started request controller
+	 */
 	@Bean
 	public ClusterRestRequestController nodelibraryClusterController(final ClusterFoundation<?> foundation)
 	{
 		return foundation.startController();
 	}
 
+	/**
+	 * Starts the cluster-aware storage manager.
+	 *
+	 * @param foundation cluster foundation
+	 * @return started cluster storage manager
+	 */
 	@Bean
 	public ClusterStorageManager<?> clusterStorageManager(final ClusterFoundation<?> foundation)
 	{

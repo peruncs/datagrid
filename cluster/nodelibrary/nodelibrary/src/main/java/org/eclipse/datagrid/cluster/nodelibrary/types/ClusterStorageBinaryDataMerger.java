@@ -52,12 +52,23 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger, Disposable
 {
-	/** Returns an asynchronous materialization failure, or {@code null} while healthy. */
+	/** Returns an asynchronous materialization failure, or {@code null} while healthy.
+	 * @return terminal failure, or {@code null}
+	 */
 	default RuntimeException failure()
 	{
 		return null;
 	}
 
+	/** Creates a merger with bounded deferred materialization.
+	 *
+	 * @param foundation persistence foundation
+	 * @param storage Store connection
+	 * @param objectGraphUpdateHandler graph update handler
+	 * @param cachingTimeoutMs maximum wait for a cached batch
+	 * @param cachedBinaryLimit maximum cached binary count
+	 * @return binary merger
+	 */
 	static ClusterStorageBinaryDataMerger New(
 		final BinaryPersistenceFoundation<?> foundation,
 		final StorageConnection storage,
@@ -78,11 +89,17 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 	/** Supplies conservative defaults for deferred object-graph application. */
 	interface Defaults
 	{
+		/** Returns the default cache timeout in milliseconds.
+		 * @return timeout in milliseconds
+		 */
 		static long cachingTimeoutMs()
 		{
 			return 10_000L;
 		}
 
+		/** Returns the default cached binary count.
+		 * @return cached binary limit
+		 */
 		static long cachingLimit()
 		{
 			return 50L;
@@ -109,6 +126,16 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		private volatile RuntimeException failure;
 
 		private Future<?> updateFuture = CompletableFuture.completedFuture(null);
+
+		/** Aeron transfers its assembled direct buffers before this callback starts.
+		 *
+		 * @return {@code true} because this merger releases the transferred buffers
+		 */
+		@Override
+		public boolean canReceiveDataOwned()
+		{
+			return true;
+		}
 
 		private Default(
 			final BinaryPersistenceFoundation<?> foundation,
@@ -152,20 +179,29 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		@Override
 		public synchronized boolean receiveDataOwned(final Binary data)
 		{
+			final ByteBuffer[] buffers = org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataChunker
+				.buffers(org.eclipse.serializer.util.X.notNull(data)).toArray(ByteBuffer[]::new);
 			if (this.failure != null)
 			{
+				StorageBinaryDataImporter.release(buffers);
 				throw new IllegalStateException("Storage binary merger has failed", this.failure);
 			}
 			if (this.disposed)
 			{
+				StorageBinaryDataImporter.release(buffers);
 				throw new IllegalStateException("Storage binary merger is disposed");
 			}
-			final ByteBuffer[] buffers = org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataChunker
-				.buffers(org.eclipse.serializer.util.X.notNull(data)).toArray(ByteBuffer[]::new);
 			if (!StorageBinaryDataImporter.importDirect(this.storage, buffers))
 			{
-				this.receiveData(data);
-				return false;
+				try
+				{
+					this.receiveData(data);
+					return true;
+				}
+				finally
+				{
+					StorageBinaryDataImporter.release(buffers);
+				}
 			}
 			/* scheduleMaterialization now owns the buffers, including any cleanup when
 			 * executor submission or backpressure fails after queue admission. */

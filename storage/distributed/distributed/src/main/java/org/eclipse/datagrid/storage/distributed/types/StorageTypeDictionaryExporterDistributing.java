@@ -30,6 +30,12 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageTypeDictionaryExporterDistributing extends PersistenceTypeDictionaryExporter
 {
+	/** Creates an exporter that publishes each local dictionary.
+	 *
+	 * @param delegate local dictionary exporter
+	 * @param distributor destination for the dictionary
+	 * @return distributing exporter
+	 */
 	static StorageTypeDictionaryExporterDistributing New(
             final PersistenceTypeDictionaryExporter delegate,
             final StorageBinaryDataDistributor distributor

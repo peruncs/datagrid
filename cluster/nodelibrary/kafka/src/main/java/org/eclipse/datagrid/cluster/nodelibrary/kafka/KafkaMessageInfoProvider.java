@@ -37,6 +37,13 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public class KafkaMessageInfoProvider implements AutoCloseable
 {
+	/** Creates a provider for one Kafka topic.
+	 *
+	 * @param topic Kafka topic
+	 * @param groupInstanceId Kafka group and client id
+	 * @param kafkaPropertiesProvider Kafka properties provider
+	 * @return message-info provider
+	 */
 	public static KafkaMessageInfoProvider New(
 		final String topic,
 		final String groupInstanceId,
@@ -91,6 +98,9 @@ public class KafkaMessageInfoProvider implements AutoCloseable
 		this.kafka.close();
 	}
 
+	/** Subscribes and waits for the topic assignment.
+	 * @throws KafkaException if initialization fails
+	 */
 	public void init() throws KafkaException
 	{
 		LOG.trace("Initializing KafkaMessageInfoProvider. Subscribing to topic {}", this.topic);
@@ -127,6 +137,8 @@ public class KafkaMessageInfoProvider implements AutoCloseable
 	/**
 	 * Creates a new kafka consumer and asks for the last message in the topic,
 	 * returns the message index of that message
+	 *
+	 * @return latest message index
 	 */
 	public long provideLatestMessageIndex() throws KafkaException
 	{
@@ -149,6 +161,9 @@ public class KafkaMessageInfoProvider implements AutoCloseable
 		return lastMessageIndex;
 	}
 
+	/** Returns the latest Kafka message information.
+	 * @return latest message information
+	 */
 	public MessageInfo provideLatestMessageInfo()
 	{
 		final var messageIndex = this.provideLatestMessageIndex();

@@ -309,7 +309,7 @@ final class TransactionAssembler
 		}
 		final ByteBuffer direct = completed.dataStorage == null
 			? EMPTY_BUFFER.duplicate()
-			: completed.dataStorage.duplicate();
+			: completed.dataStorage;
 		if (completed.dataStorage == null)
 		{
 			/* Keep the direct-buffer contract required by ChunksWrapper while
@@ -319,8 +319,11 @@ final class TransactionAssembler
 		}
 		else
 		{
-			direct.clear();
+			/* ChunksWrapper uses the source position as its logical length. The
+			 * buffer was filled from offset zero, so expose the completed write
+			 * position while retaining the exact limit used by Store import. */
 			direct.limit(completed.dataLength);
+			direct.position(completed.dataLength);
 		}
 		this.transaction = null;
 		this.nextExpectedSequence = envelope.sequence() + 1;
@@ -372,11 +375,20 @@ final class TransactionAssembler
 						deliveryListener.beforeStoreImport(
 							this.sequence, this.position, dataLength, dataChunkCount, this.resolutionCrc32c);
 					}
-					/* Mark ownership before waiting for deferred materialisation.  The
-					 * receiver may release its copy when that wait fails; the assembler
-					 * must not then deallocate the same native buffers in its finally block. */
-					dataTransferred = receiver.receiveDataOwned(ChunksWrapper.New(this.data));
-					if (dataTransferred) this.completed.detachDataStorage();
+					final org.eclipse.serializer.persistence.binary.types.Binary binary = ChunksWrapper.New(this.data);
+					if (receiver.canReceiveDataOwned())
+					{
+						/* The owned receiver releases the original buffer on every path,
+						 * including a failure thrown from receiveDataOwned or awaitApplied. */
+						this.completed.detachDataStorage();
+						dataTransferred = true;
+						receiver.receiveDataOwned(binary);
+					}
+					else
+					{
+						dataTransferred = receiver.receiveDataOwned(binary);
+						if (dataTransferred) this.completed.detachDataStorage();
+					}
 					receiver.awaitApplied();
 				}
 				synchronized (TransactionAssembler.this)

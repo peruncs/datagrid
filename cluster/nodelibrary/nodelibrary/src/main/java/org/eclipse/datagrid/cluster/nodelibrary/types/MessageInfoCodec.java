@@ -22,6 +22,11 @@ public final class MessageInfoCodec
 {
 	private MessageInfoCodec() { }
 
+	/** Serializes message information as a text manifest.
+	 *
+	 * @param info message information
+	 * @return serialized manifest
+	 */
 	public static String serialize(final MessageInfo info)
 	{
 		return info.messageIndex() + "\n"
@@ -30,6 +35,11 @@ public final class MessageInfoCodec
 			+ Base64.getEncoder().encodeToString(info.providerPosition()) + "\n";
 	}
 
+	/** Serializes message information as UTF-8 bytes.
+	 *
+	 * @param info message information
+	 * @return serialized bytes
+	 */
 	public static byte[] serializeBytes(final MessageInfo info)
 	{
 		return serialize(info).getBytes(StandardCharsets.UTF_8);

@@ -53,9 +53,20 @@ public final class AeronReplicationEnvelope
 	/** Identifies the data or terminal marker carried by an envelope. */
 	public enum Kind
 	{
+		/** A chunk of the type dictionary that precedes Store data. */
 		TYPE_DICTIONARY(1),
+		/** A chunk of one Store binary. */
 		STORE_BINARY(2),
+		/**
+		 * The terminal witness for a published transaction. Its payload length
+		 * and chunk count repeat the assembled binary metadata; its commit CRC
+		 * validates the complete binary.
+		 */
 		COMMIT(3),
+		/**
+		 * The terminal witness for a rejected transaction. Its payload length
+		 * and chunk count repeat the prepared metadata, while its CRC is zero.
+		 */
 		ABORT(4);
 
 		private final int code;
@@ -196,7 +207,8 @@ public final class AeronReplicationEnvelope
 		final int chunkLength
 	)
 	{
-		if (clusterId == null || kind == null || payload == null) throw new NullPointerException();
+		if (clusterId == null || kind == null || payload == null)
+			throw new NullPointerException("clusterId, kind, and payload are required");
 		if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 || chunkIndex < 0 || chunkCount <= 0 ||
 			chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
 			payloadOffset > payload.capacity() - chunkLength)

@@ -23,19 +23,27 @@ public interface ReplicationLogRetention extends AutoCloseable
 	 * Returns whether this transport can safely delete replicated history. A
 	 * provider that cannot establish authenticated reader watermarks must return
 	 * {@code false}; lifecycle code will retain history and continue backups.
+	 *
+	 * @return {@code true} when safe retention is supported
 	 */
 	default boolean isSupported()
 	{
 		return true;
 	}
 
-	/** Deletes only history proven safe by the provider's cursor/watermark rules. */
+	/** Deletes only history proven safe by the provider's cursor/watermark rules.
+	 *
+	 * @param cursor deletion boundary
+	 * @throws NodelibraryException if deletion fails
+	 */
 	void deleteThrough(ReplicationCursor cursor) throws NodelibraryException;
 
 	/**
 	 * Records one authenticated reader acknowledgement for a later aggregate
 	 * retention request. Providers without reader-watermark support reject this
 	 * operation explicitly.
+	 *
+	 * @param cursor reader watermark
 	 */
 	default void recordReaderWatermark(final ReplicationCursor cursor)
 	{

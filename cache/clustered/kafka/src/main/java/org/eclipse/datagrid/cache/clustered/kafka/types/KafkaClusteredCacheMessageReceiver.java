@@ -51,6 +51,14 @@ public class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessage
     private final AtomicBoolean active = new AtomicBoolean(false);
     private Thread thread;
 
+    /** Creates a receiver for one Kafka topic and client.
+     *
+     * @param kafkaProperties Kafka consumer properties
+     * @param topicName topic that carries cache updates
+     * @param clientId client and consumer-group identifier
+     * @param messageAcceptor target for accepted cache updates
+     * @param serializer message serializer
+     */
     public KafkaClusteredCacheMessageReceiver(
         final Properties kafkaProperties,
         final String topicName,

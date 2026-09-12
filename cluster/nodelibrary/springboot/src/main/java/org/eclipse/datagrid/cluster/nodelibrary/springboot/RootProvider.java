@@ -14,8 +14,17 @@ package org.eclipse.datagrid.cluster.nodelibrary.springboot;
  * #L%
  */
 
-/** Supplies the application root used by the cluster foundation. */
+/**
+ * Supplies the application root used by the cluster foundation.
+ *
+ * @param <T> root type
+ */
 public interface RootProvider<T>
 {
+	/**
+	 * Returns the application root.
+	 *
+	 * @return application root
+	 */
 	T root();
 }

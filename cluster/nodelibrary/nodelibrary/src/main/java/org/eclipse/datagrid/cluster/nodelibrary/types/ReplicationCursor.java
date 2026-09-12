@@ -36,6 +36,13 @@ public record ReplicationCursor(
 	byte[] providerPosition
 )
 {
+	/** Validates and copies the provider position.
+	 *
+	 * @param transport selected provider id
+	 * @param storeGeneration Store generation
+	 * @param logicalSequence last resolved transaction
+	 * @param providerPosition provider position bytes
+	 */
 	public ReplicationCursor
 	{
 		if (transport == null || transport.isBlank())
@@ -49,12 +56,17 @@ public record ReplicationCursor(
 		providerPosition = providerPosition == null ? new byte[0] : providerPosition.clone();
 	}
 
+	/** Returns a copy of the provider position.
+	 * @return provider position copy
+	 */
 	public byte[] providerPosition()
 	{
 		return this.providerPosition.clone();
 	}
 
-	/** Compatibility name used by the original Kafka lifecycle. */
+	/** Compatibility name used by the original Kafka lifecycle.
+	 * @return logical sequence
+	 */
 	public long messageIndex()
 	{
 		return this.logicalSequence;

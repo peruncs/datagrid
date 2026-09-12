@@ -21,6 +21,11 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
  * before import. The state is cleared only after import and cursor handling
  * finish. A state left by a crash is therefore evidence that recovery needs a
  * deliberate decision, not evidence that the import succeeded or failed.</p>
+ *
+ * <p>The callback runs inside the reader's delivery boundary. It must not call
+ * back into the owning transport or close the reader; request lifecycle changes
+ * after the callback returns. Re-entry would compete with shutdown and can
+ * deadlock a caller that is waiting for the polling thread.</p>
  */
 @FunctionalInterface
 public interface ReaderDeliveryListener

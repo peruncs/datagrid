@@ -36,17 +36,30 @@ import static org.eclipse.serializer.util.X.notNull;
 /** Deletes Kafka history only after the provider has validated its cursor boundary. */
 public interface KafkaRecordDeleter extends ReplicationLogRetention
 {
+	/** Creates a deleter that discovers the topic from the admin client.
+	 * @param kafkaAdminClient Kafka admin client
+	 * @return record deleter
+	 */
     static KafkaRecordDeleter New(final AdminClient kafkaAdminClient)
     {
         return new Default(notNull(kafkaAdminClient), null);
     }
 
-    static KafkaRecordDeleter New(final AdminClient kafkaAdminClient, final String topicName)
+	/** Creates a deleter for one topic.
+	 * @param kafkaAdminClient Kafka admin client
+	 * @param topicName Kafka topic
+	 * @return record deleter
+	 */
+	static KafkaRecordDeleter New(final AdminClient kafkaAdminClient, final String topicName)
     {
         return new Default(notNull(kafkaAdminClient), notEmpty(topicName));
     }
 
-    void deleteUntilOffsets(XImmutableMap<TopicPartition, Long> partitionOffsets) throws NodelibraryException;
+	/** Deletes records through the supplied offsets.
+	 * @param partitionOffsets partition end offsets
+	 * @throws NodelibraryException if deletion fails
+	 */
+	void deleteUntilOffsets(XImmutableMap<TopicPartition, Long> partitionOffsets) throws NodelibraryException;
 
     @Override
     default void deleteThrough(final ReplicationCursor cursor) throws NodelibraryException

@@ -25,13 +25,22 @@ import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
  */
 public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 {
+	/** Stops at the latest complete message boundary. */
 	void stopAtLatestMessage();
 
+	/** Returns the latest applied message information.
+	 * @return message information
+	 */
 	MessageInfo messageInfo();
 
+	/** Reports whether the reader is running.
+	 * @return {@code true} when running
+	 */
 	boolean isRunning();
 
-	/** Returns a terminal reader failure, or {@code null} while the client is healthy. */
+	/** Returns a terminal reader failure, or {@code null} while the client is healthy.
+	 * @return terminal failure, or {@code null}
+	 */
 	default RuntimeException failure()
 	{
 		return null;
@@ -48,20 +57,34 @@ public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 		return this.isRunning() ? StopOutcome.RUNNING : StopOutcome.RESOLVED_BOUNDARY;
 	}
 
-	/** Returns the stop outcome together with the last resolved cursor. */
+	/** Returns the stop outcome together with the last resolved cursor.
+	 * @return stop result
+	 */
 	default StopResult stopResult()
 	{
 		final MessageInfo info = this.messageInfo();
 		return new StopResult(this.stopOutcome(), info.messageIndex(), -1L);
 	}
 
+	/** Reports whether the reader is live.
+	 * @return {@code true} when live
+	 */
 	default boolean isLive()
 	{
 		return isRunning();
 	}
 
+	/** Resumes reading after a stop.
+	 * @throws NodelibraryException if resume fails
+	 */
 	void resume() throws NodelibraryException;
 
+	/** Creates a neutral client for tests and disabled replication.
+	 *
+	 * @param startingCursor initial cursor, or {@code null}
+	 * @param listener callback after data is applied
+	 * @return neutral client
+	 */
 	static ClusterStorageBinaryDataClient NoOp(
 		final ReplicationCursor startingCursor,
 		final AfterDataMessageConsumedListener listener

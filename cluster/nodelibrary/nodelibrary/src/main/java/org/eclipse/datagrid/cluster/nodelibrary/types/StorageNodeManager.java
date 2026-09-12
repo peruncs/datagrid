@@ -32,10 +32,18 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageNodeManager extends ClusterNodeManager
 {
+	/** Reports whether this node is a distributor.
+	 * @return {@code true} when distributing
+	 */
 	boolean isDistributor();
 
+	/** Starts the reader-to-distributor transition. */
 	void switchToDistribution();
 
+	/** Finishes the reader-to-distributor transition.
+	 * @return {@code true} when the transition completed
+	 * @throws NotADistributorException if the node is not ready
+	 */
 	boolean finishDistributonSwitch() throws NotADistributorException;
 
 	long getCurrentMessageIndex();
@@ -48,6 +56,17 @@ public interface StorageNodeManager extends ClusterNodeManager
 	/** Returns the provider lifecycle state shown by monitoring endpoints. */
 	ReplicationHealth.State getReplicationState();
 
+	/** Creates a manager with the default transport label.
+	 *
+	 * @param dataDistributor binary distributor
+	 * @param storageTaskExecutor storage task executor
+	 * @param dataClient replication client
+	 * @param healthCheck health check
+	 * @param storageController Store controller
+	 * @param storageDiskSpaceReader disk-space reader
+	 * @param positionProvider position provider
+	 * @return storage node manager
+	 */
 	static StorageNodeManager New(
 		final ClusterStorageBinaryDataDistributor dataDistributor,
 		final StorageTaskExecutor storageTaskExecutor,
@@ -69,7 +88,18 @@ public interface StorageNodeManager extends ClusterNodeManager
 		);
 	}
 
-	/** Creates a manager with an explicit transport id for monitoring labels. */
+	/** Creates a manager with an explicit transport id for monitoring labels.
+	 *
+	 * @param dataDistributor binary distributor
+	 * @param storageTaskExecutor storage task executor
+	 * @param dataClient replication client
+	 * @param healthCheck health check
+	 * @param storageController Store controller
+	 * @param storageDiskSpaceReader disk-space reader
+	 * @param positionProvider position provider
+	 * @param replicationTransport transport id
+	 * @return storage node manager
+	 */
 	static StorageNodeManager New(
 		final ClusterStorageBinaryDataDistributor dataDistributor,
 		final StorageTaskExecutor storageTaskExecutor,
@@ -107,6 +137,16 @@ public interface StorageNodeManager extends ClusterNodeManager
 		private volatile boolean closed;
 		private volatile boolean positionProviderClosed;
 
+		/** Creates a manager with the legacy neutral transport label.
+		 *
+		 * @param dataDistributor binary distributor
+		 * @param storageTaskExecutor storage task executor
+		 * @param dataClient replication client
+		 * @param healthCheck health check
+		 * @param storageController Store controller
+		 * @param storageDiskSpaceReader disk-space reader
+		 * @param positionProvider position provider
+		 */
 		public Default(
 			final ClusterStorageBinaryDataDistributor dataDistributor,
 			final StorageTaskExecutor storageTaskExecutor,
@@ -121,6 +161,17 @@ public interface StorageNodeManager extends ClusterNodeManager
 				storageDiskSpaceReader, positionProvider, "unknown");
 		}
 
+		/** Creates a manager with the selected transport label.
+		 *
+		 * @param dataDistributor binary distributor
+		 * @param storageTaskExecutor storage task executor
+		 * @param dataClient replication client
+		 * @param healthCheck health check
+		 * @param storageController Store controller
+		 * @param storageDiskSpaceReader disk-space reader
+		 * @param positionProvider position provider
+		 * @param replicationTransport transport id
+		 */
 		public Default(
 			final ClusterStorageBinaryDataDistributor dataDistributor,
 			final StorageTaskExecutor storageTaskExecutor,

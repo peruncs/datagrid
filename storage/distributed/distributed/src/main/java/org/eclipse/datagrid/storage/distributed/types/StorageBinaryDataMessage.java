@@ -36,22 +36,54 @@ public interface StorageBinaryDataMessage extends Disposable
 	/** Identifies whether the assembled bytes describe types or Store data. */
 	enum MessageType
 	{
+		/** The bytes describe a type dictionary. */
 		TYPE_DICTIONARY,
+		/** The bytes describe Store data. */
 		DATA
 	}
 
+		/** Returns the message kind.
+		 *
+		 * @return message kind
+		 */
 	MessageType type();
 
+		/** Returns the declared message length.
+		 *
+		 * @return message length in bytes
+		 */
 	int length();
 
+		/** Returns the declared packet count.
+		 *
+		 * @return packet count
+		 */
 	int packetCount();
 
+	/** Adds the next packet and returns this message.
+	 *
+	 * @param packet next packet in order
+	 * @return this message
+		 */
 	StorageBinaryDataMessage addPacket(StorageBinaryDataPacket packet);
 
+	/** Reports whether all declared packets have arrived.
+	 *
+	 * @return {@code true} when the message is complete
+		 */
 	boolean isComplete();
 
+	/** Returns the completed message bytes.
+	 *
+	 * @return read-only-positioned message buffer
+		 */
 	ByteBuffer data();
 
+	/** Creates a message from its first packet.
+	 *
+	 * @param initialPacket first packet
+	 * @return new message
+		 */
 	static StorageBinaryDataMessage New(final StorageBinaryDataPacket initialPacket)
 	{
 		return new StorageBinaryDataMessage.Default(

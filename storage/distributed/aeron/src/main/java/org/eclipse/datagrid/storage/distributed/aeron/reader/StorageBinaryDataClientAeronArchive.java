@@ -184,8 +184,24 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	 * The initial position is retained in the atomic cursor snapshot until the
 	 * first newly resolved transaction, so a reader that has not caught up cannot
 	 * expose an unrelated position.
-	 *
+ *
+	 * @param aeron shared Aeron client, not owned by the reader
+	 * @param archiveContext Archive connection settings
+	 * @param recordingId recording to replay
+	 * @param startPosition first Archive position to replay
+	 * @param liveChannel live publication channel
+	 * @param liveStreamId live publication stream
+	 * @param replayChannel replay channel
+	 * @param replayStreamId replay stream
+	 * @param configuration shared framing and timeout limits
+	 * @param clusterId expected cluster identity
+	 * @param epoch expected writer epoch
+	 * @param initialSequence last sequence already applied by the Store
+	 * @param receiver destination for complete Store binaries
+	 * @param transactionResolved callback after a transaction is delivered
+	 * @param deliveryListener callback around Store materialisation
 	 * @param initialPosition last resolved Archive position, or {@code -1} for a new reader
+	 * @return a reader that owns its subscriptions
 	 */
 	public static StorageBinaryDataClientAeronArchive New(
 		final Aeron aeron,
@@ -380,43 +396,74 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
 	}
 
-	/** Returns the last sequence delivered after commit and checksum validation. */
+	/**
+	 * Returns the last sequence delivered after commit and checksum validation.
+	 *
+	 * @return last resolved transaction sequence
+	 */
 	public long lastResolvedSequence()
 	{
 		return this.assembler.lastResolvedSequence();
 	}
 
-	/** Returns the last sequence materialized by the Store receiver. */
+	/**
+	 * Returns the last sequence materialized by the Store receiver.
+	 *
+	 * @return last applied transaction sequence
+	 */
 	public long lastAppliedSequence()
 	{
 		return this.assembler.lastAppliedSequence();
 	}
 
-	/** Returns whether the polling thread is active and has not failed. */
+	/**
+	 * Returns whether the polling thread is active and has not failed.
+	 *
+	 * @return {@code true} when the reader is running
+	 */
 	public boolean isRunning()
 	{
 		return this.active.get() && !this.disposeRequested && this.failure() == null;
 	}
 
-	/** Returns whether replay has transitioned to the live subscription. */
+	/**
+	 * Returns whether replay has transitioned to the live subscription.
+	 *
+	 * @return {@code true} after replay reaches the live stream
+	 */
 	public boolean isLive()
 	{
 		return this.live;
 	}
 
-	/** Returns the Archive position of the last resolved commit. */
+	/**
+	 * Returns the Archive position of the last resolved commit.
+	 *
+	 * @return last resolved Archive position
+	 */
 	public long lastResolvedPosition()
 	{
 		return this.assembler.lastResolvedPosition();
 	}
 
-	/** Returns an atomic sequence/position snapshot for cursor persistence. */
+	/**
+	 * Returns an atomic sequence/position snapshot for cursor persistence.
+	 *
+	 * @return current cursor snapshot
+	 */
 	public CursorSnapshot cursorSnapshot()
 	{
 		return this.assembler.cursorSnapshot();
 	}
 
-	/** Builds a cursor that can resume this reader from the same recording. */
+	/**
+	 * Builds a cursor that can resume this reader from the same recording.
+	 *
+	 * @param nodeId node that will own the resumed cursor
+	 * @param storeGeneration Store image identity
+	 * @param recordingId Aeron Archive recording identity
+	 * @return durable cursor for the current reader boundary
+	 */
 	public AeronReplicationCursor cursor(
 		final UUID nodeId,
 		final UUID storeGeneration,
@@ -435,7 +482,11 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		);
 	}
 
-	/** Returns the terminal polling failure, or {@code null} while healthy. */
+	/**
+	 * Returns the terminal polling failure, or {@code null} while healthy.
+	 *
+	 * @return terminal failure, or {@code null}
+	 */
 	public RuntimeException failure()
 	{
 		return this.assembler.failure();
@@ -455,7 +506,11 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		return new StorageBinaryDataClient.StopResult(this.stopOutcome, cursor.sequence(), cursor.position());
 	}
 
-	/** Stops polling after a terminal Aeron client or MediaDriver failure. */
+	/**
+	 * Stops polling after a terminal Aeron client or MediaDriver failure.
+	 *
+	 * @param failure terminal failure
+	 */
 	public synchronized void fail(final RuntimeException failure)
 	{
 		this.assembler.failure(java.util.Objects.requireNonNull(failure, "failure"));

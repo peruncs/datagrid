@@ -52,135 +52,354 @@ import java.util.function.Supplier;
  * before starting the storage manager or request controller. Start creates the
  * dependency graph; close releases it in the reverse direction. A foundation
  * belongs to one node and must not be reused after that node is closed.</p>
+ *
+ * @param <F> fluent foundation type
  */
 public interface ClusterFoundation<F extends ClusterFoundation<?>> extends InstanceDispatcher
 {
+	/** Returns the storage backup backend.
+	 * @return backup backend
+	 */
 	StorageBackupBackend getStorageBackupBackend();
 
+	/** Sets the storage backup backend.
+	 * @param backend backup backend
+	 * @return this foundation
+	 */
 	F setStorageBackupBackend(StorageBackupBackend backend);
 
+	/** Returns the storage task executor.
+	 * @return storage task executor
+	 */
 	StorageTaskExecutor getStorageTaskExecutor();
 
+	/** Sets the storage task executor.
+	 * @param executor storage task executor
+	 * @return this foundation
+	 */
 	F setStorageTaskExecutor(StorageTaskExecutor executor);
 
+	/** Returns the backup task executor.
+	 * @return backup task executor
+	 */
 	StorageBackupTaskExecutor getStorageBackupTaskExecutor();
 
+	/** Sets the backup task executor.
+	 * @param executor backup task executor
+	 * @return this foundation
+	 */
 	F setStorageBackupTaskExecutor(StorageBackupTaskExecutor executor);
 
+	/** Returns the backup service client.
+	 * @return backup service client
+	 */
 	BackupProxyHttpClient getBackupProxyHttpClient();
 
+	/** Sets the backup service client.
+	 * @param client backup service client
+	 * @return this foundation
+	 */
 	F setBackupProxyHttpClient(BackupProxyHttpClient client);
 
+	/** Returns the cron scheduler.
+	 * @return cron scheduler
+	 */
 	QuartzCronJobScheduler getQuartzCronJobScheduler();
 
+	/** Sets the cron scheduler.
+	 * @param scheduler cron scheduler
+	 * @return this foundation
+	 */
 	F setQuartzCronJobScheduler(QuartzCronJobScheduler scheduler);
 
+	/** Returns the cron job factory.
+	 * @return cron job factory
+	 */
 	QuartzCronJobJobFactory getQuartzCronJobJobFactory();
 
+	/** Sets the cron job factory.
+	 * @param factory cron job factory
+	 * @return this foundation
+	 */
 	F setQuartzCronJobJobFactory(QuartzCronJobJobFactory factory);
 
+	/** Returns the storage backup cron manager.
+	 * @return storage backup cron manager
+	 */
 	StorageBackupQuartzCronJobManager getStorageBackupQuartzCronJobManager();
 
+	/** Sets the storage backup cron manager.
+	 * @param manager storage backup cron manager
+	 * @return this foundation
+	 */
 	F setStorageBackupQuartzCronJobManager(StorageBackupQuartzCronJobManager manager);
 
+	/** Returns the storage limit cron manager.
+	 * @return storage limit cron manager
+	 */
 	StorageLimitCheckerQuartzCronJobManager getStorageLimitCheckerQuartzCronJobManager();
 
+	/** Sets the storage limit cron manager.
+	 * @param manager storage limit cron manager
+	 * @return this foundation
+	 */
 	F setStorageLimitCheckerQuartzCronJobManager(StorageLimitCheckerQuartzCronJobManager manager);
 
+	/** Returns the garbage-collection workaround manager.
+	 * @return garbage-collection workaround manager
+	 */
 	GcWorkaroundQuartzCronJobManager getGcWorkaroundQuartzCronJobManager();
 
+	/** Sets the garbage-collection workaround manager.
+	 * @param manager workaround manager
+	 * @return this foundation
+	 */
 	F setGcWorkaroundQuartzCronJobManager(GcWorkaroundQuartzCronJobManager manager);
 
+	/** Returns the replication transport.
+	 * @return replication transport
+	 */
 	ClusterReplicationTransport getClusterReplicationTransport();
 
+	/** Sets the replication transport.
+	 * @param transport replication transport
+	 * @return this foundation
+	 */
 	F setClusterReplicationTransport(ClusterReplicationTransport transport);
 
+	/** Returns the packet acceptor.
+	 * @return packet acceptor
+	 */
 	ClusterStorageBinaryDataPacketAcceptor getClusterStorageBinaryDataPacketAcceptor();
 
+	/** Sets the packet acceptor.
+	 * @param acceptor packet acceptor
+	 * @return this foundation
+	 */
 	F setClusterStorageBinaryDataPacketAcceptor(ClusterStorageBinaryDataPacketAcceptor acceptor);
 
+	/** Returns the binary merger.
+	 * @return binary merger
+	 */
 	ClusterStorageBinaryDataMerger getClusterStorageBinaryDataMerger();
 
+	/** Sets the binary merger.
+	 * @param merger binary merger
+	 * @return this foundation
+	 */
 	F setClusterStorageBinaryDataMerger(ClusterStorageBinaryDataMerger merger);
 
+	/** Returns the post-consumption listener.
+	 * @return post-consumption listener
+	 */
 	AfterDataMessageConsumedListener getAfterDataMessageConsumedListener();
 
+	/** Sets the post-consumption listener.
+	 * @param listener post-consumption listener
+	 * @return this foundation
+	 */
 	F setAfterDataMessageConsumedListener(AfterDataMessageConsumedListener listener);
 
+	/** Returns the stored-message manager.
+	 * @return stored-message manager
+	 */
 	StoredMessageInfoManager getStoredMessageInfoManager();
 
+	/** Sets the stored-message manager.
+	 * @param manager stored-message manager
+	 * @return this foundation
+	 */
 	F setStoredMessageInfoManager(StoredMessageInfoManager manager);
 
+	/** Returns the storage backup manager.
+	 * @return storage backup manager
+	 */
 	StorageBackupManager getStorageBackupManager();
 
+	/** Sets the storage backup manager.
+	 * @param manager storage backup manager
+	 * @return this foundation
+	 */
 	F setStorageBackupManager(StorageBackupManager manager);
 
+	/** Returns the root supplier.
+	 * @return root supplier
+	 */
 	Supplier<Object> getRootSupplier();
 
+	/** Sets the root supplier.
+	 * @param supplier root supplier
+	 * @return this foundation
+	 */
 	F setRootSupplier(Supplier<Object> supplier);
 
+	/** Returns the object-graph update handler.
+	 * @return graph update handler
+	 */
 	ObjectGraphUpdateHandler getObjectGraphUpdateHandler();
 
+	/** Sets the object-graph update handler.
+	 * @param handler graph update handler
+	 * @return this foundation
+	 */
 	F setObjectGraphUpdateHandler(ObjectGraphUpdateHandler handler);
 
+	/** Returns the embedded storage foundation.
+	 * @return embedded storage foundation
+	 */
 	EmbeddedStorageFoundation<?> getEmbeddedStorageFoundation();
 
+	/** Sets the embedded storage foundation.
+	 * @param foundation embedded storage foundation
+	 * @return this foundation
+	 */
 	F setEmbeddedStorageFoundation(EmbeddedStorageFoundation<?> foundation);
 
+	/** Returns the backup node manager.
+	 * @return backup node manager
+	 */
 	BackupNodeManager getBackupNodeManager();
 
+	/** Sets the backup node manager.
+	 * @param manager backup node manager
+	 * @return this foundation
+	 */
 	F setBackupNodeManager(BackupNodeManager manager);
 
+	/** Returns the binary data client.
+	 * @return binary data client
+	 */
 	ClusterStorageBinaryDataClient getClusterStorageBinaryDataClient();
 
+	/** Sets the binary data client.
+	 * @param client binary data client
+	 * @return this foundation
+	 */
 	F setClusterStorageBinaryDataClient(ClusterStorageBinaryDataClient client);
 
+	/** Returns the binary data distributor.
+	 * @return binary data distributor
+	 */
 	ClusterStorageBinaryDataDistributor getClusterStorageBinaryDataDistributor();
 
+	/** Sets the binary data distributor.
+	 * @param distributor binary data distributor
+	 * @return this foundation
+	 */
 	F setClusterStorageBinaryDataDistributor(ClusterStorageBinaryDataDistributor distributor);
 
+	/** Returns the storage health check.
+	 * @return storage health check
+	 */
 	StorageNodeHealthCheck getStorageNodeHealthCheck();
 
+	/** Sets the storage health check.
+	 * @param check storage health check
+	 * @return this foundation
+	 */
 	F setStorageNodeHealthCheck(StorageNodeHealthCheck check);
 
+	/** Returns the properties provider.
+	 * @return properties provider
+	 */
 	NodelibraryPropertiesProvider getNodelibraryPropertiesProvider();
 
+	/** Sets the properties provider.
+	 * @param provider properties provider
+	 * @return this foundation
+	 */
 	F setNodelibraryPropertiesProvider(NodelibraryPropertiesProvider provider);
 
+	/** Returns the storage disk-space reader.
+	 * @return disk-space reader
+	 */
 	StorageDiskSpaceReader getStorageDiskSpaceReader();
 
+	/** Sets the storage disk-space reader.
+	 * @param reader disk-space reader
+	 * @return this foundation
+	 */
 	F setStorageDiskSpaceReader(StorageDiskSpaceReader reader);
 
+	/** Returns the storage node manager.
+	 * @return storage node manager
+	 */
 	StorageNodeManager getStorageNodeManager();
 
+	/** Sets the storage node manager.
+	 * @param manager storage node manager
+	 * @return this foundation
+	 */
 	F setStorageNodeManager(StorageNodeManager manager);
 
+	/** Returns whether asynchronous distribution is enabled.
+	 * @return {@code true} when enabled
+	 */
 	boolean getEnableAsyncDistribution();
 
+	/** Sets asynchronous distribution.
+	 * @param enable whether to enable it
+	 * @return this foundation
+	 */
 	F setEnableAsyncDistribution(boolean enable);
 
+	/** Returns the replication position provider.
+	 * @return position provider
+	 */
 	ReplicationPositionProvider getReplicationPositionProvider();
 
+	/** Sets the replication position provider.
+	 * @param provider position provider
+	 * @return this foundation
+	 */
 	F setReplicationPositionProvider(ReplicationPositionProvider provider);
 
+	/** Returns the replication log retention policy.
+	 * @return retention policy
+	 */
 	ReplicationLogRetention getReplicationLogRetention();
 
+	/** Sets the replication log retention policy.
+	 * @param retention retention policy
+	 * @return this foundation
+	 */
 	F setReplicationLogRetention(ReplicationLogRetention retention);
 
+	/** Returns the message information parser.
+	 * @return message information parser
+	 */
 	MessageInfoParser getMessageInfoParser();
 
+	/** Sets the message information parser.
+	 * @param parser message information parser
+	 * @return this foundation
+	 */
 	F setMessageInfoParser(MessageInfoParser parser);
 
+	/** Creates a foundation with default collaborators.
+	 * @return new foundation
+	 */
 	static ClusterFoundation<?> New()
 	{
 		return new Default<>();
 	}
 
+	/** Starts the request controller.
+	 * @return request controller
+	 * @throws NodelibraryException if startup fails
+	 */
 	ClusterRestRequestController startController() throws NodelibraryException;
 
+	/** Starts the storage manager.
+	 * @return storage manager
+	 * @throws NodelibraryException if startup fails
+	 */
 	ClusterStorageManager<?> startStorageManager() throws NodelibraryException;
 
-	/** Stores the parts and builds the default cluster service graph. */
+	/** Stores the parts and builds the default cluster service graph.
+	 *
+	 * @param <F> fluent implementation type
+	 */
 	class Default<F extends Default<?>> extends InstanceDispatcher.Default
 		implements ClusterFoundation<F>, Unpersistable
 	{
@@ -224,12 +443,18 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 		{
 		}
 
+		/** Returns this implementation with its fluent type.
+		 * @return this foundation
+		 */
 		@SuppressWarnings("unchecked")
 		protected final F $()
 		{
 			return (F)this;
 		}
 
+		/** Creates the configured backup backend.
+		 * @return backup backend
+		 */
 		protected StorageBackupBackend ensureBackupBackend()
 		{
 			final var props = this.getNodelibraryPropertiesProvider();
@@ -266,6 +491,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			}
 		}
 
+		/** Creates the storage task executor.
+		 * @return storage task executor
+		 */
 		protected StorageTaskExecutor ensureStorageTaskExecutor()
 		{
 			if (this.getNodelibraryPropertiesProvider().isBackupNode())
@@ -275,16 +503,25 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			return StorageTaskExecutor.New(this.clusterStorageManager);
 		}
 
+		/** Creates the backup task executor.
+		 * @return backup task executor
+		 */
 		protected StorageBackupTaskExecutor ensureStorageBackupTaskExecutor()
 		{
 			return StorageBackupTaskExecutor.New(this.clusterStorageManager, this.getStorageBackupManager());
 		}
 
+		/** Creates the storage backup cron manager.
+		 * @return cron manager
+		 */
 		protected StorageBackupQuartzCronJobManager ensureStorageBackupQuartzCronJobManager()
 		{
 			return StorageBackupQuartzCronJobManager.New(this.getStorageBackupManager());
 		}
 
+		/** Creates the backup service client.
+		 * @return backup service client
+		 */
 		protected BackupProxyHttpClient ensureBackupProxyHttpClient()
 		{
 			return BackupProxyHttpClient.New(
@@ -292,11 +529,17 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the cron job factory.
+		 * @return cron job factory
+		 */
 		protected QuartzCronJobJobFactory ensureCronJobFactory()
 		{
 			return QuartzCronJobJobFactory.New();
 		}
 
+		/** Creates the cron scheduler.
+		 * @return cron scheduler
+		 */
 		protected QuartzCronJobScheduler ensureCronJobScheduler()
 		{
 			final Scheduler scheduler;
@@ -311,11 +554,17 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			return QuartzCronJobScheduler.New(scheduler);
 		}
 
+		/** Creates the garbage-collection workaround manager.
+		 * @return workaround manager
+		 */
 		protected GcWorkaroundQuartzCronJobManager ensureGcWorkaroundManager()
 		{
 			return GcWorkaroundQuartzCronJobManager.New(this.clusterStorageManager);
 		}
 
+		/** Creates the storage limit checker.
+		 * @return storage limit checker
+		 */
 		protected StorageLimitCheckerQuartzCronJobManager ensureStorageLimitCheckerManager()
 		{
 			return StorageLimitCheckerQuartzCronJobManager.New(
@@ -324,6 +573,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Loads the selected replication transport provider.
+		 * @return replication transport
+		 */
 		protected ClusterReplicationTransport ensureClusterReplicationTransport()
 		{
 			final String configured = this.getNodelibraryPropertiesProvider().replicationTransport();
@@ -343,6 +595,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			return ClusterReplicationTransport.noOp();
 		}
 
+		/** Creates the replication position provider.
+		 * @return position provider
+		 */
 		protected ReplicationPositionProvider ensureReplicationPositionProvider()
 		{
 			return this.getClusterReplicationTransport().positionProvider(
@@ -350,11 +605,17 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the replication retention policy.
+		 * @return retention policy
+		 */
 		protected ReplicationLogRetention ensureReplicationLogRetention()
 		{
 			return this.getClusterReplicationTransport().retention();
 		}
 
+		/** Creates the stored-message manager.
+		 * @return stored-message manager
+		 */
 		protected StoredMessageInfoManager ensureStoredMessageInfoManager()
 		{
 			final var messageInfoPath = this.storageParentPath().resolve("offset");
@@ -376,6 +637,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			return Paths.get(configured == null || configured.isBlank() ? "/storage" : configured).normalize();
 		}
 
+		/** Creates the listener that persists consumed-message information.
+		 * @return consumed-message listener
+		 */
 		protected AfterDataMessageConsumedListener ensureAfterDataMessageConsumedListener()
 		{
 			final var props = this.getNodelibraryPropertiesProvider();
@@ -408,6 +672,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			return storedMessageInfoUpdater;
 		}
 
+		/** Creates the storage backup manager.
+		 * @return storage backup manager
+		 */
 		protected StorageBackupManager ensureStorageBackupManager()
 		{
 			final var props = this.getNodelibraryPropertiesProvider();
@@ -425,21 +692,33 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Returns the configured root supplier.
+		 * @return root supplier
+		 */
 		protected Supplier<Object> ensureRootSupplier()
 		{
 			throw new MissingFoundationPartException(Supplier.class, "Missing root supplier");
 		}
 
+		/** Creates the default graph update handler.
+		 * @return graph update handler
+		 */
 		protected ObjectGraphUpdateHandler ensureGraphUpdateHandler()
 		{
 			return ObjectGraphUpdateHandler.Synchronized();
 		}
 
+		/** Creates the embedded storage foundation.
+		 * @return embedded storage foundation
+		 */
 		protected EmbeddedStorageFoundation<?> ensureEmbeddedStorageFoundation()
 		{
 			return EmbeddedStorageFoundation.New();
 		}
 
+		/** Creates the backup node manager.
+		 * @return backup node manager
+		 */
 		protected BackupNodeManager ensureBackupNodeManager()
 		{
 			return BackupNodeManager.New(
@@ -450,6 +729,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Reads the last replication cursor from stored information.
+		 * @return stored replication cursor
+		 */
 		protected ReplicationCursor getReplicationCursorFromStoredInfo()
 		{
 			final MessageInfo info = this.getStoredMessageInfoManager().get();
@@ -458,6 +740,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the replication data client.
+		 * @return replication data client
+		 */
 		protected ClusterStorageBinaryDataClient ensureClusterStorageBinaryDataClient()
 		{
 			final var props = this.getNodelibraryPropertiesProvider();
@@ -471,6 +756,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the storage node health check.
+		 * @return storage health check
+		 */
 		protected StorageNodeHealthCheck ensureStorageNodeHealthCheck()
 		{
 			return StorageNodeHealthCheck.New(
@@ -482,11 +770,17 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the environment-backed properties provider.
+		 * @return properties provider
+		 */
 		protected NodelibraryPropertiesProvider ensureNodelibraryPropertiesProvider()
 		{
 			return NodelibraryPropertiesProvider.Env();
 		}
 
+		/** Creates the storage disk-space reader.
+		 * @return disk-space reader
+		 */
 		protected StorageDiskSpaceReader ensureStorageDiskSpaceReader()
 		{
 			return StorageDiskSpaceReader.New(
@@ -494,6 +788,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the storage node manager.
+		 * @return storage node manager
+		 */
 		protected StorageNodeManager ensureStorageNodeManager()
 		{
 			return StorageNodeManager.New(
@@ -508,6 +805,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the configured binary distributor.
+		 * @return binary distributor
+		 */
 		protected ClusterStorageBinaryDataDistributor ensureDataDistributor()
 		{
 			return ClusterStorageBinaryDataDistributor.Caching(
@@ -518,6 +818,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the binary merger with configured limits.
+		 * @return binary merger
+		 */
 		protected ClusterStorageBinaryDataMerger ensureClusterStorageBinaryDataMerger()
 		{
 			final Long cachingTimeoutMsNullable = this.getNodelibraryPropertiesProvider().dataMergerTimeoutMs();
@@ -537,11 +840,17 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			);
 		}
 
+		/** Creates the packet acceptor.
+		 * @return packet acceptor
+		 */
 		protected ClusterStorageBinaryDataPacketAcceptor ensureDataPacketAcceptor()
 		{
 			return ClusterStorageBinaryDataPacketAcceptor.New(this.getClusterStorageBinaryDataMerger());
 		}
 
+		/** Creates the message information parser.
+		 * @return message information parser
+		 */
 		protected MessageInfoParser ensureMessageInfoParser()
 		{
 			return MessageInfoParser.New();
@@ -1058,6 +1367,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			return this.clusterStorageManager;
 		}
 
+		/** Starts the node in its configured role.
+		 * @throws NodelibraryException if startup fails
+		 */
 		protected void start() throws NodelibraryException
 		{
 			final var properties = this.getNodelibraryPropertiesProvider();
@@ -1076,6 +1388,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			}
 		}
 
+		/** Starts a node that restores and serves backups.
+		 * @throws NodelibraryException if startup fails
+		 */
 		protected void startBackupNode() throws NodelibraryException
 		{
 			LOG.info("Starting backup cluster node");
@@ -1196,6 +1511,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			scheduler.start();
 		}
 
+		/** Starts a node that publishes storage data.
+		 * @throws NodelibraryException if startup fails
+		 */
 		protected void startStorageNode() throws NodelibraryException
 		{
 			LOG.info("Starting storage cluster node");
@@ -1351,6 +1669,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 			}
 		}
 
+		/** Starts the local development node.
+		 * @throws NodelibraryException if startup fails
+		 */
 		protected void startDevNode() throws NodelibraryException
 		{
 			LOG.info("Starting dev cluster node");

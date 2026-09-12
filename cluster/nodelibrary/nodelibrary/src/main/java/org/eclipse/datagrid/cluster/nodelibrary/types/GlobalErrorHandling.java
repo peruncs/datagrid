@@ -23,6 +23,10 @@ public final class GlobalErrorHandling
 {
 	private static final Logger LOG = LoggerFactory.getLogger(GlobalErrorHandling.class);
 
+	/** Handles an error that makes the node unsafe to continue.
+	 *
+	 * @param t fatal error
+	 */
 	public static void handleFatalError(final Throwable t)
 	{
 		try

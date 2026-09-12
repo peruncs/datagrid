@@ -15,29 +15,35 @@ package org.eclipse.datagrid.cluster.nodelibrary.aeron;
  */
 
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageBinaryDataDistributor;
+import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronReplicationWriteCoordinator;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
+import java.util.function.Supplier;
 
 /**
- * The one Aeron distributor state object shared with the Store integration.
- * Data publication intentionally remains on the persistence-target path where
- * local acceptance and the durable fence are one operation.
+ * The Aeron distributor state shared with the Store integration.
+ * Direct distribution uses the coordinator's archive-first fence. Store writes
+ * should still use the persistence-target path when local acceptance is part of
+ * the same operation.
  */
 final class AeronDistributor implements ClusterStorageBinaryDataDistributor
 {
 	private final BooleanSupplier writer;
 	private final LongConsumer sequenceSynchronizer;
+	private final Supplier<AeronReplicationWriteCoordinator> coordinatorSupplier;
 	private volatile long index = -1L;
 	private volatile boolean ignored;
 	private String dictionary;
 
-	AeronDistributor(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer)
+	AeronDistributor(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer,
+		final Supplier<AeronReplicationWriteCoordinator> coordinatorSupplier)
 	{
 		this.writer = Objects.requireNonNull(writer, "writer");
 		this.sequenceSynchronizer = Objects.requireNonNull(sequenceSynchronizer, "sequenceSynchronizer");
+		this.coordinatorSupplier = Objects.requireNonNull(coordinatorSupplier, "coordinatorSupplier");
 	}
 
 	@Override
@@ -72,9 +78,15 @@ final class AeronDistributor implements ClusterStorageBinaryDataDistributor
 	{
 		if (this.ignored) return;
 		if (!this.writer.getAsBoolean()) throw new IllegalStateException("Aeron replication distributor is writer-only");
-		throw new UnsupportedOperationException(
-			"Aeron data distribution must use persistenceTargetFactory so local Store acceptance " +
-			"and the durable replication fence share one transaction boundary");
+		final AeronReplicationWriteCoordinator coordinator =
+			Objects.requireNonNull(this.coordinatorSupplier.get(), "coordinator");
+		final String pendingDictionary = this.dictionary;
+		if (pendingDictionary != null)
+		{
+			coordinator.distributeTypeDictionary(pendingDictionary);
+		}
+		coordinator.distributeData(Objects.requireNonNull(data, "data"));
+		this.dictionary = null;
 	}
 
 	/** The provider owns the shared Aeron/archive runtime. */

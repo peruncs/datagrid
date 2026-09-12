@@ -52,6 +52,11 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 {
 	/** Stable key used to keep every packet for a stream on one Kafka partition. */
 	String PARTITION_KEY = "eclipse-datagrid-replication";
+	/** Creates a synchronous Kafka distributor.
+	 * @param topicName Kafka topic
+	 * @param kafkaPropertiesProvider Kafka properties provider
+	 * @return synchronous distributor
+	 */
 	static ClusterStorageBinaryDataDistributorKafka Sync(
 		final String topicName,
 		final KafkaPropertiesProvider kafkaPropertiesProvider
@@ -60,6 +65,11 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		return new ClusterStorageBinaryDataDistributorKafka.Sync(notEmpty(topicName), notNull(kafkaPropertiesProvider));
 	}
 
+	/** Creates an asynchronous Kafka distributor.
+	 * @param topicName Kafka topic
+	 * @param kafkaPropertiesProvider Kafka properties provider
+	 * @return asynchronous distributor
+	 */
 	static ClusterStorageBinaryDataDistributorKafka Async(
 		final String topicName,
 		final KafkaPropertiesProvider kafkaPropertiesProvider
@@ -85,6 +95,10 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		private volatile boolean disposed;
 		private volatile boolean disposing;
 
+		/** Creates the shared Kafka distributor state.
+		 * @param topicName Kafka topic
+		 * @param kafkaPropertiesProvider Kafka properties provider
+		 */
 		protected Abstract(final String topicName, final KafkaPropertiesProvider kafkaPropertiesProvider)
 		{
 			this.topicName = topicName;
@@ -118,6 +132,9 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			}
 		}
 
+		/** Runs or submits one distribution action.
+		 * @param action distribution action
+		 */
 		protected abstract void execute(Runnable action);
 
 		private void distribute(final MessageType messageType, final Binary data)
@@ -191,6 +208,9 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			}
 		}
 
+		/** Records the first terminal distribution failure.
+		 * @param failure terminal failure
+		 */
 		protected final synchronized void recordFailure(final Throwable failure)
 		{
 			if (this.failure == null)

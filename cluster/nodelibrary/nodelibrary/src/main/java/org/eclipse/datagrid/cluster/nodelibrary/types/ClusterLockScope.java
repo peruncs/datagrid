@@ -30,26 +30,50 @@ public abstract class ClusterLockScope
 {
 	private final LockedExecutor executor;
 
+	/** Creates a scope backed by the supplied lock.
+	 *
+	 * @param executor lock executor
+	 */
 	protected ClusterLockScope(final LockedExecutor executor)
 	{
 		this.executor = executor;
 	}
 
+	/** Runs a value-producing action under the read lock.
+	 *
+	 * @param <T> result type
+	 * @param producer read action
+	 * @return action result
+	 */
 	public <T> T read(final Producer<T> producer)
 	{
 		return this.executor.read(producer);
 	}
 
+	/** Runs an action under the read lock.
+	 *
+	 * @param action read action
+	 */
 	public void read(final Action action)
 	{
 		this.executor.read(action);
 	}
 
+	/** Runs a value-producing action under the write lock.
+	 *
+	 * @param <T> result type
+	 * @param producer write action
+	 * @return action result
+	 */
 	public <T> T write(final Producer<T> producer)
 	{
 		return this.executor.write(producer);
 	}
 
+	/** Runs an action under the write lock.
+	 *
+	 * @param action write action
+	 */
 	public void write(final Action action)
 	{
 		this.executor.write(action);

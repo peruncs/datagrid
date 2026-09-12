@@ -30,7 +30,13 @@ public final class StorageBinaryDataChunker
 	{
 	}
 
-	/** One packet and its position in the source binary. */
+	/** One packet and its position in the source binary.
+	 *
+	 * @param bytes packet payload
+	 * @param index zero-based packet index
+	 * @param count total packet count
+	 * @param messageLength total message length
+	 */
 	public record Chunk(byte[] bytes, int index, int count, int messageLength)
 	{
 	}
@@ -178,7 +184,11 @@ public final class StorageBinaryDataChunker
 		visit(data, maxPacketSize, consumer);
 	}
 
-	/** Collects channel buffers in order without advancing their positions. */
+	/** Collects channel buffers in order without advancing their positions.
+	 *
+	 * @param data source Store binary
+	 * @return source buffers in channel order
+	 */
 	public static List<ByteBuffer> buffers(final Binary data)
 	{
 		notNull(data);

@@ -52,6 +52,11 @@ public interface StorageBinaryDataDistributorKafka
 {
 	/** Stable key used to keep every packet for a stream on one Kafka partition. */
 	String PARTITION_KEY = "eclipse-datagrid-replication";
+	/** Creates a synchronous Kafka distributor.
+	 * @param kafkaProperties Kafka producer properties
+	 * @param topicName Kafka topic
+	 * @return synchronous distributor
+	 */
 	static StorageBinaryDataDistributorKafka Sync(
             final Properties kafkaProperties,
             final String topicName
@@ -63,6 +68,11 @@ public interface StorageBinaryDataDistributorKafka
 		);
 	}
 
+	/** Creates an asynchronous Kafka distributor.
+	 * @param kafkaProperties Kafka producer properties
+	 * @param topicName Kafka topic
+	 * @return asynchronous distributor
+	 */
 	static StorageBinaryDataDistributorKafka Async(
             final Properties kafkaProperties,
             final String topicName
@@ -77,11 +87,13 @@ public interface StorageBinaryDataDistributorKafka
 	/** Shared producer, failure, and disposal behavior for both modes. */
 	abstract class Abstract implements StorageBinaryDataDistributorKafka
 	{
+		/** Logger shared by Kafka distributor modes. */
 		protected static final System.Logger LOG = System.getLogger(StorageBinaryDataDistributorKafka.class.getName());
 		private final Properties kafkaProperties;
 		private final String topicName;
 		private KafkaProducer<String, byte[]> kafkaProducer;
 		private volatile RuntimeException failure;
+		/** Number of queued messages dropped after a terminal failure. */
 		protected final AtomicLong droppedAfterFailure = new AtomicLong();
 		private volatile boolean disposed;
 		private volatile boolean disposing;
@@ -96,6 +108,9 @@ public interface StorageBinaryDataDistributorKafka
 			this.topicName = topicName;
 		}
 
+		/** Runs or submits one distribution action.
+		 * @param action distribution action
+		 */
 		protected abstract void execute(Runnable action);
 
 		private synchronized KafkaProducer<String, byte[]> ensureProducer()
@@ -184,6 +199,9 @@ public interface StorageBinaryDataDistributorKafka
 			}
 		}
 
+		/** Records the first terminal distribution failure.
+		 * @param failure terminal failure
+		 */
 		protected final synchronized void recordFailure(final Throwable failure)
 		{
 			if (this.failure == null)
@@ -215,6 +233,9 @@ public interface StorageBinaryDataDistributorKafka
 			this.disposing = false;
 		}
 
+		/** Returns the terminal distribution failure.
+		 * @return failure, or {@code null}
+		 */
 		public final RuntimeException failure()
 		{
 			return this.failure;

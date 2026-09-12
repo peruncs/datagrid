@@ -124,7 +124,7 @@ public final class AeronEndToEndBenchmark
 		@Override public void receiveTypeDictionary(final String value) { }
 		@Override public void receiveData(final Binary value)
 		{
-			for (final ByteBuffer chunk : value.buffers()) this.assembledBytes += chunk.remaining();
+			for (final ByteBuffer chunk : value.buffers()) this.assembledBytes += chunk.position();
 		}
 		private void reset() { this.assembledBytes = 0L; }
 	}

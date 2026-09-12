@@ -38,6 +38,9 @@ class AeronReplicationMonitoringTest
 		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
 			.create(properties("writer")))
 		{
+			/* Health inspection must not start the runtime. Start it through the
+			 * explicit position-provider lifecycle first. */
+			transport.positionProvider("stream").latest();
 			final ClusterStorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
 			final ReplicationHealth health = transport.health(() -> true, client);
 			health.init();
@@ -81,6 +84,19 @@ class AeronReplicationMonitoringTest
 		}
 	}
 
+	/** Verifies the neutral distributor uses the Aeron archive-first path. */
+	@Test
+	void distributorPublishesDataWithoutAStoreTarget()
+	{
+		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+			.create(properties("writer")))
+		{
+			final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+			distributor.distributeData(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 3, 2, 1 })));
+			assertEquals(0L, transport.positionProvider("stream").latest().logicalSequence());
+		}
+	}
+
 	/** Retention must fail explicitly while authenticated watermarks are absent. */
 	@Test
 	void retentionRejectsDeletionUntilWatermarksAreConfigured()
@@ -111,9 +127,10 @@ class AeronReplicationMonitoringTest
 			assertFalse(failedHealth.isReady());
 			assertFalse(failedHealth.isHealthy());
 			assertEquals(ReplicationHealth.State.FAILED, failedHealth.state());
-			assertThrows(UnsupportedOperationException.class,
-				() -> transport.positionProvider("stream").latest(),
-				"a reader cannot claim its local cursor is the writer latest boundary");
+			final ReplicationCursor cursor = transport.positionProvider("stream").latest();
+			assertEquals("aeron", cursor.transport());
+			assertEquals(-1L, cursor.logicalSequence(),
+				"an idle reader reports its own unresolved cursor, not the writer boundary");
 			health.close();
 			failedHealth.close();
 		}

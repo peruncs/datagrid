@@ -16,6 +16,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -253,6 +254,7 @@ class AeronReplicationWriteCoordinatorTest
 	void enqueueLocalRejectionDoesNotCreateSyntheticTerminalSequence()
 	{
 		final List<String> events = new ArrayList<>();
+		final AtomicBoolean fenceCleared = new AtomicBoolean();
 		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
 			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
 			.durabilityMode(org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
@@ -261,8 +263,21 @@ class AeronReplicationWriteCoordinatorTest
 			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
 			UUID.randomUUID(), 1, 0);
 		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) ->
-				events.add(state + ":" + sequence));
+			publisher, configuration.durabilityMode(), new AeronArchiveReplicationPublisher.CheckpointWriter()
+			{
+				@Override
+				public void onState(final AeronReplicationCheckpoint.State state, final long sequence,
+					final int length, final int chunks, final int crc, final long position)
+				{
+					events.add(state + ":" + sequence);
+				}
+
+				@Override
+				public void clearEnqueueFence()
+				{
+					fenceCleared.set(true);
+				}
+			});
 		final PersistenceTarget<Binary> failing = new PersistenceTarget<>()
 		{
 			@Override public void write(final Binary data) { throw new IllegalStateException("local failure"); }
@@ -270,7 +285,8 @@ class AeronReplicationWriteCoordinatorTest
 		};
 		assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryTargetDistributing(failing, coordinator)
 			.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }))));
-		assertEquals(List.of("ENQUEUED:0", "REJECTED:-1"), events);
+		assertEquals(List.of("ENQUEUED:0"), events);
+		assertTrue(fenceCleared.get());
 		assertEquals(0L, coordinator.nextSequence());
 		coordinator.dispose();
 	}
@@ -288,9 +304,19 @@ class AeronReplicationWriteCoordinatorTest
 			UUID.randomUUID(), 1, 0);
 		final IllegalStateException cleanupFailure = new IllegalStateException("checkpoint cleanup failed");
 		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) ->
+			publisher, configuration.durabilityMode(), new AeronArchiveReplicationPublisher.CheckpointWriter()
 			{
-				if (state == AeronReplicationCheckpoint.State.REJECTED) throw cleanupFailure;
+				@Override
+				public void onState(final AeronReplicationCheckpoint.State state, final long sequence,
+					final int length, final int chunks, final int crc, final long position)
+				{
+				}
+
+				@Override
+				public void clearEnqueueFence()
+				{
+					throw cleanupFailure;
+				}
 			});
 		try
 		{
@@ -439,8 +465,12 @@ class AeronReplicationWriteCoordinatorTest
 			channels[channelIndex].complete();
 		}
 
-		final java.nio.ByteBuffer[] buffers = AeronBinaryBuffers.collect(channels[0]);
-		assertEquals(channels.length, buffers.length);
+		final List<java.nio.ByteBuffer> buffers = new ArrayList<>();
+		channels[0].iterateChannelChunks(channel ->
+		{
+			for (final java.nio.ByteBuffer buffer : channel.buffers()) buffers.add(buffer);
+		});
+		assertEquals(channels.length, buffers.size());
 		for (final java.nio.ByteBuffer buffer : buffers)
 		{
 			assertTrue(buffer.remaining() > 0);

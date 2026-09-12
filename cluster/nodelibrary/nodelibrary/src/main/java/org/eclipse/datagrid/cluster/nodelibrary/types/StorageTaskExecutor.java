@@ -30,10 +30,18 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageTaskExecutor
 {
+	/** Starts a storage check task. */
 	void runChecks();
 
+	/** Reports whether a storage check is running.
+	 * @return {@code true} when running
+	 */
 	boolean isRunningChecks();
 
+	/** Creates a storage task executor.
+	 * @param connection Store connection
+	 * @return task executor
+	 */
 	static StorageTaskExecutor New(final StorageConnection connection)
 	{
 		return new Default(notNull(connection));
@@ -47,6 +55,9 @@ public interface StorageTaskExecutor
 
 		private Thread checksThread;
 
+		/** Creates the shared executor state.
+		 * @param connection Store connection
+		 */
 		protected Abstract(final StorageConnection connection)
 		{
 			this.connection = connection;

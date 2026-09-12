@@ -26,6 +26,11 @@ import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
  */
 public interface AfterDataMessageConsumedListener extends AutoCloseable
 {
+	/** Records that one replicated message has been applied.
+	 *
+	 * @param messageInfo applied message information
+	 * @throws NodelibraryException if follow-up bookkeeping fails
+	 */
 	void onChange(MessageInfo messageInfo) throws NodelibraryException;
 
 	@Override

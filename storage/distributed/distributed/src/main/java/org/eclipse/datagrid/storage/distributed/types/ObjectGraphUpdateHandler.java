@@ -24,12 +24,20 @@ import org.eclipse.serializer.concurrency.XThreads;
  * integrations can provide a handler that uses their own cluster lock, but an
  * update must not race with a local graph write.</p>
  */
-@FunctionalInterface
-public interface ObjectGraphUpdateHandler
-{
-	void objectGraphUpdateAvailable(ObjectGraphUpdater updater);
+	@FunctionalInterface
+	public interface ObjectGraphUpdateHandler
+	{
+		/** Runs an update when the object graph may be changed.
+		 *
+		 * @param updater update to run
+		 */
+		void objectGraphUpdateAvailable(ObjectGraphUpdater updater);
 
-	static ObjectGraphUpdateHandler Synchronized()
+		/** Creates a handler that serializes updates on the Store lock.
+		 *
+		 * @return synchronized update handler
+		 */
+		static ObjectGraphUpdateHandler Synchronized()
 	{
 		return updater -> XThreads.executeSynchronized(updater::updateObjectGraph);
 	}

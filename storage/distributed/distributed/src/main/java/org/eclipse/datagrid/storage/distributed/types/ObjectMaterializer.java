@@ -34,6 +34,10 @@ public class ObjectMaterializer implements BinaryEntityRawDataAcceptor
 	private final PersistenceLoader loader;
 	private final Set_long oids = Set_long.New();
 
+	/** Creates a materializer for one persistence manager.
+	 *
+	 * @param persistenceManager manager that owns the target graph
+	 */
 	public ObjectMaterializer(final PersistenceManager<?> persistenceManager)
 	{
 		super();
@@ -86,6 +90,7 @@ public class ObjectMaterializer implements BinaryEntityRawDataAcceptor
 		return true;
 	}
 
+	/** Materializes each object collected by {@link #acceptEntityData(long, long)}. */
 	public void materialize()
 	{
 		// Batch-materializes all collected objects in the live graph

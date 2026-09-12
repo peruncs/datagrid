@@ -14,7 +14,12 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
  * #L%
  */
 
-/** Immutable sequence/recording-position pair captured at one reader boundary. */
+/**
+ * Immutable sequence/recording-position pair captured at one reader boundary.
+ *
+ * @param sequence last resolved transaction sequence
+ * @param position Archive position of that transaction
+ */
 public record CursorSnapshot(long sequence, long position)
 {
 }

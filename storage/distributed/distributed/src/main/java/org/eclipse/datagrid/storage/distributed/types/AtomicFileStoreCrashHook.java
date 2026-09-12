@@ -22,7 +22,10 @@ public final class AtomicFileStoreCrashHook
 {
 	private AtomicFileStoreCrashHook() { }
 
-	/** Installs a hook on the calling thread. */
+	/** Installs a hook on the calling thread.
+	 *
+	 * @param hook callback for crash-test phases
+	 */
 	public static void install(final BiConsumer<String, Path> hook)
 	{
 		AtomicFileStore.setTestHook(hook);

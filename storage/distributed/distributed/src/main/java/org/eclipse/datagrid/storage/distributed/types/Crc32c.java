@@ -24,7 +24,13 @@ public final class Crc32c
 	{
 	}
 
-	/** Returns the CRC32C of a byte range. */
+	/** Returns the CRC32C of a byte range.
+	 *
+	 * @param bytes source bytes
+	 * @param offset first byte to include
+	 * @param length number of bytes to include
+	 * @return CRC32C value
+	 */
 	public static int compute(final byte[] bytes, final int offset, final int length)
 	{
 		final CRC32C crc = LOCAL.get();
@@ -33,7 +39,11 @@ public final class Crc32c
 		return (int)crc.getValue();
 	}
 
-	/** Returns the CRC32C of the complete byte array. */
+	/** Returns the CRC32C of the complete byte array.
+	 *
+	 * @param bytes source bytes
+	 * @return CRC32C value
+	 */
 	public static int compute(final byte[] bytes)
 	{
 		return compute(bytes, 0, bytes.length);

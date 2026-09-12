@@ -41,6 +41,9 @@ import static org.eclipse.datagrid.cache.clustered.kafka.types.KafkaClusteredCon
  * instance. Producer and consumer settings are read from their separate
  * configuration prefixes so the two clients cannot accidentally share a
  * role-specific setting.</p>
+ *
+ * @param <K> cache key type
+ * @param <V> cache value type
  */
 public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCacheMessageComProvider<K, V>
 {
@@ -48,6 +51,14 @@ public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCac
 
     private String clientId;
     private KafkaProducer<String, byte[]> producer;
+
+    /** Creates a provider with no Kafka clients yet.
+     *
+     * <p>The clients are created when the cache region asks for them.</p>
+     */
+    public KafkaClusteredCacheMessageComProvider()
+    {
+    }
 
     @Override
     public ClusteredCacheMessageSender<K, V> provideUpdateTimestampsCacheMessageSender(

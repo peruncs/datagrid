@@ -32,19 +32,26 @@ import static org.eclipse.serializer.util.X.notNull;
  * A {@link StorageBinaryDataPacketAcceptor} that forwards completed messages to
  * the merger and then disposes their packet-owned buffers. The merger copies
  * data it needs for deferred materialization, so ownership remains local to
- * this acceptor. Complete-binary delivery is a borrowed, synchronous call:
- * implementations must consume or copy the supplied {@link Binary} before
- * returning and must not retain it. This class will also call
+ * this acceptor. Packet delivery is borrowed and synchronous: implementations
+ * must consume or copy packet-owned buffers before returning and must not retain
+ * them. The direct Aeron path may use the separate ownership-aware callback
+ * when the merger advertises it. This class will also call
  * {@link #dispose()} on the {@link ClusterStorageBinaryDataMerger}
  */
 public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDataPacketAcceptor, Disposable
 {
-	/** Returns a failure reported by the asynchronous merger, or {@code null}. */
+	/** Returns a failure reported by the asynchronous merger, or {@code null}.
+	 * @return merger failure, or {@code null}
+	 */
 	default RuntimeException failure()
 	{
 		return null;
 	}
 
+	/** Waits until deferred data has been applied.
+	 *
+	 * <p>The default implementation has no deferred work.</p>
+	 */
 	default void awaitApplied()
 	{
 	}
@@ -54,6 +61,8 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 	 * this boundary because their assembler has already validated and reassembled
 	 * the transaction. The binary is borrowed for the duration of this call;
 	 * packet transports continue to use {@link #accept(List)}.
+	 *
+	 * @param data complete binary
 	 */
 	default void acceptData(final Binary data)
 	{
@@ -63,6 +72,9 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 	/**
 	 * Accepts a complete binary and may take ownership of its direct buffers.
 	 * Returning {@code true} transfers release responsibility to the acceptor.
+	 *
+	 * @param data complete binary
+	 * @return whether ownership was transferred
 	 */
 	default boolean acceptDataOwned(final Binary data)
 	{
@@ -70,11 +82,30 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		return false;
 	}
 
-	/** Accepts a type dictionary already decoded by the transport. */
+	/**
+	 * Reports whether complete-binary delivery transfers ownership before the
+	 * callback starts.
+	 *
+	 * @return whether the acceptor owns the binary on callback entry
+	 */
+	default boolean canAcceptDataOwned()
+	{
+		return false;
+	}
+
+	/** Accepts a type dictionary already decoded by the transport.
+	 *
+	 * @param dictionary decoded type dictionary
+	 */
 	default void acceptTypeDictionary(final String dictionary)
 	{
 		throw new UnsupportedOperationException("decoded dictionary delivery is not supported");
 	}
+	/** Creates an acceptor for one merger.
+	 *
+	 * @param merger destination merger
+	 * @return packet acceptor
+	 */
 	static ClusterStorageBinaryDataPacketAcceptor New(final ClusterStorageBinaryDataMerger merger)
 	{
 		return new Default(notNull(merger));
@@ -86,6 +117,9 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		private final ClusterStorageBinaryDataMerger merger;
 		private StorageBinaryDataMessage message;
 
+		/** Creates the packet acceptor implementation.
+		 * @param merger destination merger
+		 */
 		protected Default(final ClusterStorageBinaryDataMerger merger)
 		{
 			super();
@@ -120,6 +154,12 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		public boolean acceptDataOwned(final Binary data)
 		{
 			return this.merger.receiveDataOwned(data);
+		}
+
+		@Override
+		public boolean canAcceptDataOwned()
+		{
+			return this.merger.canReceiveDataOwned();
 		}
 
 		@Override

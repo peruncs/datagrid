@@ -18,11 +18,17 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 	/** Identifies the local or remote place from which a backup is served. */
 	public enum BackupTarget
 {
-	SAAS, ONPREM;
+		/** Backup served by the hosted service. */
+		SAAS,
+		/** Backup served by the local installation. */
+		ONPREM;
 
 	/**
 	 * Tries to parse the string into the appropriate backup target. If it fails
-	 * `null` is returned.
+	 * {@code null} is returned.
+	 *
+	 * @param s target name
+	 * @return parsed target, or {@code null}
 	 */
 	public static BackupTarget parse(final String s)
 	{

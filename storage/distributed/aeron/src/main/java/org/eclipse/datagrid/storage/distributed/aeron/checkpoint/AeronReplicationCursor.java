@@ -24,6 +24,14 @@ import java.util.UUID;
  * a new recording may reuse it. The neutral cursor store persists this value;
  * this record carries the Aeron-specific position across the provider
  * boundary.</p>
+ *
+ * @param clusterId replication cluster identity
+ * @param nodeId node that owns the cursor
+ * @param storeGeneration Store image identity
+ * @param epoch writer epoch associated with the recording
+ * @param recordingId Aeron Archive recording identity
+ * @param recordingPosition Archive position at the cursor
+ * @param sequence transaction sequence at the cursor
  */
 public record AeronReplicationCursor(
 	UUID clusterId,
@@ -34,7 +42,8 @@ public record AeronReplicationCursor(
 	long recordingPosition,
 	long sequence
 )
-{
+	{
+	/** Validates the identities and position carried by the durable cursor. */
 	public AeronReplicationCursor
 	{
 		if (clusterId == null || nodeId == null || storeGeneration == null ||

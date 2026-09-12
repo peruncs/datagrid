@@ -35,7 +35,12 @@ public final class ReplicationCursorStore
 
 	private ReplicationCursorStore() { }
 
-	/** Writes a CRC-protected cursor using a forced temporary file and replace. */
+	/** Writes a CRC-protected cursor using a forced temporary file and replace.
+	 *
+	 * @param path cursor path
+	 * @param cursor cursor to store
+	 * @throws IOException if the cursor cannot be stored
+	 */
 	public static void write(final Path path, final ReplicationCursor cursor) throws IOException
 	{
 		final byte[] transport = cursor.transport().getBytes(StandardCharsets.UTF_8);
@@ -53,7 +58,12 @@ public final class ReplicationCursorStore
 			AtomicFileStore.PHASE_CURSOR);
 	}
 
-	/** Reads and validates a persisted cursor, rejecting truncation and bit-rot. */
+	/** Reads and validates a persisted cursor, rejecting truncation and bit-rot.
+	 *
+	 * @param path cursor path
+	 * @return stored cursor
+	 * @throws IOException if the cursor is missing or invalid
+	 */
 	public static ReplicationCursor read(final Path path) throws IOException
 	{
 		final byte[] bytes = Files.readAllBytes(path);

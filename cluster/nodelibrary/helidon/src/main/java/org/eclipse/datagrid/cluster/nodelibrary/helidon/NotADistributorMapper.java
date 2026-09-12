@@ -31,6 +31,11 @@ import org.eclipse.datagrid.cluster.nodelibrary.exceptions.HttpResponseException
 @Provider
 public class NotADistributorMapper implements ExceptionMapper<HttpResponseException>
 {
+	/** Creates an exception mapper for neutral HTTP failures. */
+	public NotADistributorMapper()
+	{
+	}
+
 	@Override
 	public Response toResponse(final HttpResponseException e)
 	{

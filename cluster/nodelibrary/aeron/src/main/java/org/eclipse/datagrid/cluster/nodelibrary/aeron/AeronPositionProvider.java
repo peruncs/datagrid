@@ -24,9 +24,8 @@ import java.util.function.Supplier;
 
 /**
  * Cached Aeron position view. Writer callers receive the last durable terminal
- * boundary. Reader callers cannot infer the writer's latest committed boundary
- * from their local applied cursor and therefore fail explicitly instead of
- * returning a misleading "latest" value.
+ * boundary. Reader callers receive their own durable cursor because that is the
+ * only latest position they can establish without a control channel.
  */
 final class AeronPositionProvider implements ReplicationPositionProvider
 {
@@ -34,14 +33,17 @@ final class AeronPositionProvider implements ReplicationPositionProvider
 	private final Runnable ensureWriter;
 	private final Supplier<AeronWriterBoundary> writerBoundary;
 	private final Supplier<UUID> storeGeneration;
+	private final Supplier<ReplicationCursor> readerCursor;
 
 	AeronPositionProvider(final BooleanSupplier writer, final Runnable ensureWriter,
-		final Supplier<AeronWriterBoundary> writerBoundary, final Supplier<UUID> storeGeneration)
+		final Supplier<AeronWriterBoundary> writerBoundary, final Supplier<UUID> storeGeneration,
+		final Supplier<ReplicationCursor> readerCursor)
 	{
 		this.writer = Objects.requireNonNull(writer, "writer");
 		this.ensureWriter = Objects.requireNonNull(ensureWriter, "ensureWriter");
 		this.writerBoundary = Objects.requireNonNull(writerBoundary, "writerBoundary");
 		this.storeGeneration = Objects.requireNonNull(storeGeneration, "storeGeneration");
+		this.readerCursor = Objects.requireNonNull(readerCursor, "readerCursor");
 	}
 
 	@Override public void init() { }
@@ -51,8 +53,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider
 	{
 		if (!this.writer.getAsBoolean())
 		{
-			throw new UnsupportedOperationException(
-				"Aeron reader cannot determine the writer latest boundary without a control/status channel");
+			return Objects.requireNonNull(this.readerCursor.get(), "readerCursor");
 		}
 		this.ensureWriter.run();
 		final AeronWriterBoundary boundary = this.writerBoundary.get();

@@ -59,6 +59,10 @@ public record AeronReplicationCheckpoint(
 	int resolutionCrc32c
 )
 {
+	/**
+	 * Validates the restart record and keeps its state machine closed over the
+	 * writer and reader recovery domains.
+	 */
 	public AeronReplicationCheckpoint
 	{
 		if (recordType == null || durabilityMode == null || state == null || clusterId == null ||

@@ -3,10 +3,10 @@ package org.eclipse.datagrid.storage.distributed.aeron.writer;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
 import org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode;
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.typing.Disposable;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 
@@ -37,7 +37,7 @@ import java.util.function.BooleanSupplier;
  * transport-neutral distributor would allow publication without local Store
  * acceptance and would bypass the durable fence.</p>
  */
-public final class AeronReplicationWriteCoordinator implements Disposable
+public final class AeronReplicationWriteCoordinator implements AutoCloseable
 {
 	static void setCrashHook(final BiConsumer<String, Long> hook) { CrashHook.install(hook); }
 	static void clearCrashHook() { CrashHook.clear(); }
@@ -52,6 +52,11 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 	private final BooleanSupplier writeAdmission;
 	private byte[] pendingDictionary;
 	private LocalEnqueue localAcceptanceFence;
+	/* The coordinator is single-threaded. Reusing this channel-order scratch
+	 * array removes the ArrayList and temporary array from every write. A local
+	 * acceptance fence keeps the count beside the array until preparation ends. */
+	private ByteBuffer[] bufferScratch = new ByteBuffer[8];
+	private int bufferScratchCount;
 	/* Set only after publisher.commit() has returned.  A checkpoint cleanup
 	 * failure after that point must not overwrite a durable COMMITTED record with
 	 * COMMITTING_UNCERTAIN. */
@@ -81,7 +86,10 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		final AeronArchiveReplicationPublisher.CheckpointWriter listener,
 		final BooleanSupplier writeAdmission)
 	{
-		if (publisher == null || durabilityMode == null || listener == null || writeAdmission == null) throw new NullPointerException();
+		if (publisher == null) throw new NullPointerException("publisher");
+		if (durabilityMode == null) throw new NullPointerException("durabilityMode");
+		if (listener == null) throw new NullPointerException("listener");
+		if (writeAdmission == null) throw new NullPointerException("writeAdmission");
 		if (durabilityMode == ReplicationDurabilityMode.LOCAL_DURABLE_FIRST)
 		{
 			throw new IllegalArgumentException("Store durable completion callback is required for LOCAL_DURABLE_FIRST");
@@ -103,14 +111,26 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		return this.publisher.nextSequence();
 	}
 
-	/** Saves a type dictionary for the next transaction. */
-	synchronized void distributeTypeDictionary(final String typeDictionaryData)
+	/** Saves a type dictionary for the next transaction.
+	 *
+	 * @param typeDictionaryData dictionary text, or {@code null} to clear it
+	 */
+	public synchronized void distributeTypeDictionary(final String typeDictionaryData)
 	{
 		this.pendingDictionary = typeDictionaryData == null ? null : typeDictionaryData.getBytes(StandardCharsets.UTF_8);
 	}
 
-	/** Publishes and commits one Store binary. */
-	synchronized void distributeData(final Binary data)
+	/**
+	 * Publishes and commits one Store binary using the archive-first fence.
+	 *
+	 * <p>This entry point is for the neutral distributor, which has no local
+	 * persistence target to fence. Store writes should use
+	 * {@link AeronStorageBinaryTargetDistributing} so local acceptance and
+	 * publication remain one operation.</p>
+	 *
+	 * @param data binary to publish
+	 */
+	public synchronized void distributeData(final Binary data)
 	{
 		try (final AeronReplicationPublisher.PreparedTransaction prepared = this.prepare(data))
 		{
@@ -183,7 +203,18 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		 * fencing the local Store write. Reuse that view after the Store
 		 * restores the marked positions; collecting again would repeat the channel
 		 * walk and allocate another array for the same transaction. */
-		final ByteBuffer[] buffers = local == null ? AeronBinaryBuffers.collect(data) : local.buffers();
+		final int bufferCount;
+		final ByteBuffer[] buffers;
+		if (local == null)
+		{
+			bufferCount = this.collectBuffers(data);
+			buffers = this.bufferScratch;
+		}
+		else
+		{
+			bufferCount = local.bufferCount();
+			buffers = local.buffers();
+		}
 		final boolean archiveFirst = local == null;
 		AeronReplicationPublisher.TransactionMetadata metadata = null;
 		long sequence = -1L;
@@ -194,15 +225,16 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		 * not write it twice. */
 		if (archiveFirst)
 		{
-			metadata = this.publisher.transactionMetadata(buffers);
-			sequence = this.publisher.reserveSequence();
 			try
 			{
+				metadata = this.publisher.transactionMetadata(buffers, bufferCount);
+				sequence = this.publisher.reserveSequence();
 				this.notifyState(AeronReplicationCheckpoint.State.PREPARING, sequence,
 					metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c(), -1);
 			}
 			catch (final RuntimeException | Error failure)
 			{
+				this.clearBufferScratch();
 				this.publisher.failClosed();
 				throw failure;
 			}
@@ -210,15 +242,17 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		try
 		{
 			prepared = archiveFirst
-				? this.publisher.prepareTransaction(this.pendingDictionary, buffers, sequence, metadata)
+				? this.publisher.prepareTransaction(this.pendingDictionary, buffers, bufferCount, sequence, metadata)
 				: this.publisher.prepareTransaction(this.pendingDictionary, buffers,
-					local.sequence(), local.metadata());
+					bufferCount, local.sequence(), local.metadata());
 		}
 		catch (final RuntimeException | Error failure)
 		{
+			this.clearBufferScratch();
 			if (archiveFirst) this.publisher.failClosed();
 			throw failure;
 		}
+		this.clearBufferScratch();
 		prepared.onAbort(abortPosition ->
 		{
 			try
@@ -284,16 +318,18 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		{
 			throw new IllegalStateException("an Aeron local acceptance fence is already pending");
 		}
-		final ByteBuffer[] buffers = AeronBinaryBuffers.collect(data);
-		final AeronReplicationPublisher.TransactionMetadata metadata =
-			this.publisher.transactionMetadata(buffers);
-		/* Reserve the sequence before writing the fence.  The ENQUEUE_THEN_ARCHIVE
-		 * preparation must reuse this exact reservation; reading nextSequence()
-		 * here would leave the fence one sequence behind the published data. */
-		final long sequence = this.publisher.reserveSequence();
-		this.localAcceptanceFence = new LocalEnqueue(sequence, metadata, buffers);
+		final int bufferCount = this.collectBuffers(data);
+		final ByteBuffer[] buffers = this.bufferScratch;
+		final AeronReplicationPublisher.TransactionMetadata metadata;
+		final long sequence;
 		try
 		{
+			metadata = this.publisher.transactionMetadata(buffers, bufferCount);
+			/* Reserve the sequence before writing the fence.  The ENQUEUE_THEN_ARCHIVE
+			 * preparation must reuse this exact reservation; reading nextSequence()
+			 * here would leave the fence one sequence behind the published data. */
+			sequence = this.publisher.reserveSequence();
+			this.localAcceptanceFence = new LocalEnqueue(sequence, metadata, buffers, bufferCount);
 			this.notifyState(AeronReplicationCheckpoint.State.ENQUEUED, sequence,
 				metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c(), -1);
 		}
@@ -303,15 +339,19 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 			 * transaction could accidentally skip or reuse. The publisher is failed
 			 * closed because the durable boundary itself is no longer trustworthy. */
 			this.publisher.failClosed();
-			try
+			if (this.localAcceptanceFence != null)
 			{
-				this.publisher.releaseReservedSequence(sequence);
-			}
-			catch (final RuntimeException | Error releaseFailure)
-			{
-				failure.addSuppressed(releaseFailure);
+				try
+				{
+					this.publisher.releaseReservedSequence(this.localAcceptanceFence.sequence());
+				}
+				catch (final RuntimeException | Error releaseFailure)
+				{
+					failure.addSuppressed(releaseFailure);
+				}
 			}
 			this.localAcceptanceFence = null;
+			this.clearBufferScratch();
 			throw failure;
 		}
 		return sequence;
@@ -332,13 +372,9 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		if (local == null) return;
 		try
 		{
-			/* The Store rejected the write. Do not publish a terminal checkpoint for
-			 * a sequence that does not exist in the log; doing so would make restart
-			 * skip the next real sequence. The negative sequence is an explicit
-			 * "delete fence only" signal consumed by the provider checkpoint writer. */
-			this.listener.onState(AeronReplicationCheckpoint.State.REJECTED, -1,
-				local.metadata().dataLength(), local.metadata().dataChunkCount(),
-				local.metadata().crc32c(), -1);
+			/* The Store rejected the write. There is no Aeron transaction to
+			 * represent, so clear only the local acceptance fence. */
+			this.listener.clearEnqueueFence();
 		}
 		catch (final RuntimeException | Error failure)
 		{
@@ -368,6 +404,7 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		finally
 		{
 			this.localAcceptanceFence = null;
+			this.clearBufferScratch();
 		}
 	}
 
@@ -401,6 +438,7 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 			throw failure;
 		}
 		this.localAcceptanceFence = null;
+		this.clearBufferScratch();
 	}
 
 	synchronized void commit(final AeronReplicationPublisher.PreparedTransaction prepared)
@@ -421,6 +459,7 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 			throw failure;
 		}
 		this.localAcceptanceFence = null;
+		this.clearBufferScratch();
 		this.commitMarkerPublished = false;
 	}
 
@@ -440,12 +479,41 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 			throw failure;
 		}
 		this.localAcceptanceFence = null;
+		this.clearBufferScratch();
 	}
 
 	/** Pairs a reserved sequence with the transaction queued for publication. */
 	private record LocalEnqueue(long sequence, AeronReplicationPublisher.TransactionMetadata metadata,
-		ByteBuffer[] buffers)
+		ByteBuffer[] buffers, int bufferCount)
 	{
+	}
+
+	/** Collects channel buffers into the reusable writer-owned array. */
+	private int collectBuffers(final Binary data)
+	{
+		if (data == null) throw new NullPointerException("data");
+		this.bufferScratchCount = 0;
+		data.iterateChannelChunks(channel ->
+		{
+			if (channel == null) throw new IllegalStateException("Serializer returned a null channel");
+			for (final ByteBuffer buffer : channel.buffers())
+			{
+				if (buffer == null) throw new IllegalStateException("Serializer returned a null channel buffer");
+				if (this.bufferScratchCount == this.bufferScratch.length)
+				{
+					this.bufferScratch = Arrays.copyOf(this.bufferScratch, this.bufferScratch.length * 2);
+				}
+				this.bufferScratch[this.bufferScratchCount++] = buffer;
+			}
+		});
+		return this.bufferScratchCount;
+	}
+
+	/** Drops references to the last transaction's source buffers. */
+	private void clearBufferScratch()
+	{
+		Arrays.fill(this.bufferScratch, 0, this.bufferScratchCount, null);
+		this.bufferScratchCount = 0;
 	}
 
 	synchronized void markCommittingUncertain(final AeronReplicationPublisher.PreparedTransaction prepared)
@@ -470,6 +538,12 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 
 	/** Closes the publisher owned by this coordinator. */
 	@Override
+	public void close()
+	{
+		this.dispose();
+	}
+
+	/** Releases the publisher owned by this coordinator. */
 	public synchronized void dispose()
 	{
 		/* ENQUEUE_THEN_ARCHIVE may be interrupted after the Store accepted data

@@ -507,6 +507,7 @@ class AeronArchiveReplicationIT
 		public void receiveData(final Binary value)
 		{
 			final ByteBuffer source = value.buffers()[0].duplicate();
+			source.flip();
 			this.data = new byte[source.remaining()];
 			source.get(this.data);
 		}

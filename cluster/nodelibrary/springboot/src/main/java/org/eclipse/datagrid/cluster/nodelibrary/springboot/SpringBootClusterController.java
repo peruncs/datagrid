@@ -41,17 +41,33 @@ public class SpringBootClusterController
 {
 	private final ClusterRestRequestController controller;
 
+	/**
+	 * Creates an HTTP controller backed by the neutral request controller.
+	 *
+	 * @param controller neutral cluster request controller
+	 */
 	public SpringBootClusterController(final ClusterRestRequestController controller)
 	{
 		this.controller = controller;
 	}
 
+	/**
+	 * Returns whether the distributor is active.
+	 *
+	 * @return distributor state
+	 * @throws HttpResponseException if the request cannot be served
+	 */
 	@GetMapping(value = GetDistributor.PATH, produces = GetDistributor.PRODUCES)
 	public boolean getDistributor() throws HttpResponseException
 	{
 		return this.call(this.controller::getDistributor);
 	}
 
+	/**
+	 * Starts distributor activation.
+	 *
+	 * @throws HttpResponseException if activation cannot start
+	 */
 	@PostMapping(
 		value = PostActivateDistributorStart.PATH,
 		consumes = PostActivateDistributorStart.CONSUMES,
@@ -62,6 +78,12 @@ public class SpringBootClusterController
 		this.call(this.controller::postActivateDistributorStart);
 	}
 
+	/**
+	 * Finishes distributor activation.
+	 *
+	 * @return whether activation finished successfully
+	 * @throws HttpResponseException if activation cannot finish
+	 */
 	@PostMapping(
 		value = PostActivateDistributorFinish.PATH,
 		consumes = PostActivateDistributorFinish.CONSUMES,
@@ -72,12 +94,23 @@ public class SpringBootClusterController
 		return this.call(this.controller::postActivateDistributorFinish);
 	}
 
+	/**
+	 * Checks node health.
+	 *
+	 * @throws HttpResponseException if the health check fails
+	 */
 	@GetMapping(value = GetHealth.PATH, produces = GetHealth.PRODUCES)
 	public void getHealth() throws HttpResponseException
 	{
 		this.call(this.controller::getHealth);
 	}
 
+	/**
+	 * Checks whether the node is ready to serve traffic.
+	 *
+	 * @return completed asynchronous response
+	 * @throws HttpResponseException if the readiness check fails
+	 */
 	@GetMapping(value = GetHealthReady.PATH, produces = GetHealthReady.PRODUCES)
 	@Async
 	public CompletableFuture<Void> getHealthReady() throws HttpResponseException
@@ -86,6 +119,12 @@ public class SpringBootClusterController
 		return CompletableFuture.completedFuture(null);
 	}
 
+	/**
+	 * Returns the storage usage report.
+	 *
+	 * @return asynchronous storage usage report
+	 * @throws HttpResponseException if the report cannot be read
+	 */
 	@GetMapping(value = GetStorageBytes.PATH, produces = GetStorageBytes.PRODUCES)
 	@Async
 	public CompletableFuture<String> getStorageBytes() throws HttpResponseException
@@ -93,6 +132,12 @@ public class SpringBootClusterController
 		return CompletableFuture.completedFuture(this.call(this.controller::getStorageBytes));
 	}
 
+	/**
+	 * Returns the replication metrics report.
+	 *
+	 * @return asynchronous replication metrics report
+	 * @throws HttpResponseException if the report cannot be read
+	 */
 	@GetMapping(value = GetReplicationMetrics.PATH, produces = GetReplicationMetrics.PRODUCES)
 	@Async
 	public CompletableFuture<String> getReplicationMetrics() throws HttpResponseException
@@ -100,6 +145,12 @@ public class SpringBootClusterController
 		return CompletableFuture.completedFuture(this.call(this.controller::getReplicationMetrics));
 	}
 
+	/**
+	 * Starts the backup operation described by the request body.
+	 *
+	 * @param body backup request
+	 * @throws HttpResponseException if the backup cannot start
+	 */
 	@PostMapping(
 		value = PostBackup.PATH,
 		consumes = PostBackup.CONSUMES,
@@ -110,6 +161,11 @@ public class SpringBootClusterController
 		this.call(() -> this.controller.postBackup(body));
 	}
 
+	/**
+	 * Pauses update delivery.
+	 *
+	 * @throws HttpResponseException if updates cannot be paused
+	 */
 	@PostMapping(
 		value = PostUpdates.PATH,
 		consumes = PostUpdates.CONSUMES,
@@ -120,18 +176,35 @@ public class SpringBootClusterController
 		this.call(this.controller::postUpdates);
 	}
 
+	/**
+	 * Returns whether backup is active.
+	 *
+	 * @return backup state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@GetMapping(value = GetBackup.PATH, produces = GetBackup.PRODUCES)
 	public boolean getBackup() throws HttpResponseException
 	{
 		return this.call(this.controller::getBackup);
 	}
 
+	/**
+	 * Returns whether update delivery is active.
+	 *
+	 * @return update-delivery state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@GetMapping(value = GetUpdates.PATH, produces = GetUpdates.PRODUCES)
 	public boolean getUpdates() throws HttpResponseException
 	{
 		return this.call(this.controller::getUpdates);
 	}
 
+	/**
+	 * Resumes update delivery.
+	 *
+	 * @throws HttpResponseException if updates cannot be resumed
+	 */
 	@PostMapping(
 		value = PostResumeUpdates.PATH,
 		consumes = PostResumeUpdates.CONSUMES,
@@ -142,6 +215,11 @@ public class SpringBootClusterController
 		this.call(this.controller::postResumeUpdates);
 	}
 
+	/**
+	 * Starts garbage collection.
+	 *
+	 * @throws HttpResponseException if garbage collection cannot start
+	 */
 	@PostMapping(
 		value = PostGc.PATH,
 		consumes = PostGc.CONSUMES,
@@ -152,6 +230,12 @@ public class SpringBootClusterController
 		this.call(this.controller::postGc);
 	}
 
+	/**
+	 * Returns whether garbage collection is active.
+	 *
+	 * @return garbage-collection state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@GetMapping(value = GetGc.PATH, produces = GetGc.PRODUCES)
 	public boolean getGc() throws HttpResponseException
 	{

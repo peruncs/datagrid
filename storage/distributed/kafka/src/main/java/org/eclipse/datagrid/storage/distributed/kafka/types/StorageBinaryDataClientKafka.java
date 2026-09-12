@@ -47,9 +47,19 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 {
-	/** Returns the terminal consumer failure, or {@code null} while healthy. */
+	/** Returns the terminal consumer failure, or {@code null} while healthy.
+	 * @return terminal failure, or {@code null}
+	 */
 	RuntimeException failure();
 
+	/** Creates a Kafka client that assembles packets for a receiver.
+	 *
+	 * @param kafkaProperties Kafka consumer properties
+	 * @param topicName Kafka topic
+	 * @param clientId client and consumer-group id
+	 * @param receiver destination receiver
+	 * @return Kafka data client
+	 */
 	static StorageBinaryDataClientKafka New(
 		final Properties kafkaProperties,
 		final String topicName,
@@ -65,6 +75,14 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		);
 	}
 
+	/** Creates a Kafka client that forwards packets to an acceptor.
+	 *
+	 * @param kafkaProperties Kafka consumer properties
+	 * @param topicName Kafka topic
+	 * @param clientId client and consumer-group id
+	 * @param packetAcceptor packet destination
+	 * @return Kafka data client
+	 */
 	static StorageBinaryDataClientKafka New(
 		final Properties kafkaProperties,
 		final String topicName,

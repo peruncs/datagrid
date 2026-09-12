@@ -23,6 +23,16 @@ import org.eclipse.serializer.concurrency.LockedExecutor;
 @Factory
 public class LockedExecutorFactory
 {
+	/** Creates a lock factory. */
+	public LockedExecutorFactory()
+	{
+	}
+
+	/**
+	 * Creates the executor that serializes graph updates.
+	 *
+	 * @return new locked executor
+	 */
 	@Singleton
 	public LockedExecutor lockedExecutor()
 	{

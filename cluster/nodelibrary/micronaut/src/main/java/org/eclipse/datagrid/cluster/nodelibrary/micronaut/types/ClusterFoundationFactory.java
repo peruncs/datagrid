@@ -41,11 +41,24 @@ public class ClusterFoundationFactory
 {
 	private final BeanContext context;
 
+	/**
+	 * Creates a factory backed by the Micronaut bean context.
+	 *
+	 * @param context application bean context
+	 */
 	public ClusterFoundationFactory(final BeanContext context)
 	{
 		this.context = context;
 	}
 
+	/**
+	 * Creates the cluster foundation from the named root configuration.
+	 *
+	 * @param configProvider embedded storage configuration
+	 * @param async whether distribution may use asynchronous delivery
+	 * @param objectGraphUpdateHandler handler for incoming graph updates
+	 * @return configured cluster foundation
+	 */
 	@Singleton
 	public ClusterFoundation<?> clusterFoundation(
 		final EmbeddedStorageConfigurationProvider configProvider,

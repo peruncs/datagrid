@@ -36,11 +36,22 @@ public class HelidonClusterController
 {
 	private final ClusterRestRequestController requestController;
 
+	/**
+	 * Creates an HTTP controller backed by the neutral request controller.
+	 *
+	 * @param requestController neutral cluster request controller
+	 */
 	public HelidonClusterController(final ClusterRestRequestController requestController)
 	{
 		this.requestController = requestController;
 	}
 
+	/**
+	 * Returns whether the distributor is active.
+	 *
+	 * @return distributor state
+	 * @throws HttpResponseException if the request cannot be served
+	 */
 	@GET
 	@Path(GetDistributor.PATH)
 	@Produces(GetDistributor.PRODUCES)
@@ -49,6 +60,11 @@ public class HelidonClusterController
 		return this.requestController.getDistributor();
 	}
 
+	/**
+	 * Starts distributor activation.
+	 *
+	 * @throws HttpResponseException if activation cannot start
+	 */
 	@POST
 	@Path(PostActivateDistributorStart.PATH)
 	@Consumes(PostActivateDistributorStart.CONSUMES)
@@ -58,6 +74,12 @@ public class HelidonClusterController
 		this.requestController.postActivateDistributorStart();
 	}
 
+	/**
+	 * Finishes distributor activation.
+	 *
+	 * @return whether activation finished successfully
+	 * @throws HttpResponseException if activation cannot finish
+	 */
 	@POST
 	@Path(PostActivateDistributorFinish.PATH)
 	@Consumes(PostActivateDistributorFinish.CONSUMES)
@@ -67,6 +89,11 @@ public class HelidonClusterController
 		return this.requestController.postActivateDistributorFinish();
 	}
 
+	/**
+	 * Checks node health.
+	 *
+	 * @throws HttpResponseException if the health check fails
+	 */
 	@GET
 	@Path(GetHealth.PATH)
 	@Produces(GetHealth.PRODUCES)
@@ -75,6 +102,11 @@ public class HelidonClusterController
 		this.requestController.getHealth();
 	}
 
+	/**
+	 * Checks whether the node is ready to serve traffic.
+	 *
+	 * @throws HttpResponseException if the readiness check fails
+	 */
 	@GET
 	@Path(GetHealthReady.PATH)
 	@Produces(GetHealthReady.PRODUCES)
@@ -83,6 +115,12 @@ public class HelidonClusterController
 		this.requestController.getHealthReady();
 	}
 
+	/**
+	 * Returns the storage usage report.
+	 *
+	 * @return storage usage report
+	 * @throws HttpResponseException if the report cannot be read
+	 */
 	@GET
 	@Path(GetStorageBytes.PATH)
 	@Produces(GetStorageBytes.PRODUCES)
@@ -91,6 +129,12 @@ public class HelidonClusterController
 		return this.requestController.getStorageBytes();
 	}
 
+	/**
+	 * Returns the replication metrics report.
+	 *
+	 * @return replication metrics report
+	 * @throws HttpResponseException if the report cannot be read
+	 */
 	@GET
 	@Path(GetReplicationMetrics.PATH)
 	@Produces(GetReplicationMetrics.PRODUCES)
@@ -99,6 +143,12 @@ public class HelidonClusterController
 		return this.requestController.getReplicationMetrics();
 	}
 
+	/**
+	 * Starts the backup operation described by the request body.
+	 *
+	 * @param body backup request
+	 * @throws HttpResponseException if the backup cannot start
+	 */
 	@POST
 	@Path(PostBackup.PATH)
 	@Consumes(PostBackup.CONSUMES)
@@ -108,6 +158,12 @@ public class HelidonClusterController
 		this.requestController.postBackup(body);
 	}
 
+	/**
+	 * Returns whether backup is active.
+	 *
+	 * @return backup state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@GET
 	@Path(GetBackup.PATH)
 	@Produces(GetBackup.PRODUCES)
@@ -116,6 +172,11 @@ public class HelidonClusterController
 		return this.requestController.getBackup();
 	}
 
+	/**
+	 * Pauses update delivery.
+	 *
+	 * @throws HttpResponseException if updates cannot be paused
+	 */
 	@POST
 	@Path(PostUpdates.PATH)
 	@Consumes(PostUpdates.CONSUMES)
@@ -125,6 +186,12 @@ public class HelidonClusterController
 		this.requestController.postUpdates();
 	}
 
+	/**
+	 * Returns whether update delivery is active.
+	 *
+	 * @return update-delivery state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@GET
 	@Path(GetUpdates.PATH)
 	@Produces(GetUpdates.PRODUCES)
@@ -133,6 +200,11 @@ public class HelidonClusterController
 		return this.requestController.getUpdates();
 	}
 
+	/**
+	 * Resumes update delivery.
+	 *
+	 * @throws HttpResponseException if updates cannot be resumed
+	 */
 	@POST
 	@Path(PostResumeUpdates.PATH)
 	@Consumes(PostResumeUpdates.CONSUMES)
@@ -142,6 +214,11 @@ public class HelidonClusterController
 		this.requestController.postResumeUpdates();
 	}
 
+	/**
+	 * Starts garbage collection.
+	 *
+	 * @throws HttpResponseException if garbage collection cannot start
+	 */
 	@POST
 	@Path(PostGc.PATH)
 	@Consumes(PostGc.CONSUMES)
@@ -151,6 +228,12 @@ public class HelidonClusterController
 		this.requestController.postGc();
 	}
 
+	/**
+	 * Returns whether garbage collection is active.
+	 *
+	 * @return garbage-collection state
+	 * @throws HttpResponseException if the state cannot be read
+	 */
 	@GET
 	@Path(GetGc.PATH)
 	@Produces(GetGc.PRODUCES)

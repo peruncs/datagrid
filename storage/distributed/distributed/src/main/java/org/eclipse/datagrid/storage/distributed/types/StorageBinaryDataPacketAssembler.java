@@ -29,7 +29,11 @@ public final class StorageBinaryDataPacketAssembler
 	{
 	}
 
-	/** Result of consuming a packet batch, including a possibly incomplete message. */
+	/** Result of consuming a packet batch, including a possibly incomplete message.
+	 *
+	 * @param pending incomplete message, or {@code null}
+	 * @param completed messages completed by the batch
+	 */
 	public record Result(StorageBinaryDataMessage pending, List<StorageBinaryDataMessage> completed)
 	{
 	}
@@ -110,7 +114,11 @@ public final class StorageBinaryDataPacketAssembler
 		}
 	}
 
-	/** Decodes a completed type-dictionary message without changing its buffer position. */
+	/** Decodes a completed type-dictionary message without changing its buffer position.
+	 *
+	 * @param data completed type-dictionary bytes
+	 * @return decoded type dictionary
+	 */
 	public static String decodeTypeDictionary(final ByteBuffer data)
 	{
 		return new String(XMemory.toArray(data.duplicate()), StandardCharsets.UTF_8);

@@ -255,6 +255,7 @@ class AeronUdpReplicationIT
 		{
 			this.observedBeforeLocal = !this.localAccepted.getAsBoolean();
 			final ByteBuffer source = value.buffers()[0].duplicate();
+			source.flip();
 			final byte[] bytes = new byte[source.remaining()];
 			source.get(bytes);
 			this.data = bytes;

@@ -99,7 +99,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
 		final long initialSequence, final boolean closePublication)
 	{
-		this(offerer(publication), configuration.maxMessageLength(), configuration, clusterId, epoch, initialSequence,
+		this(offerer(publication), actualMaxMessageLength(publication, configuration), configuration, clusterId, epoch, initialSequence,
 			closePublication ? publication : null, LongUnaryOperator.identity());
 	}
 
@@ -107,8 +107,22 @@ final class AeronReplicationPublisher implements AutoCloseable
 		final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
 		final long initialSequence, final boolean closePublication, final LongUnaryOperator commitPositionAwaiter)
 	{
-		this(offerer(publication), configuration.maxMessageLength(), configuration, clusterId, epoch, initialSequence,
+		this(offerer(publication), actualMaxMessageLength(publication, configuration), configuration, clusterId, epoch, initialSequence,
 			closePublication ? publication : null, commitPositionAwaiter);
+	}
+
+	private static int actualMaxMessageLength(final ExclusivePublication publication,
+		final AeronReplicationConfiguration configuration)
+	{
+		if (publication == null) throw new NullPointerException("publication");
+		if (configuration == null) throw new NullPointerException("configuration");
+		final int actual = publication.maxMessageLength();
+		if (actual != configuration.maxMessageLength())
+		{
+			throw new IllegalArgumentException("Aeron publication maxMessageLength=" + actual +
+				" does not match replication configuration value " + configuration.maxMessageLength());
+		}
+		return actual;
 	}
 
 	AeronReplicationPublisher(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
@@ -159,7 +173,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 	/** Publishes one transaction and its terminal commit marker. */
 	synchronized long publishTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers)
 	{
-		return this.commit(this.prepareTransaction(dictionary, dataBuffers));
+		return this.commit(this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length));
 	}
 
 	/**
@@ -177,6 +191,13 @@ final class AeronReplicationPublisher implements AutoCloseable
 	 */
 	synchronized PreparedTransaction prepareTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers)
 	{
+		return this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length);
+	}
+
+	/** Prepares a transaction using only the populated prefix of a reusable buffer array. */
+	private synchronized PreparedTransaction prepareTransaction(final byte[] dictionary,
+		final ByteBuffer[] dataBuffers, final int bufferCount)
+	{
 		this.ensureOpen();
 		if (this.coordinatorOwner != null)
 		{
@@ -187,7 +208,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		this.ensureNoPendingTransaction();
 		crashPoint("BEFORE_PREPARE", this.nextSequence);
 		final int dictionaryLength = dictionary == null ? 0 : dictionary.length;
-		final long totalDataLength = totalRemaining(dataBuffers);
+		final long totalDataLength = totalRemaining(dataBuffers, bufferCount);
 		if (totalDataLength > (long)this.configuration.maxTransactionBytes() - dictionaryLength)
 		{
 			throw new IllegalArgumentException("Store transaction exceeds maxTransactionBytes");
@@ -200,7 +221,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		}
 		this.nextSequence = sequence + 1;
 		final int dataChunks = chunkCount(dataLength);
-		return this.prepareReserved(dictionary, dataBuffers, sequence, dataLength, dataChunks, -1, false);
+		return this.prepareReserved(dictionary, dataBuffers, bufferCount, sequence, dataLength, dataChunks, -1, false);
 	}
 
 	/**
@@ -223,6 +244,14 @@ final class AeronReplicationPublisher implements AutoCloseable
 	synchronized PreparedTransaction prepareTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers,
 		final long reservedSequence, final TransactionMetadata metadata)
 	{
+		return this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length,
+			reservedSequence, metadata);
+	}
+
+	/** Completes preparation with an explicit sequence and populated buffer count. */
+	synchronized PreparedTransaction prepareTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers,
+		final int bufferCount, final long reservedSequence, final TransactionMetadata metadata)
+	{
 		this.ensureOpen();
 		this.failedPrepare = null;
 		this.ensureNoPendingTransaction();
@@ -232,19 +261,19 @@ final class AeronReplicationPublisher implements AutoCloseable
 			throw new IllegalStateException("reserved replication sequence is no longer current");
 		}
 		final int dictionaryLength = dictionary == null ? 0 : dictionary.length;
-		if (metadata.dataLength() != totalRemaining(dataBuffers) ||
+		if (metadata.dataLength() != totalRemaining(dataBuffers, bufferCount) ||
 			metadata.dataLength() < 0 || metadata.dataChunkCount() != this.chunkCount(metadata.dataLength()) ||
 			(long)metadata.dataLength() > (long)this.configuration.maxTransactionBytes() - dictionaryLength)
 		{
 			throw new IllegalArgumentException("transaction metadata does not match Store data");
 		}
 		crashPoint("BEFORE_PREPARE", reservedSequence);
-		return this.prepareReserved(dictionary, dataBuffers, reservedSequence, metadata.dataLength(),
+		return this.prepareReserved(dictionary, dataBuffers, bufferCount, reservedSequence, metadata.dataLength(),
 			metadata.dataChunkCount(), metadata.crc32c(), true);
 	}
 
 	private PreparedTransaction prepareReserved(final byte[] dictionary, final ByteBuffer[] dataBuffers,
-		final long sequence, final int dataLength, final int dataChunks, final int expectedCrc32c,
+		final int bufferCount, final long sequence, final int dataLength, final int dataChunks, final int expectedCrc32c,
 		final boolean verifyExpectedCrc)
 	{
 		try
@@ -254,7 +283,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 				this.publishDictionaryChunks(sequence, new UnsafeBuffer(dictionary), dictionary.length);
 				crashPoint("AFTER_DICTIONARY_CHUNKS", sequence);
 			}
-			final int dataCrc32c = this.publishDataChunks(sequence, dataBuffers, dataLength);
+			final int dataCrc32c = this.publishDataChunks(sequence, dataBuffers, bufferCount, dataLength);
 			if (verifyExpectedCrc && dataCrc32c != expectedCrc32c)
 			{
 				throw new IllegalArgumentException("transaction data changed after durable fence");
@@ -276,7 +305,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 			int failedCrc32c = 0;
 			try
 			{
-				failedCrc32c = this.computeDataCrc(dataBuffers, dataLength);
+				failedCrc32c = this.computeDataCrc(dataBuffers, bufferCount, dataLength);
 			}
 			catch (final RuntimeException | Error crcFailure)
 			{
@@ -356,14 +385,20 @@ final class AeronReplicationPublisher implements AutoCloseable
 	/** Computes the metadata used by an in-flight local-write record. */
 	synchronized TransactionMetadata transactionMetadata(final ByteBuffer[] dataBuffers)
 	{
-		final long length = totalRemaining(dataBuffers);
+		return this.transactionMetadata(dataBuffers, dataBuffers == null ? 0 : dataBuffers.length);
+	}
+
+	/** Computes transaction metadata for the populated prefix of a reusable buffer array. */
+	 synchronized TransactionMetadata transactionMetadata(final ByteBuffer[] dataBuffers, final int bufferCount)
+	{
+		final long length = totalRemaining(dataBuffers, bufferCount);
 		if (length > this.configuration.maxTransactionBytes())
 		{
 			throw new IllegalArgumentException("Store transaction exceeds maxTransactionBytes");
 		}
 		final int dataLength = (int)length;
 		return new TransactionMetadata(dataLength, this.chunkCount(dataLength),
-			this.computeDataCrc(dataBuffers, dataLength));
+			this.computeDataCrc(dataBuffers, bufferCount, dataLength));
 	}
 
 	/** Metadata retained while a transaction moves through writer states. */
@@ -376,8 +411,15 @@ final class AeronReplicationPublisher implements AutoCloseable
 	{
 	}
 
-	/** Publishes Store data directly from the caller's buffer sequence. */
-	private int publishDataChunks(final long sequence, final ByteBuffer[] sources, final int length)
+	/**
+	 * Publishes Store data directly from the caller's buffer sequence.
+	 *
+	 * <p>The returned value is the CRC32C of the complete logical Store binary.
+	 * The coordinator uses it in the commit marker. The earlier fence CRC remains
+	 * a separate pass because it is the recovery evidence written before local
+	 * Store acceptance.</p>
+	 */
+	private int publishDataChunks(final long sequence, final ByteBuffer[] sources, final int sourceCount, final int length)
 	{
 		final CRC32C crc = this.dataCrc;
 		crc.reset();
@@ -400,7 +442,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 			{
 				while (!source.hasRemaining())
 				{
-					if (++sourceIndex >= sources.length) throw new IllegalArgumentException("data buffer length changed");
+					if (++sourceIndex >= sourceCount) throw new IllegalArgumentException("data buffer length changed");
 					source = sources[sourceIndex].duplicate();
 				}
 				final int amount = Math.min(source.remaining(), chunkLength - copied);
@@ -422,13 +464,14 @@ final class AeronReplicationPublisher implements AutoCloseable
 		return (int)crc.getValue();
 	}
 
-	private int computeDataCrc(final ByteBuffer[] sources, final int length)
+	private int computeDataCrc(final ByteBuffer[] sources, final int sourceCount, final int length)
 	{
 		final CRC32C crc = this.dataCrc;
 		crc.reset();
 		int remaining = length;
-		for (final ByteBuffer sourceBuffer : sources)
+		for (int sourceIndex = 0; sourceIndex < sourceCount; sourceIndex++)
 		{
+			final ByteBuffer sourceBuffer = sources[sourceIndex];
 			final ByteBuffer source = sourceBuffer.duplicate();
 			final int amount = Math.min(remaining, source.remaining());
 			if (amount > 0)
@@ -618,6 +661,12 @@ final class AeronReplicationPublisher implements AutoCloseable
 		return this.pendingTransaction != null && !this.pendingTransaction.terminal;
 	}
 
+	/** Returns whether publication resources have completed their terminal close. */
+	synchronized boolean isClosed()
+	{
+		return this.closed;
+	}
+
 	/** Claims the publisher for its single write coordinator. */
 	synchronized void claimCoordinator(final Object coordinator)
 	{
@@ -647,12 +696,14 @@ final class AeronReplicationPublisher implements AutoCloseable
 		return this.failed;
 	}
 
-	private static long totalRemaining(final ByteBuffer[] buffers)
+	private static long totalRemaining(final ByteBuffer[] buffers, final int count)
 	{
 		if (buffers == null) throw new NullPointerException("dataBuffers");
+		if (count < 0 || count > buffers.length) throw new IllegalArgumentException("invalid data buffer count");
 		long length = 0;
-		for (final ByteBuffer buffer : buffers)
+		for (int index = 0; index < count; index++)
 		{
+			final ByteBuffer buffer = buffers[index];
 			if (buffer == null) throw new NullPointerException("dataBuffers contains null");
 			length = Math.addExact(length, buffer.remaining());
 		}
