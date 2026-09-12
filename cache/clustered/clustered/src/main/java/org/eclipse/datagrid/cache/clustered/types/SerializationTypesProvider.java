@@ -21,13 +21,30 @@ import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * This provider lists types that the clustered-cache serializer must know.
+ *
+ * <p>Applications can add their own cache key or message types. The default
+ * provider contains the Hibernate key types, the timestamp message, and the
+ * common identifier type used by the built-in cache integration.</p>
+ */
 public interface SerializationTypesProvider
 {
-    Collection<Class<?>> provideTypes();
+	/** Returns all types that must be registered before messages are serialized.
+	 *
+	 * @return types required by the serializer
+	 */
+	Collection<Class<?>> provideTypes();
 
-    class Default implements SerializationTypesProvider
-    {
-        @Override
+	/** The built-in set of types used by the cache integration. */
+	class Default implements SerializationTypesProvider
+	{
+		/** Creates the default provider. */
+		public Default()
+		{
+		}
+
+		@Override
         public Collection<Class<?>> provideTypes()
         {
             return List.of(

@@ -31,6 +31,13 @@ import java.util.stream.Collectors;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This backend exports backups locally and stores them through a backup proxy.
+ *
+ * <p>The scratch directory holds temporary archives. The proxy is the durable
+ * boundary, so a backup is usable only after its archive and replication
+ * metadata have both been uploaded.</p>
+ */
 public interface NetworkArchiveBackupBackend extends StorageBackupBackend
 {
     static NetworkArchiveBackupBackend New(
@@ -48,6 +55,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend
         );
     }
 
+    /** Implements backup export, upload, download, and cleanup. */
     final class Default implements NetworkArchiveBackupBackend
     {
         private static final Logger LOG = LoggerFactory.getLogger(NetworkArchiveBackupBackend.class);

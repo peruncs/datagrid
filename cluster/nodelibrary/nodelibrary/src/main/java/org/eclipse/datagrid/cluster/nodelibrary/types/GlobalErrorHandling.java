@@ -18,6 +18,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/** Handles an unrecoverable application error and terminates the process. */
 public final class GlobalErrorHandling
 {
 	private static final Logger LOG = LoggerFactory.getLogger(GlobalErrorHandling.class);

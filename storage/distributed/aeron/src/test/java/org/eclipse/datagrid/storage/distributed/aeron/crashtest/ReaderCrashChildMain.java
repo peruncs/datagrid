@@ -263,7 +263,10 @@ public final class ReaderCrashChildMain
 				}
 				try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE))
 				{
-					while (buffer.hasRemaining()) channel.write(buffer);
+					while (buffer.hasRemaining())
+					{
+						if (channel.write(buffer) == 0) throw new IOException("Cursor write made no progress");
+					}
 					channel.force(true);
 				}
 				if ("AFTER_CURSOR_TEMP_WRITE_BEFORE_RENAME".equals(point))
@@ -298,9 +301,15 @@ public final class ReaderCrashChildMain
 			try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
 				StandardOpenOption.APPEND))
 			{
-				while (header.hasRemaining()) channel.write(header);
+				while (header.hasRemaining())
+				{
+					if (channel.write(header) == 0) throw new IOException("Reader fixture header write made no progress");
+				}
 				final ByteBuffer payload = ByteBuffer.wrap(bytes);
-				while (payload.hasRemaining()) channel.write(payload);
+				while (payload.hasRemaining())
+				{
+					if (channel.write(payload) == 0) throw new IOException("Reader fixture payload write made no progress");
+				}
 				channel.force(true);
 			}
 		}
@@ -334,7 +343,10 @@ public final class ReaderCrashChildMain
 				try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE))
 				{
 					final ByteBuffer bytes = StandardCharsets.UTF_8.encode(value);
-					while (bytes.hasRemaining()) channel.write(bytes);
+					while (bytes.hasRemaining())
+					{
+						if (channel.write(bytes) == 0) throw new IOException("Reader milestone write made no progress");
+					}
 					channel.force(true);
 				}
 				Files.move(temporary, path, java.nio.file.StandardCopyOption.ATOMIC_MOVE,

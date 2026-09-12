@@ -63,12 +63,37 @@ public record AeronReplicationCheckpoint(
 	{
 		if (recordType == null || durabilityMode == null || state == null || clusterId == null ||
 			nodeId == null || storeGeneration == null || recordingId < -1 || writerEpoch < 0 ||
-			transactionSequence < -1 || recordingPosition < -1 || dataLength < 0 || dataChunkCount < 0)
+				transactionSequence < -1 || transactionSequence == Long.MAX_VALUE || recordingPosition < -1 ||
+				dataLength < 0 || dataChunkCount < 0)
 		{
 			throw new IllegalArgumentException("invalid Aeron replication checkpoint");
 		}
+		/* Keep the persisted state machine closed over its domain.  Without these
+		 * checks a corrupt-but-checksummed record could be accepted and interpreted
+		 * as a different kind of recovery evidence (for example a reader cursor
+		 * carrying a COMMITTED writer state). */
+		if (recordType == RecordType.READER_CURSOR)
+		{
+			if (state != State.COMMITTING_UNCERTAIN || transactionSequence < 0 || recordingPosition < 0)
+			{
+				throw new IllegalArgumentException("invalid Aeron reader cursor checkpoint state");
+			}
+		}
+		else
+		{
+			if (transactionSequence < 0)
+			{
+				throw new IllegalArgumentException("writer checkpoint must identify a transaction");
+			}
+			if ((state == State.COMMITTED || state == State.REJECTED) &&
+				(recordingId < 0 || recordingPosition < 0))
+			{
+				throw new IllegalArgumentException("terminal writer checkpoint must identify a durable Archive position");
+			}
+		}
 	}
 
+	/** Distinguishes a writer checkpoint from a reader cursor record. */
 	public enum RecordType
 	{
 	/** A record owned by the single writer. */
@@ -88,6 +113,7 @@ public record AeronReplicationCheckpoint(
 		}
 	}
 
+	/** Describes how the writer waits for replication durability. */
 	public enum DurabilityMode
 	{
 	/** Publish the Archive transaction before accepting it locally. */
@@ -107,6 +133,7 @@ public record AeronReplicationCheckpoint(
 		}
 	}
 
+	/** States in the persisted writer and reader recovery machine. */
 	public enum State
 	{
 	/** Data publication has started but has no terminal result yet. */

@@ -17,6 +17,13 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 
+/**
+ * This manager reports node readiness and starts storage maintenance work.
+ *
+ * <p>Readiness means the node can serve its role. Health also considers whether
+ * its active transport is still functioning. Implementations close their own
+ * transport and storage collaborators.</p>
+ */
 public interface ClusterNodeManager extends AutoCloseable
 {
 	@Override
@@ -46,4 +53,16 @@ public interface ClusterNodeManager extends AutoCloseable
 	{
 		return isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING;
 	}
+
+	/** Monitoring hook for the selected provider's Archive capacity. */
+	default long getArchiveUsableSpaceBytes() { return -1L; }
+
+	/** Monitoring hook for the writer's last durable recording position. */
+	default long getWriterDurablePosition() { return -1L; }
+
+	/** Monitoring hook for the writer's last durable sequence. */
+	default long getWriterDurableSequence() { return -1L; }
+
+	/** Monitoring hook for the reader's last applied sequence. */
+	default long getAppliedSequence() { return -1L; }
 }

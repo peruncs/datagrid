@@ -23,6 +23,13 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfig
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.*;
 import org.eclipse.microprofile.openapi.annotations.parameters.RequestBody;
 
+/**
+ * This controller exposes the neutral node operations through Helidon REST.
+ *
+ * <p>It keeps transport annotations at the framework edge and delegates all
+ * state changes to {@link ClusterRestRequestController}. The neutral
+ * controller remains the single owner of node rules and error decisions.</p>
+ */
 @ApplicationScoped
 @Path(StorageNodeRestRouteConfigurations.ROOT_PATH)
 public class HelidonClusterController

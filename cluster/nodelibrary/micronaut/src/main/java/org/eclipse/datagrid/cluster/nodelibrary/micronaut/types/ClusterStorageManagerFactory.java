@@ -23,6 +23,7 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterFoundation;
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageManager;
 import org.eclipse.store.storage.types.StorageManager;
 
+/** Creates the cluster-aware storage manager for the Micronaut context. */
 @Factory
 public class ClusterStorageManagerFactory
 {

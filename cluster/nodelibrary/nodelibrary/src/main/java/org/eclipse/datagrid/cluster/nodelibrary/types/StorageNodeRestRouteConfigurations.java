@@ -14,9 +14,16 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-
+/**
+ * This class keeps the node REST paths and media types in one place.
+ *
+ * <p>Framework adapters use these constants to expose the same route table in
+ * Helidon, Micronaut, and Spring Boot. The neutral request controller remains
+ * responsible for the behavior behind each route.</p>
+ */
 public final class StorageNodeRestRouteConfigurations
 {
+	/** Shared media types used by the node endpoints. */
 	public static final class MediaTypes
 	{
 		private static final String WILDCARD = "*/*";
@@ -30,6 +37,7 @@ public final class StorageNodeRestRouteConfigurations
 
 	public static final String ROOT_PATH = "/eclipse-datagrid";
 
+	/** Reads whether this node is the distributor. */
 	public static final class GetDistributor
 	{
 		public static final String PATH = "/distributor";
@@ -40,6 +48,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Starts the distributor role transition. */
 	public static final class PostActivateDistributorStart
 	{
 		public static final String PATH = "/activate-distributor/start";
@@ -51,6 +60,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Finishes the distributor role transition. */
 	public static final class PostActivateDistributorFinish
 	{
 		public static final String PATH = "/activate-distributor/finish";
@@ -62,6 +72,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Reads the node health state. */
 	public static final class GetHealth
 	{
 		public static final String PATH = "/health";
@@ -72,6 +83,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Reads whether the node is ready to serve. */
 	public static final class GetHealthReady
 	{
 		public static final String PATH = "/health/ready";
@@ -82,6 +94,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Reads the number of bytes used by storage. */
 	public static final class GetStorageBytes
 	{
 		public static final String PATH = "/storage-bytes";
@@ -93,6 +106,7 @@ public final class StorageNodeRestRouteConfigurations
 	}
 
 	/** Prometheus text endpoint for transport-neutral replication state. */
+	/** Reads provider-neutral replication metrics. */
 	public static final class GetReplicationMetrics
 	{
 		public static final String PATH = "/replication-metrics";
@@ -103,12 +117,14 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Starts a storage backup. */
 	public static final class PostBackup
 	{
 		public static final String PATH = "/backup";
 		public static final String CONSUMES = MediaTypes.APPLICATION_JSON;
 		public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
+		/** Request body that selects the manual backup slot. */
 		public static final class Body
 		{
 			private Boolean useManualSlot;
@@ -129,6 +145,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Reads whether a backup is running. */
 	public static final class GetBackup
 	{
 		public static final String PATH = "/backup";
@@ -139,6 +156,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Stops replication at the latest safe message. */
 	public static final class PostUpdates
 	{
 		public static final String PATH = "/updates";
@@ -150,6 +168,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Reads whether replication is paused. */
 	public static final class GetUpdates
 	{
 		public static final String PATH = "/updates";
@@ -160,6 +179,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Resumes replication after a controlled pause. */
 	public static final class PostResumeUpdates
 	{
 		public static final String PATH = "/resume-updates";
@@ -171,6 +191,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Starts asynchronous storage checks and cleanup. */
 	public static final class PostGc
 	{
 		public static final String PATH = "/gc";
@@ -182,6 +203,7 @@ public final class StorageNodeRestRouteConfigurations
 		}
 	}
 
+	/** Reads whether storage checks are running. */
 	public static final class GetGc
 	{
 		public static final String PATH = "/gc";

@@ -28,6 +28,13 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
+/**
+ * This controller exposes neutral node operations through Spring MVC.
+ *
+ * <p>Spring handles routing and asynchronous response wrappers. The neutral
+ * request controller owns node state; this class translates its HTTP failures
+ * into Spring response exceptions.</p>
+ */
 @RestController
 @RequestMapping(StorageNodeRestRouteConfigurations.ROOT_PATH)
 public class SpringBootClusterController

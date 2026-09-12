@@ -22,10 +22,18 @@ import java.nio.ByteBuffer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This message assembles ordered packets into one type dictionary or binary.
+ *
+ * <p>The message owns its direct buffer after the first packet arrives. A
+ * complete message can be consumed and then disposed; callers must not retain
+ * its buffer after disposal.</p>
+ */
 public interface StorageBinaryDataMessage extends Disposable
 {
 	/** Defensive upper bound for a single network message before a transport-specific limit is supplied. */
 	int MAX_MESSAGE_LENGTH = 256 * 1024 * 1024;
+	/** Identifies whether the assembled bytes describe types or Store data. */
 	enum MessageType
 	{
 		TYPE_DICTIONARY,
@@ -51,6 +59,7 @@ public interface StorageBinaryDataMessage extends Disposable
 		);
 	}
 
+	/** Owns the direct buffer and validates packet order and dimensions. */
 	class Default implements StorageBinaryDataMessage
 	{
 		private final MessageType type;

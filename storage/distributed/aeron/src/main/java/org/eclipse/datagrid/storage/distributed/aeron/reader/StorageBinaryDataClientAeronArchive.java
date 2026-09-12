@@ -72,7 +72,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		this.subscription = java.util.Objects.requireNonNull(subscription, "subscription");
 		try
 		{
-			this.stopTimeoutNanos = java.util.Objects.requireNonNull(configuration, "configuration").offerTimeoutNanos();
+			this.stopTimeoutNanos = java.util.Objects.requireNonNull(configuration, "configuration").readerStopTimeoutNanos();
 			this.assembler = new TransactionAssembler(
 				configuration, clusterId, epoch, initialSequence, initialPosition, receiver, transactionResolved,
 				deliveryListener
@@ -262,6 +262,12 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		{
 			throw new IllegalStateException("Aeron Archive reader is disposed or stopping for disposal");
 		}
+		if (this.assembler.failure() != null)
+		{
+			throw new IllegalStateException(
+				"cannot start a failed Aeron Archive reader; create a new reader from its durable cursor",
+				this.assembler.failure());
+		}
 		final Thread existing = this.thread;
 		if (existing != null && existing.isAlive())
 		{
@@ -361,12 +367,17 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	/** Requests a stop after replay reaches the current live tail. */
 	public synchronized void stopAtLatestMessage()
 	{
-		if (!this.disposed)
+		if (this.disposed)
 		{
-			this.stopAtLatest = true;
-			this.stopDeadlineNanos = System.nanoTime() + this.stopTimeoutNanos;
-			if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
+			return;
 		}
+		if (this.disposeRequested)
+		{
+			throw new IllegalStateException("Aeron Archive reader is stopping for disposal");
+		}
+		this.stopAtLatest = true;
+		this.stopDeadlineNanos = System.nanoTime() + this.stopTimeoutNanos;
+		if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
 	}
 
 	/** Returns the last sequence delivered after commit and checksum validation. */
@@ -445,11 +456,15 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	}
 
 	/** Stops polling after a terminal Aeron client or MediaDriver failure. */
-	public void fail(final RuntimeException failure)
+	public synchronized void fail(final RuntimeException failure)
 	{
 		this.assembler.failure(java.util.Objects.requireNonNull(failure, "failure"));
 		this.active.set(false);
 		this.live = false;
+		if (this.stopOutcome != StorageBinaryDataClient.StopOutcome.CLOSED)
+		{
+			this.stopOutcome = StorageBinaryDataClient.StopOutcome.FAILED;
+		}
 	}
 
 	/**

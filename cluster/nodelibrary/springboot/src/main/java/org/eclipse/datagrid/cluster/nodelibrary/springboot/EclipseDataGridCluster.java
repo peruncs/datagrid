@@ -25,6 +25,13 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
+/**
+ * This configuration assembles the cluster services in Spring Boot.
+ *
+ * <p>Spring owns the beans and their shutdown order. The foundation creates the
+ * neutral request controller and cluster-aware storage manager, while the
+ * object graph handler applies updates under one lock.</p>
+ */
 @Configuration
 @Import(SpringBootClusterController.class)
 public class EclipseDataGridCluster

@@ -17,6 +17,13 @@ package org.eclipse.datagrid.storage.distributed.types;
 
 import org.eclipse.serializer.concurrency.XThreads;
 
+/**
+ * This handler decides when a received storage update may touch the graph.
+ *
+ * <p>The built-in synchronized handler applies one update at a time. Framework
+ * integrations can provide a handler that uses their own cluster lock, but an
+ * update must not race with a local graph write.</p>
+ */
 @FunctionalInterface
 public interface ObjectGraphUpdateHandler
 {

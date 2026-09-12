@@ -23,6 +23,14 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 
 import java.util.function.UnaryOperator;
 
+/**
+ * This utility installs distributed writing into an embedded Store foundation.
+ *
+ * <p>The configured foundation keeps its normal local target and type
+ * dictionary, then wraps both so committed binary data and type definitions
+ * reach the supplied distributor. The utility changes the foundation in place
+ * and returns it for fluent setup.</p>
+ */
 public final class DistributedStorage
 {
 	public static EmbeddedStorageFoundation<?> configureWriting(

@@ -38,6 +38,7 @@ public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binar
 		);
 	}
 
+	/** Delegates a local Store write before publishing the same binary. */
 	class Default implements StorageBinaryTargetDistributing
 	{
 		private final PersistenceTarget<Binary> delegate;

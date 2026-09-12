@@ -27,8 +27,16 @@ import javax.cache.event.*;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This listener publishes cache timestamp changes to a Kafka topic.
+ *
+ * <p>The sender waits for each Kafka send to complete so a local cache event
+ * cannot outrun the invalidation it represents. The sender closes the producer
+ * when the cache region is released.</p>
+ */
 public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListener<K, V>, Disposable
 {
+    /** Creates a sender for the timestamp cache. */
     static <K, V> ClusteredCacheMessageSender<K, V> UpdateTimestamps(
         final KafkaProducer<String, byte[]> producer,
         final String topicName,
@@ -44,6 +52,7 @@ public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListen
         );
     }
 
+    /** Shared publishing logic for cache event listeners. */
     abstract class Abstract<K, V> implements ClusteredCacheMessageSender<K, V>
     {
         private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageSender.Abstract.class);
@@ -122,6 +131,7 @@ public interface KafkaClusteredCacheMessageSender<K, V> extends CacheEntryListen
         }
     }
 
+    /** Converts timestamp cache events into cluster update messages. */
     class UpdateTimestamps<K, V> extends Abstract<K, V>
         implements CacheEntryUpdatedListener<K, V>, CacheEntryCreatedListener<K, V>
     {

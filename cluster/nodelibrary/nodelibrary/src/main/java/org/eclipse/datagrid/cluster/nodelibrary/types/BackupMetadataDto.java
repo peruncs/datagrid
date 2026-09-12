@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-
+/** Metadata returned by the remote backup service. */
 public class BackupMetadataDto
 {
 	private String name;

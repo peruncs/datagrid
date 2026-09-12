@@ -86,7 +86,7 @@ class StorageBinaryImportIntegrationTest
 			reader.shutdown();
 
 			final EmbeddedStorageManager restarted = foundation(readerPath).start();
-			final Root importedRoot = (Root)restarted.root();
+			final Root importedRoot = restarted.root();
 			assertTrue(importedRoot.values.containsAll(List.of("one", "two")));
 			assertTrue(importedRoot.entries.isEmpty(), "deleted Store objects must remain deleted after import");
 			restarted.shutdown();

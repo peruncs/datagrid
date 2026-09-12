@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
  * #L%
  */
 
-
+/** Reports an invariant failure that should not be reachable in normal use. */
 public class UnreachableCodeException extends NodelibraryException
 {
 	public UnreachableCodeException()

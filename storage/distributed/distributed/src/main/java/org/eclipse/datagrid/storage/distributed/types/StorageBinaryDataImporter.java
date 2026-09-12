@@ -73,6 +73,34 @@ public final class StorageBinaryDataImporter
 		}
 	}
 
+	/**
+	 * Imports already-direct buffers without allocating a second native copy.
+	 *
+	 * @param storage destination Store connection
+	 * @param buffers buffers offered by the transport
+	 * @return {@code true} when all buffers were direct and ownership was imported
+	 */
+	public static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers)
+	{
+		notNull(storage);
+		notNull(buffers);
+		for (final ByteBuffer buffer : buffers)
+		{
+			if (buffer == null || !buffer.isDirect()) return false;
+		}
+		try
+		{
+			storage.importData(org.eclipse.serializer.util.X.Enum(buffers));
+			for (final ByteBuffer buffer : buffers) buffer.position(0);
+			return true;
+		}
+		catch (final RuntimeException | Error failure)
+		{
+			release(buffers);
+			throw failure;
+		}
+	}
+
 	/** Releases native buffers returned by {@link #importOwned(StorageConnection, ByteBuffer[])}. */
 	public static void release(final ByteBuffer[] buffers)
 	{

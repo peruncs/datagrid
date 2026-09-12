@@ -16,7 +16,14 @@ package org.eclipse.datagrid.cache.clustered.types;
 
 import org.eclipse.serializer.typing.Disposable;
 
+/**
+ * This receiver listens for remote cache invalidations.
+ *
+ * <p>{@link #start()} begins delivery after construction. Disposal stops
+ * delivery and releases the underlying transport resources.</p>
+ */
 public interface ClusteredCacheMessageReceiver extends Disposable
 {
-    void start();
+	/** Starts consuming remote invalidations. */
+	void start();
 }

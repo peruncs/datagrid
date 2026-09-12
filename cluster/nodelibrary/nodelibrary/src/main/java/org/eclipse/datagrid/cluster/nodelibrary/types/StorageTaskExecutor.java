@@ -21,6 +21,13 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This executor runs storage maintenance work away from the caller thread.
+ *
+ * <p>Only one check task may run at a time. A later request while that task is
+ * active is ignored, and the next request can start after the previous thread
+ * has finished.</p>
+ */
 public interface StorageTaskExecutor
 {
 	void runChecks();
@@ -32,6 +39,7 @@ public interface StorageTaskExecutor
 		return new Default(notNull(connection));
 	}
 
+	/** Implements the single-flight storage-check state machine. */
 	class Abstract implements StorageTaskExecutor
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(Abstract.class);
@@ -72,6 +80,7 @@ public interface StorageTaskExecutor
 		}
 	}
 
+	/** Provides the standard storage-check executor. */
 	final class Default extends Abstract implements StorageTaskExecutor
 	{
 		private Default(final StorageConnection connection)

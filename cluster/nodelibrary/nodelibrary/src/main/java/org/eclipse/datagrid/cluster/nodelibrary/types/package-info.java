@@ -12,12 +12,17 @@
  * #L%
  */
 /**
- * Transport-neutral cluster lifecycle and replication SPI.
+ * This package coordinates the transport-neutral cluster lifecycle.
  *
- * <p>The package coordinates Data Grid storage, cursors, health, retention,
- * and provider selection. Kafka and Aeron implementations are installed as
+ * <p>Node services use these contracts to move from construction to running,
+ * draining, and closed states. A provider owns its transport resources, while
+ * the node owns start and stop order. Kafka and Aeron implementations are
  * optional sibling modules discovered through {@link java.util.ServiceLoader};
  * this package intentionally contains neither client library.</p>
+ *
+ * <p>Callers must finish a node's write and replication work before closing its
+ * storage. Cursors and backup callbacks are valid only while their owning node
+ * remains active.</p>
  *
  * @since 1.0
  */

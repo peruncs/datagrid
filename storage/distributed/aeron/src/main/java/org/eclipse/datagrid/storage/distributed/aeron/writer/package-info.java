@@ -13,6 +13,11 @@
  */
 
 /**
- * Aeron publication, Archive recording, and Store-write coordination.
+ * This package writes complete Store transactions to Aeron.
+ *
+ * <p>The writer publishes data in order and records the same stream for later
+ * replay. A transaction end marker is the hand-off point: consumers may apply
+ * the transaction only after that marker is durable. The writer must be closed
+ * after the final transaction has been published.</p>
  */
 package org.eclipse.datagrid.storage.distributed.aeron.writer;

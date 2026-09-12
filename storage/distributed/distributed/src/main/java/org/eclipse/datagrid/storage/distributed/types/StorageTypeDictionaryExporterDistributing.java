@@ -21,6 +21,13 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporte
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This exporter sends the persistence type dictionary along with storage data.
+ *
+ * <p>It first updates the local delegate and then distributes the assembled
+ * dictionary. Receivers can therefore learn the type definitions before they
+ * materialize a later binary message.</p>
+ */
 public interface StorageTypeDictionaryExporterDistributing extends PersistenceTypeDictionaryExporter
 {
 	static StorageTypeDictionaryExporterDistributing New(
@@ -35,6 +42,7 @@ public interface StorageTypeDictionaryExporterDistributing extends PersistenceTy
 		);
 	}
 
+	/** Exports locally before publishing the matching type dictionary. */
 	class Default implements StorageTypeDictionaryExporterDistributing
 	{
 		private final PersistenceTypeDictionaryExporter delegate;

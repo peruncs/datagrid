@@ -24,6 +24,13 @@ import java.util.Optional;
 
 import static org.eclipse.serializer.math.XMath.positive;
 
+/**
+ * This backend stores and retrieves the durable files that make up a backup.
+ *
+ * <p>Backup metadata identifies the message position associated with the
+ * stored files. Implementations must not report a backup as usable until its
+ * storage and metadata are complete.</p>
+ */
 public interface StorageBackupBackend
 {
 	List<BackupMetadata> listBackups() throws NodelibraryException;

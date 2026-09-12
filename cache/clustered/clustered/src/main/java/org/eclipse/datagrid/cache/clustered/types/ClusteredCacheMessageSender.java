@@ -18,6 +18,16 @@ import org.eclipse.serializer.typing.Disposable;
 
 import javax.cache.event.CacheEntryListener;
 
+/**
+ * This listener sends local cache changes to the cluster.
+ *
+ * <p>The sender is also disposable because it owns the transport resource used
+ * to publish those changes. The cache configuration releases it when the
+ * cache is closed.</p>
+ *
+ * @param <K> cache key type
+ * @param <V> cache value type
+ */
 public interface ClusteredCacheMessageSender<K, V> extends CacheEntryListener<K, V>, Disposable
 {
 }

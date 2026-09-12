@@ -12,16 +12,21 @@
  * #L%
  */
 /**
- * Transport-neutral Store binary replication contracts for Eclipse Data Grid.
+ * This module defines the neutral contract for moving Store binary data.
  *
- * <p>The module contains the SPI used by optional Kafka and Aeron providers.
- * It intentionally exports no provider implementation and therefore does not
- * pull a messaging client into applications that do not use clustering.</p>
+ * <p>It owns packet, transaction, reader, writer, import, and materialization
+ * contracts. Optional Kafka and Aeron modules implement those contracts. This
+ * module exports no provider implementation, so an application can use the
+ * neutral API without pulling in a messaging client.</p>
+ *
+ * <p>Implementations must preserve transaction boundaries and must release
+ * binary resources after the receiving object graph has accepted them.</p>
+ *
+ * @since 1.0
  */
 module org.eclipse.datagrid.storage.distributed
 {
 	requires org.eclipse.store.storage.embedded;
-	requires org.eclipse.store.storage.embedded.configuration;
 	requires org.eclipse.serializer.base;
 	requires org.eclipse.serializer.persistence;
 	requires org.eclipse.serializer.persistence.binary;

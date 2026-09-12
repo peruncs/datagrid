@@ -9,6 +9,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -231,6 +232,28 @@ class AeronReplicationPublisherTest
 
 		assertEquals(1, abortCallbacks.get());
 		assertTrue(abortPosition.get() >= 0);
+	}
+
+	/** A transient abort offer failure keeps the token retryable and never emits two aborts. */
+	@Test
+	void closeCanRetryPendingAbortAfterNotConnectedFailure()
+	{
+		final AtomicInteger offers = new AtomicInteger();
+		final AtomicBoolean failAbort = new AtomicBoolean(true);
+		final AeronReplicationConfiguration configuration = configuration(1_000_000L);
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> offers.getAndIncrement() == 0 || !failAbort.get()
+				? length : Publication.NOT_CONNECTED,
+			configuration.maxMessageLength(), configuration, CLUSTER, 1, 0);
+		final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+			null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {6})});
+
+		assertThrows(IllegalStateException.class, publisher::close);
+		assertTrue(publisher.hasPendingTransaction(), "a marker that was never accepted must remain retryable");
+		failAbort.set(false);
+		assertDoesNotThrow(publisher::close);
+		assertFalse(publisher.hasPendingTransaction());
+		assertTrue(prepared.sequence() == 0L);
 	}
 
 	/** Verifies a direct publisher abort invokes the same callback as shutdown abort. */

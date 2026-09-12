@@ -32,11 +32,20 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.eclipse.serializer.chars.XChars.notEmpty;
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This distributor publishes storage packets to Kafka.
+ *
+ * <p>Every packet uses one stable partition key, so Kafka keeps the packet
+ * order required to rebuild a transaction. The asynchronous variant may
+ * return before Kafka finishes; callers must observe its failure state and
+ * dispose the distributor during shutdown.</p>
+ */
 public interface StorageBinaryDataDistributorKafka
 	extends
 		StorageBinaryDataDistributor
@@ -65,6 +74,7 @@ public interface StorageBinaryDataDistributorKafka
 		);
 	}
 
+	/** Shared producer, failure, and disposal behavior for both modes. */
 	abstract class Abstract implements StorageBinaryDataDistributorKafka
 	{
 		protected static final System.Logger LOG = System.getLogger(StorageBinaryDataDistributorKafka.class.getName());
@@ -73,6 +83,8 @@ public interface StorageBinaryDataDistributorKafka
 		private KafkaProducer<String, byte[]> kafkaProducer;
 		private volatile RuntimeException failure;
 		protected final AtomicLong droppedAfterFailure = new AtomicLong();
+		private volatile boolean disposed;
+		private volatile boolean disposing;
 
 		Abstract(
 			final Properties kafkaProperties,
@@ -100,16 +112,28 @@ public interface StorageBinaryDataDistributorKafka
 			properties.setProperty(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
 			properties.setProperty(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
 
-			final KafkaProducer<String, byte[]> producer = new KafkaProducer<>(properties);
-			final int partitionCount = producer.partitionsFor(this.topicName).size();
-			if (partitionCount != 1)
+			KafkaProducer<String, byte[]> producer = null;
+			try
 			{
-				producer.close();
-				throw new IllegalArgumentException(
-					"Kafka replication topic must have exactly one partition; found " + partitionCount
-				);
+				producer = new KafkaProducer<>(properties);
+				final int partitionCount = producer.partitionsFor(this.topicName).size();
+				if (partitionCount != 1)
+				{
+					throw new IllegalArgumentException(
+						"Kafka replication topic must have exactly one partition; found " + partitionCount
+					);
+				}
+				return producer;
 			}
-			return producer;
+			catch (final RuntimeException | Error failure)
+			{
+				if (producer != null)
+				{
+					try { producer.close(); }
+					catch (final RuntimeException | Error closeFailure) { failure.addSuppressed(closeFailure); }
+				}
+				throw failure;
+			}
 		}
 
 		private void distribute(
@@ -117,13 +141,42 @@ public interface StorageBinaryDataDistributorKafka
 			final Binary data
 		)
 		{
-			if (this.failure != null) throw new IllegalStateException("Kafka distributor has failed", this.failure);
+			this.distribute(messageType, data, null);
+		}
+
+		private void distribute(
+			final MessageType messageType,
+			final Binary data,
+			final Runnable cleanup
+		)
+		{
+			if (this.disposed || this.disposing)
+			{
+				if (cleanup != null) cleanup.run();
+				throw new IllegalStateException(this.disposed ? "Kafka distributor is disposed" : "Kafka distributor is stopping");
+			}
+			if (this.failure != null)
+			{
+				if (cleanup != null) cleanup.run();
+				throw new IllegalStateException("Kafka distributor has failed", this.failure);
+			}
 			try
 			{
-				this.execute(() -> this.executeDistribution(messageType, data));
+				this.execute(() ->
+				{
+					try
+					{
+						this.executeDistribution(messageType, data);
+					}
+					finally
+					{
+						if (cleanup != null) cleanup.run();
+					}
+				});
 			}
 			catch (final RuntimeException | Error failure)
 			{
+				if (cleanup != null) cleanup.run();
 				/* Sync execution and executor submission failures must establish the same
 				 * terminal state; otherwise a later write can silently retry a broken log. */
 				this.recordFailure(failure);
@@ -141,6 +194,27 @@ public interface StorageBinaryDataDistributorKafka
 			}
 		}
 
+		/** Claims disposal ownership before an asynchronous worker is drained. */
+		protected final synchronized void beginDisposal()
+		{
+			if (this.disposed) return;
+			if (this.disposing) throw new IllegalStateException("Kafka distributor disposal is already in progress");
+			this.disposing = true;
+		}
+
+		/** Reopens admission after a bounded disposal attempt could not stop the worker. */
+		protected final synchronized void cancelDisposal()
+		{
+			this.disposing = false;
+			this.disposed = false;
+		}
+
+		/** Releases the disposal claim after the producer has been handled. */
+		protected final synchronized void finishDisposal()
+		{
+			this.disposing = false;
+		}
+
 		public final RuntimeException failure()
 		{
 			return this.failure;
@@ -151,9 +225,20 @@ public interface StorageBinaryDataDistributorKafka
 			final Binary data
 		)
 		{
+			if (this.failure != null)
+			{
+				final long dropped = this.droppedAfterFailure.incrementAndGet();
+				LOG.log(System.Logger.Level.WARNING,
+					"Dropping queued Kafka distribution " + dropped + " after terminal failure");
+				return;
+			}
 			final KafkaProducer<String, byte[]> producer = this.ensureProducer();
 			StorageBinaryDataChunker.forEach(data, StorageBinaryDistributedKafka.maxPacketSize(), chunk ->
 			{
+				if (this.failure != null)
+				{
+					throw new IllegalStateException("Kafka distributor has failed", this.failure);
+				}
 				final ProducerRecord<String, byte[]> record = new ProducerRecord<>(
 					this.topicName, PARTITION_KEY, chunk.bytes());
 				StorageBinaryDistributedKafka.addPacketHeaders(
@@ -168,20 +253,25 @@ public interface StorageBinaryDataDistributorKafka
 				{
 					producer.send(record).get();
 				}
-				catch (final InterruptedException e)
-				{
-					throw new InterruptException("Interrupted while sending the Kafka record", e);
-				}
+					catch (final InterruptedException e)
+					{
+						Thread.currentThread().interrupt();
+						throw new InterruptException("Interrupted while sending the Kafka record", e);
+					}
 				catch (final ExecutionException e)
 				{
 					final var cause = e.getCause();
+					if (cause instanceof final Error error)
+					{
+						throw error;
+					}
 					if (cause instanceof final RuntimeException rte)
 					{
 						throw rte;
 					}
 					else
 					{
-						throw new RuntimeException(cause);
+						throw new IllegalStateException("Kafka record send failed", cause);
 					}
 				}
 
@@ -200,23 +290,49 @@ public interface StorageBinaryDataDistributorKafka
 		@Override
 		public void distributeTypeDictionary(final String typeDictionaryData)
 		{
-			this.distribute(
-				MessageType.TYPE_DICTIONARY,
-				ChunksWrapper.New(
-					XMemory.toDirectByteBuffer(
-						StorageBinaryDistributedKafka.serialize(typeDictionaryData)
-					)
-				)
-			);
+			final java.nio.ByteBuffer buffer = XMemory.toDirectByteBuffer(
+				StorageBinaryDistributedKafka.serialize(typeDictionaryData));
+			final Runnable cleanup = releaseOnce(buffer);
+			try
+			{
+				this.distribute(MessageType.TYPE_DICTIONARY, ChunksWrapper.New(buffer), cleanup);
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				cleanup.run();
+				throw failure;
+			}
+		}
+
+		private static Runnable releaseOnce(final java.nio.ByteBuffer buffer)
+		{
+			final AtomicBoolean released = new AtomicBoolean();
+			return () ->
+			{
+				if (released.compareAndSet(false, true)) XMemory.deallocateDirectByteBuffer(buffer);
+			};
 		}
 
 		@Override
 		public synchronized void dispose()
 		{
+			if (this.disposed) return;
+			if (!this.disposing) this.disposing = true;
+			this.disposed = true;
 			if (this.kafkaProducer != null)
 			{
-				this.kafkaProducer.close();
+				try
+				{
+					this.kafkaProducer.close();
+				}
+				catch (final RuntimeException | Error failure)
+				{
+					this.disposed = false;
+					this.disposing = false;
+					throw failure;
+				}
 			}
+			this.disposing = false;
 
 		}
 
@@ -241,6 +357,7 @@ public interface StorageBinaryDataDistributorKafka
 
 	}
 
+	/** Sends packets on a dedicated executor without blocking the caller. */
 	class Async extends Abstract
 	{
 		private final ExecutorService executor;
@@ -269,15 +386,6 @@ public interface StorageBinaryDataDistributorKafka
 			// own tryExecuteDistribution method.
 			this.executor.execute(() ->
 			{
-				if (failure() != null)
-				{
-					final long dropped = this.droppedAfterFailure.incrementAndGet();
-					// The caller already handed off this asynchronous action; retain evidence
-					// that it was dropped after the distributor entered its terminal state.
-					LOG.log(System.Logger.Level.WARNING,
-							"Dropping queued Kafka distribution " + dropped + " after terminal failure");
-					return;
-				}
 				try
 				{
 					action.run();
@@ -292,25 +400,41 @@ public interface StorageBinaryDataDistributorKafka
 		@Override
 		public void dispose()
 		{
+			this.beginDisposal();
 			if (!this.executor.isShutdown())
 			{
 				this.executor.shutdown();
 			}
 			try
 			{
-				if (!this.executor.awaitTermination(30, TimeUnit.SECONDS))
+					if (!this.executor.awaitTermination(30, TimeUnit.SECONDS))
+					{
+						this.executor.shutdownNow();
+						if (!this.executor.awaitTermination(5, TimeUnit.SECONDS))
+						{
+							this.cancelDisposal();
+							throw new IllegalStateException(
+								"Kafka distributor worker did not stop; producer remains open for retry");
+						}
+					}
+				}
+				catch (final InterruptedException interrupted)
 				{
 					this.executor.shutdownNow();
-					this.executor.awaitTermination(5, TimeUnit.SECONDS);
+					Thread.currentThread().interrupt();
+					this.cancelDisposal();
+					throw new IllegalStateException(
+						"Interrupted while stopping Kafka distributor; producer remains open for retry", interrupted);
 				}
-			}
-			catch (final InterruptedException interrupted)
-			{
-				this.executor.shutdownNow();
-				Thread.currentThread().interrupt();
-			}
 
-			super.dispose();
+			try
+			{
+				super.dispose();
+			}
+			finally
+			{
+				this.finishDisposal();
+			}
 		}
 
 	}

@@ -13,6 +13,11 @@
  */
 
 /**
- * Aeron Archive replay and live readers for complete Store transactions.
+ * This package reads complete Store transactions from Aeron.
+ *
+ * <p>A reader first replays the Archive and then follows the live stream. It
+ * delivers a transaction only after its end marker arrives, so callers never
+ * see a partial Store write. The reader owns its subscription and must be
+ * closed before the Aeron client that created it.</p>
  */
 package org.eclipse.datagrid.storage.distributed.aeron.reader;

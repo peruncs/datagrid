@@ -20,6 +20,7 @@ import jakarta.inject.Singleton;
 import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
 import org.eclipse.serializer.concurrency.LockedExecutor;
 
+/** Creates the handler that applies graph updates under the cluster lock. */
 @Factory
 public class ObjectGraphUpdateHandlerFactory
 {

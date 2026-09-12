@@ -41,6 +41,7 @@ import java.util.function.BooleanSupplier;
 public final class AeronArchiveReplicationPublisher implements AutoCloseable
 {
 	@FunctionalInterface
+	/** Persists the writer checkpoint after an Archive position is known. */
 	public interface CheckpointWriter
 	{
 		/**
@@ -167,7 +168,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		{
 			if (publication != null)
 			{
-				final RuntimeException stopFailure = tryStopRecording(archive, publication, Aeron.NULL_VALUE);
+				final Throwable stopFailure = tryStopRecording(
+					archive, publication, Aeron.NULL_VALUE, configuration);
 				if (stopFailure != null) failure.addSuppressed(stopFailure);
 				try
 				{
@@ -277,7 +279,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		}
 		catch (final RuntimeException | Error failure)
 		{
-			final RuntimeException stopFailure = tryStopRecording(archive, publication, recordingId);
+			final Throwable stopFailure = tryStopRecording(
+				archive, publication, recordingId, configuration);
 			if (stopFailure != null) failure.addSuppressed(stopFailure);
 			try
 			{
@@ -311,8 +314,18 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	{
 		final CountersReader counters = this.archive.context().aeron().countersReader();
 		final int counterId = this.recordingCounterId(counters);
-		return counterId >= 0 ? RecordingPos.getRecordingId(counters, counterId) :
-			this.recordingIdHint >= 0 ? this.recordingIdHint : Aeron.NULL_VALUE;
+		if (counterId >= 0)
+		{
+			return RecordingPos.getRecordingId(counters, counterId);
+		}
+		if (this.recordingIdHint >= 0)
+		{
+			return this.recordingIdHint;
+		}
+		/* A counter may disappear during shutdown before the Archive catalog has
+		 * forgotten the recording. Discover it from the catalog so close() can still
+		 * stop the recording instead of leaking an active entry. */
+		return findRecordingId(this.archive, this.publication);
 	}
 
 	private int recordingCounterId(final CountersReader counters)
@@ -374,12 +387,17 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		final long deadline = System.nanoTime() + configuration.offerTimeoutNanos();
 		long lastRecordedPosition = Aeron.NULL_VALUE;
 		boolean lastActive = false;
+		int counterId = -1;
 		while (true)
 		{
-			int counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId(), archive.archiveId());
-			if (counterId < 0 && recordingIdHint >= 0)
+			if (counterId < 0 || counterId > counters.maxCounterId() ||
+				(recordingIdHint >= 0 && RecordingPos.getRecordingId(counters, counterId) != recordingIdHint))
 			{
-				counterId = RecordingPos.findCounterIdByRecording(counters, recordingIdHint, archive.archiveId());
+				counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId(), archive.archiveId());
+				if (counterId < 0 && recordingIdHint >= 0)
+				{
+					counterId = RecordingPos.findCounterIdByRecording(counters, recordingIdHint, archive.archiveId());
+				}
 			}
 			if (counterId >= 0)
 			{
@@ -412,8 +430,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			 * control channel so the normal commit path does not pay a synchronous
 			 * Archive request once the local recording has already advanced. Remote
 			 * recordings still use this poll to surface control-session failures. */
-			final String archiveError = archive.pollForErrorResponse();
-			if (archiveError != null) throw new IllegalStateException("Aeron archive error: " + archiveError);
+			if (counterId < 0)
+			{
+				final String archiveError = archive.pollForErrorResponse();
+				if (archiveError != null) throw new IllegalStateException("Aeron archive error: " + archiveError);
+			}
 			if (System.nanoTime() >= deadline)
 			{
 				throw new IllegalStateException("Aeron archive did not record commit position " + commitPosition +
@@ -461,11 +482,33 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		}
 	}
 
+	/**
+	 * Returns whether this publisher still owns an active Archive recording.
+	 *
+	 * <p>The retention controller uses this boundary to refuse segment deletion
+	 * while publication can still append to the recording.</p>
+	 */
 	synchronized boolean recordingIsActive()
 	{
 		final CountersReader counters = this.archive.context().aeron().countersReader();
 		final int counterId = this.recordingCounterId(counters);
-		return counterId >= 0 && RecordingPos.isActive(counters, counterId, RecordingPos.getRecordingId(counters, counterId));
+		if (counterId >= 0)
+		{
+			return RecordingPos.isActive(counters, counterId, RecordingPos.getRecordingId(counters, counterId));
+		}
+		/* The local counter can disappear during driver shutdown while the Archive
+		 * catalog still knows the recording.  Treat an unknown stop position as
+		 * active; retention must fail closed rather than purge a live recording. */
+		final long id = this.recordingId();
+		if (id < 0) return true;
+		try
+		{
+			return this.archive.getStopPosition(id) < 0;
+		}
+		catch (final RuntimeException failure)
+		{
+			return true;
+		}
 	}
 
 	ExclusivePublication publication()
@@ -510,7 +553,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 
 	/** Stops the recording, aborts any pending transaction, and closes the publication. */
 	@Override
-	public void close()
+	public synchronized void close()
 	{
 		synchronized (this)
 		{
@@ -559,6 +602,29 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			}
 			throw pendingFailure;
 		}
+		/* RecordingPos can disappear while the publication is being closed.  Retry
+		 * discovery before stopping the Archive; otherwise a successful publisher
+		 * close would leak an active recording that no later code can identify. */
+		if (recordingId < 0)
+		{
+			try
+			{
+				recordingId = this.recordingId();
+			}
+			catch (final RuntimeException rediscoveryFailure)
+			{
+				if (failure == null) failure = rediscoveryFailure;
+				else failure.addSuppressed(rediscoveryFailure);
+			}
+			if (recordingId < 0 && this.recordingIdHint >= 0) recordingId = this.recordingIdHint;
+		}
+		if (recordingId < 0)
+		{
+			final IllegalStateException identityFailure = new IllegalStateException(
+				"cannot determine Aeron Archive recording identity; refusing to close as successful");
+			if (failure == null) failure = identityFailure;
+			else failure.addSuppressed(identityFailure);
+		}
 		if (recordingId >= 0)
 		{
 			try
@@ -570,6 +636,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				if (failure == null) failure = stopFailure;
 				else failure.addSuppressed(stopFailure);
 			}
+			catch (final Error stopFailure)
+			{
+				if (fatalFailure == null) fatalFailure = stopFailure;
+				else fatalFailure.addSuppressed(stopFailure);
+			}
 		}
 		if (recordingId >= 0)
 		{
@@ -578,6 +649,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			{
 				if (failure == null) failure = stopFailure;
 				else failure.addSuppressed(stopFailure);
+			}
+			catch (final Error stopFailure)
+			{
+				if (fatalFailure == null) fatalFailure = stopFailure;
+				else fatalFailure.addSuppressed(stopFailure);
 			}
 		}
 		if (fatalFailure != null)
@@ -595,16 +671,17 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		}
 	}
 
-	private static RuntimeException tryStopRecording(
+	private static Throwable tryStopRecording(
 		final AeronArchive archive,
 		final ExclusivePublication publication,
-		final long recordingIdHint
+		final long recordingIdHint,
+		final AeronReplicationConfiguration configuration
 	)
 	{
-		RuntimeException failure = null;
+		Throwable failure = null;
+		long recordingId = recordingIdHint;
 		try
 		{
-			long recordingId = recordingIdHint;
 			if (recordingId < 0)
 			{
 				final CountersReader counters = archive.context().aeron().countersReader();
@@ -614,6 +691,13 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				{
 					recordingId = RecordingPos.getRecordingId(counters, counterId);
 				}
+				if (recordingId < 0)
+				{
+					/* A counter may not be visible until the Archive catalog has indexed
+					 * the publication.  Discovering by session/stream is the last safe
+					 * fallback before abandoning construction cleanup. */
+					recordingId = findRecordingId(archive, publication);
+				}
 			}
 			if (recordingId >= 0)
 			{
@@ -621,15 +705,28 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				{
 					archive.tryStopRecording(recordingId);
 				}
-				catch (final RuntimeException stopFailure)
+			catch (final RuntimeException | Error stopFailure)
+			{
+				failure = stopFailure;
+			}
+				try
 				{
-					failure = stopFailure;
+					/* Stopping is asynchronous.  Construction must not leak a recording
+					 * when a later setup step fails, otherwise the next startup sees an
+					 * apparently active recording and refuses to extend it. */
+					awaitStopped(archive, recordingId, configuration);
+				}
+			catch (final RuntimeException | Error awaitFailure)
+				{
+					if (failure == null) failure = awaitFailure;
+					else if (failure != awaitFailure) failure.addSuppressed(awaitFailure);
 				}
 			}
 		}
-		catch (final RuntimeException cleanupFailure)
+		catch (final RuntimeException | Error cleanupFailure)
 		{
-			failure = cleanupFailure;
+			if (failure == null) failure = cleanupFailure;
+			else if (failure != cleanupFailure) failure.addSuppressed(cleanupFailure);
 		}
 		return failure;
 	}

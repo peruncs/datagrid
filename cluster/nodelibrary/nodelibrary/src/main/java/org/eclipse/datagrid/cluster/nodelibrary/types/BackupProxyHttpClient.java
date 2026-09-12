@@ -33,6 +33,13 @@ import java.util.List;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This client moves backup archives through the remote backup service.
+ *
+ * <p>It translates HTTP failures and malformed metadata into
+ * {@link org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException}.
+ * The caller owns the paths passed to upload and download.</p>
+ */
 public interface BackupProxyHttpClient
 {
 	void upload(final String s3Key, final Path filePath) throws NodelibraryException;
@@ -48,6 +55,7 @@ public interface BackupProxyHttpClient
 		return new Default(notNull(baseUri));
 	}
 
+	/** Implements backup transfers with the JDK HTTP client. */
 	class Default implements BackupProxyHttpClient
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(BackupProxyHttpClient.class);

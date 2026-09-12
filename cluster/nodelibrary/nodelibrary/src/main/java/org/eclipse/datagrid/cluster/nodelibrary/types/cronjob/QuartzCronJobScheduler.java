@@ -25,6 +25,13 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This scheduler owns the small lifecycle around the node's Quartz jobs.
+ *
+ * <p>Install the job factory first, schedule every job second, and start the
+ * scheduler last. Shutdown stops future triggers and releases Quartz
+ * resources.</p>
+ */
 public interface QuartzCronJobScheduler
 {
 	void setFactory(QuartzCronJobJobFactory factory) throws CronJobException;
@@ -40,6 +47,7 @@ public interface QuartzCronJobScheduler
 		return new Default(notNull(scheduler));
 	}
 
+	/** Adapts the Quartz scheduler and translates checked failures. */
 	final class Default implements QuartzCronJobScheduler
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(QuartzCronJobScheduler.class);

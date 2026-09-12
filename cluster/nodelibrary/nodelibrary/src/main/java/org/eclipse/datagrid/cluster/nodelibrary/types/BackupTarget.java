@@ -15,7 +15,8 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
-public enum BackupTarget
+	/** Identifies the local or remote place from which a backup is served. */
+	public enum BackupTarget
 {
 	SAAS, ONPREM;
 

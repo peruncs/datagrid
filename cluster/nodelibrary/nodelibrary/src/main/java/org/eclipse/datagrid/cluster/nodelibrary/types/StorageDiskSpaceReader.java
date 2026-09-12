@@ -21,6 +21,13 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This reader measures the bytes currently used by a storage directory.
+ *
+ * <p>A running Store may remove a file while the directory is being visited.
+ * Implementations therefore treat that individual file as unavailable and
+ * continue the measurement.</p>
+ */
 public interface StorageDiskSpaceReader
 {
 	long readUsedDiskSpaceBytes();
@@ -30,6 +37,7 @@ public interface StorageDiskSpaceReader
 		return new Default(notNull(storageDir));
 	}
 
+	/** Recursively measures the configured Store directory. */
 	class Default implements StorageDiskSpaceReader
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(StorageDiskSpaceReader.class);

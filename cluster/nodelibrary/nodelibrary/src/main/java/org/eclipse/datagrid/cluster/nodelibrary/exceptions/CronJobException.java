@@ -17,6 +17,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
 
 import org.eclipse.serializer.exceptions.BaseException;
 
+/** Reports a failure while configuring or running a maintenance job. */
 public class CronJobException extends BaseException
 {
 	public CronJobException()

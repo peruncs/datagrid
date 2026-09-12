@@ -69,6 +69,7 @@ public final class AtomicFileStore
 	}
 
 	@FunctionalInterface
+	/** Writes one complete metadata file to an open channel. */
 	public interface Encoder
 	{
 		void write(FileChannel channel) throws IOException;
@@ -110,10 +111,11 @@ public final class AtomicFileStore
 	{
 		final Path absolute = path.toAbsolutePath();
 		final Path parent = absolute.getParent();
-		if (parent != null)
+		if (parent == null)
 		{
-			Files.createDirectories(parent);
+			throw new IOException("Metadata path has no parent directory: " + path);
 		}
+		Files.createDirectories(parent);
 		Path temporary;
 		try
 		{
@@ -152,7 +154,7 @@ public final class AtomicFileStore
 			{
 				Files.deleteIfExists(temporary);
 			}
-			catch (final IOException cleanupFailure)
+			catch (final IOException | RuntimeException cleanupFailure)
 			{
 				LOGGER.log(System.Logger.Level.WARNING,
 					"Unable to remove temporary replication metadata file " + temporary, cleanupFailure);
@@ -186,13 +188,26 @@ public final class AtomicFileStore
 		final Path probe = parent.resolve(absolute.getFileName() + ".probe-" + UUID.randomUUID());
 		try
 		{
-			write(probe, channel -> channel.write(java.nio.ByteBuffer.wrap(new byte[] {1})));
+			write(probe, channel -> writeFully(channel, java.nio.ByteBuffer.wrap(new byte[] {1})));
 		}
-		finally
+		catch (final IOException | RuntimeException | Error failure)
 		{
-			Files.deleteIfExists(probe);
-			forceDirectory(parent);
+			/* Preserve the capability failure itself. Cleanup is best effort and must
+			 * not replace an informative atomic-move/fsync exception with a secondary
+			 * delete error. */
+			try
+			{
+				Files.deleteIfExists(probe);
+				forceDirectory(parent);
+			}
+			catch (final IOException | RuntimeException | Error cleanupFailure)
+			{
+				failure.addSuppressed(cleanupFailure);
+			}
+			throw failure;
 		}
+		Files.deleteIfExists(probe);
+		forceDirectory(parent);
 	}
 
 	/**
@@ -225,6 +240,14 @@ public final class AtomicFileStore
 		catch (final UnsupportedOperationException failure)
 		{
 			throw new IOException("Directory fsync is unavailable for replication metadata " + parent, failure);
+		}
+	}
+
+	private static void writeFully(final FileChannel channel, final java.nio.ByteBuffer buffer) throws IOException
+	{
+		while (buffer.hasRemaining())
+		{
+			if (channel.write(buffer) == 0) throw new IOException("Atomic metadata write made no progress");
 		}
 	}
 }

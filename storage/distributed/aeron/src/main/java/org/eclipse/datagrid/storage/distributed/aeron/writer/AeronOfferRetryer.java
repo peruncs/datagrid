@@ -28,6 +28,7 @@ import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationCon
 final class AeronOfferRetryer
 {
 	@FunctionalInterface
+	/** Supplies one publication attempt to the retry loop. */
 	interface Offerer
 	{
 		long offer(DirectBuffer buffer, int offset, int length);

@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
  * #L%
  */
 
-
+/** Reports that a node has reached its configured storage limit. */
 public class StorageLimitReachedException extends NodelibraryException
 {
 	public StorageLimitReachedException()

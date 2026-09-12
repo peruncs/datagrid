@@ -21,6 +21,13 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This executor runs backups and storage checks without blocking a request.
+ *
+ * <p>At most one backup thread is active. A new request waits for the current
+ * backup to finish instead of starting a second backup against the same
+ * storage.</p>
+ */
 public interface StorageBackupTaskExecutor extends StorageTaskExecutor
 {
 	void runBackup(boolean useManualSlot);
@@ -32,6 +39,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor
 		return new Default(notNull(connection), notNull(backupManager));
 	}
 
+	/** Provides one backup thread and the inherited storage-check thread. */
 	final class Default extends StorageTaskExecutor.Abstract implements StorageBackupTaskExecutor
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(StorageBackupTaskExecutor.class);

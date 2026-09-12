@@ -17,6 +17,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.types.cronjob;
 
 import org.quartz.Job;
 
+/** Creates a Quartz job with the resources needed by one maintenance task. */
 public interface QuartzCronJobManager
 {
 	Job create();

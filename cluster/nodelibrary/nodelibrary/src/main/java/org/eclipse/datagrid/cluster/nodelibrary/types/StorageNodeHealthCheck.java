@@ -32,6 +32,30 @@ public interface StorageNodeHealthCheck extends AutoCloseable
 		return isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING;
 	}
 
+	/** Returns the provider's current Archive free-space estimate, or {@code -1}. */
+	default long archiveUsableSpaceBytes()
+	{
+		return -1L;
+	}
+
+	/** Returns the writer's last durable recording position, or {@code -1}. */
+	default long writerDurablePosition()
+	{
+		return -1L;
+	}
+
+	/** Returns the writer's last durable sequence, or {@code -1}. */
+	default long writerDurableSequence()
+	{
+		return -1L;
+	}
+
+	/** Returns the reader's last applied sequence, or {@code -1}. */
+	default long appliedSequence()
+	{
+		return -1L;
+	}
+
 	@Override
 	void close();
 
@@ -45,6 +69,7 @@ public interface StorageNodeHealthCheck extends AutoCloseable
 		return new Default(notNull(storageController), notNull(replicationHealth));
 	}
 
+	/** Combines Store readiness with provider health and lifecycle state. */
 	final class Default implements StorageNodeHealthCheck
 	{
 		private final StorageController storageController;
@@ -77,6 +102,11 @@ public interface StorageNodeHealthCheck extends AutoCloseable
 		{
 			return this.active ? this.replicationHealth.state() : ReplicationHealth.State.FAILED;
 		}
+
+		@Override public long archiveUsableSpaceBytes() { return this.replicationHealth.archiveUsableSpaceBytes(); }
+		@Override public long writerDurablePosition() { return this.replicationHealth.writerDurablePosition(); }
+		@Override public long writerDurableSequence() { return this.replicationHealth.writerDurableSequence(); }
+		@Override public long appliedSequence() { return this.replicationHealth.appliedSequence(); }
 
 		@Override
 		public boolean isReady() throws NodelibraryException

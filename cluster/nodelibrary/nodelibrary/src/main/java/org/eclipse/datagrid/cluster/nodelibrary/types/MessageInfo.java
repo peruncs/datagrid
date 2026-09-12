@@ -50,6 +50,7 @@ public interface MessageInfo
 		return New(messageIndex, "unknown", null, new byte[0]);
 	}
 
+	/** Stores an immutable copy of a provider position. */
 	final class Default implements MessageInfo
 	{
 		private final long messageIndex;

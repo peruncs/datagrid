@@ -441,9 +441,9 @@ class AeronReplicationWriteCoordinatorTest
 
 		final java.nio.ByteBuffer[] buffers = AeronBinaryBuffers.collect(channels[0]);
 		assertEquals(channels.length, buffers.length);
-		for (int channelIndex = 0; channelIndex < buffers.length; channelIndex++)
+		for (final java.nio.ByteBuffer buffer : buffers)
 		{
-			assertTrue(buffers[channelIndex].remaining() > 0);
+			assertTrue(buffer.remaining() > 0);
 		}
 	}
 

@@ -57,13 +57,20 @@ configured threading mode to matching MediaDriver and Archive threading.
 capped at 16 MiB). Store bytes are sent directly inside the fixed replication
 envelope; no SBE or second serialization pass is required.
 
-Writer checkpoint persistence is enabled in the provider. ACK-driven retention
-is intentionally not part of this release: the unused ACK/tracker implementation
-was removed rather than shipped as a misleading public surface. The nodelibrary
-provider rejects retention requests with an explicit unsupported-capability
-error until authenticated reader identities and durable watermarks are designed
-and implemented; it never pretends that history was reclaimed. Operators must
-monitor Archive capacity and rotate or expand storage before it is exhausted.
+Writer checkpoint persistence is enabled in the provider. Authenticated,
+segment-boundary retention is available only when an embedded writer is started
+with `ECLIPSE_DATAGRID_AERON_RETENTION_SECRET` (base64, at least 16 bytes) and
+`ECLIPSE_DATAGRID_AERON_RETENTION_READERS` (a comma-separated list of reader
+UUIDs). Each reader acknowledgement is an HMAC-SHA256
+`AeronAuthenticatedWatermark` covering reader, cluster, Store generation,
+epoch, recording, sequence, and position. Submit those acknowledgements with
+`recordReaderWatermark`, then call `deleteThrough` with a cursor naming the
+desired sequence. The provider computes the least advanced reader position and
+only purges complete segments; Aeron's own active-recording/replay checks still
+apply. External Archives and incomplete reader quorums remain unsupported for
+deletion. Without the secret or reader list, retention is reported as
+unsupported and history is preserved. Operators must monitor Archive capacity
+and rotate or expand storage before it is exhausted.
 The supported capacity procedure is: alert when
 `archiveUsableSpaceBytes()` approaches the configured
 `ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES`, stop acknowledged writes (the

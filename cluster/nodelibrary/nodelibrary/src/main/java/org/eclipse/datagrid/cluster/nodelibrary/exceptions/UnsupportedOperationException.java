@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
  * #L%
  */
 
-
+/** Reports a node operation that the current implementation does not support. */
 public class UnsupportedOperationException extends NodelibraryException
 {
 	public UnsupportedOperationException()

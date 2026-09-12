@@ -17,6 +17,13 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 
+/**
+ * This listener runs after a replicated data message has been applied.
+ *
+ * <p>The message information is the commit point for follow-up bookkeeping.
+ * The listener is also closeable so a reader can release any callback state
+ * during shutdown.</p>
+ */
 public interface AfterDataMessageConsumedListener extends AutoCloseable
 {
 	void onChange(MessageInfo messageInfo) throws NodelibraryException;

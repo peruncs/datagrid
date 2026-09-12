@@ -36,8 +36,10 @@ import java.util.UUID;
  */
 final class TransactionAssembler
 {
-	/* ChunksWrapper requires direct buffers even for an empty binary. */
-	private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(1);
+	/* ChunksWrapper requires a direct buffer even for an empty binary.  Reuse one
+	 * immutable zero-capacity view instead of allocating native memory per empty
+	 * transaction. */
+	private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0).asReadOnlyBuffer();
 	private final AeronReplicationConfiguration configuration;
 	private final UUID clusterId;
 	private final long epoch;
@@ -269,7 +271,7 @@ final class TransactionAssembler
 	{
 		if (this.transaction == null)
 		{
-			if (envelope.payloadLength() != 0 || envelope.chunkCount() != 0)
+			if (envelope.payloadLength() != 0 || envelope.chunkCount() != 0 || envelope.commitCrc32c() != 0)
 			{
 				throw new IllegalStateException("commit without data chunks");
 			}
@@ -326,6 +328,7 @@ final class TransactionAssembler
 			envelope.chunkCount(), envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
 	}
 
+	/** Delivers one validated transaction outside the assembler monitor. */
 	private final class Delivery
 	{
 		private String dictionary;
@@ -356,6 +359,7 @@ final class TransactionAssembler
 
 		void run()
 		{
+			boolean dataTransferred = false;
 			try
 			{
 				if (this.dictionary != null) receiver.receiveTypeDictionary(this.dictionary);
@@ -368,11 +372,22 @@ final class TransactionAssembler
 						deliveryListener.beforeStoreImport(
 							this.sequence, this.position, dataLength, dataChunkCount, this.resolutionCrc32c);
 					}
-					receiver.receiveData(ChunksWrapper.New(this.data));
+					/* Mark ownership before waiting for deferred materialisation.  The
+					 * receiver may release its copy when that wait fails; the assembler
+					 * must not then deallocate the same native buffers in its finally block. */
+					dataTransferred = receiver.receiveDataOwned(ChunksWrapper.New(this.data));
+					if (dataTransferred) this.completed.detachDataStorage();
+					receiver.awaitApplied();
 				}
 				synchronized (TransactionAssembler.this)
 				{
-					lastAppliedSequence = this.sequence;
+					/* An abort resolves the replication cursor but does not materialise a
+					 * Store image.  Keep the two observations distinct so health/lag
+					 * callers never report an aborted sequence as applied data. */
+					if (this.resolutionKind == AeronReplicationEnvelope.Kind.COMMIT)
+					{
+						lastAppliedSequence = this.sequence;
+					}
 					lastResolvedSequence = this.sequence;
 					lastResolvedPosition = this.position;
 					lastResolutionCrc32c = this.resolutionCrc32c;
@@ -388,7 +403,7 @@ final class TransactionAssembler
 			}
 			finally
 			{
-				if (this.completed != null) this.completed.dispose();
+				if (this.completed != null) this.completed.dispose(dataTransferred);
 				this.dictionary = null;
 				this.data = null;
 				this.completed = null;
@@ -416,29 +431,43 @@ final class TransactionAssembler
 
 	RuntimeException failure() { return this.failure; }
 
-	synchronized void failure(final RuntimeException exception)
+	 synchronized void failure(final RuntimeException exception)
 	{
-		if (this.failure == null)
+		if (exception == null) throw new NullPointerException("exception");
+		synchronized (this.delivery)
 		{
-			this.failure = exception;
-			if (this.transaction != null)
+			synchronized (this)
 			{
-				this.transaction.dispose();
-				this.transaction = null;
+				if (this.failure == null)
+				{
+					this.failure = exception;
+					if (this.transaction != null)
+					{
+						this.transaction.dispose();
+						this.transaction = null;
+					}
+				}
 			}
 		}
 	}
 
 	/** Releases native buffers retained by an incomplete transaction. */
-	synchronized void dispose()
+	 synchronized void dispose()
 	{
-		if (this.transaction != null)
+		synchronized (this.delivery)
 		{
-			this.transaction.dispose();
-			this.transaction = null;
+			synchronized (this)
+			{
+				if (this.transaction != null)
+				{
+					this.transaction.dispose();
+					this.transaction = null;
+				}
+			}
 		}
 	}
 
+	/** Holds fragments and commit metadata for one transaction. */
 	static final class Transaction
 	{
 		private final long sequence;
@@ -529,17 +558,28 @@ final class TransactionAssembler
 
 		void dispose()
 		{
+			this.dispose(false);
+		}
+
+		void dispose(final boolean dataTransferred)
+		{
 			if (this.dictionaryStorage != null)
 			{
 				XMemory.deallocateDirectByteBuffer(this.dictionaryStorage);
 				this.dictionaryStorage = null;
 			}
-			if (this.dataStorage != null)
+			if (!dataTransferred && this.dataStorage != null)
 			{
 				XMemory.deallocateDirectByteBuffer(this.dataStorage);
 				this.dataStorage = null;
 			}
 			this.dictionary = null;
+			this.data = null;
+		}
+
+		void detachDataStorage()
+		{
+			this.dataStorage = null;
 			this.data = null;
 		}
 	}

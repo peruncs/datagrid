@@ -17,6 +17,13 @@ package org.eclipse.datagrid.cluster.nodelibrary.spi;
 
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageManager;
 
+/**
+ * This SPI supplies the cluster-aware storage manager for one application.
+ *
+ * <p>The framework calls the provider during node assembly. The application
+ * owns the returned manager and closes it after replication and request
+ * handling have stopped.</p>
+ */
 public interface ClusterStorageManagerProvider
 {
 	ClusterStorageManager<?> provideClusterStorageManager();

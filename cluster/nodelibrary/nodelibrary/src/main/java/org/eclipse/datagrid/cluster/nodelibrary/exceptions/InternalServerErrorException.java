@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
  * #L%
  */
 
-
+/** Reports an internal node failure as an HTTP 500 response. */
 public class InternalServerErrorException extends HttpResponseException
 {
 	public InternalServerErrorException()

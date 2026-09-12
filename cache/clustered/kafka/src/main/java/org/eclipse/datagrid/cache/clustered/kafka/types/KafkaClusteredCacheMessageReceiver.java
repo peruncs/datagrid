@@ -31,6 +31,13 @@ import java.util.Collections;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * This receiver consumes clustered-cache timestamps from Kafka.
+ *
+ * <p>It uses one consumer group per node, ignores records written by its own
+ * client, and commits offsets after the batch has been accepted. Disposal
+ * interrupts the polling thread and waits briefly for it to finish.</p>
+ */
 public class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageReceiver
 {
     private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageReceiver.class);

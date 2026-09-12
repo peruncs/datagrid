@@ -36,6 +36,7 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
 		);
 	}
 
+	/** Reassembles packets and forwards complete messages to a receiver. */
 	class Default implements StorageBinaryDataPacketAcceptor
 	{
 		private final StorageBinaryDataReceiver receiver;

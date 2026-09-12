@@ -19,6 +19,7 @@ import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 /** Transport health independent of a Kafka, Aeron, or other client implementation. */
 public interface ReplicationHealth extends AutoCloseable
 {
+	/** States reported while a provider starts, runs, or requires recovery. */
 	enum State
 	{
 		STARTING, REPLAYING, LIVE, DEGRADED_ARCHIVE, RESEED_REQUIRED, FAILED

@@ -215,6 +215,18 @@ public final class AeronReplicationEnvelope
 		}
 		if (kind != Kind.COMMIT && kind != Kind.ABORT)
 		{
+			/* A zero-length data payload is represented by exactly one empty chunk.
+			 * Accepting a multi-chunk empty transaction would let a sender reserve a
+			 * sequence that can never reach a valid terminal state and would leave the
+			 * assembler waiting forever for bytes that do not exist. */
+			if (payloadLength == 0 && (chunkIndex != 0 || chunkCount != 1 || chunkOffset != 0))
+			{
+				throw new IllegalArgumentException("empty payload must use one canonical chunk");
+			}
+			if (payloadLength > 0 && chunkLength == 0)
+			{
+				throw new IllegalArgumentException("non-empty payload chunks must carry bytes");
+			}
 			final long end = (long)chunkOffset + chunkLength;
 			if (end > payloadLength || chunkIndex == chunkCount - 1 && end != payloadLength)
 			{
@@ -306,6 +318,15 @@ public final class AeronReplicationEnvelope
 			((long)chunkOffset + payloadOnWire > payloadLength))
 		{
 			throw new IllegalArgumentException("chunk exceeds logical payload length");
+		}
+		if (kind != Kind.COMMIT && kind != Kind.ABORT && payloadLength == 0 &&
+			(chunkIndex != 0 || chunkCount != 1 || chunkOffset != 0 || payloadOnWire != 0))
+		{
+			throw new IllegalArgumentException("empty payload must use one canonical chunk");
+		}
+		if (kind != Kind.COMMIT && kind != Kind.ABORT && payloadLength > 0 && payloadOnWire == 0)
+		{
+			throw new IllegalArgumentException("non-empty payload chunks must carry bytes");
 		}
 		if (source.getInt(offset + 40, ByteOrder.BIG_ENDIAN) != crc32c(source, offset + HEADER_LENGTH, payloadOnWire))
 		{

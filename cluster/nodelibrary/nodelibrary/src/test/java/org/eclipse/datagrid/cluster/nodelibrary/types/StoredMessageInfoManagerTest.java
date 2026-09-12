@@ -14,13 +14,13 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
+import org.eclipse.datagrid.storage.distributed.types.AtomicFileStoreCrashHook;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -78,32 +78,16 @@ class StoredMessageInfoManagerTest
 		final AtomicReference<String> phase = new AtomicReference<>();
 		try
 		{
-			final Class<?> store = Class.forName("org.eclipse.datagrid.storage.distributed.types.AtomicFileStore");
-			final var set = store.getDeclaredMethod("setTestHook", BiConsumer.class);
-			final var clear = store.getDeclaredMethod("clearTestHook");
-			set.setAccessible(true);
-			clear.setAccessible(true);
-			set.invoke(null, (BiConsumer<String, Path>) (name, ignored) -> phase.compareAndSet(null, name));
+			AtomicFileStoreCrashHook.install((name, ignored) -> phase.compareAndSet(null, name));
 			try (StoredMessageInfoManager manager = StoredMessageInfoManager.NewAtomic(path, MessageInfoParser.New()))
 			{
 				manager.set(MessageInfo.New(1L, "aeron", UUID.randomUUID(), new byte[] { 4 }));
 			}
 			assertEquals("BEFORE_TEMP_WRITE", phase.get());
-			clear.invoke(null);
 		}
 		finally
 		{
-			try
-			{
-				final Class<?> store = Class.forName("org.eclipse.datagrid.storage.distributed.types.AtomicFileStore");
-				final var clear = store.getDeclaredMethod("clearTestHook");
-				clear.setAccessible(true);
-				clear.invoke(null);
-			}
-			catch (final ReflectiveOperationException ignored)
-			{
-				// The hook is test-only; cleanup below still removes all files.
-			}
+			AtomicFileStoreCrashHook.clear();
 			try (var files = Files.walk(directory))
 			{
 				files.sorted(java.util.Comparator.reverseOrder()).forEach(file ->

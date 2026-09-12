@@ -53,6 +53,12 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 
 	boolean ignoreDistribution();
 
+	/** Returns a terminal distribution failure, or {@code null} while healthy. */
+	default RuntimeException failure()
+	{
+		return null;
+	}
+
 	/**
 	 * Queues a complete dictionary for the next data transaction, regardless of
 	 * which Store thread performs that transaction. This is used after writer
@@ -68,6 +74,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		return new Caching(notNull(delegate));
 	}
 
+	/** Keeps dictionary data adjacent to the transaction that needs it. */
 	final class Caching implements ClusterStorageBinaryDataDistributor
 	{
 		private final ClusterStorageBinaryDataDistributor delegate;
@@ -113,18 +120,30 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		@Override
 		public synchronized void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
 		{
+			/* A node may have accumulated an incremental dictionary while startup
+			 * distribution was disabled.  The restart snapshot is authoritative and
+			 * must replace that stale thread-bound value, otherwise consumeTypeDictionary
+			 * would return the incremental fragment and the queued full dictionary would
+			 * never reach the next Aeron transaction. */
+			this.typeDictionaryData.remove();
 			this.queuedTypeDictionary = typeDictionaryData;
 		}
 
 		@Override
 		public synchronized String consumeTypeDictionary()
 		{
+			final String queued = this.queuedTypeDictionary;
+			if (queued != null)
+			{
+				/* A full restart snapshot supersedes any incremental dictionary staged
+				 * on the calling thread while startup distribution was disabled. */
+				this.queuedTypeDictionary = null;
+				this.typeDictionaryData.remove();
+				return queued;
+			}
 			final String value = this.typeDictionaryData.get();
 			this.typeDictionaryData.remove();
-			if (value != null) return value;
-			final String queued = this.queuedTypeDictionary;
-			this.queuedTypeDictionary = null;
-			return queued;
+			return value;
 		}
 
 		@Override
@@ -143,6 +162,12 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		public boolean ignoreDistribution()
 		{
 			return this.delegate.ignoreDistribution();
+		}
+
+		@Override
+		public RuntimeException failure()
+		{
+			return this.delegate.failure();
 		}
 
 		@Override

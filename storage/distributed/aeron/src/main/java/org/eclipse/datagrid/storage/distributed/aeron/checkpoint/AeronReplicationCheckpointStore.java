@@ -59,6 +59,11 @@ public final class AeronReplicationCheckpointStore
 	 */
 	public static AeronReplicationCheckpoint read(final Path path) throws IOException
 	{
+		final long size = Files.size(path);
+		if (size != AeronReplicationCheckpoint.ENCODED_BYTES)
+		{
+			throw new IOException("invalid Aeron checkpoint length=" + size);
+		}
 		final byte[] bytes = Files.readAllBytes(path);
 		if (bytes.length != AeronReplicationCheckpoint.ENCODED_BYTES)
 		{

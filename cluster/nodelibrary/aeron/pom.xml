@@ -55,6 +55,9 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
+                    <!-- Keep test fixtures on the class path; production code is JPMS-compiled,
+                         while forked children intentionally receive the complete dependency class path. -->
+                    <useModulePath>false</useModulePath>
                     <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
                 </configuration>
             </plugin>
@@ -71,9 +74,14 @@
                         <artifactId>maven-failsafe-plugin</artifactId>
                         <version>3.5.0</version>
                         <configuration>
+                            <!-- Forked crash and Store fixtures must run on the
+                                 class path; the production modules remain JPMS
+                                 named at compile time. -->
+                            <useModulePath>false</useModulePath>
                             <includes>
                                 <include>**/ProviderCrashMatrixIT.java</include>
                                 <include>**/ExternalArchiveCrashIT.java</include>
+                                <include>**/AeronStoreIntegrationIT.java</include>
                             </includes>
                             <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
                             <forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>

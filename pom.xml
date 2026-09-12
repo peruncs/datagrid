@@ -208,9 +208,10 @@
 					<artifactId>maven-javadoc-plugin</artifactId>
 					<version>3.10.0</version>
 					<configuration>
-						<doclint>none</doclint>
+						<doclint>all</doclint>
+						<failOnWarnings>true</failOnWarnings>
 						<notree>true</notree>
-						<source>8</source>
+						<source>17</source>
 						<doctitle>Eclipse Data Grid API</doctitle>
 						<windowtitle>Eclipse Data Grid API</windowtitle>
 						<archive>

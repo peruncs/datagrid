@@ -15,6 +15,7 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.junit.jupiter.api.Test;
 
@@ -23,6 +24,8 @@ import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
 
 /** Tests storage binary data chunker behavior. */
 class StorageBinaryDataChunkerTest
@@ -67,5 +70,30 @@ class StorageBinaryDataChunkerTest
 		assertArrayEquals(new byte[] { 1, 2 }, chunks.get(0).bytes());
 		assertArrayEquals(new byte[] { 3 }, chunks.get(1).bytes());
 		assertEquals(0, source.position());
+	}
+
+	/** Verifies channel-partitioned Store binaries are flattened in channel order. */
+	@Test
+	void chunksAllSerializerChannelsInOrder()
+	{
+		final ByteBuffer first = XMemory.toDirectByteBuffer(new byte[] { 1, 2 });
+		final ByteBuffer second = XMemory.toDirectByteBuffer(new byte[] { 3, 4 });
+		final Binary binary = mock(Binary.class);
+		when(binary.buffers()).thenReturn(new ByteBuffer[] { first });
+		doAnswer(invocation ->
+		{
+			final java.util.function.Consumer<? super Binary> consumer = invocation.getArgument(0);
+			consumer.accept(ChunksWrapper.New(first));
+			consumer.accept(ChunksWrapper.New(second));
+			return null;
+		}).when(binary).iterateChannelChunks(any());
+
+		final var chunks = StorageBinaryDataChunker.chunk(binary, 3);
+
+		assertEquals(2, chunks.size());
+		assertArrayEquals(new byte[] { 1, 2, 3 }, chunks.get(0).bytes());
+		assertArrayEquals(new byte[] { 4 }, chunks.get(1).bytes());
+		assertEquals(0, first.position());
+		assertEquals(0, second.position());
 	}
 }

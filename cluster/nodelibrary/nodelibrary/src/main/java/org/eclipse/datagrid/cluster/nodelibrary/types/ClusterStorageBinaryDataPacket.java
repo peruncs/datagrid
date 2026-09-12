@@ -24,6 +24,14 @@ import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This packet adds a monotonically increasing message index to a storage
+ * packet.
+ *
+ * <p>The packet index identifies a fragment inside one message. The message
+ * index identifies the complete message in the cluster stream, so readers can
+ * resume after a backup without confusing fragments from different messages.</p>
+ */
 public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
 {
 	long messageIndex();
@@ -47,6 +55,7 @@ public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
 		);
 	}
 
+	/** Stores packet metadata together with its borrowed binary buffer. */
 	class Default implements ClusterStorageBinaryDataPacket
 	{
 		private final MessageType messageType;

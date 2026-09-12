@@ -22,6 +22,13 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This manager exposes node health while coordinating backups and replication.
+ *
+ * <p>A backup stops the reader at a safe message boundary, creates the backup,
+ * and then resumes reading. Callers must not close the storage while either
+ * operation is active.</p>
+ */
 public interface BackupNodeManager extends ClusterNodeManager
 {
 	void stopReadingAtLatestMessage();
@@ -49,6 +56,7 @@ public interface BackupNodeManager extends ClusterNodeManager
 		);
 	}
 
+	/** Coordinates backup work with the replication reader and storage controller. */
 	final class Default implements BackupNodeManager
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(BackupNodeManager.class);

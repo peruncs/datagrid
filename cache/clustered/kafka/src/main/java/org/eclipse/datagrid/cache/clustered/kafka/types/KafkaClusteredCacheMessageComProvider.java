@@ -33,6 +33,15 @@ import java.util.UUID;
 import static org.eclipse.datagrid.cache.clustered.kafka.types.KafkaClusteredConfigurationPropertyNames.KAFKA_CONSUMER_CONFIG_PREFIX;
 import static org.eclipse.datagrid.cache.clustered.kafka.types.KafkaClusteredConfigurationPropertyNames.KAFKA_PRODUCER_CONFIG_PREFIX;
 
+/**
+ * This provider builds the Kafka sender and receiver for clustered cache
+ * invalidation.
+ *
+ * <p>It creates one producer and one generated client id for the provider
+ * instance. Producer and consumer settings are read from their separate
+ * configuration prefixes so the two clients cannot accidentally share a
+ * role-specific setting.</p>
+ */
 public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCacheMessageComProvider<K, V>
 {
     private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageComProvider.class);

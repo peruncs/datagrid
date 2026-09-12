@@ -106,6 +106,10 @@ class AeronReplicationEnvelopeTest
 			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
 			1, 1, 1, 0, 0, new byte[] { 7 }
 		));
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.encode(
+			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+			0, 0, 2, 0, 0, new byte[0]
+		));
 
 		final byte[] encoded = AeronReplicationEnvelope.encode(
 			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,

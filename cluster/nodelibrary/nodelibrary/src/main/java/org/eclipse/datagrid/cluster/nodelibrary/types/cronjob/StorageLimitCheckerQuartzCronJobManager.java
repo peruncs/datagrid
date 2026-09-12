@@ -28,6 +28,12 @@ import java.util.function.Consumer;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This manager records whether scheduled storage measurements reached a limit.
+ *
+ * <p>The job reads disk usage and updates one atomic flag. The flag remains
+ * safe to read from request threads while Quartz performs the measurement.</p>
+ */
 public interface StorageLimitCheckerQuartzCronJobManager extends QuartzCronJobManager
 {
 	boolean limitReached();
@@ -40,6 +46,7 @@ public interface StorageLimitCheckerQuartzCronJobManager extends QuartzCronJobMa
 		return new Default(positive(storageSizeLimitGb), notNull(diskSpaceReader));
 	}
 
+	/** Creates limit-checking jobs and exposes their shared result. */
 	final class Default implements StorageLimitCheckerQuartzCronJobManager
 	{
 		private final AtomicBoolean limitReached = new AtomicBoolean(false);
@@ -69,6 +76,7 @@ public interface StorageLimitCheckerQuartzCronJobManager extends QuartzCronJobMa
 		}
 	}
 
+	/** Measures storage usage and reports when the configured limit is reached. */
 	@DisallowConcurrentExecution
 	final class StorageLimitCheckerQuartzCronJob implements Job
 	{

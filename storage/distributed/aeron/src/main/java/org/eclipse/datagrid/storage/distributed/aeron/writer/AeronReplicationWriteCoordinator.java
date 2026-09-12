@@ -109,14 +109,6 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		this.pendingDictionary = typeDictionaryData == null ? null : typeDictionaryData.getBytes(StandardCharsets.UTF_8);
 	}
 
-	/** Returns and clears the dictionary saved for the next transaction. */
-	synchronized String consumeTypeDictionary()
-	{
-		final byte[] dictionary = this.pendingDictionary;
-		this.pendingDictionary = null;
-		return dictionary == null ? null : new String(dictionary, StandardCharsets.UTF_8);
-	}
-
 	/** Publishes and commits one Store binary. */
 	synchronized void distributeData(final Binary data)
 	{
@@ -179,7 +171,6 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		this.ensureWriteAdmitted();
 		if (data == null)
 		{
-			this.pendingDictionary = null;
 			throw new NullPointerException("data");
 		}
 		if (this.publisher.hasPendingTransaction())
@@ -232,7 +223,14 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		{
 			try
 			{
-				this.listener.onState(AeronReplicationCheckpoint.State.REJECTED, prepared.sequence(),
+				/* A negative position means the ABORT marker was offered but its
+				 * durable Archive position could not be established. Treat that path as
+				 * uncertain; a restart must reseed rather than accept a rejection whose
+				 * terminal evidence may still be in flight. */
+				final AeronReplicationCheckpoint.State state = abortPosition < 0
+					? AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN
+					: AeronReplicationCheckpoint.State.REJECTED;
+				this.listener.onState(state, prepared.sequence(),
 					prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), abortPosition);
 			}
 			catch (final RuntimeException | Error failure)
@@ -282,6 +280,10 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 	{
 		this.ensureWriteAdmitted();
 		if (data == null) throw new NullPointerException("data");
+		if (this.localAcceptanceFence != null)
+		{
+			throw new IllegalStateException("an Aeron local acceptance fence is already pending");
+		}
 		final ByteBuffer[] buffers = AeronBinaryBuffers.collect(data);
 		final AeronReplicationPublisher.TransactionMetadata metadata =
 			this.publisher.transactionMetadata(buffers);
@@ -440,6 +442,7 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 		this.localAcceptanceFence = null;
 	}
 
+	/** Pairs a reserved sequence with the transaction queued for publication. */
 	private record LocalEnqueue(long sequence, AeronReplicationPublisher.TransactionMetadata metadata,
 		ByteBuffer[] buffers)
 	{
@@ -469,7 +472,22 @@ public final class AeronReplicationWriteCoordinator implements Disposable
 	@Override
 	public synchronized void dispose()
 	{
-		this.publisher.releaseCoordinator(this);
+		/* ENQUEUE_THEN_ARCHIVE may be interrupted after the Store accepted data
+		 * but before the Archive terminal marker was published.  Never turn that
+		 * local acceptance into an ABORT during shutdown: close the publication
+		 * without a terminal marker and keep the durable ENQUEUED fence so the next
+		 * process reseeds instead of silently discarding Store data. */
+		if (this.localAcceptanceFence != null && this.publisher.hasPendingTransaction())
+		{
+			this.publisher.closeWithoutAbort();
+			this.publisher.releaseCoordinator(this);
+			return;
+		}
+		/* Keep the coordinator claim until publication shutdown has completed.  If an
+		 * abort/close offer is transiently unavailable, releasing first would allow a
+		 * second coordinator to claim the same publisher while this one still owns a
+		 * pending sequence. */
 		this.publisher.close();
+		this.publisher.releaseCoordinator(this);
 	}
 }

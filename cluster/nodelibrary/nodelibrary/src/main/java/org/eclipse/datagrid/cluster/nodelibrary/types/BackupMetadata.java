@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
-
+/** Identifies a backup by its creation time and backup slot. */
 public record BackupMetadata(long timestamp, boolean manualSlot)
 {
 }

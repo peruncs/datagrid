@@ -25,6 +25,13 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Supplier;
 
+/**
+ * This factory lets Quartz create jobs from application-owned suppliers.
+ *
+ * <p>Quartz supplies a job class when a trigger fires. The factory looks up
+ * the matching supplier, which lets jobs receive live storage collaborators
+ * instead of being constructed through a no-argument reflection call.</p>
+ */
 public interface QuartzCronJobJobFactory extends JobFactory
 {
 	void setJobFactory(final Class<? extends Job> clazz, final Supplier<Job> supplier);
@@ -34,6 +41,7 @@ public interface QuartzCronJobJobFactory extends JobFactory
 		return new Default();
 	}
 
+	/** Stores the job-class to supplier mapping. */
 	final class Default implements QuartzCronJobJobFactory
 	{
 		private final Map<Class<? extends Job>, Supplier<Job>> jobSupliers = new HashMap<>();

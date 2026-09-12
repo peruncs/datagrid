@@ -27,6 +27,13 @@ import java.util.function.UnaryOperator;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This dispatcher wraps Store components with distributed-writing behavior.
+ *
+ * <p>Persistence targets distribute committed binary data, and type dictionary
+ * exporters distribute type definitions. Other objects pass through unchanged
+ * so the normal Store foundation keeps its existing behavior.</p>
+ */
 public class DistributedStorageConfigurator implements InstanceDispatcherLogic
 {
 	private final StorageBinaryDataDistributor distributor;

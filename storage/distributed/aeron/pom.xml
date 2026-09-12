@@ -61,7 +61,8 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED,org.agrona</argLine>
+                    <useModulePath>false</useModulePath>
+                    <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
                 </configuration>
             </plugin>
             <plugin>
@@ -69,7 +70,9 @@
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>3.5.0</version>
                 <configuration>
-                    <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED,org.agrona</argLine>
+                    <!-- Keep forked integration fixtures on the class path. -->
+                    <useModulePath>false</useModulePath>
+                    <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
                 </configuration>
                 <executions>
                     <execution>

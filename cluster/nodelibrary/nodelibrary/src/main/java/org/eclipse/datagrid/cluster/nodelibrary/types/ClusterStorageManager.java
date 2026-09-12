@@ -39,9 +39,17 @@ import java.util.function.Predicate;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This storage manager adds cluster shutdown and size checks to Store.
+ *
+ * <p>The wrapper keeps the Store API visible while adding the node's shutdown
+ * callback. The full implementation also validates storage size before writes
+ * and routes graph updates through the cluster lock.</p>
+ */
 public interface ClusterStorageManager<T> extends StorageManager
 {
 	@Override
+	@SuppressWarnings("unchecked")
 	Lazy<T> root();
 
 	@Override
@@ -56,6 +64,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		return new Default<>(notNull(delegate), notNull(storageSizeValidation), notNull(shutdownCallback));
 	}
 
+	/** Runs node-specific work immediately before Store shuts down. */
 	interface ShutdownCallback
 	{
 		void onShutdown();
@@ -65,6 +74,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			return new NoOp();
 		}
 
+		/** A callback for applications that need no shutdown action. */
 		final class NoOp implements ShutdownCallback
 		{
 			private NoOp()
@@ -79,6 +89,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 	}
 
+	/** Decides whether another Store write may be accepted. */
 	interface StorageSizeValidation
 	{
 		boolean isStorageSizeValid();
@@ -89,6 +100,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		return new Wrapper<>(notNull(delegate), notNull(shutdownCallback));
 	}
 
+	/** Adds the shutdown callback while delegating every Store operation. */
 	class Wrapper<T> implements ClusterStorageManager<T>
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(Wrapper.class);
@@ -129,6 +141,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 
 		@Override
+		@SuppressWarnings("unchecked")
 		public Object setRoot(final Object newRoot)
 		{
 			return this.delegate.setRoot(newRoot);
@@ -315,6 +328,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 
 		@Override
+		@SuppressWarnings("unchecked")
 		public Lazy<T> root() throws NodelibraryException
 		{
 			return this.delegate.root();
@@ -334,6 +348,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 	}
 
+	/** Adds size validation and distributed graph-write behavior to Store. */
 	class Default<T> implements ClusterStorageManager<T>
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(Default.class);
@@ -551,6 +566,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 
 		@Override
+		@SuppressWarnings("unchecked")
 		public Object setRoot(final Object newRoot)
 		{
 			this.validateState();
@@ -661,6 +677,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 
 		@Override
+		@SuppressWarnings("unchecked")
 		public Lazy<T> root()
 		{
 			return this.delegate.root();
@@ -672,6 +689,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			return this.delegate.exportAdjacencyData(workingDir);
 		}
 
+		/** Adapts the cluster manager to Store's binary persistence manager. */
 		private final class BinaryPersistenceManagerAdapter implements PersistenceManager<Binary>
 		{
 			private final PersistenceManager<Binary> delegate;
@@ -919,6 +937,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			}
 		}
 
+		/** Registers binary types through the cluster manager boundary. */
 		private final class ClusterPersistenceRegistererAdapter implements PersistenceRegisterer
 		{
 			private final PersistenceRegisterer delegate;
@@ -950,6 +969,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			}
 		}
 
+		/** Stores binary entities while applying the cluster's size rules. */
 		private final class ClusterPersistenceStorerAdapter extends ClusterStorerAdapter implements PersistenceStorer
 		{
 			private final PersistenceStorer delegate;
@@ -985,6 +1005,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			}
 		}
 
+		/** Delegates Store storer operations while preserving cluster checks. */
 		private class ClusterStorerAdapter implements Storer
 		{
 			private final Storer storer;

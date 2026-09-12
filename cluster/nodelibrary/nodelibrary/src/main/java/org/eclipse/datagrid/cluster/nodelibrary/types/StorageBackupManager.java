@@ -29,6 +29,13 @@ import java.util.function.Supplier;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This manager creates, lists, downloads, and deletes storage backups.
+ *
+ * <p>Creating a backup is synchronized because it temporarily stops the
+ * replication reader and captures the current message position. The manager
+ * uses that position when a later node resumes from the backup.</p>
+ */
 public interface StorageBackupManager
 {
     void createStorageBackup(boolean useManualSlot) throws NodelibraryException;
@@ -75,6 +82,7 @@ public interface StorageBackupManager
         );
     }
 
+    /** Implements the stop, backup, retention, and resume sequence. */
     class Default implements StorageBackupManager
     {
 		private static final Logger LOG = LoggerFactory.getLogger(StorageBackupManager.class);
@@ -117,39 +125,61 @@ public interface StorageBackupManager
 				throw new IllegalStateException("Cannot create backup after replication reader failure", readerFailure);
 			}
 
-			if (!backups.isEmpty())
-            {
-                if (useManualSlot)
-                {
-                    backups.stream().filter(BackupMetadata::manualSlot).forEach(this::deleteBackup);
-                }
-                else
-                {
-                    // just in case there are multiple backups too many
-                    final int toDeleteCount = (int)backups.stream().filter(b -> !b.manualSlot()).count()
-                        - this.maxBackupCount + 1;
-                    LOG.debug("Deleting {} oldest backup(s)", toDeleteCount);
-                    for (int i = 0; i < toDeleteCount; i++)
-                    {
-                        this.deleteBackup(this.oldestBackup(backups));
-                    }
-                }
-            }
-
 			final boolean isRunning = this.dataClient.isRunning();
 
 			if (isRunning)
 			{
 				this.stopDataClient();
 			}
+			else
+			{
+				/* A reader can report isRunning()==false while a timed-out stop still
+				 * owns a live polling thread.  Never treat that intermediate state as a
+				 * safe backup boundary.  STOPPED/NOT_STARTED remain valid for simple
+				 * clients that never expose a stop-at-latest operation. */
+				final ClusterStorageBinaryDataClient.StopOutcome outcome = this.dataClient.stopResult().outcome();
+				if (outcome == ClusterStorageBinaryDataClient.StopOutcome.STOPPING ||
+					outcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
+					outcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED)
+				{
+					throw new IllegalStateException(
+						"Cannot create backup while replication reader stop is unresolved: " + outcome);
+				}
+			}
 
-            try
-            {
-                this.backend.createAndUploadBackup(this.storageConnection, this.messageInfoSupplier.get(), newBackup);
+			Throwable operationFailure = null;
+			try
+			{
+				this.backend.createAndUploadBackup(this.storageConnection, this.messageInfoSupplier.get(), newBackup);
 
-                if (!useManualSlot)
-                {
-                    // delete up to the previous backup to save on Kafka log storage
+				/* Prune only after the new backup is durable.  If upload fails, every
+				 * previously recoverable backup remains available for recovery. */
+				if (!backups.isEmpty())
+				{
+					if (useManualSlot)
+					{
+						backups.stream().filter(BackupMetadata::manualSlot).forEach(this::deleteBackup);
+					}
+					else
+					{
+						// just in case there are multiple backups too many
+						final int toDeleteCount = (int)backups.stream().filter(b -> !b.manualSlot()).count()
+							- this.maxBackupCount + 1;
+						LOG.debug("Deleting {} oldest backup(s)", toDeleteCount);
+						final List<BackupMetadata> nonManual = backups.stream()
+							.filter(b -> !b.manualSlot())
+							.sorted(Comparator.comparingLong(BackupMetadata::timestamp))
+							.toList();
+						for (int i = 0; i < Math.max(0, toDeleteCount) && i < nonManual.size(); i++)
+						{
+							this.deleteBackup(nonManual.get(i));
+						}
+					}
+				}
+
+				if (!useManualSlot)
+				{
+					// delete up to the previous backup to save on Kafka log storage
 					if (this.retention.isSupported())
 					{
 						this.backend.getMessageInfoFromPreviousBackup(1)
@@ -161,17 +191,36 @@ public interface StorageBackupManager
 					{
 						LOG.warn("Replication retention is unsupported; preserving Archive history");
 					}
-                }
-            }
-            finally
-            {
-                // only resume if the data client was running previously
-                if (isRunning)
-                {
-                    this.dataClient.resume();
-                }
-            }
-        }
+				}
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				operationFailure = failure;
+				throw failure;
+			}
+			finally
+			{
+				// only resume if the data client was running previously
+				/* A stop timeout records a terminal reader failure and deliberately leaves
+				 * the client stopped.  Calling resume() from this finally block would mask
+				 * the original backup error and race a still-draining poller. */
+				if (isRunning && this.dataClient.failure() == null &&
+					this.dataClient.stopResult().outcome() == ClusterStorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY)
+				{
+					try
+					{
+						this.dataClient.resume();
+					}
+					catch (final RuntimeException | Error resumeFailure)
+					{
+						/* Never hide a failed backup behind a shutdown/resume error;
+						 * preserve both causes for operators and retry logic. */
+						if (operationFailure != null) operationFailure.addSuppressed(resumeFailure);
+						else throw resumeFailure;
+					}
+				}
+			}
+		}
 
         @Override
         public synchronized void downloadLatestBackup(final Path targetRootPath)
@@ -254,10 +303,5 @@ public interface StorageBackupManager
 				XThreads.sleep(100);
 			}
 		}
-
-        private BackupMetadata oldestBackup(final List<BackupMetadata> backups)
-        {
-            return backups.stream().min(Comparator.comparingLong(BackupMetadata::timestamp)).orElse(null);
-        }
     }
 }

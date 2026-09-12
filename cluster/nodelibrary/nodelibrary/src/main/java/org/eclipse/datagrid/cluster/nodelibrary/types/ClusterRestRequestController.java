@@ -92,6 +92,7 @@ public interface ClusterRestRequestController extends AutoCloseable
 		return new BackupNode(notNull(backupNodeManager), notNull(properties));
 	}
 
+	/** Shares validation, error mapping, and common monitoring requests. */
 	abstract class Abstract implements ClusterRestRequestController
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(ClusterRestRequestController.class);
@@ -169,6 +170,10 @@ public interface ClusterRestRequestController extends AutoCloseable
 				final long current = this.nodeManager.getCurrentMessageIndex();
 				final long latest = this.nodeManager.getLatestMessageIndex();
 				final long lag = Math.max(0, latest - current);
+				final long archiveFree = this.nodeManager.getArchiveUsableSpaceBytes();
+				final long durablePosition = this.nodeManager.getWriterDurablePosition();
+				final long durableSequence = this.nodeManager.getWriterDurableSequence();
+				final long appliedSequence = this.nodeManager.getAppliedSequence();
 				final String transport = metricLabel(this.nodeManager.getReplicationTransport());
 				final String state = this.nodeManager.getReplicationState().name().toLowerCase(java.util.Locale.ROOT);
 				return String.format(
@@ -189,10 +194,24 @@ public interface ClusterRestRequestController extends AutoCloseable
 					"cluster_replication_ready{transport=\"%s\"} %d\n" +
 					"# HELP cluster_replication_healthy Whether the node is healthy.\n" +
 					"# TYPE cluster_replication_healthy gauge\n" +
-					"cluster_replication_healthy{transport=\"%s\"} %d",
+					"cluster_replication_healthy{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_archive_usable_space_bytes Archive free bytes, or -1 when unavailable.\n" +
+					"# TYPE cluster_replication_archive_usable_space_bytes gauge\n" +
+					"cluster_replication_archive_usable_space_bytes{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_writer_durable_position Last terminal recording position, or -1.\n" +
+					"# TYPE cluster_replication_writer_durable_position gauge\n" +
+					"cluster_replication_writer_durable_position{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_writer_durable_sequence Last terminal writer sequence, or -1.\n" +
+					"# TYPE cluster_replication_writer_durable_sequence gauge\n" +
+					"cluster_replication_writer_durable_sequence{transport=\"%s\"} %d\n" +
+					"# HELP cluster_replication_applied_sequence Last sequence applied by this node, or -1.\n" +
+					"# TYPE cluster_replication_applied_sequence gauge\n" +
+					"cluster_replication_applied_sequence{transport=\"%s\"} %d",
 					transport, current, transport, latest, transport, lag, transport, state,
 					transport, this.nodeManager.isReady() ? 1 : 0,
-					transport, this.nodeManager.isHealthy() ? 1 : 0
+					transport, this.nodeManager.isHealthy() ? 1 : 0,
+					transport, archiveFree, transport, durablePosition, transport, durableSequence,
+					transport, appliedSequence
 				);
 			});
 		}
@@ -293,6 +312,7 @@ public interface ClusterRestRequestController extends AutoCloseable
 		}
 	}
 
+	/** Serves requests for a node that can become the distributor. */
 	final class StorageNode extends Abstract
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(StorageNode.class);
@@ -336,6 +356,7 @@ public interface ClusterRestRequestController extends AutoCloseable
 		}
 	}
 
+	/** Serves requests for a node that reads from a backup. */
 	final class BackupNode extends Abstract
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(BackupNode.class);

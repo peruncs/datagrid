@@ -60,6 +60,16 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		throw new UnsupportedOperationException("complete-binary delivery is not supported");
 	}
 
+	/**
+	 * Accepts a complete binary and may take ownership of its direct buffers.
+	 * Returning {@code true} transfers release responsibility to the acceptor.
+	 */
+	default boolean acceptDataOwned(final Binary data)
+	{
+		this.acceptData(data);
+		return false;
+	}
+
 	/** Accepts a type dictionary already decoded by the transport. */
 	default void acceptTypeDictionary(final String dictionary)
 	{
@@ -70,6 +80,7 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		return new Default(notNull(merger));
 	}
 
+	/** Reassembles packets and forwards complete messages to the merger. */
 	class Default implements ClusterStorageBinaryDataPacketAcceptor
 	{
 		private final ClusterStorageBinaryDataMerger merger;
@@ -103,6 +114,12 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		public void acceptData(final Binary data)
 		{
 			this.merger.receiveData(data);
+		}
+
+		@Override
+		public boolean acceptDataOwned(final Binary data)
+		{
+			return this.merger.receiveDataOwned(data);
 		}
 
 		@Override

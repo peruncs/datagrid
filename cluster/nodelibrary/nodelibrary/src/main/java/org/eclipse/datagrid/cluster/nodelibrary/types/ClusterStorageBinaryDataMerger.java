@@ -16,14 +16,12 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
-import org.eclipse.datagrid.storage.distributed.types.ObjectMaterializer;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataImporter;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMaterializer;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMerger;
 import org.eclipse.serializer.collections.types.XEnum;
-import org.eclipse.serializer.concurrency.XThreads;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistence;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundation;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
@@ -77,6 +75,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		);
 	}
 
+	/** Supplies conservative defaults for deferred object-graph application. */
 	interface Defaults
 	{
 		static long cachingTimeoutMs()
@@ -90,6 +89,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		}
 	}
 
+	/** Applies imported data on one bounded worker and reports failures. */
 	class Default implements ClusterStorageBinaryDataMerger
 	{
 		private static final Logger LOG = Logging.getLogger(ClusterStorageBinaryDataMerger.class);
@@ -97,6 +97,8 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		private final ExecutorService executor = Executors.newSingleThreadExecutor();
 		private final ConcurrentLinkedQueue<ByteBuffer> cachedData = new ConcurrentLinkedQueue<>();
 		private final Object applyLock = new Object();
+		private final Object flushMonitor = new Object();
+		private volatile boolean flushRequested;
 
 		private final BinaryPersistenceFoundation<?> foundation;
 		private final StorageConnection storage;
@@ -132,69 +134,159 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 			}
 			if (this.disposed)
 			{
-				return;
+				/* A disposed receiver must not acknowledge data. Returning normally
+				 * would let the Aeron assembler advance its cursor even though the Store
+				 * binary was discarded. */
+				throw new IllegalStateException("Storage binary merger is disposed");
 			}
-			final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, data.buffers());
+			final ByteBuffer[] sourceBuffers = org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataChunker
+				.buffers(data).toArray(ByteBuffer[]::new);
+			final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, sourceBuffers);
+			/* scheduleMaterialization owns cleanup on every rejection.  Releasing here
+			 * as well would double-free buffers when the worker has already drained its
+			 * queue after a terminal failure. */
+			this.scheduleMaterialization(ownedBuffers);
+		}
 
-			this.cachedData.addAll(Arrays.asList(ownedBuffers));
-
-			if (this.updateFuture.isDone())
+		/** Imports Aeron-owned direct buffers without a second native allocation. */
+		@Override
+		public synchronized boolean receiveDataOwned(final Binary data)
+		{
+			if (this.failure != null)
 			{
-				this.updateFuture = this.executor.submit(() ->
-				{
-					try
-					{
-						XThreads.sleep(this.cachingTimeoutMs);
-						this.applyDataSafely();
-					}
-					catch (final Throwable t)
-					{
-						if (Thread.currentThread().isInterrupted())
-						{
-							this.releaseCachedData();
-							return;
-						}
-						this.failure = t instanceof RuntimeException runtime
-							? runtime
-							: new IllegalStateException("Storage binary merger failed", t);
-						LOG.error("Storage binary merger failed", this.failure);
-						this.releaseCachedData();
-						throw this.failure;
-					}
-				});
+				throw new IllegalStateException("Storage binary merger has failed", this.failure);
+			}
+			if (this.disposed)
+			{
+				throw new IllegalStateException("Storage binary merger is disposed");
+			}
+			final ByteBuffer[] buffers = org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataChunker
+				.buffers(org.eclipse.serializer.util.X.notNull(data)).toArray(ByteBuffer[]::new);
+			if (!StorageBinaryDataImporter.importDirect(this.storage, buffers))
+			{
+				this.receiveData(data);
+				return false;
+			}
+			/* scheduleMaterialization now owns the buffers, including any cleanup when
+			 * executor submission or backpressure fails after queue admission. */
+			this.scheduleMaterialization(buffers);
+			return true;
+		}
+
+		private void scheduleMaterialization(final ByteBuffer[] ownedBuffers)
+		{
+			if (this.failure != null)
+			{
+				StorageBinaryDataImporter.release(ownedBuffers);
+				throw new IllegalStateException("Storage binary merger has failed", this.failure);
+			}
+			if (this.disposed)
+			{
+				StorageBinaryDataImporter.release(ownedBuffers);
+				throw new IllegalStateException("Storage binary merger is disposed");
 			}
 
-			if (this.cachedData.size() > this.cacheLimit)
+			boolean queued = false;
+			try
 			{
-				while (!this.updateFuture.isDone())
+				synchronized (this.applyLock)
 				{
-					try
+					/* The worker can fail between the entry check above and this
+					 * ownership hand-off.  Reject before enqueueing so a caller never
+					 * loses the native buffers into a dead queue. */
+					if (this.failure != null)
 					{
-						this.updateFuture.get(500, TimeUnit.MILLISECONDS);
+						throw new IllegalStateException("Storage binary merger has failed", this.failure);
 					}
-					catch (final InterruptedException e)
+					if (this.disposed)
 					{
-						Thread.currentThread().interrupt();
-						/* A Kafka reader can be interrupted while disposal is waiting for this
-						 * backpressure loop. Do not continue calling Future.get() with the
-						 * interrupt flag set: that creates a hot loop and prevents shutdown. */
-						throw new IllegalStateException("Interrupted while waiting for import data task", e);
+						throw new IllegalStateException("Storage binary merger is disposed");
 					}
-					catch (final ExecutionException e)
+					this.cachedData.addAll(Arrays.asList(ownedBuffers));
+					queued = true;
+					if (this.updateFuture.isDone())
 					{
-						// The worker records its terminal failure before completing exceptionally.
-						final RuntimeException mergerFailure = this.failure;
-						if (mergerFailure != null)
+						try
 						{
-							throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
+							this.updateFuture = this.executor.submit(() ->
+							{
+								try
+								{
+									this.awaitFlushRequestOrTimeout();
+									this.applyDataSafely();
+								}
+								catch (final Throwable t)
+								{
+									if (this.disposed && Thread.currentThread().isInterrupted())
+									{
+										this.releaseCachedData();
+										return;
+									}
+									this.failure = t instanceof RuntimeException runtime
+										? runtime
+										: new IllegalStateException("Storage binary merger failed", t);
+									LOG.error("Storage binary merger failed", this.failure);
+									this.releaseCachedData();
+									throw this.failure;
+								}
+							});
 						}
-						throw new IllegalStateException("Storage binary merger task failed", e.getCause());
-					}
-					catch (final TimeoutException e)
-					{
-						// no-op
+						catch (final RuntimeException | Error failure)
+						{
+							/* Submission happens under applyLock, so the worker cannot have
+							 * removed these newly queued buffers yet. */
+							for (final ByteBuffer buffer : ownedBuffers)
+							{
+								this.cachedData.removeIf(candidate -> candidate == buffer);
+							}
+							queued = false;
+							throw failure;
+						}
 					}
 				}
+
+				if (this.cachedData.size() > this.cacheLimit)
+				{
+					while (!this.updateFuture.isDone())
+					{
+						try
+						{
+							this.updateFuture.get(500, TimeUnit.MILLISECONDS);
+						}
+						catch (final InterruptedException e)
+						{
+							Thread.currentThread().interrupt();
+							/* A Kafka reader can be interrupted while disposal is waiting for this
+							 * backpressure loop. Do not continue calling Future.get() with the
+							 * interrupt flag set: that creates a hot loop and prevents shutdown. */
+							throw new IllegalStateException("Interrupted while waiting for import data task", e);
+						}
+						catch (final ExecutionException e)
+						{
+							// The worker records its terminal failure before completing exceptionally.
+							final RuntimeException mergerFailure = this.failure;
+							if (mergerFailure != null)
+							{
+								throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
+							}
+							throw new IllegalStateException("Storage binary merger task failed", e.getCause());
+						}
+						catch (final TimeoutException e)
+						{
+							// no-op
+						}
+					}
+				}
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				if (!queued)
+				{
+					StorageBinaryDataImporter.release(ownedBuffers);
+				}
+				/* Once queued, the worker or releaseCachedData owns the buffers.  Releasing
+				 * them here would race applyDataSafely and double-deallocate native memory. */
+				throw failure;
 			}
 		}
 
@@ -227,24 +319,16 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 
 			try
 			{
-				this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+			this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+			{
+				try
 				{
-					final ObjectMaterializer materializer = new ObjectMaterializer(this.storage.persistenceManager());
-
-					final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
-					try
-					{
-						for (final ByteBuffer buffer : data)
-						{
-							final long address = XMemory.getDirectByteBufferAddress(buffer);
-							iterator.iterateEntityRawData(address, address + buffer.limit(), materializer);
-						}
-						materializer.materialize();
-					}
-					finally
-					{
-						release.run();
-					}
+					StorageBinaryDataMaterializer.materialize(this.storage, data.toArray(ByteBuffer.class));
+				}
+				finally
+				{
+					release.run();
+				}
 				});
 			}
 			catch (final RuntimeException | Error failure)
@@ -262,6 +346,29 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 				{
 					this.applyData();
 				}
+			}
+		}
+
+		private void awaitFlushRequestOrTimeout()
+		{
+			if (this.cachingTimeoutMs <= 0L) return;
+			synchronized (this.flushMonitor)
+			{
+				if (this.flushRequested)
+				{
+					this.flushRequested = false;
+					return;
+				}
+				try
+				{
+					this.flushMonitor.wait(this.cachingTimeoutMs);
+				}
+				catch (final InterruptedException interrupted)
+				{
+					Thread.currentThread().interrupt();
+					throw new IllegalStateException("Storage graph update worker was interrupted", interrupted);
+				}
+				this.flushRequested = false;
 			}
 		}
 
@@ -284,7 +391,10 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 			{
 				throw new IllegalStateException("Storage binary merger has failed", this.failure);
 			}
-			if (this.disposed) return;
+			if (this.disposed)
+			{
+				throw new IllegalStateException("Storage binary merger is disposed");
+			}
 			final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
 				.setClassLoaderProvider(this.foundation.getClassLoaderProvider())
 				.setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
@@ -312,17 +422,27 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		@Override
 		public synchronized void dispose()
 		{
-			if (this.disposed) return;
+			/* A timeout is retryable: the worker may still own native buffers.  Do
+			 * not let the first failed attempt make every later cleanup a no-op. */
+			if (this.disposed && this.executor.isTerminated()) return;
 			this.disposed = true;
 			this.executor.shutdown();
+			boolean terminated = false;
 			try
 			{
 				// if any external processes like Kubernetes shuts us down, it will wait for the externally set
 				// grace period and then kill the process. But any other case we will await the task orderly like this.
-				if (!this.executor.awaitTermination(30, TimeUnit.SECONDS))
+				terminated = this.executor.awaitTermination(30, TimeUnit.SECONDS);
+				if (!terminated)
 				{
 					LOG.warn("Timed out waiting for storage graph updates; interrupting remaining work");
 					this.executor.shutdownNow();
+					terminated = this.executor.awaitTermination(5, TimeUnit.SECONDS);
+					if (!terminated)
+					{
+						throw new IllegalStateException(
+							"Storage graph update worker did not terminate; native buffers remain owned by it");
+					}
 				}
 			}
 			catch (final InterruptedException e)
@@ -333,7 +453,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 			}
 			finally
 			{
-				if (this.executor.isTerminated()) this.releaseCachedData();
+				if (terminated || this.executor.isTerminated()) this.releaseCachedData();
 			}
 		}
 
@@ -342,6 +462,10 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		{
 			if (this.failure != null)
 			{
+				/* A worker can fail between receiveDataOwned() and this boundary.
+				 * Release buffers accepted after the worker's failure cleanup so the
+				 * assembler's ownership transfer cannot turn into a native leak. */
+				this.releaseCachedData();
 				throw new IllegalStateException("Storage binary merger has failed", this.failure);
 			}
 			/*
@@ -352,8 +476,37 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 			 * worker is deliberately not interrupted: it may already be inside Store
 			 * materialization, and interrupting it can leave the object graph half-applied.
 			 */
+			/* Wake a worker that is in its coalescing delay.  The flag avoids a lost
+			 * notification when the worker is between checking the flag and entering
+			 * wait(). */
+			synchronized (this.flushMonitor)
+			{
+				this.flushRequested = true;
+				this.flushMonitor.notifyAll();
+			}
 			this.applyDataSafely();
 			final Future<?> pending = this.updateFuture;
+			if (!pending.isDone())
+			{
+				try
+				{
+					pending.get();
+				}
+				catch (final InterruptedException e)
+				{
+					Thread.currentThread().interrupt();
+					throw new NodelibraryException(e);
+				}
+				catch (final ExecutionException e)
+				{
+					final RuntimeException mergerFailure = this.failure;
+					if (mergerFailure != null)
+					{
+						throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
+					}
+					throw new NodelibraryException("Failed to materialize imported Store data", e.getCause());
+				}
+			}
 			if (pending.isDone())
 			{
 				try

@@ -130,18 +130,33 @@ final class AeronReaderLifecycle
 				throw new IllegalStateException("cannot dispose Aeron reader from its polling thread");
 			}
 			thread.interrupt();
+			final long deadline = System.nanoTime() + timeoutNanos;
 			try
 			{
-				if (!stopped.await(timeoutNanos, java.util.concurrent.TimeUnit.NANOSECONDS))
+				final long remaining = deadline - System.nanoTime();
+				if (remaining <= 0L || !stopped.await(remaining, java.util.concurrent.TimeUnit.NANOSECONDS))
 				{
 					failure = new IllegalStateException("Aeron reader polling thread did not stop");
 				}
 				else
 				{
-					/* The latch is released from the polling thread's finally block;
-					 * join until that thread has returned so callers never observe a
-					 * live reader after shutdown completes. */
-					thread.join();
+					/* The latch is released from the polling thread's finally block. Use
+					 * the same deadline for the tiny interval between countDown() and
+					 * Thread termination; an unbounded join defeats the shutdown budget. */
+					final long joinNanos = deadline - System.nanoTime();
+					if (joinNanos <= 0L)
+					{
+						failure = new IllegalStateException("Aeron reader polling thread did not stop");
+					}
+					else
+					{
+						final long joinMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(joinNanos);
+						thread.join(Math.max(1L, joinMillis));
+						if (thread.isAlive())
+						{
+							failure = new IllegalStateException("Aeron reader polling thread did not stop");
+						}
+					}
 				}
 			}
 			catch (final InterruptedException interrupted)

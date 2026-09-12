@@ -24,6 +24,13 @@ import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.serializer.concurrency.LockedExecutor;
 
+/**
+ * This producer assembles the cluster services in a Helidon application.
+ *
+ * <p>Each produced service belongs to the application context. The foundation
+ * is created before storage and REST controllers, and the shutdown hooks close
+ * those services when the process ends.</p>
+ */
 @ApplicationScoped
 public class EclipseDataGridCluster
 {

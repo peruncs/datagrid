@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 
+/** Reports that a request reached a node that is not the distributor. */
 public class NotADistributorException extends BadRequestException
 {
 	public static final String NAD_HEADER_KEY = "StorageNode-NAD";

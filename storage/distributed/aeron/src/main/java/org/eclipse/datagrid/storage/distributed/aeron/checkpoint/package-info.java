@@ -13,9 +13,11 @@
  */
 
 /**
- * Durable Aeron replication checkpoints and restart cursors.
+ * This package keeps the durable state needed to resume Aeron replication.
  *
- * <p>Records in this package are versioned persistence boundaries. They are
- * validated before a writer or reader reuses an Archive recording.</p>
+ * <p>A checkpoint names the stream position and recording that a node has
+ * accepted. A reader or writer may reuse a recording only after its identity
+ * and generation match the checkpoint. A mismatch starts a new safe path
+ * instead of silently appending to unrelated data.</p>
  */
 package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;

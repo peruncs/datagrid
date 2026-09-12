@@ -18,14 +18,37 @@ import org.eclipse.serializer.Serializer;
 
 import java.util.Map;
 
+/**
+ * This provider creates the sender and receiver used by one clustered cache.
+ *
+ * <p>The cache factory supplies the Hibernate properties and shared serializer.
+ * Implementations decide how messages travel, but they must return resources
+ * that remain valid until the cache region factory releases them.</p>
+ *
+ * @param <K> cache key type
+ * @param <V> cache value type
+ */
 public interface ClusteredCacheMessageComProvider<K, V>
 {
-    ClusteredCacheMessageSender<K, V> provideUpdateTimestampsCacheMessageSender(
+	/** Creates the sender for timestamp cache events.
+	 *
+	 * @param properties cache configuration properties
+	 * @param serializer serializer shared by the sender and receiver
+	 * @return sender for timestamp cache events
+	 */
+	ClusteredCacheMessageSender<K, V> provideUpdateTimestampsCacheMessageSender(
         @SuppressWarnings("rawtypes") Map properties,
         Serializer<byte[]> serializer
-    );
+	);
 
-    ClusteredCacheMessageReceiver provideMessageReceiver(
+	/** Creates the receiver that passes remote messages to the acceptor.
+	 *
+	 * @param properties cache configuration properties
+	 * @param serializer serializer shared by the sender and receiver
+	 * @param messageAcceptor target for received messages
+	 * @return receiver for remote cache messages
+	 */
+	ClusteredCacheMessageReceiver provideMessageReceiver(
         @SuppressWarnings("rawtypes") Map properties,
         Serializer<byte[]> serializer,
         ClusteredCacheMessageAcceptor messageAcceptor

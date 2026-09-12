@@ -20,6 +20,13 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataAcceptor;
 import org.eclipse.serializer.persistence.types.*;
 
+/**
+ * This acceptor collects remote object ids and materializes them as one batch.
+ *
+ * <p>Root objects are left untouched because each node owns its local roots.
+ * Repeated object ids are collected once, which matters when one transaction
+ * contains several versions of an object.</p>
+ */
 public class ObjectMaterializer implements BinaryEntityRawDataAcceptor
 {
 	private final PersistenceTypeDictionary persistenceTypeDictionary;

@@ -17,6 +17,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
 
 import org.eclipse.serializer.exceptions.BaseException;
 
+/** Base runtime exception for node lifecycle and storage failures. */
 public class NodelibraryException extends BaseException
 {
 	public NodelibraryException()

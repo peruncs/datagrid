@@ -88,8 +88,10 @@ public interface NodelibraryPropertiesProvider
 		return new Env();
 	}
 
+	/** Reads node properties from environment variables. */
 	class Env implements NodelibraryPropertiesProvider
 	{
+		/** Names of the environment variables understood by the provider. */
 		public static final class EnvKeys
 		{
 			public static final String KAFKA_TOPIC_NAME = "MSCNL_KAFKA_TOPIC_NAME";

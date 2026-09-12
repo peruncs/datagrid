@@ -21,6 +21,7 @@ import jakarta.inject.Singleton;
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterFoundation;
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterRestRequestController;
 
+/** Creates and closes the neutral REST request controller. */
 @Factory
 public class ClusterRestRequestControllerFactory
 {

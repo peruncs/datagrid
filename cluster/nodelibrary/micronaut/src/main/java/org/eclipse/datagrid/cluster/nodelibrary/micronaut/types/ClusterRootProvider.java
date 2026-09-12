@@ -21,6 +21,7 @@ import io.micronaut.eclipsestore.DefaultRootProvider;
 import io.micronaut.eclipsestore.RootProvider;
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageManager;
 
+/** Supplies a root from the cluster-aware storage manager. */
 @EachBean(ClusterStorageManager.class)
 @Replaces(DefaultRootProvider.class)
 public class ClusterRootProvider<T> implements RootProvider<T>

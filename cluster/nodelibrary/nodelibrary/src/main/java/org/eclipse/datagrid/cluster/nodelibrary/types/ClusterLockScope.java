@@ -19,6 +19,13 @@ import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.functional.Action;
 import org.eclipse.serializer.functional.Producer;
 
+/**
+ * This scope exposes the lock used to protect one cluster's object graph.
+ *
+ * <p>Read actions may share the lock. Write actions exclude reads and other
+ * writes. Callers should keep the action small and must not retain mutable
+ * state that was read after the action returns.</p>
+ */
 public abstract class ClusterLockScope
 {
 	private final LockedExecutor executor;

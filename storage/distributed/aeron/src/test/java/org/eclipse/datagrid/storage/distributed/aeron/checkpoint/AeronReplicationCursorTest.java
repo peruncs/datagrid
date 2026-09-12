@@ -58,5 +58,7 @@ class AeronReplicationCursorTest
 			id, id, id, 0, 1, -2, 0));
 		assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCursor(
 			id, id, id, 0, 1, 0, -2));
+		assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCursor(
+			id, id, id, 0, 1, 0, Long.MAX_VALUE));
 	}
 }

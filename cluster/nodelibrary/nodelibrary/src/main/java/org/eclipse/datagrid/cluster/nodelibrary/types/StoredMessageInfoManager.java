@@ -28,6 +28,13 @@ import java.nio.file.Path;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This manager persists the last replication message accepted by a node.
+ *
+ * <p>The stored position is the restart boundary. A successful write means a
+ * later reader may resume from that position; a failed write leaves the
+ * boundary uncertain and must be treated as a startup error.</p>
+ */
 public interface StoredMessageInfoManager extends AutoCloseable
 {
     MessageInfo get() throws NodelibraryException;
@@ -57,12 +64,14 @@ public interface StoredMessageInfoManager extends AutoCloseable
     }
 
     @FunctionalInterface
-    interface Creator
+	/** Creates a manager for a writable offset file. */
+	interface Creator
     {
         StoredMessageInfoManager create(AWritableFile offsetFile);
     }
 
-    final class Default implements StoredMessageInfoManager
+	/** Persists message positions with an atomic or writable-file backend. */
+	final class Default implements StoredMessageInfoManager
     {
         private static final Logger LOG = LoggerFactory.getLogger(StoredMessageInfoManager.class);
 
@@ -116,7 +125,10 @@ public interface StoredMessageInfoManager extends AutoCloseable
 					AtomicFileStore.write(this.atomicPath, channel ->
 					{
 						final ByteBuffer buffer = ByteBuffer.wrap(serialized);
-						while (buffer.hasRemaining()) channel.write(buffer);
+						while (buffer.hasRemaining())
+						{
+							if (channel.write(buffer) == 0) throw new IOException("Message info write made no progress");
+						}
 					});
                     written = serialized.length;
                 }

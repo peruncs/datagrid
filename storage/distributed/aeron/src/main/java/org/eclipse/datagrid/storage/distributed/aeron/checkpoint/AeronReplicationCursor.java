@@ -38,7 +38,7 @@ public record AeronReplicationCursor(
 	public AeronReplicationCursor
 	{
 		if (clusterId == null || nodeId == null || storeGeneration == null ||
-			epoch < 0 || recordingId < 0 || recordingPosition < -1 || sequence < -1)
+				epoch < 0 || recordingId < 0 || recordingPosition < -1 || sequence < -1 || sequence == Long.MAX_VALUE)
 		{
 			throw new IllegalArgumentException("invalid Aeron replication cursor");
 		}

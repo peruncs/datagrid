@@ -24,6 +24,12 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This manager creates the scheduled full-backup job.
+ *
+ * <p>The job uses the automatic backup slot and cannot overlap another run.
+ * The backup manager handles the reader boundary and restart metadata.</p>
+ */
 public interface StorageBackupQuartzCronJobManager extends QuartzCronJobManager
 {
 	static StorageBackupQuartzCronJobManager New(final StorageBackupManager backupManager)
@@ -31,6 +37,7 @@ public interface StorageBackupQuartzCronJobManager extends QuartzCronJobManager
 		return new Default(notNull(backupManager));
 	}
 
+	/** Creates backup jobs with one shared backup manager. */
 	final class Default implements StorageBackupQuartzCronJobManager
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(StorageBackupQuartzCronJobManager.class);
@@ -49,6 +56,7 @@ public interface StorageBackupQuartzCronJobManager extends QuartzCronJobManager
 		}
 	}
 
+	/** Requests one automatic storage backup when the trigger fires. */
 	@DisallowConcurrentExecution
 	final class StorageBackupQuartzCronJob implements Job
 	{

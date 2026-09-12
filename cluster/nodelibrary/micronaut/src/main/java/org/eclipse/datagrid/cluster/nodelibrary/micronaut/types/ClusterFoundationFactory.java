@@ -29,6 +29,13 @@ import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
 
 import java.util.function.Supplier;
 
+/**
+ * This factory builds the cluster foundation from Micronaut configuration.
+ *
+ * <p>The application must provide the named root-class configuration. The
+ * factory fails during context creation when that root is missing, because a
+ * cluster without a stable root cannot safely start storage.</p>
+ */
 @Factory
 public class ClusterFoundationFactory
 {

@@ -133,7 +133,10 @@ class AtomicFileStoreTest
 		throws java.io.IOException
 	{
 		final ByteBuffer buffer = StandardCharsets.UTF_8.encode(value);
-		while (buffer.hasRemaining()) channel.write(buffer);
+		while (buffer.hasRemaining())
+		{
+			if (channel.write(buffer) == 0) throw new java.io.IOException("Test file write made no progress");
+		}
 	}
 
 	private static void delete(final Path directory) throws Exception

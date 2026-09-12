@@ -31,6 +31,13 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterRestRequestControll
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations;
 import org.eclipse.datagrid.cluster.nodelibrary.types.StorageNodeRestRouteConfigurations.*;
 
+/**
+ * This controller exposes neutral node operations through Micronaut HTTP.
+ *
+ * <p>Micronaut handles routing, serialization, and worker selection. The
+ * neutral request controller owns the node state and turns failures into
+ * {@link HttpResponseException} instances.</p>
+ */
 @Controller(StorageNodeRestRouteConfigurations.ROOT_PATH)
 @Introspected(classes = PostBackup.Body.class)
 @SerdeImport(PostBackup.Body.class)

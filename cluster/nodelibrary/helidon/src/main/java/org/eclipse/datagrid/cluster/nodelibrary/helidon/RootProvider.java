@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.helidon;
  * #L%
  */
 
-
+/** Supplies the application root used by the cluster foundation. */
 public interface RootProvider
 {
 	Object root();

@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.exceptions;
  * #L%
  */
 
-
+/** Reports a request that the node cannot accept. */
 public class BadRequestException extends HttpResponseException
 {
 	public BadRequestException()

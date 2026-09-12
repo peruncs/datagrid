@@ -42,6 +42,10 @@ final class AeronBinaryBuffers
 		final List<ByteBuffer> buffers = new ArrayList<>();
 		data.iterateChannelChunks(channel ->
 		{
+			if (channel == null)
+			{
+				throw new IllegalStateException("Serializer returned a null channel");
+			}
 			for (final ByteBuffer buffer : channel.buffers())
 			{
 				if (buffer == null)

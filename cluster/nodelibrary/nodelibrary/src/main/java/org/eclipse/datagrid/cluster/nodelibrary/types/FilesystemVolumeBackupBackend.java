@@ -32,6 +32,13 @@ import java.util.stream.Collectors;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This backend stores backups as directories on a local filesystem volume.
+ *
+ * <p>A backup becomes visible only after its storage, metadata, manifest, and
+ * ready marker have been written. The backend keeps user-uploaded storage in
+ * a separate directory so it is not mistaken for a generated backup.</p>
+ */
 public interface FilesystemVolumeBackupBackend extends StorageBackupBackend
 {
     static FilesystemVolumeBackupBackend New(
@@ -47,6 +54,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend
         );
     }
 
+    /** Implements the filesystem backup marker and copy protocol. */
     class Default implements FilesystemVolumeBackupBackend
     {
         private static final Logger LOG = LoggerFactory.getLogger(FilesystemVolumeBackupBackend.class);

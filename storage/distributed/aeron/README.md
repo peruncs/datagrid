@@ -58,3 +58,18 @@ Run the transport and UDP/Archive integration tests with:
 ```text
 mvn -pl storage/distributed/aeron -am verify
 ```
+
+The allocation/throughput probes are test-only and do not add benchmark code
+to the production runtime. Run them on a quiet, dedicated JVM with:
+
+```text
+mvn -pl storage/distributed/aeron -am \
+  -Dtest=AeronEnvelopeBenchmarkTest,AeronPublisherBenchmarkTest test
+```
+
+For reproducible measurements, invoke the two test-side benchmark mains with
+fixed `--warmup`, `--iterations`, payload sizes, chunk size, and JVM flags.
+They report nanoseconds per transaction, MiB/s, bytes copied, bytes offered,
+and thread-allocated bytes when the JDK exposes that counter. The tests assert
+accounting invariants only; they intentionally do not impose machine-specific
+throughput thresholds.

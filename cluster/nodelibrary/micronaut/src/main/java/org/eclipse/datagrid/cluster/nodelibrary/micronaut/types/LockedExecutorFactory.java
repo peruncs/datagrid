@@ -19,6 +19,7 @@ import io.micronaut.context.annotation.Factory;
 import jakarta.inject.Singleton;
 import org.eclipse.serializer.concurrency.LockedExecutor;
 
+/** Creates the one lock used to serialize object-graph writes. */
 @Factory
 public class LockedExecutorFactory
 {

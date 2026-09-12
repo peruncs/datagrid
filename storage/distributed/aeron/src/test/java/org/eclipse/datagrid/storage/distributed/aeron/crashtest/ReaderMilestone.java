@@ -52,17 +52,23 @@ record ReaderMilestone(String point, long sequence, long position)
 		final CRC32C crc = new CRC32C();
 		crc.update(bytes, 0, BYTES - Integer.BYTES);
 		value.putInt((int)crc.getValue()).flip();
-		Files.createDirectories(path.toAbsolutePath().getParent());
-		final Path temporary = Files.createTempFile(path.getParent(), path.getFileName() + ".tmp-", null);
+		final Path absolute = path.toAbsolutePath();
+		final Path parent = absolute.getParent();
+		if (parent == null) throw new IOException("Reader milestone path has no parent: " + path);
+		Files.createDirectories(parent);
+		final Path temporary = Files.createTempFile(parent, absolute.getFileName() + ".tmp-", null);
 		try
 		{
 			try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE))
 			{
-				while (value.hasRemaining()) channel.write(value);
+				while (value.hasRemaining())
+				{
+					if (channel.write(value) == 0) throw new IOException("Reader milestone write made no progress");
+				}
 				channel.force(true);
 			}
-			Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-			try (FileChannel directory = FileChannel.open(path.getParent(), StandardOpenOption.READ))
+			Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+			try (FileChannel directory = FileChannel.open(parent, StandardOpenOption.READ))
 			{
 				directory.force(true);
 			}

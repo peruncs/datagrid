@@ -73,7 +73,10 @@ public final class AeronCrashChildMain
 	private static void write(final FileChannel channel, final String value) throws java.io.IOException
 	{
 		final ByteBuffer bytes = StandardCharsets.UTF_8.encode(value);
-		while (bytes.hasRemaining()) channel.write(bytes);
+		while (bytes.hasRemaining())
+		{
+			if (channel.write(bytes) == 0) throw new java.io.IOException("Checkpoint write made no progress");
+		}
 	}
 
 	private static void mark(final Path path) throws java.io.IOException

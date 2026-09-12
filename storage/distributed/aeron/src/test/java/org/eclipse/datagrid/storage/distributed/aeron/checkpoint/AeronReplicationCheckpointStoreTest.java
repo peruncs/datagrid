@@ -87,6 +87,21 @@ class AeronReplicationCheckpointStoreTest
 			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
 			AeronReplicationCheckpoint.State.PREPARING,
 			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -2, 0, -1, -1, 0, 0, 0));
+		assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
+			AeronReplicationCheckpoint.RecordType.READER_CURSOR,
+			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+			AeronReplicationCheckpoint.State.COMMITTED,
+			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 7, 1024, 1, 1, 0));
+		assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
+			AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
+			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+			AeronReplicationCheckpoint.State.COMMITTED,
+			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -1, 0, 7, -1, 1, 1, 0));
+		assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
+			AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
+			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+			AeronReplicationCheckpoint.State.COMMITTED,
+			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, Long.MAX_VALUE, 1024, 1, 1, 0));
 	}
 
 	private static AeronReplicationCheckpoint checkpoint()

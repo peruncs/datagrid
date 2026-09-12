@@ -128,6 +128,8 @@ class StorageBinaryDataClientAeronTest
 			1, 0, 1, 0, 0, new byte[0]
 		));
 		assertEquals(0, assembler.lastResolvedSequence());
+		assertEquals(-1, assembler.lastAppliedSequence(),
+			"an aborted transaction must not be reported as materialised Store data");
 		assertEquals(0, receiver.dataCalls);
 	}
 

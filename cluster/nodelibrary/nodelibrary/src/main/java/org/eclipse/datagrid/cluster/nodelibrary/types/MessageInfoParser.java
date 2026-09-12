@@ -26,6 +26,7 @@ public interface MessageInfoParser
 
 	MessageInfo parseMessageInfo(String offsetFileContent) throws NodelibraryException;
 
+	/** Parses both the current cursor format and the older Kafka form. */
 	final class Default implements MessageInfoParser
 	{
 		@Override

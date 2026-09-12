@@ -24,6 +24,12 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This manager creates the scheduled storage cleanup job.
+ *
+ * <p>The job asks Store to check its cache and then run garbage collection.
+ * Quartz prevents two cleanup jobs from using the same connection at once.</p>
+ */
 public interface GcWorkaroundQuartzCronJobManager extends QuartzCronJobManager
 {
 	static GcWorkaroundQuartzCronJobManager New(final StorageConnection connection)
@@ -31,6 +37,7 @@ public interface GcWorkaroundQuartzCronJobManager extends QuartzCronJobManager
 		return new Default(notNull(connection));
 	}
 
+	/** Creates cleanup jobs with one shared storage connection. */
 	final class Default implements GcWorkaroundQuartzCronJobManager
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(GcWorkaroundQuartzCronJobManager.class);
@@ -49,6 +56,7 @@ public interface GcWorkaroundQuartzCronJobManager extends QuartzCronJobManager
 		}
 	}
 
+	/** Runs the Store cache check and garbage collection sequence. */
 	@DisallowConcurrentExecution
 	final class GcWorkaroundQuartzCronJob implements Job
 	{

@@ -38,6 +38,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.eclipse.serializer.chars.XChars.notEmpty;
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This client consumes Kafka packets and passes them to a storage receiver.
+ *
+ * <p>The client owns its polling thread and packet acceptor. It reports a
+ * terminal consumer failure through {@link #failure()} and closes those
+ * resources when disposed.</p>
+ */
 public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 {
 	/** Returns the terminal consumer failure, or {@code null} while healthy. */
@@ -73,6 +80,7 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		);
 	}
 
+	/** Polls Kafka on one thread and forwards complete packet batches. */
 	class Default implements StorageBinaryDataClientKafka
 	{
 		private final Properties kafkaProperties;
@@ -83,6 +91,7 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		private volatile Thread thread;
 		private volatile KafkaConsumer<String, byte[]> consumer;
 		private volatile boolean disposed;
+		private volatile boolean disposeRequested;
 		private volatile RuntimeException failure;
 
 		Default(
@@ -102,9 +111,15 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		@Override
 		public synchronized void start()
 		{
-			if (this.disposed) throw new IllegalStateException("Kafka client is disposed");
+			if (this.disposed || this.disposeRequested) throw new IllegalStateException("Kafka client is disposed or stopping");
 			if (this.failure != null) throw new IllegalStateException("Kafka client has failed", this.failure);
-			if (this.active.getAndSet(true)) return;
+			if (this.active.get()) return;
+			final Thread existing = this.thread;
+			if (existing != null && existing.isAlive())
+			{
+				throw new IllegalStateException("Kafka client reader is still stopping");
+			}
+			this.active.set(true);
 
 			this.thread = new Thread(this::run, "datagrid-kafka-reader");
 			this.thread.setDaemon(true);
@@ -192,9 +207,19 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 		{
 			if (this.disposed) return;
 			this.disposed = true;
+			this.disposeRequested = true;
 			this.active.set(false);
 			final Thread current = this.thread;
-			if (current != null && current != Thread.currentThread())
+			if (current == Thread.currentThread())
+			{
+				/* A poll callback may request shutdown, but it cannot close its own
+				 * ownership boundary safely.  Keep the thread reference and allow a
+				 * different caller to complete disposal after the loop exits. */
+				this.disposed = false;
+				this.disposeRequested = false;
+				throw new IllegalStateException("Kafka client cannot be disposed from its polling thread");
+			}
+			if (current != null)
 			{
 				final KafkaConsumer<String, byte[]> consumer = this.consumer;
 				if (consumer != null)
@@ -202,6 +227,7 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 					consumer.wakeup();
 				}
 				current.interrupt();
+				RuntimeException stopFailure = null;
 				try
 				{
 					current.join(5_000L);
@@ -209,11 +235,17 @@ public interface StorageBinaryDataClientKafka extends StorageBinaryDataClient
 				catch (final InterruptedException interrupted)
 				{
 					Thread.currentThread().interrupt();
+					stopFailure = new IllegalStateException("Interrupted while stopping Kafka client", interrupted);
 				}
 				if (current.isAlive())
 				{
 					this.disposed = false;
 					throw new IllegalStateException("Kafka client reader did not stop before disposal timeout");
+				}
+				if (stopFailure != null)
+				{
+					this.disposed = false;
+					throw stopFailure;
 				}
 			}
 			/* Keep the thread reference until the join succeeds. A timed-out disposal

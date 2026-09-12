@@ -32,6 +32,16 @@ public interface ReplicationLogRetention extends AutoCloseable
 	/** Deletes only history proven safe by the provider's cursor/watermark rules. */
 	void deleteThrough(ReplicationCursor cursor) throws NodelibraryException;
 
+	/**
+	 * Records one authenticated reader acknowledgement for a later aggregate
+	 * retention request. Providers without reader-watermark support reject this
+	 * operation explicitly.
+	 */
+	default void recordReaderWatermark(final ReplicationCursor cursor)
+	{
+		throw new UnsupportedOperationException("reader watermarks are unsupported by this transport");
+	}
+
 	@Override
 	void close();
 }

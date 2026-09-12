@@ -15,9 +15,7 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistence;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundation;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
@@ -48,6 +46,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 		);
 	}
 
+	/** Imports each binary and schedules its graph update. */
 	class Default implements StorageBinaryDataMerger
 	{
 		private final static Logger logger = Logging.getLogger(StorageBinaryDataMerger.class);
@@ -72,7 +71,36 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 		public synchronized void receiveData(final Binary data)
 		{
 			logger.debug("Importing data");
-			final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, data.buffers());
+			final ByteBuffer[] sourceBuffers = StorageBinaryDataChunker.buffers(data).toArray(ByteBuffer[]::new);
+			final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, sourceBuffers);
+			/* scheduleMaterialization releases the buffers when callback registration
+			 * fails.  Do not release again here: native buffers must have exactly one
+			 * owner after importOwned returns. */
+			this.scheduleMaterialization(ownedBuffers);
+		}
+
+		/**
+		 * Imports direct buffers without copying them. The caller transfers ownership
+		 * only after this method returns successfully; failed imports release the
+		 * transferred buffers here.
+		 */
+		@Override
+		public synchronized boolean receiveDataOwned(final Binary data)
+		{
+			logger.debug("Importing owned data");
+			final ByteBuffer[] buffers = StorageBinaryDataChunker.buffers(notNull(data)).toArray(ByteBuffer[]::new);
+			if (!StorageBinaryDataImporter.importDirect(this.storage, buffers))
+			{
+				this.receiveData(data);
+				return false;
+			}
+			/* scheduleMaterialization owns cleanup after the import succeeds. */
+			this.scheduleMaterialization(buffers);
+			return true;
+		}
+
+		private void scheduleMaterialization(final ByteBuffer[] ownedBuffers)
+		{
 			final AtomicBoolean released = new AtomicBoolean();
 			final Runnable release = () ->
 			{
@@ -86,22 +114,14 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver
 			{
 				logger.debug("Updating object graph");
 
-				final ObjectMaterializer materializer = new ObjectMaterializer(this.storage.persistenceManager());
-
-				final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
 				try
-					{
-						for (final ByteBuffer buffer : ownedBuffers)
-						{
-							final long address = XMemory.getDirectByteBufferAddress(buffer);
-							iterator.iterateEntityRawData(address, address + buffer.limit(), materializer);
-						}
-						materializer.materialize();
-					}
-					finally
-					{
-						release.run();
-					}
+				{
+					StorageBinaryDataMaterializer.materialize(this.storage, ownedBuffers);
+				}
+				finally
+				{
+					release.run();
+				}
 			};
 			try
 			{

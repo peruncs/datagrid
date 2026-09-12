@@ -12,13 +12,17 @@
  * #L%
  */
 /**
- * Aeron transport for Eclipse Data Grid replication.
+ * This module carries neutral Store replication data over Aeron.
  *
- * <p>The module adds the transport without changing the neutral storage
- * contracts. Applications choose it by adding this module and configuring the
- * Aeron provider. The exported packages cover configuration, restart state,
- * reading, and writing. The envelope format stays private to this module so a
- * wire-format change does not become an application API.</p>
+ * <p>The distributed-storage module defines the data and lifecycle contracts.
+ * This module supplies the Aeron configuration, restart state, readers, and
+ * writers that implement them. The exported packages are the application
+ * boundary; the envelope format stays private so wire changes do not become
+ * application API changes.</p>
+ *
+ * <p>A provider owns the Aeron driver, archive, publications, and subscriptions
+ * that it creates. Callers must close the provider after the node has stopped
+ * producing or consuming data.</p>
  *
  * @since 1.0
  */
@@ -31,7 +35,8 @@ module org.eclipse.datagrid.storage.distributed.aeron
 	requires org.agrona;
 	requires io.aeron.client;
 	requires io.aeron.archive;
-
+	// Benchmark tests use com.sun.management.ThreadMXBean for allocation accounting.
+	requires static jdk.management;
 	exports org.eclipse.datagrid.storage.distributed.aeron.config;
 	exports org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
 	exports org.eclipse.datagrid.storage.distributed.aeron.reader;

@@ -21,6 +21,12 @@ import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.HttpResponseException;
 
+/**
+ * This mapper turns neutral HTTP failures into Helidon responses.
+ *
+ * <p>The status and headers come from the exception, so the REST adapter does
+ * not need to know which node rule caused the failure.</p>
+ */
 @ApplicationScoped
 @Provider
 public class NotADistributorMapper implements ExceptionMapper<HttpResponseException>

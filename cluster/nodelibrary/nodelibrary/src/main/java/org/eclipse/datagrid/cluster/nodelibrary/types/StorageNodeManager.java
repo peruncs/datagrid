@@ -23,6 +23,13 @@ import org.slf4j.LoggerFactory;
 
 import static org.eclipse.serializer.util.X.notNull;
 
+/**
+ * This manager controls a storage node's distributor role.
+ *
+ * <p>A node starts as a reader and can switch to distribution only through the
+ * two-phase activation methods. The switch is complete only after the finish
+ * step confirms that the new role is ready.</p>
+ */
 public interface StorageNodeManager extends ClusterNodeManager
 {
 	boolean isDistributor();
@@ -81,6 +88,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 		);
 	}
 
+	/** Implements the reader-to-distributor role transition. */
 	final class Default implements StorageNodeManager
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(StorageNodeManager.class);
@@ -94,10 +102,10 @@ public interface StorageNodeManager extends ClusterNodeManager
 		private final ReplicationPositionProvider positionProvider;
 		private final String replicationTransport;
 
-		private boolean isDistributor;
-		private boolean isSwitchingToDistributor;
-		private boolean closed;
-		private boolean positionProviderClosed;
+		private volatile boolean isDistributor;
+		private volatile boolean isSwitchingToDistributor;
+		private volatile boolean closed;
+		private volatile boolean positionProviderClosed;
 
 		public Default(
 			final ClusterStorageBinaryDataDistributor dataDistributor,
@@ -186,7 +194,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 		}
 
 		@Override
-		public void switchToDistribution()
+		public synchronized void switchToDistribution()
 		{
 			if (this.isDistributor() || this.isSwitchingToDistributor)
 			{
@@ -202,13 +210,26 @@ public interface StorageNodeManager extends ClusterNodeManager
 					"Aeron reader promotion is unsupported; start a node configured as writer");
 			}
 
+			if (this.dataClient.failure() != null)
+			{
+				throw new IllegalStateException("Cannot promote a failed replication reader",
+					this.dataClient.failure());
+			}
 			LOG.info("Turning on distribution.");
 			this.isSwitchingToDistributor = true;
-			this.dataClient.stopAtLatestMessage();
+			try
+			{
+				this.dataClient.stopAtLatestMessage();
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				this.isSwitchingToDistributor = false;
+				throw failure;
+			}
 		}
 
 		@Override
-		public boolean finishDistributonSwitch() throws NotADistributorException
+		public synchronized boolean finishDistributonSwitch() throws NotADistributorException
 		{
 			if (!this.isSwitchingToDistributor)
 			{
@@ -227,9 +248,22 @@ public interface StorageNodeManager extends ClusterNodeManager
 					"Aeron reader promotion is unsupported; start a node configured as writer");
 			}
 
+			final RuntimeException readerFailure = this.dataClient.failure();
+			if (readerFailure != null)
+			{
+				throw new IllegalStateException("Cannot promote a failed replication reader", readerFailure);
+			}
 			if (this.dataClient.isRunning())
 			{
 				return false;
+			}
+			final ClusterStorageBinaryDataClient.StopOutcome stopOutcome = this.dataClient.stopResult().outcome();
+			if (stopOutcome == ClusterStorageBinaryDataClient.StopOutcome.STOPPING ||
+				stopOutcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
+				stopOutcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED)
+			{
+				throw new IllegalStateException("Cannot promote before replication reader stopped at a resolved boundary: " +
+					stopOutcome);
 			}
 
 			final var messageInfo = this.dataClient.messageInfo();
@@ -304,14 +338,37 @@ public interface StorageNodeManager extends ClusterNodeManager
 		}
 
 		@Override
-		public void close()
+		public long getArchiveUsableSpaceBytes()
+		{
+			return this.healthCheck.archiveUsableSpaceBytes();
+		}
+
+		@Override
+		public long getWriterDurablePosition()
+		{
+			return this.healthCheck.writerDurablePosition();
+		}
+
+		@Override
+		public long getWriterDurableSequence()
+		{
+			return this.healthCheck.writerDurableSequence();
+		}
+
+		@Override
+		public long getAppliedSequence()
+		{
+			return this.healthCheck.appliedSequence();
+		}
+
+		@Override
+		public synchronized void close()
 		{
 			LOG.info("Closing StorageNodeManager");
 			if (this.closed)
 			{
 				return;
 			}
-			this.closed = true;
 			RuntimeException failure = null;
 			try { this.dataDistributor.dispose(); }
 			catch (final RuntimeException closeFailure) { failure = closeFailure; }
@@ -337,6 +394,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				throw new IllegalStateException("failed to close storage node resources", failure);
 			}
+			this.closed = true;
 		}
 
 		private void closePositionProvider()
@@ -345,8 +403,12 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				return;
 			}
-			this.positionProviderClosed = true;
 			this.positionProvider.close();
+			/* Mark ownership released only after close succeeds.  A provider can
+			 * legitimately fail during a bounded shutdown (for example while its
+			 * Archive control session is stopping); the enclosing close() is retryable
+			 * and must not turn that first failure into a silent resource leak. */
+			this.positionProviderClosed = true;
 		}
 	}
 }

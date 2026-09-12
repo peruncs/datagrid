@@ -21,16 +21,34 @@ import javax.cache.configuration.Factory;
 import javax.cache.event.CacheEntryEventFilter;
 import javax.cache.event.CacheEntryListener;
 
+/**
+ * This configuration connects cache events to a clustered message sender.
+ *
+ * <p>The JCache listener is synchronous and does not require the old value.
+ * The enclosing configuration owns the sender and disposes it with the cache
+ * region.</p>
+ *
+ * @param <K> cache key type
+ * @param <V> cache value type
+ */
 public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposable
 {
     private final CacheEntryListenerConfig updateTimestamps;
 
-    public ClusteredCacheEntryListenerConfiguration(final ClusteredCacheMessageSender<K, V> updateTimestampsSender)
+	/** Creates a configuration that owns the supplied sender.
+	 *
+	 * @param updateTimestampsSender sender for timestamp updates
+	 */
+	public ClusteredCacheEntryListenerConfiguration(final ClusteredCacheMessageSender<K, V> updateTimestampsSender)
     {
         this.updateTimestamps = new CacheEntryListenerConfig(updateTimestampsSender);
     }
 
-    public CacheEntryListenerConfiguration<K, V> getUpdateTimestampsCacheEntryListenerConfiguration()
+	/** Returns the JCache listener configuration for timestamp updates.
+	 *
+	 * @return listener configuration for timestamp updates
+	 */
+	public CacheEntryListenerConfiguration<K, V> getUpdateTimestampsCacheEntryListenerConfiguration()
     {
         return this.updateTimestamps;
     }
@@ -56,9 +74,11 @@ public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposabl
         this.updateTimestamps.sender.dispose();
     }
 
-    public class CacheEntryListenerConfig implements CacheEntryListenerConfiguration<K, V>
-    {
-        private final ClusteredCacheMessageSender<K, V> sender;
+    /** JCache view that exposes the sender as a listener factory. */
+	public class CacheEntryListenerConfig implements CacheEntryListenerConfiguration<K, V>
+	{
+		/** Sender shared by the listener factory and the enclosing owner. */
+		private final ClusteredCacheMessageSender<K, V> sender;
 
         private CacheEntryListenerConfig(final ClusteredCacheMessageSender<K, V> sender)
         {

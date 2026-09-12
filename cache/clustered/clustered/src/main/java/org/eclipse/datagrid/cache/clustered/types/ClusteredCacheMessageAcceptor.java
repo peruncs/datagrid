@@ -18,17 +18,33 @@ import org.eclipse.store.cache.types.CacheManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * This acceptor applies remote timestamp updates to caches already open here.
+ *
+ * <p>It keeps the greatest timestamp seen for each table. A message for an
+ * unopened cache is ignored because opening that cache will establish its own
+ * local state. Applying the update silently prevents a received invalidation
+ * from being sent back to the cluster.</p>
+ */
 public class ClusteredCacheMessageAcceptor
 {
     private static final Logger logger = LoggerFactory.getLogger(ClusteredCacheMessageAcceptor.class);
     private final CacheManager cacheManager;
 
-    public ClusteredCacheMessageAcceptor(final CacheManager cacheManager)
+	/** Creates an acceptor for the supplied local cache manager.
+	 *
+	 * @param cacheManager local cache manager
+	 */
+	public ClusteredCacheMessageAcceptor(final CacheManager cacheManager)
     {
         this.cacheManager = cacheManager;
     }
 
-    public void accept(final TimestampsRegionUpdateMessage message)
+	/** Applies a remote timestamp when it is newer than the local value.
+	 *
+	 * @param message remote timestamp update
+	 */
+	public void accept(final TimestampsRegionUpdateMessage message)
     {
         final var cache = this.cacheManager.getCache(message.cacheName());
 

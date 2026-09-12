@@ -14,6 +14,16 @@ package org.eclipse.datagrid.cache.clustered.types;
  * #L%
  */
 
+/**
+ * This message carries the newest timestamp known for one cache table.
+ *
+ * <p>Receivers compare the timestamp with their local value and never move it
+ * backwards. The cache and table names identify the local entry to update.</p>
+ *
+ * @param cacheName local cache name
+ * @param tableName timestamp table key
+ * @param timestamp newest timestamp observed by the sender
+ */
 public record TimestampsRegionUpdateMessage(String cacheName, String tableName, long timestamp)
 {
 }

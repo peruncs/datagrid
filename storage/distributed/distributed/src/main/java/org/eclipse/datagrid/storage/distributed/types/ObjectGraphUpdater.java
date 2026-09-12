@@ -14,7 +14,7 @@ package org.eclipse.datagrid.storage.distributed.types;
  * #L%
  */
 
-
+/** Applies one already-validated update to the object graph. */
 @FunctionalInterface
 public interface ObjectGraphUpdater
 {

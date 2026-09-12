@@ -30,20 +30,35 @@ import org.slf4j.LoggerFactory;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Map;
 
+/**
+ * This region factory adds clustered invalidation to the Store cache factory.
+ *
+ * <p>During preparation it creates one serializer, message provider, receiver,
+ * and listener configuration for the session factory. During release it closes
+ * those resources before the base factory releases the local caches.</p>
+ */
 public class ClusteredCacheRegionFactory extends CacheRegionFactory
 {
-    private static final Logger logger = LoggerFactory.getLogger(ClusteredCacheRegionFactory.class);
+	private static final Logger logger = LoggerFactory.getLogger(ClusteredCacheRegionFactory.class);
 
-    private ClusteredCacheEntryListenerConfiguration<Object, Object> cacheEntryListenerConfiguration;
-    private ClusteredCacheMessageReceiver cacheMessageReceiver;
-    private CacheManager cacheManager;
+	/** Listener configuration created during session-factory preparation. */
+	private ClusteredCacheEntryListenerConfiguration<Object, Object> cacheEntryListenerConfiguration;
+	/** Receiver created during session-factory preparation. */
+	private ClusteredCacheMessageReceiver cacheMessageReceiver;
+	/** Local cache manager used by the message acceptor. */
+	private CacheManager cacheManager;
 
-    public ClusteredCacheRegionFactory()
+	/** Creates a factory with Hibernate's default cache key strategy. */
+	public ClusteredCacheRegionFactory()
     {
         this(DefaultCacheKeysFactory.INSTANCE);
     }
 
-    public ClusteredCacheRegionFactory(final CacheKeysFactory cacheKeysFactory)
+	/** Creates a factory with an explicit Hibernate cache key strategy.
+	 *
+	 * @param cacheKeysFactory cache key strategy
+	 */
+	public ClusteredCacheRegionFactory(final CacheKeysFactory cacheKeysFactory)
     {
         super(cacheKeysFactory);
     }
@@ -90,8 +105,14 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
         ));
     }
 
-    @SuppressWarnings("unchecked")
-    protected ClusteredCacheMessageComProvider<?, ?> resolveComProvider(
+	/** Resolves a communication provider instance from a Hibernate setting.
+	 *
+	 * @param settings session factory settings used for class loading
+	 * @param comProviderSetting provider instance or provider class
+	 * @return resolved communication provider
+	 */
+	@SuppressWarnings("unchecked")
+	protected ClusteredCacheMessageComProvider<?, ?> resolveComProvider(
         final SessionFactoryOptions settings,
         final Object comProviderSetting
     )
@@ -134,8 +155,14 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
         return StorageAccess.New(cache);
     }
 
-    @SuppressWarnings("unchecked")
-    protected SerializationTypesProvider resolveSerializationTypesProvider(
+	/** Resolves the serializer type provider from a Hibernate setting.
+	 *
+	 * @param settings session factory settings used for class loading
+	 * @param properties Hibernate cache properties
+	 * @return resolved serializer type provider
+	 */
+	@SuppressWarnings("unchecked")
+	protected SerializationTypesProvider resolveSerializationTypesProvider(
         final SessionFactoryOptions settings,
         @SuppressWarnings("rawtypes") // superclass uses raw type
         final Map properties

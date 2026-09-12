@@ -16,13 +16,19 @@ package org.eclipse.datagrid.cache.clustered.kafka.types;
 
 import org.eclipse.datagrid.cache.clustered.types.ClusteredConfigurationPropertyNames;
 
+/** Names of the Kafka settings used by clustered-cache messages. */
 public interface KafkaClusteredConfigurationPropertyNames
 {
+    /** Prefix shared by Kafka clustered-cache properties. */
     String PREFIX = ClusteredConfigurationPropertyNames.PREFIX + "kafka.";
 
+    /** Property containing the invalidation topic name. */
     String TOPIC = PREFIX + "topic";
+    /** Prefix for settings shared by the Kafka producer and consumer. */
     String KAFKA_CONFIG_PREFIX = PREFIX + "config.";
 
+    /** Prefix for producer-only Kafka settings. */
     String KAFKA_PRODUCER_CONFIG_PREFIX = KAFKA_CONFIG_PREFIX + "producer.";
+    /** Prefix for consumer-only Kafka settings. */
     String KAFKA_CONSUMER_CONFIG_PREFIX = KAFKA_CONFIG_PREFIX + "consumer.";
 }

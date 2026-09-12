@@ -45,6 +45,14 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.function.Supplier;
 
+/**
+ * This foundation assembles the services that make one cluster node run.
+ *
+ * <p>Callers set the storage, transport, graph-update, and maintenance parts
+ * before starting the storage manager or request controller. Start creates the
+ * dependency graph; close releases it in the reverse direction. A foundation
+ * belongs to one node and must not be reused after that node is closed.</p>
+ */
 public interface ClusterFoundation<F extends ClusterFoundation<?>> extends InstanceDispatcher
 {
 	StorageBackupBackend getStorageBackupBackend();
@@ -172,6 +180,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
 	ClusterStorageManager<?> startStorageManager() throws NodelibraryException;
 
+	/** Stores the parts and builds the default cluster service graph. */
 	class Default<F extends Default<?>> extends InstanceDispatcher.Default
 		implements ClusterFoundation<F>, Unpersistable
 	{

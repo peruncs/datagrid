@@ -53,6 +53,7 @@ public interface StorageBinaryDataPacket
 		);
 	}
 
+	/** Immutable packet metadata and borrowed payload view. */
 	class Default implements StorageBinaryDataPacket
 	{
 		private final MessageType messageType;

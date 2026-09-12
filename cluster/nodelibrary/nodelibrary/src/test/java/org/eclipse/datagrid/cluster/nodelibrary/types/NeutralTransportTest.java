@@ -95,6 +95,26 @@ class NeutralTransportTest
 		assertEquals(null, caching.consumeTypeDictionary());
 	}
 
+	/** A restart snapshot replaces an incremental dictionary staged before startup completed. */
+	@Test
+	void queuedDictionarySupersedesStaleThreadLocalDictionary()
+	{
+		final ClusterStorageBinaryDataDistributor delegate = new ClusterStorageBinaryDataDistributor()
+		{
+			public void messageIndex(final long value) { }
+			public long messageIndex() { return -1; }
+			public void ignoreDistribution(final boolean value) { }
+			public boolean ignoreDistribution() { return false; }
+			public void distributeTypeDictionary(final String value) { }
+			public void distributeData(final org.eclipse.serializer.persistence.binary.types.Binary value) { }
+			public void dispose() { }
+		};
+		final ClusterStorageBinaryDataDistributor caching = ClusterStorageBinaryDataDistributor.Caching(delegate);
+		caching.distributeTypeDictionary("stale-incremental");
+		caching.queueTypeDictionaryForNextTransaction("full-restart-dictionary");
+		assertEquals("full-restart-dictionary", caching.consumeTypeDictionary());
+	}
+
 	private static Thread dictionaryThread(
 		final String name,
 		final ClusterStorageBinaryDataDistributor distributor,
