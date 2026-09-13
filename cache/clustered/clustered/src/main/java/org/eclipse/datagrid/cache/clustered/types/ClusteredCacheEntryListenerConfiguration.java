@@ -33,7 +33,7 @@ import javax.cache.event.CacheEntryListener;
  */
 public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposable
 {
-    private final CacheEntryListenerConfig updateTimestamps;
+    private final CacheEntryListenerConfig<K, V> updateTimestamps;
 
 	/** Creates a configuration that owns the supplied sender.
 	 *
@@ -44,7 +44,14 @@ public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposabl
         this.updateTimestamps = new CacheEntryListenerConfig(updateTimestampsSender);
     }
 
-	/** Returns the JCache listener configuration for timestamp updates.
+	/**
+	 * Returns the JCache listener configuration for timestamp updates.
+	 *
+	 * <p>The listener factory returns the single sender instance owned by this
+	 * configuration. The reference is deliberately not snapshotted: the sender
+	 * is the only listener instance, its dispose is idempotent, and it fails
+	 * closed, so a late factory call after {@link #dispose()} yields a sender
+	 * that rejects further publishes instead of a stale copy.</p>
 	 *
 	 * @return listener configuration for timestamp updates
 	 */
@@ -53,29 +60,23 @@ public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposabl
         return this.updateTimestamps;
     }
 
-    private boolean isOldValueRequired()
-    {
-        return false;
-    }
-
-    private Factory<CacheEntryEventFilter<? super K, ? super V>> getCacheEntryEventFilterFactory()
-    {
-        return null;
-    }
-
-    private boolean isSynchronous()
-    {
-        return true;
-    }
+    private boolean disposed;
 
     @Override
-    public void dispose()
+    public synchronized void dispose()
     {
+        if (this.disposed)
+        {
+            return;
+        }
+        this.disposed = true;
+        /* The sender's own dispose is idempotent; the reference stays valid for
+         * the listener factory until this configuration is garbage. */
         this.updateTimestamps.sender.dispose();
     }
 
     /** JCache view that exposes the sender as a listener factory. */
-	public class CacheEntryListenerConfig implements CacheEntryListenerConfiguration<K, V>
+	private static final class CacheEntryListenerConfig<K, V> implements CacheEntryListenerConfiguration<K, V>
 	{
 		/** Sender shared by the listener factory and the enclosing owner. */
 		private final ClusteredCacheMessageSender<K, V> sender;
@@ -94,19 +95,19 @@ public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposabl
         @Override
         public boolean isOldValueRequired()
         {
-            return ClusteredCacheEntryListenerConfiguration.this.isOldValueRequired();
+            return false;
         }
 
         @Override
         public Factory<CacheEntryEventFilter<? super K, ? super V>> getCacheEntryEventFilterFactory()
         {
-            return ClusteredCacheEntryListenerConfiguration.this.getCacheEntryEventFilterFactory();
+            return null;
         }
 
         @Override
         public boolean isSynchronous()
         {
-            return ClusteredCacheEntryListenerConfiguration.this.isSynchronous();
+            return true;
         }
     }
 }

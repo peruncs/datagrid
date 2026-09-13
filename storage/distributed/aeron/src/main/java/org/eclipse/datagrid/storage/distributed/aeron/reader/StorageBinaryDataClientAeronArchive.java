@@ -52,8 +52,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	private volatile boolean live;
 	private volatile boolean stopAtLatest;
 	private volatile long stopDeadlineNanos;
-	private volatile StorageBinaryDataClient.StopOutcome stopOutcome =
-		StorageBinaryDataClient.StopOutcome.NOT_STARTED;
+	private volatile StorageBinaryDataClient.StopOutcome stopOutcome = StorageBinaryDataClient.StopOutcome.NOT_STARTED;
 
 
 
@@ -349,6 +348,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		catch (final Error e)
 		{
 			this.assembler.failure(new IllegalStateException("Aeron Archive reader polling failed", e));
+			throw e;
 		}
 		finally
 		{

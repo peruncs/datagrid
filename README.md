@@ -69,10 +69,13 @@ mode are configurable with the
 `ECLIPSE_DATAGRID_AERON_*` environment variables. Aeron deployments must also
 set an explicit `ECLIPSE_DATAGRID_REPLICATION_ROLE`; the provider refuses to
 guess whether a node is a writer or reader.
-Keep the same values on the writer and readers. Vector and Lucene storage
-payloads follow the same Store binary path; enable them only when the selected
-Store version supports deterministic export/import, otherwise gate those
-collections or replicate their rebuildable source data.
+Keep the same values on the writer and readers. Clustered text and vector
+indexes must stay inside the Eclipse Store object graph so their state follows
+the same Store transaction as the entities. The `storage-distributed-index`
+module provides the supported registration API: Lucene uses an embedded
+GraphDirectory and JVector uses its persisted vector store. External Lucene
+directories and JVector on-disk indexes are rejected; they are not supported by
+either Kafka or Aeron.
 Writer restart safety additionally requires stable `ECLIPSE_DATAGRID_AERON_NODE_ID`,
 `ECLIPSE_DATAGRID_AERON_STORE_GENERATION`, and a durable
 `ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH`; archive and checkpoint directories

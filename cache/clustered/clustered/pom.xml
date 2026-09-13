@@ -30,11 +30,63 @@
             <version>7.2.3.Final</version>
             <scope>provided</scope>
         </dependency>
-		<dependency>
-			<groupId>org.apache.kafka</groupId>
-			<artifactId>kafka-clients</artifactId>
-            <version>4.2.0</version>
-		</dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The published cache-hibernate module descriptor requires the
+                 java.persistence module. Hibernate 7 uses jakarta.persistence, so
+                 the legacy API must be present to resolve that descriptor on the
+                 JPMS module path. It is provided and only used for module
+                 resolution; the cache code itself uses Hibernate/Jakarta types. -->
+            <groupId>javax.persistence</groupId>
+            <artifactId>javax.persistence-api</artifactId>
+            <version>2.2</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <!-- Bound before the package phase so sibling modules can
+                             resolve the test-jar during `mvn test` in one reactor. -->
+                        <phase>process-test-classes</phase>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                        <configuration>
+                            <!-- Only the shared fixture ships in the test-jar, and only in
+                                 its own package: the other test classes live in the exported
+                                 types package, which would split the package on a module path. -->
+                            <includes>
+                                <include>org/eclipse/datagrid/cache/clustered/test/**</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Test fixtures run on the class path; production sources stay JPMS-compiled. -->
+                    <useModulePath>false</useModulePath>
+                    <argLine>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

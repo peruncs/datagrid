@@ -21,11 +21,13 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Verifies that archive gaps and tails select the documented recovery policy. */
 class AeronCrashRecoveryPolicyTest
 {
+	private static final AeronWriterBoundary BOUNDARY = new AeronWriterBoundary(1, 7, 100);
+
 	/** Verifies exact archive prefix can be extended. */
 	@Test
 	void exactArchivePrefixCanBeExtended()
 	{
-		assertDoesNotThrow(() -> AeronClusterReplicationTransportProvider.validateRecordingPositions(100, 100));
+		assertDoesNotThrow(() -> BOUNDARY.validateArchiveStop(100));
 	}
 
 	/** Verifies archive ahead fails closed as reseed required. */
@@ -33,7 +35,7 @@ class AeronCrashRecoveryPolicyTest
 	void archiveAheadFailsClosedAsReseedRequired()
 	{
 		final IllegalStateException failure = assertThrows(IllegalStateException.class,
-			() -> AeronClusterReplicationTransportProvider.validateRecordingPositions(101, 100));
+			() -> BOUNDARY.validateArchiveStop(101));
 		assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
 	}
 
@@ -42,7 +44,7 @@ class AeronCrashRecoveryPolicyTest
 	void archiveBehindFailsClosedAsReseedRequired()
 	{
 		final IllegalStateException failure = assertThrows(IllegalStateException.class,
-			() -> AeronClusterReplicationTransportProvider.validateRecordingPositions(99, 100));
+			() -> BOUNDARY.validateArchiveStop(99));
 		assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
 	}
 
@@ -51,7 +53,7 @@ class AeronCrashRecoveryPolicyTest
 	void activeRecordingCannotBeExtendedFromCheckpoint()
 	{
 		final IllegalStateException failure = assertThrows(IllegalStateException.class,
-			() -> AeronClusterReplicationTransportProvider.validateRecordingPositions(-1, 100));
+			() -> BOUNDARY.validateArchiveStop(-1));
 		assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
 	}
 }

@@ -19,7 +19,6 @@ import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.datagrid.storage.distributed.types.Crc32c;
 
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.UUID;
 import java.util.zip.CRC32C;
@@ -366,22 +365,9 @@ public final class AeronReplicationEnvelope
 		}
 		final CRC32C crc = DIRECT_CRC.get();
 		crc.reset();
-		final ByteBuffer byteBuffer = payload.byteBuffer();
-		if (byteBuffer != null)
-		{
-			final int start = Math.addExact(payload.wrapAdjustment(), offset);
-			final ByteBuffer slice = byteBuffer.duplicate();
-			if (start < 0 || start > slice.capacity() - length)
-			{
-				throw new IllegalArgumentException("invalid CRC32C range");
-			}
-			slice.position(start);
-			slice.limit(start + length);
-			crc.update(slice);
-			return (int)crc.getValue();
-		}
 		/* Agrona's bulk copy keeps this path allocation-free after the first use
-		 * on a polling thread and lets CRC32C use the JDK's vectorized update. */
+		 * on a polling thread and avoids allocating a ByteBuffer duplicate for
+		 * every decoded fragment. */
 		final byte[] scratch = CRC_SCRATCH.get();
 		for (int copied = 0; copied < length; )
 		{

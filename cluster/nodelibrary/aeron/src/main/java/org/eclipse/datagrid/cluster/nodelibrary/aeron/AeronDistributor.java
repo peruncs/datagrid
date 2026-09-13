@@ -15,35 +15,30 @@ package org.eclipse.datagrid.cluster.nodelibrary.aeron;
  */
 
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageBinaryDataDistributor;
-import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronReplicationWriteCoordinator;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
-import java.util.function.Supplier;
 
 /**
  * The Aeron distributor state shared with the Store integration.
- * Direct distribution uses the coordinator's archive-first fence. Store writes
- * should still use the persistence-target path when local acceptance is part of
- * the same operation.
+ * Data publication is intentionally rejected here. Aeron Store writes must use
+ * the provider's persistence-target factory so local acceptance, Archive
+ * publication, and checkpoint fencing share one transaction owner.
  */
 final class AeronDistributor implements ClusterStorageBinaryDataDistributor
 {
 	private final BooleanSupplier writer;
 	private final LongConsumer sequenceSynchronizer;
-	private final Supplier<AeronReplicationWriteCoordinator> coordinatorSupplier;
 	private volatile long index = -1L;
 	private volatile boolean ignored;
 	private String dictionary;
 
-	AeronDistributor(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer,
-		final Supplier<AeronReplicationWriteCoordinator> coordinatorSupplier)
+	AeronDistributor(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer)
 	{
 		this.writer = Objects.requireNonNull(writer, "writer");
 		this.sequenceSynchronizer = Objects.requireNonNull(sequenceSynchronizer, "sequenceSynchronizer");
-		this.coordinatorSupplier = Objects.requireNonNull(coordinatorSupplier, "coordinatorSupplier");
 	}
 
 	@Override
@@ -55,9 +50,14 @@ final class AeronDistributor implements ClusterStorageBinaryDataDistributor
 		this.sequenceSynchronizer.accept(value + 1);
 	}
 
-	@Override public long messageIndex() { return this.index; }
-	@Override public void ignoreDistribution(final boolean value) { this.ignored = value; }
-	@Override public boolean ignoreDistribution() { return this.ignored; }
+	@Override
+    public long messageIndex() { return this.index; }
+
+    @Override
+    public void ignoreDistribution(final boolean value) { this.ignored = value; }
+
+    @Override
+    public boolean ignoreDistribution() { return this.ignored; }
 
 	@Override
 	public synchronized void distributeTypeDictionary(final String value)
@@ -74,19 +74,13 @@ final class AeronDistributor implements ClusterStorageBinaryDataDistributor
 	}
 
 	@Override
-	public synchronized void distributeData(final Binary data)
+	public void distributeData(final Binary data)
 	{
+		Objects.requireNonNull(data, "data");
 		if (this.ignored) return;
 		if (!this.writer.getAsBoolean()) throw new IllegalStateException("Aeron replication distributor is writer-only");
-		final AeronReplicationWriteCoordinator coordinator =
-			Objects.requireNonNull(this.coordinatorSupplier.get(), "coordinator");
-		final String pendingDictionary = this.dictionary;
-		if (pendingDictionary != null)
-		{
-			coordinator.distributeTypeDictionary(pendingDictionary);
-		}
-		coordinator.distributeData(Objects.requireNonNull(data, "data"));
-		this.dictionary = null;
+		throw new UnsupportedOperationException(
+			"Aeron Store binaries must be written through the replication persistence target");
 	}
 
 	/** The provider owns the shared Aeron/archive runtime. */

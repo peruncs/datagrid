@@ -61,14 +61,21 @@ Writer checkpoint persistence is enabled in the provider. Authenticated,
 segment-boundary retention is available only when an embedded writer is started
 with `ECLIPSE_DATAGRID_AERON_RETENTION_SECRET` (base64, at least 16 bytes) and
 `ECLIPSE_DATAGRID_AERON_RETENTION_READERS` (a comma-separated list of reader
-UUIDs). Each reader acknowledgement is an HMAC-SHA256
+UUIDs). Configure the same secret plus
+`ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL` and
+`ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID` on every participant. Each reader
+first persists its recovery cursor and then sends an HMAC-SHA256
 `AeronAuthenticatedWatermark` covering reader, cluster, Store generation,
-epoch, recording, sequence, and position. Submit those acknowledgements with
-`recordReaderWatermark`, then call `deleteThrough` with a cursor naming the
-desired sequence. The provider computes the least advanced reader position and
-only purges complete segments; Aeron's own active-recording/replay checks still
-apply. External Archives and incomplete reader quorums remain unsupported for
-deletion. Without the secret or reader list, retention is reported as
+epoch, recording, sequence, and position over that dedicated stream. The writer
+records those acknowledgements automatically; call `deleteThrough` with the
+ordinary durable backup cursor naming the desired sequence. The authenticated
+reader quorum, rather than the maintenance request itself, authorizes deletion.
+The provider computes the least advanced reader position, pauses coordinator
+admission, stops the recording, purges only complete segments, and extends the
+same recording at its exact stop position before admitting another write. An
+active replay defers maintenance without deleting data. External Archives and
+incomplete reader quorums remain unsupported for deletion. Without the secret
+or reader list, retention is reported as
 unsupported and history is preserved. Operators must monitor Archive capacity
 and rotate or expand storage before it is exhausted.
 The supported capacity procedure is: alert when

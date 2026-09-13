@@ -16,9 +16,29 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 
+import java.util.UUID;
+
 /** Provider-specific retention hook; unsupported providers retain history and report it explicitly. */
 public interface ReplicationLogRetention extends AutoCloseable
 {
+	/** Outcome of one bounded retention maintenance attempt. */
+	record MaintenanceResult(Status status, long position, String detail)
+	{
+		/** Retention maintenance outcome. */
+		public enum Status
+		{
+			DELETED,
+			NOTHING_TO_DELETE,
+			/** A stopped recording still has a replay using a segment selected for purge. */
+			DEFERRED_ACTIVE_REPLAY
+		}
+
+		public MaintenanceResult
+		{
+			if (status == null) throw new NullPointerException("status");
+			detail = detail == null ? "" : detail;
+		}
+	}
 	/**
 	 * Returns whether this transport can safely delete replicated history. A
 	 * provider that cannot establish authenticated reader watermarks must return
@@ -36,7 +56,7 @@ public interface ReplicationLogRetention extends AutoCloseable
 	 * @param cursor deletion boundary
 	 * @throws NodelibraryException if deletion fails
 	 */
-	void deleteThrough(ReplicationCursor cursor) throws NodelibraryException;
+	MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodelibraryException;
 
 	/**
 	 * Records one authenticated reader acknowledgement for a later aggregate
@@ -48,6 +68,18 @@ public interface ReplicationLogRetention extends AutoCloseable
 	default void recordReaderWatermark(final ReplicationCursor cursor)
 	{
 		throw new UnsupportedOperationException("reader watermarks are unsupported by this transport");
+	}
+
+	/**
+	 * Permanently removes a decommissioned reader from the retention quorum.
+	 * Implementations must persist the retirement before allowing it to affect
+	 * deletion safety.
+	 *
+	 * @param readerId permanently retired reader identity
+	 */
+	default void retireReader(final UUID readerId)
+	{
+		throw new UnsupportedOperationException("reader retirement is unsupported by this transport");
 	}
 
 	@Override

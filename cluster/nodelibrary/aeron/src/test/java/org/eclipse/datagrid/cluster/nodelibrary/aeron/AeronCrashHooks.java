@@ -14,16 +14,13 @@ package org.eclipse.datagrid.cluster.nodelibrary.aeron;
  * #L%
  */
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
+import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronCrashHookSupport;
+
 import java.util.function.BiConsumer;
 
 /** Test-only bridge for the forked Aeron crash harness. */
 public final class AeronCrashHooks
 {
-	private static final String STORAGE_CRASH_HOOK =
-		"org.eclipse.datagrid.storage.distributed.aeron.writer.CrashHook";
-
 	private AeronCrashHooks() { }
 
 	/** Installs the writer and provider hooks on the calling test thread.
@@ -32,14 +29,14 @@ public final class AeronCrashHooks
 	 */
 	public static void install(final BiConsumer<String, Long> hook)
 	{
-		invokeStorage("install", hook);
+		AeronCrashHookSupport.install(hook);
 		AeronClusterReplicationTransportProvider.setCrashHook(hook);
 	}
 
 	/** Clears all writer and provider hooks on the calling test thread. */
 	public static void clear()
 	{
-		invokeStorage("clear");
+		AeronCrashHookSupport.clear();
 		AeronClusterReplicationTransportProvider.clearCrashHook();
 	}
 
@@ -52,28 +49,4 @@ public final class AeronCrashHooks
 		return AeronClusterReplicationTransportProvider.currentCheckpointSequence();
 	}
 
-	private static void invokeStorage(final String methodName, final Object... arguments)
-	{
-		try
-		{
-			final Class<?> hook = Class.forName(STORAGE_CRASH_HOOK);
-			final Class<?>[] parameterTypes = arguments.length == 0
-				? new Class<?>[0]
-				: new Class<?>[] { BiConsumer.class };
-			final Method method = hook.getDeclaredMethod(methodName, parameterTypes);
-			method.setAccessible(true);
-			method.invoke(null, arguments);
-		}
-		catch (final ClassNotFoundException | NoSuchMethodException | IllegalAccessException failure)
-		{
-			throw new IllegalStateException("storage Aeron crash hook is unavailable", failure);
-		}
-		catch (final InvocationTargetException failure)
-		{
-			final Throwable cause = failure.getCause();
-			if (cause instanceof final RuntimeException runtime) throw runtime;
-			if (cause instanceof final Error error) throw error;
-			throw new IllegalStateException("storage Aeron crash hook failed", cause);
-		}
-	}
 }

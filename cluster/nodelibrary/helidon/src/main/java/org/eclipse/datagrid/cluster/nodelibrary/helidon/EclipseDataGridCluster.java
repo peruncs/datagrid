@@ -49,7 +49,11 @@ public class EclipseDataGridCluster
 	@Produces
 	public ObjectGraphUpdateHandler objectGraphUpdateHandler(final LockedExecutor executor)
 	{
-		return updater -> executor.write(updater::updateObjectGraph);
+		return updater ->
+		{
+			executor.write(updater::updateObjectGraph);
+			return java.util.concurrent.CompletableFuture.completedFuture(null);
+		};
 	}
 
 	/**

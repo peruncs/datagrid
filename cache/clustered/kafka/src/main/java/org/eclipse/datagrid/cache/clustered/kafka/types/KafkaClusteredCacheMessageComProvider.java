@@ -18,10 +18,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.VoidSerializer;
-import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageAcceptor;
-import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageComProvider;
-import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageReceiver;
-import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageSender;
+import org.eclipse.datagrid.cache.clustered.types.*;
 import org.eclipse.serializer.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,14 +39,18 @@ import static org.eclipse.datagrid.cache.clustered.kafka.types.KafkaClusteredCon
  * configuration prefixes so the two clients cannot accidentally share a
  * role-specific setting.</p>
  *
- * @param <K> cache key type
- * @param <V> cache value type
+ * <p>Failure latency differs from the Aeron adapter: the sender waits for
+ * Kafka's {@code delivery.timeout.ms} (default 120 s) for a send to complete,
+ * while the Aeron sender waits a configurable offer timeout (default 5 s).
+ * Both fail the local cache operation, but after different delays.</p>
  */
-public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCacheMessageComProvider<K, V>
+public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMessageComProvider
 {
     private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageComProvider.class);
+    private static final int DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20;
 
     private String clientId;
+    private String configuredTopic;
     private KafkaProducer<String, byte[]> producer;
 
     /** Creates a provider with no Kafka clients yet.
@@ -61,7 +62,7 @@ public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCac
     }
 
     @Override
-    public ClusteredCacheMessageSender<K, V> provideUpdateTimestampsCacheMessageSender(
+    public synchronized ClusteredCacheMessageSender<Object, Object> provideUpdateTimestampsCacheMessageSender(
         @SuppressWarnings("rawtypes") final Map properties,
         final Serializer<byte[]> serializer
     )
@@ -73,7 +74,7 @@ public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCac
     }
 
     @Override
-    public ClusteredCacheMessageReceiver provideMessageReceiver(
+    public synchronized ClusteredCacheMessageReceiver provideMessageReceiver(
         @SuppressWarnings("rawtypes") final Map properties,
         final Serializer<byte[]> serializer,
         final ClusteredCacheMessageAcceptor messageAcceptor
@@ -85,13 +86,23 @@ public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCac
         );
         final var topicName = this.getTopicName(properties);
         final var clientId = this.ensureClientId();
+        final var groupId = ClusteredCachePropertyParsers.stringProperty(properties,
+            KafkaClusteredConfigurationPropertyNames.GROUP_ID, clientId);
         return new KafkaClusteredCacheMessageReceiver(
             kafkaProperties,
             topicName,
+            groupId,
             clientId,
             messageAcceptor,
-            serializer
+            serializer,
+            this.maxPayloadBytes(properties)
         );
+    }
+
+    private int maxPayloadBytes(@SuppressWarnings("rawtypes") final Map properties)
+    {
+        return ClusteredCachePropertyParsers.intProperty(properties,
+            KafkaClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES, DEFAULT_MAX_PAYLOAD_BYTES, 1);
     }
 
     private String ensureClientId()
@@ -123,8 +134,19 @@ public class KafkaClusteredCacheMessageComProvider<K, V> implements ClusteredCac
 
     private String getTopicName(@SuppressWarnings("rawtypes") final Map properties)
     {
-        final var topicName = (String)properties.get(KafkaClusteredConfigurationPropertyNames.TOPIC);
-        return topicName != null ? topicName : "es-cache-invalidation";
+        final String topicName = ClusteredCachePropertyParsers.stringProperty(properties,
+            KafkaClusteredConfigurationPropertyNames.TOPIC, "es-cache-invalidation");
+        if (this.configuredTopic == null)
+        {
+            this.configuredTopic = topicName;
+        }
+        else if (!this.configuredTopic.equals(topicName))
+        {
+            throw new IllegalArgumentException(
+                "Conflicting " + KafkaClusteredConfigurationPropertyNames.TOPIC +
+                    ": the provider is already bound to " + this.configuredTopic + ", requested " + topicName);
+        }
+        return topicName;
     }
 
     private Properties readKafkaConfigProperties(

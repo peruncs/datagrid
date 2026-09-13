@@ -161,7 +161,10 @@ public interface ClusterReplicationTransport extends AutoCloseable
 			{
 				return new ReplicationLogRetention()
 				{
-					public void deleteThrough(final ReplicationCursor ignored) { }
+					public MaintenanceResult deleteThrough(final ReplicationCursor ignored)
+					{
+						return new MaintenanceResult(MaintenanceResult.Status.NOTHING_TO_DELETE, -1, "no replication log");
+					}
 					public void close() { }
 				};
 			}

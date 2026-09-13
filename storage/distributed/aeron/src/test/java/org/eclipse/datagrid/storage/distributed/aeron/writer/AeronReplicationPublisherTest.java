@@ -253,7 +253,7 @@ class AeronReplicationPublisherTest
 		failAbort.set(false);
 		assertDoesNotThrow(publisher::close);
 		assertFalse(publisher.hasPendingTransaction());
-		assertTrue(prepared.sequence() == 0L);
+        assertEquals(0L, prepared.sequence());
 	}
 
 	/** Verifies a direct publisher abort invokes the same callback as shutdown abort. */
@@ -306,7 +306,7 @@ class AeronReplicationPublisherTest
 		{
 			try
 			{
-				AeronReplicationPublisher.setCrashHook((name, ignored) ->
+				CrashHook.install((name, ignored) ->
 				{
 					if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
 				});
@@ -320,7 +320,7 @@ class AeronReplicationPublisherTest
 			}
 			finally
 			{
-				AeronReplicationPublisher.clearCrashHook();
+				CrashHook.clear();
 			}
 		}
 	}

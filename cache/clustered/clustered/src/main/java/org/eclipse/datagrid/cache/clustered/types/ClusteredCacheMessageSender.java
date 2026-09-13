@@ -21,6 +21,13 @@ import javax.cache.event.CacheEntryListener;
 /**
  * This listener sends local cache changes to the cluster.
  *
+ * <p>The sender is synchronous: a listener callback must not return until the
+ * invalidation has been accepted by the transport, and it must throw
+ * {@link javax.cache.event.CacheEntryListenerException} when it cannot publish.
+ * Every transport therefore fails the local cache operation rather than
+ * silently dropping an invalidation. Kafka and Aeron implement this same
+ * contract.</p>
+ *
  * <p>The sender is also disposable because it owns the transport resource used
  * to publish those changes. The cache configuration releases it when the
  * cache is closed.</p>

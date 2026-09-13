@@ -28,6 +28,7 @@ import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
@@ -161,29 +162,33 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 				if (cleanup != null) cleanup.run();
 				return;
 			}
+			final List<StorageBinaryDataChunker.Chunk> chunks;
+			try
+			{
+				/* Store owns and reuses Binary buffers after this method returns. Packetize
+				 * on the caller thread so an asynchronous worker owns byte arrays rather
+				 * than borrowed Serializer buffers. */
+				chunks = StorageBinaryDataChunker.chunk(
+					data, ClusterStorageBinaryDistributedKafka.maxPacketSize());
+			}
+			finally
+			{
+				if (cleanup != null) cleanup.run();
+			}
 			try
 			{
 				this.execute(() ->
-				{
-					try
-					{
-						this.tryExecuteDistribution(messageType, data);
-					}
-					finally
-					{
-						if (cleanup != null) cleanup.run();
-					}
-				});
+					this.tryExecuteDistribution(messageType, chunks));
 			}
 			catch (final RuntimeException | Error submissionFailure)
 			{
-				if (cleanup != null) cleanup.run();
 				this.recordFailure(submissionFailure);
 				throw submissionFailure;
 			}
 		}
 
-		private void tryExecuteDistribution(final MessageType messageType, final Binary data)
+		private void tryExecuteDistribution(final MessageType messageType,
+			final List<StorageBinaryDataChunker.Chunk> chunks)
 		{
 			if (this.failure != null)
 			{
@@ -193,7 +198,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			}
 			try
 			{
-				this.executeDistribution(messageType, data);
+				this.executeDistribution(messageType, chunks);
 			}
 			catch (final Throwable t)
 			{
@@ -202,10 +207,10 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 				/* Synchronous callers must observe the same failure that is retained for
 				 * asynchronous health checks.  Async.execute catches this rethrow at its
 				 * executor boundary; Sync.execute lets it reach distributeData(). */
-				if (t instanceof Error error) throw error;
-				if (t instanceof RuntimeException runtime) throw runtime;
-				throw new IllegalStateException("Kafka distribution failed", t);
-			}
+				if (t instanceof Error error)
+                    throw error;
+                throw (RuntimeException) t;
+            }
 		}
 
 		/** Records the first terminal distribution failure.
@@ -242,16 +247,16 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			this.disposing = false;
 		}
 
-		private void executeDistribution(final MessageType messageType, final Binary data) throws InterruptedException
+		private void executeDistribution(final MessageType messageType, final List<StorageBinaryDataChunker.Chunk> chunks)
 		{
-			StorageBinaryDataChunker.forEach(data, ClusterStorageBinaryDistributedKafka.maxPacketSize(), chunk ->
+			for (final StorageBinaryDataChunker.Chunk chunk : chunks)
 			{
 				if (this.failure != null)
 				{
 					throw new IllegalStateException("Kafka distributor has failed", this.failure);
 				}
 				final var kafkaRecord = new ProducerRecord<String, byte[]>(
-					this.topicName, PARTITION_KEY, chunk.bytes());
+					this.topicName, 0, PARTITION_KEY, chunk.bytes());
 
 				final long messageIndex = this.messageIndex.incrementAndGet();
 
@@ -286,7 +291,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 				throw new IllegalStateException("Kafka record send failed", cause);
 			}
 
-			});
+			}
 		}
 
 		@Override

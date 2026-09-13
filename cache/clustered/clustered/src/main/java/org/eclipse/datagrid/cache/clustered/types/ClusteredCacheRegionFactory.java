@@ -63,7 +63,15 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
         super(cacheKeysFactory);
     }
 
-    @SuppressWarnings("unchecked")
+    /**
+     * Prepares the clustered resources for one session factory. The configured
+     * message provider is instantiated and its receiver is started before local
+     * cache events are redirected to it. A failure releases any partially
+     * created resource.
+     *
+     * @param settings session factory settings
+     * @param properties Hibernate cache properties
+     */
     @Override
     protected void prepareForUse(final SessionFactoryOptions settings, final Map properties)
     {
@@ -74,16 +82,34 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
             .registerEntityTypes(typesProvider.provideTypes()));
 
         final var comProviderSetting = properties.get(ClusteredConfigurationPropertyNames.COM_PROVIDER);
-        final var comProvider =
-            (ClusteredCacheMessageComProvider<Object, Object>)this.resolveComProvider(settings, comProviderSetting);
+        if (comProviderSetting == null)
+        {
+            throw new CacheException(
+                "The clustered cache requires the " + ClusteredConfigurationPropertyNames.COM_PROVIDER + " property");
+        }
+        final var comProvider = this.resolveComProvider(settings, comProviderSetting);
 
         final var messageAcceptor = new ClusteredCacheMessageAcceptor(this.cacheManager);
 
-        this.cacheMessageReceiver = comProvider.provideMessageReceiver(properties, serializer, messageAcceptor);
-        this.cacheEntryListenerConfiguration =
-            createEntryListenerConfiguration(comProvider, properties, serializer);
-
-        this.cacheMessageReceiver.start();
+        try
+        {
+            this.cacheMessageReceiver = comProvider.provideMessageReceiver(properties, serializer, messageAcceptor);
+            this.cacheEntryListenerConfiguration =
+                createEntryListenerConfiguration(comProvider, properties, serializer);
+            this.cacheMessageReceiver.start();
+        }
+        catch (final RuntimeException | Error failure)
+        {
+            try
+            {
+                this.disposeClusteredResources();
+            }
+            catch (final Throwable cleanupFailure)
+            {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
+        }
     }
 
     @Override
@@ -93,43 +119,44 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
         return this.cacheManager;
     }
 
-    private static <K, V> ClusteredCacheEntryListenerConfiguration<K, V> createEntryListenerConfiguration(
-        final ClusteredCacheMessageComProvider<K, V> comProvider,
+    private static ClusteredCacheEntryListenerConfiguration<Object, Object> createEntryListenerConfiguration(
+        final ClusteredCacheMessageComProvider comProvider,
         @SuppressWarnings("rawtypes") final Map properties,
         final Serializer<byte[]> serializer
     )
     {
-        return new ClusteredCacheEntryListenerConfiguration<>(comProvider.provideUpdateTimestampsCacheMessageSender(
-            properties,
-            serializer
-        ));
+        return new ClusteredCacheEntryListenerConfiguration<>(
+            comProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer));
     }
 
 	/** Resolves a communication provider instance from a Hibernate setting.
 	 *
+	 * <p>The provider class must expose a public no-argument constructor;
+	 * private or package-private constructors are rejected.</p>
+	 *
 	 * @param settings session factory settings used for class loading
 	 * @param comProviderSetting provider instance or provider class
 	 * @return resolved communication provider
+	 * @throws CacheException when the provider class cannot be instantiated
 	 */
-	@SuppressWarnings("unchecked")
-	protected ClusteredCacheMessageComProvider<?, ?> resolveComProvider(
+	protected ClusteredCacheMessageComProvider resolveComProvider(
         final SessionFactoryOptions settings,
         final Object comProviderSetting
     )
     {
-        if (comProviderSetting instanceof final ClusteredCacheMessageComProvider<?, ?> comProvider)
+        if (comProviderSetting instanceof final ClusteredCacheMessageComProvider comProvider)
         {
             return comProvider;
         }
 
         try
         {
-            final Class<? extends ClusteredCacheMessageComProvider<?, ?>> comProviderClass;
+            final Class<? extends ClusteredCacheMessageComProvider> comProviderClass;
             comProviderClass = comProviderSetting instanceof Class
-                               ? (Class<? extends ClusteredCacheMessageComProvider<?, ?>>)comProviderSetting
+                               ? (Class<? extends ClusteredCacheMessageComProvider>)comProviderSetting
                                : this.loadClass(comProviderSetting.toString(), settings);
 
-            return comProviderClass.getDeclaredConstructor().newInstance();
+            return comProviderClass.getConstructor().newInstance();
         }
         catch (final ClassNotFoundException | InstantiationException | IllegalAccessException
             | NoSuchMethodException | InvocationTargetException e)
@@ -144,6 +171,13 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
         final SessionFactoryImplementor sessionFactory
     )
     {
+        final ClusteredCacheEntryListenerConfiguration<Object, Object> listenerConfiguration =
+            this.cacheEntryListenerConfiguration;
+        if (listenerConfiguration == null)
+        {
+            throw new CacheException(
+                "Clustered cache resources are not prepared; cannot create the timestamps region " + regionName);
+        }
         final String defaultedRegionName = this.defaultRegionName(
             regionName,
             sessionFactory,
@@ -151,15 +185,19 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
             LEGACY_UPDATE_TIMESTAMPS_REGION_UNQUALIFIED_NAMES
         );
         final var cache = this.getOrCreateCache(defaultedRegionName, sessionFactory);
-        cache.registerCacheEntryListener(this.cacheEntryListenerConfiguration.getUpdateTimestampsCacheEntryListenerConfiguration());
+        cache.registerCacheEntryListener(listenerConfiguration.getUpdateTimestampsCacheEntryListenerConfiguration());
         return StorageAccess.New(cache);
     }
 
 	/** Resolves the serializer type provider from a Hibernate setting.
 	 *
+	 * <p>The provider class must expose a public no-argument constructor;
+	 * private or package-private constructors are rejected.</p>
+	 *
 	 * @param settings session factory settings used for class loading
 	 * @param properties Hibernate cache properties
 	 * @return resolved serializer type provider
+	 * @throws CacheException when the provider class cannot be instantiated
 	 */
 	@SuppressWarnings("unchecked")
 	protected SerializationTypesProvider resolveSerializationTypesProvider(
@@ -189,7 +227,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
             {
                 typesProviderClass = this.loadClass(setting.toString(), settings);
             }
-            return typesProviderClass.getDeclaredConstructor().newInstance();
+            return typesProviderClass.getConstructor().newInstance();
         }
         catch (final ClassNotFoundException | InstantiationException | IllegalAccessException | NoSuchMethodException |
             InvocationTargetException e)
@@ -198,27 +236,76 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory
         }
     }
 
-    @Override
-    protected void releaseFromUse()
-    {
-        try
-        {
-            this.cacheEntryListenerConfiguration.dispose();
-        }
-        catch (final Exception e)
-        {
-            logger.error("Failed to close entry listeners.", e);
-        }
+	@Override
+	protected void releaseFromUse()
+	{
+		Throwable failure = null;
+		try
+		{
+			this.disposeClusteredResources();
+		}
+		catch (final Throwable e)
+		{
+			logger.error("Failed to dispose clustered cache resources.", e);
+			failure = e;
+		}
+		super.releaseFromUse();
+		if (failure instanceof final Error error)
+		{
+			throw error;
+		}
+	}
 
-        try
-        {
-            this.cacheMessageReceiver.dispose();
-        }
-        catch (final Exception e)
-        {
-            logger.error("Failed to close invalidation receiver.", e);
-        }
+	/**
+	 * Disposes the clustered resources, tolerating a partial preparation. Every
+	 * resource is released even when an earlier dispose fails; the first failure
+	 * is rethrown afterwards.
+	 *
+	 * @throws Throwable the first dispose failure, with later failures suppressed
+	 */
+	private void disposeClusteredResources() throws Throwable
+	{
+		Throwable failure = null;
+		final ClusteredCacheEntryListenerConfiguration<Object, Object> listenerConfiguration =
+			this.cacheEntryListenerConfiguration;
+		this.cacheEntryListenerConfiguration = null;
+		if (listenerConfiguration != null)
+		{
+			try
+			{
+				listenerConfiguration.dispose();
+			}
+			catch (final Throwable e)
+			{
+				logger.error("Failed to close entry listeners.", e);
+				failure = e;
+			}
+		}
 
-        super.releaseFromUse();
-    }
+		final ClusteredCacheMessageReceiver receiver = this.cacheMessageReceiver;
+		this.cacheMessageReceiver = null;
+		if (receiver != null)
+		{
+			try
+			{
+				receiver.dispose();
+			}
+			catch (final Throwable e)
+			{
+				logger.error("Failed to close invalidation receiver.", e);
+				if (failure == null)
+				{
+					failure = e;
+				}
+				else if (failure != e)
+				{
+					failure.addSuppressed(e);
+				}
+			}
+		}
+		if (failure != null)
+		{
+			throw failure;
+		}
+	}
 }

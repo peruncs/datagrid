@@ -44,9 +44,7 @@ class AeronCrashBoundaryTest
 	@AfterEach
 	void clearHooks()
 	{
-		AeronReplicationPublisher.clearCrashHook();
-		AeronReplicationWriteCoordinator.clearCrashHook();
-		AeronStorageBinaryTargetDistributing.clearCrashHook();
+		CrashHook.clear();
 	}
 
 	/** Verifies prepared tail failure always publishes abort and fails closed. */
@@ -59,7 +57,7 @@ class AeronCrashBoundaryTest
 			org.eclipse.datagrid.storage.distributed.aeron.crashtest.CrashPoint.AFTER_DATA_CHUNKS,
 			true, 1_000_000_000L))
 		{
-			AeronReplicationPublisher.setCrashHook(barrier::reached);
+			CrashHook.install(barrier::reached);
 			assertThrows(CrashBarrier.SimulatedCrash.class, () -> publisher.prepareTransaction(
 				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1, 2, 3})}));
 		}
@@ -79,7 +77,7 @@ class AeronCrashBoundaryTest
 			org.eclipse.datagrid.storage.distributed.aeron.crashtest.CrashPoint.AFTER_COMMIT_OFFER,
 			true, 1_000_000_000L))
 		{
-			AeronReplicationPublisher.setCrashHook(barrier::reached);
+			CrashHook.install(barrier::reached);
 			assertThrows(CrashBarrier.SimulatedCrash.class, () -> publisher.publishTransaction(
 				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {9})}));
 		}
@@ -112,7 +110,7 @@ class AeronCrashBoundaryTest
 				org.eclipse.datagrid.storage.distributed.aeron.crashtest.CrashPoint.AFTER_ENQUEUE_BEFORE_PREPARE,
 				true, 1_000_000_000L))
 			{
-				AeronStorageBinaryTargetDistributing.setCrashHook(barrier::reached);
+				CrashHook.install(barrier::reached);
 				assertThrows(CrashBarrier.SimulatedCrash.class, () ->
 					new AeronStorageBinaryTargetDistributing(local, coordinator).write(
 						ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {7}))));
@@ -135,7 +133,7 @@ class AeronCrashBoundaryTest
 		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
 			publisher, ReplicationDurabilityMode.ARCHIVE_FIRST,
 			(state, sequence, length, chunks, crc, position) -> states.add(state));
-		AeronReplicationWriteCoordinator.setCrashHook((name, ignored) ->
+		CrashHook.install((name, ignored) ->
 			{
 				if ("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT".equals(name))
 				{

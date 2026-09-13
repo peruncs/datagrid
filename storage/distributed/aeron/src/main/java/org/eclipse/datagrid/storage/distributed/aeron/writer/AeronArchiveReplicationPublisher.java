@@ -14,7 +14,7 @@ import org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode;
 
 import java.util.UUID;
 import java.util.concurrent.locks.LockSupport;
-import java.util.function.BooleanSupplier;
+import java.util.function.LongPredicate;
 
 /*-
  * #%L
@@ -70,6 +70,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	private final AeronReplicationPublisher publisher;
 	private final long recordingIdHint;
 	private final AeronReplicationConfiguration configuration;
+	private final SourceLocation sourceLocation;
 	private volatile int recordingCounterId = -1;
 	private boolean closed;
 
@@ -78,7 +79,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		final ExclusivePublication publication,
 		final AeronReplicationPublisher publisher,
 		final long recordingIdHint,
-		final AeronReplicationConfiguration configuration
+		final AeronReplicationConfiguration configuration,
+		final SourceLocation sourceLocation
 	)
 	{
 		this.archive = archive;
@@ -86,6 +88,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		this.publisher = publisher;
 		this.recordingIdHint = recordingIdHint;
 		this.configuration = configuration;
+		this.sourceLocation = sourceLocation;
 	}
 
 	/**
@@ -171,11 +174,12 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				archive,
 				ownedPublication,
 				new AeronReplicationPublisher(
-					ownedPublication, configuration, clusterId, epoch, initialSequence, true,
+					ownedPublication, configuration, clusterId, epoch, initialSequence,
 					position -> awaitRecorded(archive, ownedPublication, recordingId, configuration, position)
 				),
 				recordingId,
-				configuration
+				configuration,
+				sourceLocation
 			);
 		}
 		catch (final RuntimeException | Error failure)
@@ -307,9 +311,9 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			archive.extendRecording(recordingId, extendedChannel, streamId, sourceLocation);
 			awaitRecordingStarted(archive, publication, recordingId, configuration);
 			return new AeronArchiveReplicationPublisher(archive, publication,
-				new AeronReplicationPublisher(publication, configuration, clusterId, epoch, initialSequence, true,
+				new AeronReplicationPublisher(publication, configuration, clusterId, epoch, initialSequence,
 					positionValue -> awaitRecorded(archive, publication, recordingId, configuration, positionValue)), recordingId,
-				configuration);
+				configuration, sourceLocation);
 		}
 		catch (final RuntimeException | Error failure)
 		{
@@ -336,12 +340,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	 *
 	 * @param dictionary optional type dictionary bytes
 	 * @param data Store binary buffers; their positions are read but not changed
-	 * @return the Archive position at or after the commit marker
 	 */
-	synchronized long publishTransaction(final byte[] dictionary, final java.nio.ByteBuffer[] data)
+	synchronized void publishTransaction(final byte[] dictionary, final java.nio.ByteBuffer[] data)
 	{
 		if (this.closed) throw new IllegalStateException("Aeron archive publisher is closed");
-		return this.publisher.publishTransaction(dictionary, data);
+		this.publisher.publishTransaction(dictionary, data);
 	}
 
 	/**
@@ -419,6 +422,92 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		return this.publisher.isFailed();
 	}
 
+	/**
+	 * Suspends recording while complete historical segments are purged, then
+	 * extends the same recording at the exact stop position before writes resume.
+	 * The caller must hold the write coordinator monitor for the complete call;
+	 * otherwise a publication offer could land in the stop/extend gap.
+	 *
+	 * @param newStartPosition first retained Archive position
+	 * @return number of segment files deleted
+	 */
+	public synchronized long purgeSegmentsWhileWritesPaused(final long newStartPosition)
+	{
+		if (this.closed) throw new IllegalStateException("Aeron archive publisher is closed");
+		if (this.publisher.hasPendingTransaction())
+		{
+			throw new IllegalStateException("cannot suspend Aeron recording with a prepared transaction");
+		}
+		final long recordingId = this.recordingId();
+		if (recordingId < 0) throw new IllegalStateException("cannot determine active Aeron recording identity");
+		boolean stopped = this.archive.getStopPosition(recordingId) >= 0;
+		Throwable operationFailure = null;
+		long deleted = 0L;
+		try
+		{
+			if (!stopped)
+			{
+				this.archive.tryStopRecordingByIdentity(recordingId);
+				awaitStopped(this.archive, recordingId, this.configuration);
+				stopped = true;
+			}
+			deleted = this.archive.purgeSegments(recordingId, newStartPosition);
+		}
+		catch (final RuntimeException | Error failure)
+		{
+			operationFailure = failure;
+		}
+		finally
+		{
+			if (!stopped)
+			{
+				try
+				{
+					stopped = this.archive.getStopPosition(recordingId) >= 0;
+				}
+				catch (final RuntimeException inspectionFailure)
+				{
+                    operationFailure.addSuppressed(inspectionFailure);
+				}
+			}
+			if (stopped)
+			{
+				try
+				{
+					final long stopPosition = this.archive.getStopPosition(recordingId);
+					if (stopPosition < 0)
+					{
+						throw new IllegalStateException("Aeron recording has no stop position after maintenance");
+					}
+					final String extensionChannel = new ChannelUriStringBuilder(this.publication.channel())
+						.sessionId(this.publication.sessionId())
+						.initialPosition(stopPosition, this.publication.initialTermId(),
+							this.publication.termBufferLength())
+						.build();
+					this.archive.extendRecording(recordingId, extensionChannel,
+						this.publication.streamId(), this.sourceLocation);
+					this.recordingCounterId = -1;
+					awaitRecordingStarted(this.archive, this.publication, recordingId, this.configuration);
+				}
+				catch (final RuntimeException | Error resumeFailure)
+				{
+					this.publisher.failClosed();
+					if (operationFailure == null) operationFailure = resumeFailure;
+					else operationFailure.addSuppressed(resumeFailure);
+				}
+			}
+			else {
+				/* A failed stop request may have reached the Archive even when its
+				 * response was lost. If its state cannot be established, admitting another
+				 * offer could create an unrecorded gap. */
+				this.publisher.failClosed();
+			}
+		}
+		if (operationFailure instanceof Error fatal) throw fatal;
+		if (operationFailure instanceof RuntimeException failure) throw failure;
+		return deleted;
+	}
+
 	private static long awaitRecorded(
 		final AeronArchive archive,
 		final ExclusivePublication publication,
@@ -449,12 +538,14 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				final long recordedPosition = counters.getCounterValue(counterId);
 				lastRecordedPosition = recordedPosition;
 				lastActive = RecordingPos.isActive(counters, counterId, recordingId);
-				if (recordedPosition >= commitPosition)
+				if (lastActive && recordedPosition >= commitPosition)
 				{
 					return recordedPosition;
 				}
 				if (!lastActive)
 				{
+					final long stopPosition = archive.getStopPosition(recordingId);
+					if (stopPosition >= commitPosition) return stopPosition;
 					throw new IllegalStateException("Aeron archive recording stopped before commit position " + commitPosition);
 				}
 			}
@@ -470,15 +561,14 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 					return archivePosition;
 				}
 			}
-			/* Embedded recordings expose a local counter. Check it before polling the
-			 * control channel so the normal commit path does not pay a synchronous
-			 * Archive request once the local recording has already advanced. Remote
-			 * recordings still use this poll to surface control-session failures. */
-			if (counterId < 0)
-			{
-				final String archiveError = archive.pollForErrorResponse();
-				if (archiveError != null) throw new IllegalStateException("Aeron archive error: " + archiveError);
-			}
+			/* The local counter is checked first, so an ordinary successful commit
+			 * returns without touching the control subscription. While the recording
+			 * is behind, however, the counter can remain allocated after an external
+			 * Archive dies. Poll the control session on every such duty cycle so a
+			 * disconnected Archive fails promptly instead of masquerading as a slow
+			 * recording until the complete commit deadline expires. */
+			final String archiveError = archive.pollForErrorResponse();
+			if (archiveError != null) throw new IllegalStateException("Aeron archive error: " + archiveError);
 			if (System.nanoTime() >= deadline)
 			{
 				throw new IllegalStateException("Aeron archive did not record commit position " + commitPosition +
@@ -578,31 +668,17 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 	}
 
 	/**
-	 * Creates the coordinator that records restart state for this publisher.
-	 *
-	 * @param durabilityMode ordering between local acceptance and Archive
-	 * @param writer receiver for checkpoint transitions
-	 * @return a coordinator backed by this publisher
-	 */
-	public AeronReplicationWriteCoordinator newWriteCoordinator(
-		final ReplicationDurabilityMode durabilityMode,
-		final CheckpointWriter writer)
-	{
-		return this.newWriteCoordinator(durabilityMode, writer, () -> true);
-	}
-
-	/**
 	 * Creates a coordinator with a local write-admission predicate.
 	 *
 	 * @param durabilityMode ordering between local acceptance and Archive
 	 * @param writer receiver for checkpoint transitions
-	 * @param writeAdmission predicate checked before local acceptance
+	 * @param writeAdmission predicate receiving payload plus dictionary bytes before local acceptance
 	 * @return a coordinator backed by this publisher
 	 */
 	public AeronReplicationWriteCoordinator newWriteCoordinator(
 		final ReplicationDurabilityMode durabilityMode,
 		final CheckpointWriter writer,
-		final BooleanSupplier writeAdmission)
+		final LongPredicate writeAdmission)
 	{
 		if (writer == null) throw new NullPointerException("writer");
 		return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer,
@@ -690,12 +766,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			if (failure == null) failure = identityFailure;
 			else failure.addSuppressed(identityFailure);
 		}
-		boolean stopRequestSent = false;
 		if (recordingId >= 0)
 		{
 			try
 			{
-				stopRequestSent = this.archive.tryStopRecordingByIdentity(recordingId);
+				this.archive.tryStopRecordingByIdentity(recordingId);
 			}
 			catch (final RuntimeException stopFailure)
 			{
@@ -708,10 +783,13 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 				else fatalFailure.addSuppressed(stopFailure);
 			}
 		}
-		if (stopRequestSent)
+		if (recordingId >= 0)
 		{
 			try
 			{
+				/* A false response means the recording was already inactive, not that
+				 * its terminal position is safely observable. Await the same postcondition
+				 * after both outcomes. */
 				awaitStopped(this.archive, recordingId, this.configuration);
 			}
 			catch (final RuntimeException stopFailure)
@@ -745,6 +823,21 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 		}
 	}
 
+	/**
+	 * Returns whether this wrapper has released its local publication ownership.
+	 *
+	 * <p>A close operation can be locally complete yet still throw because the
+	 * external Archive disappeared before acknowledging its stop. Owners use this
+	 * distinction to close the remaining Aeron runtime instead of retaining native
+	 * threads that no subsequent close can make safer.</p>
+	 *
+	 * @return {@code true} when no local publication remains to close
+	 */
+	public synchronized boolean isClosed()
+	{
+		return this.closed;
+	}
+
 	private static Throwable tryStopRecording(
 		final AeronArchive archive,
 		final ExclusivePublication publication,
@@ -775,29 +868,25 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable
 			}
 			if (recordingId >= 0)
 			{
-				boolean stopRequestSent = false;
 				try
 				{
-					stopRequestSent = archive.tryStopRecordingByIdentity(recordingId);
+					archive.tryStopRecordingByIdentity(recordingId);
 				}
 				catch (final RuntimeException | Error stopFailure)
 				{
 					failure = stopFailure;
 				}
-				if (stopRequestSent)
+				try
 				{
-					try
-					{
-						/* Stopping is asynchronous. Construction must not leak a recording
-						 * when a later setup step fails, otherwise the next startup sees an
-						 * apparently active recording and refuses to extend it. */
-						awaitStopped(archive, recordingId, configuration);
-					}
-					catch (final RuntimeException | Error awaitFailure)
-					{
-						if (failure == null) failure = awaitFailure;
-						else if (failure != awaitFailure) failure.addSuppressed(awaitFailure);
-					}
+					/* Stopping is asynchronous. Construction must not leak a recording
+					 * when a later setup step fails, otherwise the next startup sees an
+					 * apparently active recording and refuses to extend it. */
+					awaitStopped(archive, recordingId, configuration);
+				}
+				catch (final RuntimeException | Error awaitFailure)
+				{
+					if (failure == null) failure = awaitFailure;
+					else if (failure != awaitFailure) failure.addSuppressed(awaitFailure);
 				}
 			}
 		}

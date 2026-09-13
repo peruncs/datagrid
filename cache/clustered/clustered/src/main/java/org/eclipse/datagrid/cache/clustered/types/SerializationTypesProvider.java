@@ -14,19 +14,16 @@ package org.eclipse.datagrid.cache.clustered.types;
  * #L%
  */
 
-import org.hibernate.cache.internal.BasicCacheKeyImplementation;
-import org.hibernate.cache.internal.CacheKeyImplementation;
-
 import java.util.Collection;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * This provider lists types that the clustered-cache serializer must know.
  *
- * <p>Applications can add their own cache key or message types. The default
- * provider contains the Hibernate key types, the timestamp message, and the
- * common identifier type used by the built-in cache integration.</p>
+ * <p>The clustered-cache serializer only carries timestamp invalidation
+ * messages and the sender identity string, so the default provider registers
+ * only the message type. Applications that extend the message set can supply
+ * their own provider.</p>
  */
 public interface SerializationTypesProvider
 {
@@ -39,6 +36,8 @@ public interface SerializationTypesProvider
 	/** The built-in set of types used by the cache integration. */
 	class Default implements SerializationTypesProvider
 	{
+		private static final Collection<Class<?>> TYPES = List.of(TimestampsRegionUpdateMessage.class);
+
 		/** Creates the default provider. */
 		public Default()
 		{
@@ -47,15 +46,7 @@ public interface SerializationTypesProvider
 		@Override
         public Collection<Class<?>> provideTypes()
         {
-            return List.of(
-                // Hibernate cache key types
-                CacheKeyImplementation.class,
-                BasicCacheKeyImplementation.class,
-                // message types
-                TimestampsRegionUpdateMessage.class,
-                // common cache key id types
-                UUID.class
-            );
+            return TYPES;
         }
     }
 }

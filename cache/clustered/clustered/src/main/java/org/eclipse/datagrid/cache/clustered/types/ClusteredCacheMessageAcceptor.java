@@ -46,6 +46,10 @@ public class ClusteredCacheMessageAcceptor
 	 */
 	public void accept(final TimestampsRegionUpdateMessage message)
     {
+        if (this.cacheManager == null)
+        {
+            throw new IllegalStateException("No cache manager is configured for the clustered-cache acceptor");
+        }
         final var cache = this.cacheManager.getCache(message.cacheName());
 
         if (cache == null)
@@ -54,7 +58,17 @@ public class ClusteredCacheMessageAcceptor
             return;
         }
 
-        final Long previousTimestamp = (Long)cache.get(message.tableName());
+        final Object stored = cache.get(message.tableName());
+        final Long previousTimestamp = stored instanceof final Long value ? value : null;
+        if (stored != null && previousTimestamp == null)
+        {
+            logger.warn(
+                "Ignoring query-cache timestamp table={} with a non-timestamp stored value of type {}",
+                message.tableName(),
+                stored.getClass().getName()
+            );
+            return;
+        }
         if (previousTimestamp != null && previousTimestamp > message.timestamp())
         {
             // we received an outdated message

@@ -110,6 +110,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 	class Default implements ClusterStorageBinaryDataMerger
 	{
 		private static final Logger LOG = Logging.getLogger(ClusterStorageBinaryDataMerger.class);
+		private static final long MAX_CACHED_BYTES = 1L << 30;
 
 		private final ExecutorService executor = Executors.newSingleThreadExecutor();
 		private final ConcurrentLinkedQueue<ByteBuffer> cachedData = new ConcurrentLinkedQueue<>();
@@ -124,6 +125,8 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 		private final long cacheLimit;
 		private volatile boolean disposed;
 		private volatile RuntimeException failure;
+		private boolean workerScheduled;
+		private long cachedBytes;
 
 		private Future<?> updateFuture = CompletableFuture.completedFuture(null);
 
@@ -222,6 +225,23 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 				throw new IllegalStateException("Storage binary merger is disposed");
 			}
 
+			long incomingBytes = 0L;
+			for (final ByteBuffer buffer : ownedBuffers)
+			{
+				incomingBytes = Math.addExact(incomingBytes, buffer.remaining());
+			}
+			if (incomingBytes > MAX_CACHED_BYTES)
+			{
+				StorageBinaryDataImporter.release(ownedBuffers);
+				throw new IllegalArgumentException("Storage binary exceeds the 1 GiB materialization limit");
+			}
+			boolean drainFirst;
+			synchronized (this.applyLock)
+			{
+				drainFirst = this.cachedBytes > 0 && this.cachedBytes + incomingBytes > MAX_CACHED_BYTES;
+			}
+			if (drainFirst) this.awaitApplied();
+
 			boolean queued = false;
 			try
 			{
@@ -239,33 +259,14 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 						throw new IllegalStateException("Storage binary merger is disposed");
 					}
 					this.cachedData.addAll(Arrays.asList(ownedBuffers));
+					this.cachedBytes += incomingBytes;
 					queued = true;
-					if (this.updateFuture.isDone())
+					if (!this.workerScheduled)
 					{
 						try
 						{
-							this.updateFuture = this.executor.submit(() ->
-							{
-								try
-								{
-									this.awaitFlushRequestOrTimeout();
-									this.applyDataSafely();
-								}
-								catch (final Throwable t)
-								{
-									if (this.disposed && Thread.currentThread().isInterrupted())
-									{
-										this.releaseCachedData();
-										return;
-									}
-									this.failure = t instanceof RuntimeException runtime
-										? runtime
-										: new IllegalStateException("Storage binary merger failed", t);
-									LOG.error("Storage binary merger failed", this.failure);
-									this.releaseCachedData();
-									throw this.failure;
-								}
-							});
+							this.workerScheduled = true;
+							this.updateFuture = this.executor.submit(this::runMaterializationWorker);
 						}
 						catch (final RuntimeException | Error failure)
 						{
@@ -275,6 +276,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 							{
 								this.cachedData.removeIf(candidate -> candidate == buffer);
 							}
+							this.cachedBytes -= incomingBytes;
 							queued = false;
 							throw failure;
 						}
@@ -326,6 +328,39 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 			}
 		}
 
+		private void runMaterializationWorker()
+		{
+			try
+			{
+				this.awaitFlushRequestOrTimeout();
+				while (true)
+				{
+					synchronized (this.applyLock)
+					{
+						if (this.cachedData.isEmpty())
+						{
+							this.workerScheduled = false;
+							return;
+						}
+						this.applyData();
+					}
+				}
+			}
+			catch (final Throwable t)
+			{
+				if (this.disposed && Thread.currentThread().isInterrupted())
+				{
+					this.releaseCachedData();
+					return;
+				}
+				this.failure = t instanceof RuntimeException runtime
+					? runtime : new IllegalStateException("Storage binary merger failed", t);
+				LOG.error("Storage binary merger failed", this.failure);
+				this.releaseCachedData();
+				throw this.failure;
+			}
+		}
+
 		@Override
 		public RuntimeException failure()
 		{
@@ -350,6 +385,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 			ByteBuffer next;
 			while ((next = this.cachedData.poll()) != null)
 			{
+				this.cachedBytes -= next.remaining();
 				data.add(next);
 			}
 
@@ -365,7 +401,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 				{
 					release.run();
 				}
-				});
+				}).toCompletableFuture().join();
 			}
 			catch (final RuntimeException | Error failure)
 			{
@@ -417,6 +453,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 				{
 					XMemory.deallocateDirectByteBuffer(buffer);
 				}
+				this.cachedBytes = 0L;
 			}
 		}
 
@@ -453,6 +490,10 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 					throw new RuntimeException(localType + " <> " + remoteType);
 				}
 			});
+			/* A reader may import data without performing a local Store operation.
+			 * Persist newly registered remote definitions now, before the transaction's
+			 * binary is imported, so a restart can resolve every imported type id. */
+			this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
 		}
 
 		@Override
@@ -522,42 +563,23 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 			}
 			this.applyDataSafely();
 			final Future<?> pending = this.updateFuture;
-			if (!pending.isDone())
+			try
 			{
-				try
-				{
-					pending.get();
-				}
-				catch (final InterruptedException e)
-				{
-					Thread.currentThread().interrupt();
-					throw new NodelibraryException(e);
-				}
-				catch (final ExecutionException e)
-				{
-					final RuntimeException mergerFailure = this.failure;
-					if (mergerFailure != null)
-					{
-						throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
-					}
-					throw new NodelibraryException("Failed to materialize imported Store data", e.getCause());
-				}
+				pending.get();
 			}
-			if (pending.isDone())
+			catch (final InterruptedException e)
 			{
-				try
+				Thread.currentThread().interrupt();
+				throw new NodelibraryException(e);
+			}
+			catch (final ExecutionException e)
+			{
+				final RuntimeException mergerFailure = this.failure;
+				if (mergerFailure != null)
 				{
-					pending.get();
+					throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
 				}
-				catch (final InterruptedException e)
-				{
-					Thread.currentThread().interrupt();
-					throw new NodelibraryException(e);
-				}
-				catch (final ExecutionException e)
-				{
-					throw new NodelibraryException("Failed to materialize imported Store data", e.getCause());
-				}
+				throw new NodelibraryException("Failed to materialize imported Store data", e.getCause());
 			}
 		}
 	}

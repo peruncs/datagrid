@@ -62,11 +62,13 @@ public interface KafkaRecordDeleter extends ReplicationLogRetention
 	void deleteUntilOffsets(XImmutableMap<TopicPartition, Long> partitionOffsets) throws NodelibraryException;
 
     @Override
-    default void deleteThrough(final ReplicationCursor cursor) throws NodelibraryException
+	default MaintenanceResult deleteThrough(final ReplicationCursor cursor) throws NodelibraryException
     {
         this.deleteUntilOffsets(KafkaCursorCodec.decode(
             MessageInfo.New(cursor.logicalSequence(), cursor.transport(), cursor.storeGeneration(), cursor.providerPosition())
         ));
+		return new MaintenanceResult(MaintenanceResult.Status.DELETED, cursor.logicalSequence(),
+			"Kafka records deleted through cursor");
     }
 
     @Override
@@ -89,11 +91,13 @@ public interface KafkaRecordDeleter extends ReplicationLogRetention
         }
 
         @Override
-        public void deleteThrough(final ReplicationCursor cursor) throws NodelibraryException
+		public MaintenanceResult deleteThrough(final ReplicationCursor cursor) throws NodelibraryException
         {
             final MessageInfo info = MessageInfo.New(
                 cursor.logicalSequence(), cursor.transport(), cursor.storeGeneration(), cursor.providerPosition());
             this.deleteUntilOffsets(KafkaCursorCodec.decode(info, this.topicName));
+			return new MaintenanceResult(MaintenanceResult.Status.DELETED, cursor.logicalSequence(),
+				"Kafka records deleted through cursor");
         }
 
         @Override

@@ -19,7 +19,6 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfer;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 
-import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 
@@ -34,9 +33,6 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public final class AeronStorageBinaryTargetDistributing implements PersistenceTarget<Binary>
 {
-	/** Installs a package-private fault seam for deterministic write-boundary tests. */
-	static void setCrashHook(final BiConsumer<String, Long> hook) { CrashHook.install(hook); }
-	static void clearCrashHook() { CrashHook.clear(); }
 	private static void crashPoint(final String name, final long sequence)
 	{
 		CrashHook.invoke(name, sequence);

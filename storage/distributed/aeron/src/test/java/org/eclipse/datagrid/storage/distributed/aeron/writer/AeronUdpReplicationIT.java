@@ -74,7 +74,7 @@ class AeronUdpReplicationIT
 				data[i] = (byte)(i * 31);
 			}
 			final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-				new AeronReplicationPublisher(publication, configuration, clusterId, 1, 0, false)
+				new AeronReplicationPublisher(publication, configuration, clusterId, 1, 0)
 			);
 			final ByteBuffer first = XMemory.toDirectByteBuffer(java.util.Arrays.copyOfRange(data, 0, 37_000));
 			final ByteBuffer second = XMemory.toDirectByteBuffer(java.util.Arrays.copyOfRange(data, 37_000, data.length));
@@ -148,7 +148,7 @@ class AeronUdpReplicationIT
 			);
 			client.start();
 			final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-				new AeronReplicationPublisher(publication, configuration, clusterId, 1, 0, false)
+				new AeronReplicationPublisher(publication, configuration, clusterId, 1, 0)
 			);
 			final PersistenceTarget<Binary> failingTarget = new PersistenceTarget<>()
 			{
@@ -191,7 +191,7 @@ class AeronUdpReplicationIT
 				subscription, configuration, clusterId, 5, -1, receiver);
 			client.start();
 			final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
-				publication, configuration, clusterId, 5, 0, false);
+				publication, configuration, clusterId, 5, 0);
 			publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(new byte[] { 9, 8, 7 }) });
 			await(() -> client.lastResolvedSequence() == 0);
 			assertArrayEquals(new byte[] { 9, 8, 7 }, receiver.data);

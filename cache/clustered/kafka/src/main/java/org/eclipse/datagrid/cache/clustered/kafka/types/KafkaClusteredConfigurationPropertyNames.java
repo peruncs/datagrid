@@ -24,6 +24,8 @@ public interface KafkaClusteredConfigurationPropertyNames
 
     /** Property containing the invalidation topic name. */
     String TOPIC = PREFIX + "topic";
+    /** Property fixing the consumer group id; a stable value makes a restarted node replay missed invalidations from its committed offset. */
+    String GROUP_ID = PREFIX + "group-id";
     /** Prefix for settings shared by the Kafka producer and consumer. */
     String KAFKA_CONFIG_PREFIX = PREFIX + "config.";
 
@@ -31,4 +33,7 @@ public interface KafkaClusteredConfigurationPropertyNames
     String KAFKA_PRODUCER_CONFIG_PREFIX = KAFKA_CONFIG_PREFIX + "producer.";
     /** Prefix for consumer-only Kafka settings. */
     String KAFKA_CONSUMER_CONFIG_PREFIX = KAFKA_CONFIG_PREFIX + "consumer.";
+
+    /** Property bounding the accepted serialized payload size; defaults to 1 MiB. */
+    String MAX_PAYLOAD_BYTES = PREFIX + "max-payload-bytes";
 }

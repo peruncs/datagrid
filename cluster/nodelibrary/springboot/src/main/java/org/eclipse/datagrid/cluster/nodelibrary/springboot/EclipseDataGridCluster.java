@@ -25,6 +25,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * This configuration assembles the cluster services in Spring Boot.
  *
@@ -50,7 +52,11 @@ public class EclipseDataGridCluster
 	@Bean
 	public ObjectGraphUpdateHandler objectGraphUpdateHandler(final LockedExecutor executor)
 	{
-		return updater -> executor.write(updater::updateObjectGraph);
+		return updater ->
+		{
+			executor.write(updater::updateObjectGraph);
+			return CompletableFuture.completedFuture(null);
+		};
 	}
 
 	/**

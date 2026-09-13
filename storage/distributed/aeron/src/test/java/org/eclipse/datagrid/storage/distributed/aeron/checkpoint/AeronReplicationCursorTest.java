@@ -41,6 +41,19 @@ class AeronReplicationCursorTest
 		assertEquals(42, cursor.recordingId());
 		assertEquals(4096, cursor.recordingPosition());
 		assertEquals(13, cursor.sequence());
+		assertEquals(cursor, AeronReplicationCursor.decode(cursor.encode()));
+	}
+
+	@Test
+	void rejectsLegacyAndUnknownProviderPositionFormats()
+	{
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronReplicationCursor.decode(new byte[Long.BYTES * 2]));
+		final AeronReplicationCursor cursor = new AeronReplicationCursor(
+			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, 2, 3, 4);
+		final byte[] encoded = cursor.encode();
+		encoded[0] ^= 1;
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationCursor.decode(encoded));
 	}
 
 	/** Verifies rejection of invalid replay identity and positions. */

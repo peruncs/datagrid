@@ -1,6 +1,19 @@
 package org.eclipse.datagrid.cluster.nodelibrary.aeron;
 
 import org.eclipse.datagrid.cluster.nodelibrary.types.*;
+import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
+import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.junit.jupiter.api.Test;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ServiceLoader;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 /*-
  * #%L
@@ -16,21 +29,17 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.*;
  * #L%
  */
 
-import org.eclipse.serializer.memory.XMemory;
-import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
-import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import org.junit.jupiter.api.Test;
-
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.UUID;
-
-import static org.junit.jupiter.api.Assertions.*;
-
 /** Verifies provider health reflects writer readiness and checkpoint state. */
 class AeronReplicationMonitoringTest
 {
+	@Test
+	void classpathServiceLoaderDiscoversAeronProvider()
+	{
+		assertTrue(ServiceLoader.load(ClusterReplicationTransportProvider.class).stream()
+			.map(ServiceLoader.Provider::get)
+			.anyMatch(provider -> "aeron".equals(provider.id())));
+	}
+
 	/** Verifies writer provider exposes aeron and reports live without reader client. */
 	@Test
 	void writerProviderExposesAeronAndReportsLiveWithoutReaderClient()
@@ -61,7 +70,9 @@ class AeronReplicationMonitoringTest
 		{
 			final ReplicationCursor cursor = transport.positionProvider("stream").latest();
 			assertEquals("aeron", cursor.transport());
-			assertEquals(Long.BYTES * 2, cursor.providerPosition().length);
+			final AeronReplicationCursor aeronCursor = AeronReplicationCursor.decode(cursor.providerPosition());
+			assertEquals(cursor.logicalSequence(), aeronCursor.sequence());
+			assertEquals(cursor.storeGeneration(), aeronCursor.storeGeneration());
 		}
 	}
 
@@ -84,16 +95,17 @@ class AeronReplicationMonitoringTest
 		}
 	}
 
-	/** Verifies the neutral distributor uses the Aeron archive-first path. */
+	/** Verifies Store binaries cannot bypass the fenced persistence target. */
 	@Test
-	void distributorPublishesDataWithoutAStoreTarget()
+	void distributorRejectsDataWithoutAStoreTarget()
 	{
 		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
 			.create(properties("writer")))
 		{
 			final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
-			distributor.distributeData(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 3, 2, 1 })));
-			assertEquals(0L, transport.positionProvider("stream").latest().logicalSequence());
+			assertThrows(UnsupportedOperationException.class,
+				() -> distributor.distributeData(ChunksWrapper.New(
+					XMemory.toDirectByteBuffer(new byte[] { 3, 2, 1 }))));
 		}
 	}
 
@@ -127,10 +139,9 @@ class AeronReplicationMonitoringTest
 			assertFalse(failedHealth.isReady());
 			assertFalse(failedHealth.isHealthy());
 			assertEquals(ReplicationHealth.State.FAILED, failedHealth.state());
-			final ReplicationCursor cursor = transport.positionProvider("stream").latest();
-			assertEquals("aeron", cursor.transport());
-			assertEquals(-1L, cursor.logicalSequence(),
-				"an idle reader reports its own unresolved cursor, not the writer boundary");
+			assertThrows(UnsupportedOperationException.class,
+				() -> transport.positionProvider("stream").latest(),
+				"a reader cannot substitute its applied cursor for the writer's durable boundary");
 			health.close();
 			failedHealth.close();
 		}
@@ -266,33 +277,16 @@ class AeronReplicationMonitoringTest
 		};
 	}
 
-	private record TestClient(boolean isRunning, RuntimeException failure) implements ClusterStorageBinaryDataClient {
-
-        @Override
-        public void start() {
-        }
-
-        @Override
-        public void stopAtLatestMessage() {
-        }
-
-        @Override
-        public MessageInfo messageInfo() {
-            return MessageInfo.New(-1, "aeron", null, new byte[0]);
-        }
-
-
-        @Override
-        public void resume() {
-        }
-
-        @Override
-        public boolean isLive() {
-            return false;
-        }
-
-        @Override
-        public void dispose() {
-        }
-    }
+	private record TestClient(boolean isRunning, RuntimeException failure) implements ClusterStorageBinaryDataClient
+	{
+		@Override public void start() { }
+		@Override public void stopAtLatestMessage() { }
+		@Override public MessageInfo messageInfo()
+		{
+			return MessageInfo.New(-1, "aeron", null, new byte[0]);
+		}
+		@Override public void resume() { }
+		@Override public boolean isLive() { return false; }
+		@Override public void dispose() { }
+	}
 }

@@ -23,6 +23,7 @@
     <modules>
         <module>clustered</module>
         <module>kafka</module>
+        <module>aeron</module>
     </modules>
 
     <dependencyManagement>

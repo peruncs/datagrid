@@ -16,6 +16,7 @@ package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -27,7 +28,7 @@ class AeronAuthenticatedWatermarkTest
 	private static final UUID GENERATION = UUID.randomUUID();
 	private static final UUID READER_ONE = UUID.randomUUID();
 	private static final UUID READER_TWO = UUID.randomUUID();
-	private static final byte[] SECRET = "test-only-retention-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+	private static final byte[] SECRET = "test-only-retention-secret".getBytes(StandardCharsets.UTF_8);
 
 	@Test
 	void signedWatermarkRoundTripsAndRejectsTampering()
@@ -44,10 +45,24 @@ class AeronAuthenticatedWatermarkTest
 	}
 
 	@Test
+	void directlyEncodedSignatureRoundTripsAndVerifies()
+	{
+		final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.decode(
+			AeronAuthenticatedWatermark.signEncoded(
+				READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096, SECRET));
+		assertTrue(watermark.verify(SECRET));
+		assertEquals(42, watermark.sequence());
+		assertEquals(4_096, watermark.position());
+	}
+
+	@Test
 	void validatorRejectsRollbackAndIdentityConfusion()
 	{
 		final AeronAuthenticatedWatermark.Validator validator = new AeronAuthenticatedWatermark.Validator(SECRET);
 		validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET));
+		validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET));
+		assertThrows(IllegalStateException.class, () -> validator.accept(
+			AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 101, SECRET)));
 		validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 2, 200, SECRET));
 		assertThrows(IllegalStateException.class, () -> validator.accept(
 			AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 3, 199, SECRET)));

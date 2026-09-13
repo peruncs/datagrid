@@ -46,7 +46,24 @@ public final class AeronReplicationCheckpointStore
 	 */
 	public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException
 	{
-		final ByteBuffer encoded = encode(checkpoint);
+		final ByteBuffer encoded = ENCODE_BUFFER.get();
+		encoded.clear();
+		encoded.putInt(AeronReplicationCheckpoint.MAGIC)
+			.putShort(AeronReplicationCheckpoint.VERSION)
+			.put((byte)checkpoint.recordTypeCode())
+			.put((byte)checkpoint.durabilityModeCode())
+			.put((byte)checkpoint.stateCode())
+			.putShort((short)0).put((byte)0);
+		putUuid(encoded, checkpoint.clusterId());
+		putUuid(encoded, checkpoint.nodeId());
+		putUuid(encoded, checkpoint.storeGeneration());
+		encoded.putLong(checkpoint.recordingId()).putLong(checkpoint.writerEpoch())
+			.putLong(checkpoint.transactionSequence()).putLong(checkpoint.recordingPosition())
+			.putInt(checkpoint.dataLength()).putInt(checkpoint.dataChunkCount())
+			.putInt(checkpoint.resolutionCrc32c())
+			.putInt(Crc32c.compute(encoded.array(), 0,
+				AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES))
+			.flip();
 		AtomicFileStore.write(path, channel ->
 		{
 			while (encoded.hasRemaining())
@@ -104,27 +121,6 @@ public final class AeronReplicationCheckpointStore
 		{
 			throw new IOException("invalid Aeron checkpoint fields", e);
 		}
-	}
-
-	private static ByteBuffer encode(final AeronReplicationCheckpoint checkpoint)
-	{
-		final ByteBuffer buffer = ENCODE_BUFFER.get();
-		buffer.clear();
-		buffer.putInt(AeronReplicationCheckpoint.MAGIC)
-			.putShort(AeronReplicationCheckpoint.VERSION)
-			.put((byte)checkpoint.recordTypeCode())
-			.put((byte)checkpoint.durabilityModeCode())
-			.put((byte)checkpoint.stateCode())
-			.putShort((short)0).put((byte)0);
-		putUuid(buffer, checkpoint.clusterId());
-		putUuid(buffer, checkpoint.nodeId());
-		putUuid(buffer, checkpoint.storeGeneration());
-		buffer.putLong(checkpoint.recordingId()).putLong(checkpoint.writerEpoch())
-			.putLong(checkpoint.transactionSequence()).putLong(checkpoint.recordingPosition())
-			.putInt(checkpoint.dataLength()).putInt(checkpoint.dataChunkCount())
-			.putInt(checkpoint.resolutionCrc32c())
-			.putInt(Crc32c.compute(buffer.array(), 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
-		return buffer.flip();
 	}
 
 	private static UUID readUuid(final ByteBuffer buffer)

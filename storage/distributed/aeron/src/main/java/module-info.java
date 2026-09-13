@@ -35,7 +35,8 @@ module org.eclipse.datagrid.storage.distributed.aeron
 	requires org.agrona;
 	requires io.aeron.client;
 	requires io.aeron.archive;
-	// Benchmark tests use com.sun.management.ThreadMXBean for allocation accounting.
+	/* Benchmark test sources use com.sun.management.ThreadMXBean; production has
+	 * no runtime dependency on the management implementation. */
 	requires static jdk.management;
 	exports org.eclipse.datagrid.storage.distributed.aeron.config;
 	exports org.eclipse.datagrid.storage.distributed.aeron.checkpoint;

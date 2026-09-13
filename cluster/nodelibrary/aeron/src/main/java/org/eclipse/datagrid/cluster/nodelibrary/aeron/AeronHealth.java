@@ -90,10 +90,7 @@ final class AeronHealth implements ReplicationHealth
 		 * particular, writerReady may initialise an Archive; a health object that
 		 * has already been disposed must be a pure, side-effect-free failure view. */
 		if (!this.active || this.closed.getAsBoolean()) return false;
-		/* Evaluate writer readiness before the retained recovery state.  A freshly
-		 * created writer is STARTING until the first health probe initialises its
-		 * Archive; short-circuiting on that state would make readiness permanently
-		 * false even though startup is otherwise healthy. */
+		/* Writer readiness is a side-effect-free lifecycle snapshot. */
 		final boolean writerIsReady = this.writerReady.getAsBoolean();
 		return this.storage.isReady()
 			&& !this.driverFailed.getAsBoolean() && this.capacityAvailable.getAsBoolean()
@@ -134,6 +131,7 @@ final class AeronHealth implements ReplicationHealth
 			return ReplicationHealth.State.STARTING;
 		}
 		if (this.client.failure() != null) return ReplicationHealth.State.FAILED;
+		if (!this.client.isRunning()) return ReplicationHealth.State.STARTING;
 		return this.client.isLive() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.REPLAYING;
 	}
 

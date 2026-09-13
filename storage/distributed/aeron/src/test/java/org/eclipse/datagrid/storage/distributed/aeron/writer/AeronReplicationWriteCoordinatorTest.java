@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -79,9 +80,31 @@ class AeronReplicationWriteCoordinatorTest
 			UUID.randomUUID(), 1, 0);
 		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
 			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> { },
-			() -> false);
+			bytes -> false);
 		assertThrows(IllegalStateException.class,
 			() -> coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }))));
+		coordinator.dispose();
+	}
+
+	@Test
+	void capacityAdmissionReceivesPayloadAndDictionaryBytes()
+	{
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.chunkSize(256).maxTransactionBytes(512).build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final AtomicLong required = new AtomicLong();
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> { },
+			bytes -> { required.set(bytes); return true; });
+		coordinator.distributeTypeDictionary("type");
+		try (var prepared = coordinator.prepare(
+			ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1, 2, 3 }))))
+		{
+			assertEquals(7L, required.get());
+			coordinator.abort(prepared);
+		}
 		coordinator.dispose();
 	}
 
@@ -467,9 +490,7 @@ class AeronReplicationWriteCoordinatorTest
 
 		final List<java.nio.ByteBuffer> buffers = new ArrayList<>();
 		channels[0].iterateChannelChunks(channel ->
-		{
-			for (final java.nio.ByteBuffer buffer : channel.buffers()) buffers.add(buffer);
-		});
+                buffers.addAll(Arrays.asList(channel.buffers())));
 		assertEquals(channels.length, buffers.size());
 		for (final java.nio.ByteBuffer buffer : buffers)
 		{

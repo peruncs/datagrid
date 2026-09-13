@@ -9,7 +9,6 @@ import org.eclipse.datagrid.storage.distributed.aeron.wire.AeronReplicationEnvel
 
 import java.nio.ByteBuffer;
 import java.util.UUID;
-import java.util.function.BiConsumer;
 import java.util.function.LongUnaryOperator;
 import java.util.zip.CRC32C;
 
@@ -63,14 +62,6 @@ final class AeronReplicationPublisher implements AutoCloseable
 	private boolean envelopeFreed;
 	private boolean closed;
 
-	/** Installs a package-private fault seam used by deterministic crash tests. */
-	static void setCrashHook(final BiConsumer<String, Long> hook) { CrashHook.install(hook); }
-
-	static void clearCrashHook()
-	{
-		CrashHook.clear();
-	}
-
 	private static void crashPoint(final String name, final long sequence)
 	{
 		CrashHook.invoke(name, sequence);
@@ -97,18 +88,18 @@ final class AeronReplicationPublisher implements AutoCloseable
 
 	AeronReplicationPublisher(final ExclusivePublication publication,
 		final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-		final long initialSequence, final boolean closePublication)
+		final long initialSequence)
 	{
 		this(offerer(publication), actualMaxMessageLength(publication, configuration), configuration, clusterId, epoch, initialSequence,
-			closePublication ? publication : null, LongUnaryOperator.identity());
+			null, LongUnaryOperator.identity());
 	}
 
 	AeronReplicationPublisher(final ExclusivePublication publication,
 		final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-		final long initialSequence, final boolean closePublication, final LongUnaryOperator commitPositionAwaiter)
+		final long initialSequence, final LongUnaryOperator commitPositionAwaiter)
 	{
 		this(offerer(publication), actualMaxMessageLength(publication, configuration), configuration, clusterId, epoch, initialSequence,
-			closePublication ? publication : null, commitPositionAwaiter);
+			publication, commitPositionAwaiter);
 	}
 
 	private static int actualMaxMessageLength(final ExclusivePublication publication,
@@ -382,14 +373,8 @@ final class AeronReplicationPublisher implements AutoCloseable
 		this.nextSequence = sequence;
 	}
 
-	/** Computes the metadata used by an in-flight local-write record. */
-	synchronized TransactionMetadata transactionMetadata(final ByteBuffer[] dataBuffers)
-	{
-		return this.transactionMetadata(dataBuffers, dataBuffers == null ? 0 : dataBuffers.length);
-	}
-
 	/** Computes transaction metadata for the populated prefix of a reusable buffer array. */
-	 synchronized TransactionMetadata transactionMetadata(final ByteBuffer[] dataBuffers, final int bufferCount)
+	synchronized TransactionMetadata transactionMetadata(final ByteBuffer[] dataBuffers, final int bufferCount)
 	{
 		final long length = totalRemaining(dataBuffers, bufferCount);
 		if (length > this.configuration.maxTransactionBytes())
@@ -432,7 +417,8 @@ final class AeronReplicationPublisher implements AutoCloseable
 
 		final int count = this.chunkCount(length);
 		int sourceIndex = 0;
-		ByteBuffer source = sources[sourceIndex].duplicate();
+		ByteBuffer source = sources[sourceIndex];
+		int sourcePosition = source.position();
 		int logicalOffset = 0;
 		for (int chunkIndex = 0; chunkIndex < count; chunkIndex++)
 		{
@@ -440,20 +426,17 @@ final class AeronReplicationPublisher implements AutoCloseable
 			int copied = 0;
 			while (copied < chunkLength)
 			{
-				while (!source.hasRemaining())
+				while (sourcePosition >= source.limit())
 				{
 					if (++sourceIndex >= sourceCount) throw new IllegalArgumentException("data buffer length changed");
-					source = sources[sourceIndex].duplicate();
+					source = sources[sourceIndex];
+					sourcePosition = source.position();
 				}
-				final int amount = Math.min(source.remaining(), chunkLength - copied);
-				final int sourcePosition = source.position();
-				final int sourceLimit = source.limit();
-				source.limit(sourcePosition + amount);
-				crc.update(source);
-				source.limit(sourceLimit);
+				final int amount = Math.min(source.limit() - sourcePosition, chunkLength - copied);
+				updateCrc(crc, source, sourcePosition, amount);
 				this.envelopeBuffer.putBytes(
 					AeronReplicationEnvelope.HEADER_LENGTH + copied, source, sourcePosition, amount);
-				source.position(sourcePosition + amount);
+				sourcePosition += amount;
 				copied += amount;
 			}
 			this.offerEncoded(sequence, AeronReplicationEnvelope.Kind.STORE_BINARY,
@@ -472,20 +455,35 @@ final class AeronReplicationPublisher implements AutoCloseable
 		for (int sourceIndex = 0; sourceIndex < sourceCount; sourceIndex++)
 		{
 			final ByteBuffer sourceBuffer = sources[sourceIndex];
-			final ByteBuffer source = sourceBuffer.duplicate();
-			final int amount = Math.min(remaining, source.remaining());
+			final int amount = Math.min(remaining, sourceBuffer.remaining());
 			if (amount > 0)
 			{
-				final int sourceLimit = source.limit();
-				source.limit(source.position() + amount);
-				crc.update(source);
-				source.limit(sourceLimit);
+				updateCrc(crc, sourceBuffer, sourceBuffer.position(), amount);
 				remaining -= amount;
 			}
 			if (remaining == 0) break;
 		}
 		if (remaining != 0) throw new IllegalArgumentException("data buffer length changed");
 		return (int)crc.getValue();
+	}
+
+	/** Updates CRC32C without allocating a duplicate view or retaining caller state. */
+	private static void updateCrc(final CRC32C crc, final ByteBuffer source,
+		final int offset, final int length)
+	{
+		final int position = source.position();
+		final int limit = source.limit();
+		try
+		{
+			source.position(offset);
+			source.limit(offset + length);
+			crc.update(source);
+		}
+		finally
+		{
+			source.limit(limit);
+			source.position(position);
+		}
 	}
 
 	/** Publishes the commit marker and waits for the configured durability boundary. */
@@ -536,21 +534,21 @@ final class AeronReplicationPublisher implements AutoCloseable
 			transaction.invokeAbortAction(position);
 			return position;
 		}
-			catch (final RuntimeException | Error failure)
+		catch (final RuntimeException | Error failure)
+		{
+			/* The marker may already have been offered when the Archive acknowledgement
+			 * failed. Surface that attempted abort with its known-or-unknown position so
+			 * the coordinator can persist an uncertain state instead of losing evidence. */
+			try
 			{
-				/* The marker may already have been offered when the Archive acknowledgement
-				 * failed. Surface that attempted abort with its known-or-unknown position so
-				 * the coordinator can persist an uncertain state instead of losing evidence. */
-				try
-				{
-					transaction.invokeAbortAction(transaction.abortPosition);
-				}
-				catch (final RuntimeException | Error callbackFailure)
-				{
-					failure.addSuppressed(callbackFailure);
-				}
-				synchronized (this)
-				{
+				transaction.invokeAbortAction(transaction.abortPosition);
+			}
+			catch (final RuntimeException | Error callbackFailure)
+			{
+				failure.addSuppressed(callbackFailure);
+			}
+			synchronized (this)
+			{
 				this.failed = true;
 			}
 			throw failure;
@@ -565,10 +563,10 @@ final class AeronReplicationPublisher implements AutoCloseable
 		if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
 		try
 		{
-				final long offeredPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.ABORT,
-					transaction.dataLength, transaction.dataChunkCount, 0);
-				transaction.abortAttempted = true;
-				final long position = this.commitPositionAwaiter.applyAsLong(offeredPosition);
+			final long offeredPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.ABORT,
+				transaction.dataLength, transaction.dataChunkCount, 0);
+			transaction.abortAttempted = true;
+			final long position = this.commitPositionAwaiter.applyAsLong(offeredPosition);
 			transaction.abortPosition = position;
 			crashPoint("AFTER_ABORT_OFFERED", transaction.sequence);
 			transaction.terminal = true;

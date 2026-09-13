@@ -39,7 +39,7 @@ final class TransactionAssembler
 	/* ChunksWrapper requires a direct buffer even for an empty binary.  Reuse one
 	 * immutable zero-capacity view instead of allocating native memory per empty
 	 * transaction. */
-	private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0).asReadOnlyBuffer();
+	private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0);
 	private final AeronReplicationConfiguration configuration;
 	private final UUID clusterId;
 	private final long epoch;
@@ -277,7 +277,7 @@ final class TransactionAssembler
 			}
 			this.nextExpectedSequence = envelope.sequence() + 1;
 			this.delivery.prepare(null, null, null, envelope.sequence(), position, 0, 0,
-				envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
+				0, AeronReplicationEnvelope.Kind.COMMIT);
 			return;
 		}
 		if (this.transaction.dataLength != envelope.payloadLength() ||
@@ -443,7 +443,7 @@ final class TransactionAssembler
 
 	RuntimeException failure() { return this.failure; }
 
-	 synchronized void failure(final RuntimeException exception)
+	void failure(final RuntimeException exception)
 	{
 		if (exception == null) throw new NullPointerException("exception");
 		synchronized (this.delivery)
@@ -464,7 +464,7 @@ final class TransactionAssembler
 	}
 
 	/** Releases native buffers retained by an incomplete transaction. */
-	 synchronized void dispose()
+	void dispose()
 	{
 		synchronized (this.delivery)
 		{

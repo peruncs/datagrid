@@ -7,8 +7,8 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.function.BiConsumer;
-import java.util.function.BooleanSupplier;
+import java.util.function.LongPredicate;
+import java.util.function.LongSupplier;
 
 /*-
  * #%L
@@ -39,8 +39,6 @@ import java.util.function.BooleanSupplier;
  */
 public final class AeronReplicationWriteCoordinator implements AutoCloseable
 {
-	static void setCrashHook(final BiConsumer<String, Long> hook) { CrashHook.install(hook); }
-	static void clearCrashHook() { CrashHook.clear(); }
 	private static void crashPoint(final String name, final long sequence)
 	{
 		CrashHook.invoke(name, sequence);
@@ -49,7 +47,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 	private final AeronReplicationPublisher publisher;
 	private final ReplicationDurabilityMode durabilityMode;
 	private final AeronArchiveReplicationPublisher.CheckpointWriter listener;
-	private final BooleanSupplier writeAdmission;
+	private final LongPredicate writeAdmission;
 	private byte[] pendingDictionary;
 	private LocalEnqueue localAcceptanceFence;
 	/* The coordinator is single-threaded. Reusing this channel-order scratch
@@ -65,7 +63,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher)
 	{
 		this(publisher, ReplicationDurabilityMode.ARCHIVE_FIRST,
-			(state, sequence, length, chunks, crc, position) -> { }, () -> true);
+			(state, sequence, length, chunks, crc, position) -> { }, ignored -> true);
 	}
 
 	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
@@ -78,13 +76,13 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 		final ReplicationDurabilityMode durabilityMode,
 		final AeronArchiveReplicationPublisher.CheckpointWriter listener)
 	{
-		this(publisher, durabilityMode, listener, () -> true);
+		this(publisher, durabilityMode, listener, ignored -> true);
 	}
 
 	AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
 		final ReplicationDurabilityMode durabilityMode,
 		final AeronArchiveReplicationPublisher.CheckpointWriter listener,
-		final BooleanSupplier writeAdmission)
+		final LongPredicate writeAdmission)
 	{
 		if (publisher == null) throw new NullPointerException("publisher");
 		if (durabilityMode == null) throw new NullPointerException("durabilityMode");
@@ -188,7 +186,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 	 */
 	synchronized AeronReplicationPublisher.PreparedTransaction prepare(final Binary data)
 	{
-		this.ensureWriteAdmitted();
 		if (data == null)
 		{
 			throw new NullPointerException("data");
@@ -212,6 +209,11 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 		}
 		else
 		{
+			if (local.source() != data)
+			{
+				throw new IllegalStateException(
+					"the pending Aeron local-acceptance fence belongs to a different Store transaction");
+			}
 			bufferCount = local.bufferCount();
 			buffers = local.buffers();
 		}
@@ -228,6 +230,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 			try
 			{
 				metadata = this.publisher.transactionMetadata(buffers, bufferCount);
+				this.ensureWriteAdmitted(metadata.dataLength());
 				sequence = this.publisher.reserveSequence();
 				this.notifyState(AeronReplicationCheckpoint.State.PREPARING, sequence,
 					metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c(), -1);
@@ -238,6 +241,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 				this.publisher.failClosed();
 				throw failure;
 			}
+		}
+		else
+		{
+			this.ensureWriteAdmitted(local.metadata().dataLength());
 		}
 		try
 		{
@@ -312,7 +319,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 	 */
 	synchronized long markLocalEnqueue(final Binary data)
 	{
-		this.ensureWriteAdmitted();
 		if (data == null) throw new NullPointerException("data");
 		if (this.localAcceptanceFence != null)
 		{
@@ -325,11 +331,14 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 		try
 		{
 			metadata = this.publisher.transactionMetadata(buffers, bufferCount);
+			this.ensureWriteAdmitted(metadata.dataLength());
 			/* Reserve the sequence before writing the fence.  The ENQUEUE_THEN_ARCHIVE
 			 * preparation must reuse this exact reservation; reading nextSequence()
 			 * here would leave the fence one sequence behind the published data. */
 			sequence = this.publisher.reserveSequence();
-			this.localAcceptanceFence = new LocalEnqueue(sequence, metadata, buffers, bufferCount);
+			/* No second collection is admitted while this fence exists, so the
+			 * writer-owned scratch remains stable until prepare consumes it. */
+			this.localAcceptanceFence = new LocalEnqueue(sequence, metadata, data, buffers, bufferCount);
 			this.notifyState(AeronReplicationCheckpoint.State.ENQUEUED, sequence,
 				metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c(), -1);
 		}
@@ -357,12 +366,33 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 		return sequence;
 	}
 
-	private void ensureWriteAdmitted()
+	private void ensureWriteAdmitted(final int dataLength)
 	{
-		if (!this.writeAdmission.getAsBoolean())
+		final long dictionaryLength = this.pendingDictionary == null ? 0L : this.pendingDictionary.length;
+		final long requiredBytes = Math.addExact(dataLength, dictionaryLength);
+		if (!this.writeAdmission.test(requiredBytes))
 		{
-			throw new IllegalStateException("Aeron Archive free capacity is below the configured write threshold");
+			throw new IllegalStateException(
+				"Aeron Archive has insufficient free capacity for transaction bytes=" + requiredBytes);
 		}
+	}
+
+	/**
+	 * Executes Archive maintenance while this coordinator excludes every Store
+	 * write. The supplied operation is responsible for stopping and extending the
+	 * recording; keeping this monitor held prevents an unrecorded publication gap.
+	 *
+	 * @param maintenance bounded Archive maintenance operation
+	 * @return operation result
+	 */
+	public synchronized long withWritesPaused(final LongSupplier maintenance)
+	{
+		if (maintenance == null) throw new NullPointerException("maintenance");
+		if (this.localAcceptanceFence != null || this.publisher.hasPendingTransaction())
+		{
+			throw new IllegalStateException("cannot run Archive maintenance while a transaction is pending");
+		}
+		return maintenance.getAsLong();
 	}
 
 	/** Clears the pre-enqueue fence when the Store rejected the write. */
@@ -484,7 +514,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 
 	/** Pairs a reserved sequence with the transaction queued for publication. */
 	private record LocalEnqueue(long sequence, AeronReplicationPublisher.TransactionMetadata metadata,
-		ByteBuffer[] buffers, int bufferCount)
+		Binary source, ByteBuffer[] buffers, int bufferCount)
 	{
 	}
 
@@ -555,6 +585,9 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 		{
 			this.publisher.closeWithoutAbort();
 			this.publisher.releaseCoordinator(this);
+			this.localAcceptanceFence = null;
+			this.pendingDictionary = null;
+			this.clearBufferScratch();
 			return;
 		}
 		/* Keep the coordinator claim until publication shutdown has completed.  If an
@@ -563,5 +596,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable
 		 * pending sequence. */
 		this.publisher.close();
 		this.publisher.releaseCoordinator(this);
+		this.localAcceptanceFence = null;
+		this.pendingDictionary = null;
+		this.clearBufferScratch();
 	}
 }

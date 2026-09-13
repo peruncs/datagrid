@@ -112,7 +112,7 @@ import static org.eclipse.serializer.util.X.notNull;
 			};
 			try
 			{
-				this.objectGraphUpdateHandler.objectGraphUpdateAvailable(updater);
+				this.objectGraphUpdateHandler.objectGraphUpdateAvailable(updater).toCompletableFuture().join();
 			}
 			catch (final RuntimeException | Error failure)
 			{
@@ -146,6 +146,10 @@ import static org.eclipse.serializer.util.X.notNull;
 					throw new RuntimeException(localType + " <> " + remoteType);
 				}
 			});
+			/* Replicated imports do not execute a local Store operation that would
+			 * normally flush the exporting dictionary manager.  Flush explicitly before
+			 * importing data that can reference the newly registered type ids. */
+			this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
 		}
 
 	}

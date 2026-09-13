@@ -24,6 +24,9 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -33,6 +36,53 @@ class StorageBinaryDataClientAeronTest
 {
 	private static final UUID CLUSTER = UUID.randomUUID();
 	private static final long EPOCH = 17;
+
+	@Test
+	void concurrentFailureCannotDeadlockCommittedDelivery() throws Exception
+	{
+		final CountDownLatch deliveryStarted = new CountDownLatch(1);
+		final CountDownLatch releaseDelivery = new CountDownLatch(1);
+		final RecordingReceiver receiver = new RecordingReceiver()
+		{
+			@Override
+			public void receiveData(final Binary value)
+			{
+				deliveryStarted.countDown();
+				try
+				{
+					assertTrue(releaseDelivery.await(5, TimeUnit.SECONDS));
+				}
+				catch (final InterruptedException failure)
+				{
+					Thread.currentThread().interrupt();
+					throw new AssertionError(failure);
+				}
+				super.receiveData(value);
+			}
+		};
+		final TransactionAssembler assembler = assembler(receiver, 1024);
+		final byte[] data = { 1, 2, 3 };
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+			data, data.length));
+		final byte[] commit = AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
+			AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
+			AeronReplicationEnvelope.crc32c(data), new byte[0]);
+		final var executor = Executors.newFixedThreadPool(2);
+		try
+		{
+			final var delivery = executor.submit(() -> accept(assembler, commit));
+			assertTrue(deliveryStarted.await(5, TimeUnit.SECONDS));
+			final var failure = executor.submit(() -> assembler.failure(new IllegalStateException("driver stopped")));
+			releaseDelivery.countDown();
+			delivery.get(5, TimeUnit.SECONDS);
+			failure.get(5, TimeUnit.SECONDS);
+			assertEquals("driver stopped", assembler.failure().getMessage());
+		}
+		finally
+		{
+			executor.shutdownNow();
+		}
+	}
 
 	/** Verifies delivery of dictionary and store payload only after commit. */
 	@Test
@@ -64,6 +114,22 @@ class StorageBinaryDataClientAeronTest
 			data.length, 0, 1, 0, AeronReplicationEnvelope.crc32c(data), new byte[0]
 		));
 		assertEquals(1, receiver.dataCalls);
+	}
+
+	/** An empty Store transaction still delivers a writable direct zero-length binary. */
+	@Test
+	void deliversEmptyStoreTransaction()
+	{
+		final RecordingReceiver receiver = new RecordingReceiver();
+		final TransactionAssembler assembler = assembler(receiver, 1024);
+		accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY,
+			0, 0, 1, 0, new byte[0], 0));
+		accept(assembler, AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
+			AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[0]));
+
+		assertArrayEquals(new byte[0], receiver.data);
+		assertEquals(1, receiver.dataCalls);
+		assertEquals(0, assembler.lastResolvedSequence());
 	}
 
 	/** Verifies rejection of gap and interleaving without delivering partial data. */

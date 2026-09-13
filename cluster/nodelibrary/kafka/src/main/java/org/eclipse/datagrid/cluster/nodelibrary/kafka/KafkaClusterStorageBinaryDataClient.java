@@ -86,6 +86,10 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
     private static final Logger LOG = LoggerFactory.getLogger(KafkaClusterStorageBinaryDataClient.class);
         private static final long PARTITION_ASSIGNMENT_TIMEOUT_MS = Duration.ofSeconds(60L).toMillis();
         private static final Duration POLL_TIMEOUT = Duration.ofSeconds(5L);
+	private static final int MAX_MESSAGE_BYTES = 1 << 30;
+	private static final int MAX_PACKET_COUNT =
+		(MAX_MESSAGE_BYTES + ClusterStorageBinaryDistributedKafka.maxPacketSize() - 1) /
+			ClusterStorageBinaryDistributedKafka.maxPacketSize();
 
         /**
          * List of packets that have been polled but not yet consumed as they are still
@@ -374,13 +378,22 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 					this.recordDiscardedPacket();
 					continue;
 				}
-				if (rootPacket.packetCount() <= 0)
+					if (rootPacket.packetCount() <= 0)
 				{
 					LOG.error("Invalid packet count {}", rootPacket.packetCount());
 					this.cachedPackets.remove();
 					this.recordDiscardedPacket();
-					continue;
-				}
+						continue;
+					}
+					final int expectedPacketCount = (rootPacket.messageLength() +
+						ClusterStorageBinaryDistributedKafka.maxPacketSize() - 1) /
+						ClusterStorageBinaryDistributedKafka.maxPacketSize();
+					if (rootPacket.messageLength() <= 0 || rootPacket.messageLength() > MAX_MESSAGE_BYTES ||
+						rootPacket.packetCount() > MAX_PACKET_COUNT || rootPacket.packetCount() != expectedPacketCount)
+					{
+						throw new IllegalStateException("Invalid Kafka replication message bounds: length=" +
+							rootPacket.messageLength() + ", packets=" + rootPacket.packetCount());
+					}
 
                 if (this.cachedPackets.size() < rootPacket.packetCount())
                 {
@@ -499,8 +512,8 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                 if (LOG.isDebugEnabled() && this.cachedMessageIndex % 10_000 == 0)
                 {
                     LOG.debug("Applying packets at offset {}", this.cachedMessageIndex);
-                }
-				this.packetAcceptor.accept(newPackets);
+				}
+				acceptAndAwait(this.packetAcceptor, newPackets);
 				final RuntimeException mergerFailure = this.packetAcceptor.failure();
 				if (mergerFailure != null)
 				{
@@ -510,6 +523,23 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                 this.offsetChangedListener.onChange(newInfo);
             }
         }
+
+		/**
+		 * Completes the Store materialization boundary for one accepted message.
+		 * Kafka offsets and cursor callbacks must be advanced only after this method
+		 * returns successfully.
+		 *
+		 * @param packetAcceptor packet destination
+		 * @param packets accepted packets
+		 */
+		static void acceptAndAwait(
+			final ClusterStorageBinaryDataPacketAcceptor packetAcceptor,
+			final List<StorageBinaryDataPacket> packets
+		)
+		{
+			packetAcceptor.accept(packets);
+			packetAcceptor.awaitApplied();
+		}
 
         private ClusterStorageBinaryDataPacket createDataPacket(
             final ConsumerRecord<String, byte[]> record,

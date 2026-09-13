@@ -14,6 +14,8 @@ package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
  * #L%
  */
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.UUID;
 
 /**
@@ -26,7 +28,7 @@ import java.util.UUID;
  * boundary.</p>
  *
  * @param clusterId replication cluster identity
- * @param nodeId node that owns the cursor
+ * @param nodeId node that produced the cursor; replay may transfer it to another node
  * @param storeGeneration Store image identity
  * @param epoch writer epoch associated with the recording
  * @param recordingId Aeron Archive recording identity
@@ -42,7 +44,11 @@ public record AeronReplicationCursor(
 	long recordingPosition,
 	long sequence
 )
-	{
+{
+	private static final int MAGIC = 0x44474143; // DGAC
+	private static final short VERSION = 1;
+	private static final int ENCODED_LENGTH = Integer.BYTES + Short.BYTES * 2 + 16 * 3 + Long.BYTES * 4;
+
 	/** Validates the identities and position carried by the durable cursor. */
 	public AeronReplicationCursor
 	{
@@ -51,5 +57,33 @@ public record AeronReplicationCursor(
 		{
 			throw new IllegalArgumentException("invalid Aeron replication cursor");
 		}
+	}
+
+	/** Encodes the complete provider cursor identity for the neutral cursor store. */
+	public byte[] encode()
+	{
+		return ByteBuffer.allocate(ENCODED_LENGTH).order(ByteOrder.BIG_ENDIAN)
+			.putInt(MAGIC).putShort(VERSION).putShort((short)0)
+			.putLong(this.clusterId.getMostSignificantBits()).putLong(this.clusterId.getLeastSignificantBits())
+			.putLong(this.nodeId.getMostSignificantBits()).putLong(this.nodeId.getLeastSignificantBits())
+			.putLong(this.storeGeneration.getMostSignificantBits()).putLong(this.storeGeneration.getLeastSignificantBits())
+			.putLong(this.epoch).putLong(this.recordingId).putLong(this.recordingPosition).putLong(this.sequence)
+			.array();
+	}
+
+	/** Decodes the sole supported Aeron provider-position format. */
+	public static AeronReplicationCursor decode(final byte[] encoded)
+	{
+		if (encoded == null) throw new NullPointerException("encoded");
+		if (encoded.length != ENCODED_LENGTH)
+			throw new IllegalArgumentException("invalid Aeron cursor encoding length");
+		final ByteBuffer buffer = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN);
+		if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION || buffer.getShort() != 0)
+			throw new IllegalArgumentException("unsupported Aeron cursor format");
+		return new AeronReplicationCursor(
+			new UUID(buffer.getLong(), buffer.getLong()),
+			new UUID(buffer.getLong(), buffer.getLong()),
+			new UUID(buffer.getLong(), buffer.getLong()),
+			buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong());
 	}
 }

@@ -9,7 +9,7 @@ package org.eclipse.datagrid.cache.clustered.types;
  * This program and the accompanying materials are made
  * available under the terms of the Eclipse Public License 2.0
  * which is available at https://www.eclipse.org/legal/epl-2.0/
- * 
+ *
  * SPDX-License-Identifier: EPL-2.0
  * #L%
  */
@@ -25,10 +25,18 @@ import java.util.Map;
  * Implementations decide how messages travel, but they must return resources
  * that remain valid until the cache region factory releases them.</p>
  *
- * @param <K> cache key type
- * @param <V> cache value type
+ * <p>Because Hibernate resolves the provider from a configured class name, an
+ * implementation must expose a public no-argument constructor and read its
+ * configuration from the supplied properties. A sender and receiver from the
+ * same provider share one node identity so a node ignores its own
+ * invalidations.</p>
+ *
+ * <p>The provider is deliberately not parameterized by cache key and value
+ * types: it produces senders typed for the timestamp region
+ * ({@link ClusteredCacheMessageSender}<code>&lt;Object, Object&gt;</code>),
+ * which the cache region factory consumes.</p>
  */
-public interface ClusteredCacheMessageComProvider<K, V>
+public interface ClusteredCacheMessageComProvider
 {
 	/** Creates the sender for timestamp cache events.
 	 *
@@ -36,7 +44,7 @@ public interface ClusteredCacheMessageComProvider<K, V>
 	 * @param serializer serializer shared by the sender and receiver
 	 * @return sender for timestamp cache events
 	 */
-	ClusteredCacheMessageSender<K, V> provideUpdateTimestampsCacheMessageSender(
+	ClusteredCacheMessageSender<Object, Object> provideUpdateTimestampsCacheMessageSender(
         @SuppressWarnings("rawtypes") Map properties,
         Serializer<byte[]> serializer
 	);
