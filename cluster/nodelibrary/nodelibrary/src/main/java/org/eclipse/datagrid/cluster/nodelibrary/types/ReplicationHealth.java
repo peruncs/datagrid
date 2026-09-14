@@ -83,7 +83,14 @@ public interface ReplicationHealth extends AutoCloseable
 		 */
 	default State state()
 	{
-		return isReady() ? State.LIVE : State.STARTING;
+		try
+		{
+			return isReady() ? State.LIVE : State.STARTING;
+		}
+		catch (final RuntimeException failure)
+		{
+			return State.FAILED;
+		}
 	}
 
 	/** Initializes provider-side health probes and counters. */

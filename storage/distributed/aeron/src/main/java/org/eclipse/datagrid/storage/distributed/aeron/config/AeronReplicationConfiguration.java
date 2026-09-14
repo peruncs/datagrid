@@ -3,9 +3,11 @@ package org.eclipse.datagrid.storage.distributed.aeron.config;
 import org.agrona.BitUtil;
 import org.eclipse.datagrid.storage.distributed.aeron.wire.AeronReplicationEnvelope;
 import org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationLimits;
 
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 
 /*-
  * #%L
@@ -42,9 +44,18 @@ public final class AeronReplicationConfiguration
 	public static final String MAX_TRANSACTION_BYTES_PROPERTY = PREFIX + "max-transaction-bytes";
 	/** Property that sets the publication wait in nanoseconds. */
 	public static final String OFFER_TIMEOUT_NANOS_PROPERTY = PREFIX + "offer-timeout-nanos";
+	/** Property that sets the wait for an Archive recording to become visible. */
+	public static final String RECORDING_START_TIMEOUT_NANOS_PROPERTY = PREFIX + "recording-start-timeout-nanos";
+	/** Property that sets the wait for an Archive position to become durable. */
+	public static final String RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY = PREFIX + "recorded-position-timeout-nanos";
+	/** Property that sets the wait for an Archive recording to stop. */
+	public static final String RECORDING_STOP_TIMEOUT_NANOS_PROPERTY = PREFIX + "recording-stop-timeout-nanos";
 	/** Property that sets the reader stop wait in nanoseconds. */
 	public static final String READER_STOP_TIMEOUT_NANOS_PROPERTY = PREFIX + "reader-stop-timeout-nanos";
 	private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
+	private static final long DEFAULT_RECORDING_START_TIMEOUT_NANOS = 30_000_000_000L;
+	private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;
+	private static final long DEFAULT_RECORDING_STOP_TIMEOUT_NANOS = 30_000_000_000L;
 	private static final long DEFAULT_READER_STOP_TIMEOUT_NANOS = 30_000_000_000L;
 	/** Property that selects the local and Archive durability order. */
 	public static final String DURABILITY_MODE_PROPERTY = PREFIX + "durability-mode";
@@ -57,13 +68,16 @@ public final class AeronReplicationConfiguration
 	/** Default largest accepted transaction in bytes. */
 	public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
 	/** Hard upper bound for the largest accepted transaction in bytes. */
-	public static final int MAX_SUPPORTED_TRANSACTION_BYTES = 1024 * 1024 * 1024;
+	public static final int MAX_SUPPORTED_TRANSACTION_BYTES = ReplicationLimits.MAX_MESSAGE_BYTES;
 
 	private final int termLength;
 	private final int mtuLength;
 	private final int chunkSize;
 	private final int maxTransactionBytes;
 	private final long offerTimeoutNanos;
+	private final long recordingStartTimeoutNanos;
+	private final long recordedPositionTimeoutNanos;
+	private final long recordingStopTimeoutNanos;
 	private final long readerStopTimeoutNanos;
 	private final ReplicationDurabilityMode durabilityMode;
 
@@ -73,6 +87,9 @@ public final class AeronReplicationConfiguration
 		final int chunkSize,
 		final int maxTransactionBytes,
 		final long offerTimeoutNanos,
+		final long recordingStartTimeoutNanos,
+		final long recordedPositionTimeoutNanos,
+		final long recordingStopTimeoutNanos,
 		final long readerStopTimeoutNanos,
 		final ReplicationDurabilityMode durabilityMode
 	)
@@ -82,6 +99,9 @@ public final class AeronReplicationConfiguration
 		this.chunkSize = chunkSize;
 		this.maxTransactionBytes = maxTransactionBytes;
 		this.offerTimeoutNanos = offerTimeoutNanos;
+		this.recordingStartTimeoutNanos = recordingStartTimeoutNanos;
+		this.recordedPositionTimeoutNanos = recordedPositionTimeoutNanos;
+		this.recordingStopTimeoutNanos = recordingStopTimeoutNanos;
 		this.readerStopTimeoutNanos = readerStopTimeoutNanos;
 		this.durabilityMode = durabilityMode;
 	}
@@ -118,51 +138,60 @@ public final class AeronReplicationConfiguration
 	public static AeronReplicationConfiguration from(final Properties properties)
 	{
 		Objects.requireNonNull(properties, "properties");
-		final String offerTimeout = properties.getProperty(OFFER_TIMEOUT_NANOS_PROPERTY);
-		final long offerTimeoutNanos;
-		if (offerTimeout == null)
-		{
-			offerTimeoutNanos = DEFAULT_OFFER_TIMEOUT_NANOS;
-		}
-		else
-		{
-			try
-			{
-				offerTimeoutNanos = Long.parseLong(offerTimeout.trim());
-			}
-			catch (final NumberFormatException failure)
-			{
-				throw new IllegalArgumentException(
-					"Invalid long for " + OFFER_TIMEOUT_NANOS_PROPERTY + ": " + offerTimeout, failure);
-			}
-		}
-		final long readerStopTimeoutNanos;
-		final String readerStopTimeout = properties.getProperty(READER_STOP_TIMEOUT_NANOS_PROPERTY);
-		if (readerStopTimeout == null)
-		{
-			readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
-		}
-		else
-		{
-			try
-			{
-				readerStopTimeoutNanos = Long.parseLong(readerStopTimeout.trim());
-			}
-			catch (final NumberFormatException failure)
-			{
-				throw new IllegalArgumentException(
-					"Invalid long for " + READER_STOP_TIMEOUT_NANOS_PROPERTY + ": " + readerStopTimeout, failure);
-			}
-		}
+		validateKnownProperties(properties);
 		return builder()
 			.termLength(integer(properties, TERM_LENGTH_PROPERTY, DEFAULT_TERM_LENGTH))
 			.mtuLength(integer(properties, MTU_LENGTH_PROPERTY, DEFAULT_MTU_LENGTH))
 			.chunkSize(integer(properties, CHUNK_SIZE_PROPERTY, DEFAULT_CHUNK_SIZE))
 			.maxTransactionBytes(integer(properties, MAX_TRANSACTION_BYTES_PROPERTY, DEFAULT_MAX_TRANSACTION_BYTES))
-			.offerTimeoutNanos(offerTimeoutNanos)
-			.readerStopTimeoutNanos(readerStopTimeoutNanos)
+			.offerTimeoutNanos(longValue(properties, OFFER_TIMEOUT_NANOS_PROPERTY, DEFAULT_OFFER_TIMEOUT_NANOS))
+			.recordingStartTimeoutNanos(longValue(properties, RECORDING_START_TIMEOUT_NANOS_PROPERTY,
+				DEFAULT_RECORDING_START_TIMEOUT_NANOS))
+			.recordedPositionTimeoutNanos(longValue(properties, RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY,
+				DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS))
+			.recordingStopTimeoutNanos(longValue(properties, RECORDING_STOP_TIMEOUT_NANOS_PROPERTY,
+				DEFAULT_RECORDING_STOP_TIMEOUT_NANOS))
+			.readerStopTimeoutNanos(longValue(properties, READER_STOP_TIMEOUT_NANOS_PROPERTY,
+				DEFAULT_READER_STOP_TIMEOUT_NANOS))
 			.durabilityMode(mode(properties.getProperty(DURABILITY_MODE_PROPERTY)))
 			.build();
+	}
+
+	private static void validateKnownProperties(final Properties properties)
+	{
+		final Set<String> known = Set.of(
+			TERM_LENGTH_PROPERTY,
+			MTU_LENGTH_PROPERTY,
+			CHUNK_SIZE_PROPERTY,
+			MAX_TRANSACTION_BYTES_PROPERTY,
+			OFFER_TIMEOUT_NANOS_PROPERTY,
+			RECORDING_START_TIMEOUT_NANOS_PROPERTY,
+			RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY,
+			RECORDING_STOP_TIMEOUT_NANOS_PROPERTY,
+			READER_STOP_TIMEOUT_NANOS_PROPERTY,
+			DURABILITY_MODE_PROPERTY
+		);
+		for (final String name : properties.stringPropertyNames())
+		{
+			if (name.startsWith(PREFIX) && !known.contains(name))
+			{
+				throw new IllegalArgumentException("Unknown Aeron replication property: " + name);
+			}
+		}
+	}
+
+	private static long longValue(final Properties properties, final String key, final long fallback)
+	{
+		final String value = properties.getProperty(key);
+		if (value == null) return fallback;
+		try
+		{
+			return Long.parseLong(value.trim());
+		}
+		catch (final NumberFormatException failure)
+		{
+			throw new IllegalArgumentException("Invalid long for " + key + ": " + value, failure);
+		}
 	}
 
 	private static int integer(final Properties properties, final String key, final int fallback)
@@ -186,7 +215,6 @@ public final class AeronReplicationConfiguration
 		{
 			case "archive-first", "archive_first" -> ReplicationDurabilityMode.ARCHIVE_FIRST;
 			case "enqueue-then-archive", "enqueue_then_archive" -> ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE;
-			case "local-durable-first", "local_durable_first" -> ReplicationDurabilityMode.LOCAL_DURABLE_FIRST;
 			default -> throw new IllegalArgumentException("Unknown replication durability mode: " + value);
 		};
 	}
@@ -242,6 +270,36 @@ public final class AeronReplicationConfiguration
 	}
 
 	/**
+	 * Returns the bounded wait for an Archive recording to become active.
+	 *
+	 * @return wait in nanoseconds
+	 */
+	public long recordingStartTimeoutNanos()
+	{
+		return this.recordingStartTimeoutNanos;
+	}
+
+	/**
+	 * Returns the bounded wait for the Archive to report a recorded position.
+	 *
+	 * @return wait in nanoseconds
+	 */
+	public long recordedPositionTimeoutNanos()
+	{
+		return this.recordedPositionTimeoutNanos;
+	}
+
+	/**
+	 * Returns the bounded wait for an Archive recording to stop.
+	 *
+	 * @return wait in nanoseconds
+	 */
+	public long recordingStopTimeoutNanos()
+	{
+		return this.recordingStopTimeoutNanos;
+	}
+
+	/**
 	 * Returns the bounded wait used when a reader is stopped at the live tail.
 	 *
 	 * @return wait in nanoseconds
@@ -270,7 +328,12 @@ public final class AeronReplicationConfiguration
 	 */
 	public int maxMessageLength()
 	{
-		return Math.min(this.termLength / 8, 16 * 1024 * 1024);
+		return maxMessageLengthForTermLength(this.termLength);
+	}
+
+	private static int maxMessageLengthForTermLength(final int termLength)
+	{
+		return Math.min(termLength / 8, 16 * 1024 * 1024);
 	}
 
 	/** Builds an immutable Aeron replication configuration. */
@@ -281,6 +344,9 @@ public final class AeronReplicationConfiguration
 		private int chunkSize = DEFAULT_CHUNK_SIZE;
 		private int maxTransactionBytes = DEFAULT_MAX_TRANSACTION_BYTES;
 		private long offerTimeoutNanos = DEFAULT_OFFER_TIMEOUT_NANOS;
+		private long recordingStartTimeoutNanos = DEFAULT_RECORDING_START_TIMEOUT_NANOS;
+		private long recordedPositionTimeoutNanos = DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS;
+		private long recordingStopTimeoutNanos = DEFAULT_RECORDING_STOP_TIMEOUT_NANOS;
 		private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
 		private ReplicationDurabilityMode durabilityMode = ReplicationDurabilityMode.ARCHIVE_FIRST;
 
@@ -350,6 +416,42 @@ public final class AeronReplicationConfiguration
 		}
 
 		/**
+		 * Sets the maximum wait for an Archive recording to become active.
+		 *
+		 * @param value wait in nanoseconds
+		 * @return this builder
+		 */
+		public Builder recordingStartTimeoutNanos(final long value)
+		{
+			this.recordingStartTimeoutNanos = value;
+			return this;
+		}
+
+		/**
+		 * Sets the maximum wait for the Archive to report a recorded position.
+		 *
+		 * @param value wait in nanoseconds
+		 * @return this builder
+		 */
+		public Builder recordedPositionTimeoutNanos(final long value)
+		{
+			this.recordedPositionTimeoutNanos = value;
+			return this;
+		}
+
+		/**
+		 * Sets the maximum wait for an Archive recording to stop.
+		 *
+		 * @param value wait in nanoseconds
+		 * @return this builder
+		 */
+		public Builder recordingStopTimeoutNanos(final long value)
+		{
+			this.recordingStopTimeoutNanos = value;
+			return this;
+		}
+
+		/**
 		 * Sets the maximum wait for a reader to stop at a resolved boundary.
 		 *
 		 * @param value wait in nanoseconds
@@ -399,12 +501,20 @@ public final class AeronReplicationConfiguration
 			{
 				throw new IllegalArgumentException("chunkSize must be positive and <= maxTransactionBytes");
 			}
-			if (this.offerTimeoutNanos <= 0 || this.readerStopTimeoutNanos <= 0 || this.durabilityMode == null)
+			final long packetCount = (this.maxTransactionBytes + (long)this.chunkSize - 1L) / this.chunkSize;
+			if (packetCount > ReplicationLimits.MAX_PACKET_COUNT)
 			{
 				throw new IllegalArgumentException(
-					"offerTimeoutNanos and readerStopTimeoutNanos must be positive and durabilityMode must be set");
+					"maxTransactionBytes requires more than " + ReplicationLimits.MAX_PACKET_COUNT + " packets");
 			}
-			final int maxMessageLength = Math.min(this.termLength / 8, 16 * 1024 * 1024);
+			if (this.offerTimeoutNanos <= 0 || this.recordingStartTimeoutNanos <= 0 ||
+				this.recordedPositionTimeoutNanos <= 0 || this.recordingStopTimeoutNanos <= 0 ||
+				this.readerStopTimeoutNanos <= 0 || this.durabilityMode == null)
+			{
+				throw new IllegalArgumentException(
+					"all Aeron timeouts must be positive and durabilityMode must be set");
+			}
+			final int maxMessageLength = maxMessageLengthForTermLength(this.termLength);
 			if ((long)this.chunkSize + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength)
 			{
 				throw new IllegalArgumentException(
@@ -416,6 +526,9 @@ public final class AeronReplicationConfiguration
 				this.chunkSize,
 				this.maxTransactionBytes,
 				this.offerTimeoutNanos,
+				this.recordingStartTimeoutNanos,
+				this.recordedPositionTimeoutNanos,
+				this.recordingStopTimeoutNanos,
 				this.readerStopTimeoutNanos,
 				this.durabilityMode
 			);

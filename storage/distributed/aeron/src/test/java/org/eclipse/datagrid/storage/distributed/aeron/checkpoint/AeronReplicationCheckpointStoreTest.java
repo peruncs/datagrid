@@ -14,10 +14,12 @@ package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
  * #L%
  */
 
+import org.eclipse.datagrid.storage.distributed.types.AtomicFileStoreCrashHook;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -102,6 +104,61 @@ class AeronReplicationCheckpointStoreTest
 			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
 			AeronReplicationCheckpoint.State.COMMITTED,
 			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, Long.MAX_VALUE, 1024, 1, 1, 0));
+	}
+
+	@Test
+	void rejectsSymbolicLinkCheckpoint() throws Exception
+	{
+		final Path directory = Files.createTempDirectory("datagrid-checkpoint-symlink");
+		final Path target = directory.resolve("target");
+		final Path link = directory.resolve("checkpoint");
+		try
+		{
+			AeronReplicationCheckpointStore.write(target, checkpoint());
+			try
+			{
+				Files.createSymbolicLink(link, target.getFileName());
+			}
+			catch (final UnsupportedOperationException | java.nio.file.FileSystemException unsupported)
+			{
+				return;
+			}
+			assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(link));
+		}
+		finally
+		{
+			Files.deleteIfExists(link);
+			Files.deleteIfExists(target);
+			Files.deleteIfExists(directory);
+		}
+	}
+
+	/** Reader uncertainty markers use cursor crash phases, never writer checkpoint phases. */
+	@Test
+	void readerCursorUsesCursorCrashPhases() throws Exception
+	{
+		final Path path = Files.createTempFile("datagrid-reader-cursor", ".bin");
+		final ArrayList<String> phases = new ArrayList<>();
+		final AeronReplicationCheckpoint readerCursor = new AeronReplicationCheckpoint(
+			AeronReplicationCheckpoint.RecordType.READER_CURSOR,
+			AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+			AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
+			UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 7, 4096, 0, 0, 0);
+		try
+		{
+			AtomicFileStoreCrashHook.install((phase, ignored) -> phases.add(phase));
+			AeronReplicationCheckpointStore.write(path, readerCursor);
+		}
+		finally
+		{
+			AtomicFileStoreCrashHook.clear();
+			Files.deleteIfExists(path);
+		}
+		assertEquals(java.util.List.of(
+			"BEFORE_CURSOR_TEMP_WRITE",
+			"DURING_CURSOR_FILE_WRITE",
+			"AFTER_CURSOR_TEMP_WRITE_BEFORE_RENAME",
+			"AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC"), phases);
 	}
 
 	private static AeronReplicationCheckpoint checkpoint()

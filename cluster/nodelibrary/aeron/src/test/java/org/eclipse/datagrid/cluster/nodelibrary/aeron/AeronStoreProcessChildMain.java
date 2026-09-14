@@ -58,6 +58,7 @@ public final class AeronStoreProcessChildMain
 			.create(properties(root, clusterId, nodeId, generation)))
 		{
 			final AtomicInteger dictionaryChunks = new AtomicInteger();
+			transport.positionProvider("store").init();
 			/* Count dictionary chunks at the publication seam, rather than counting
 			 * exporter notifications.  A rejected ARCHIVE_FIRST transaction must
 			 * publish its retained dictionary again even though the Store exporter
@@ -184,7 +185,7 @@ public final class AeronStoreProcessChildMain
 	/** Entity introduced only by the rejection/retry phase of the process fixture. */
 	public static final class RetryType
 	{
-		public String value;
+		public final String value;
 		public RetryType() { this.value = "dictionary-retry"; }
 	}
 

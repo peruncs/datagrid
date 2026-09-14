@@ -19,7 +19,7 @@ import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
 
 /**
  * Transport-neutral reader lifecycle. Provider modules supply the
- * implementation and map their cursor/offset model to {@link MessageInfo}.
+ * implementation and expose a transport-neutral {@link ReplicationCursor}.
  * A client must not report a message as consumed until the Store merger has
  * accepted the complete committed binary.
  */
@@ -28,10 +28,10 @@ public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 	/** Stops at the latest complete message boundary. */
 	void stopAtLatestMessage();
 
-	/** Returns the latest applied message information.
-	 * @return message information
+	/** Returns the latest applied replication cursor.
+	 * @return replication cursor
 	 */
-	MessageInfo messageInfo();
+	ReplicationCursor cursor();
 
 	/** Reports whether the reader is running.
 	 * @return {@code true} when running
@@ -39,17 +39,18 @@ public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 	boolean isRunning();
 
 	/** Returns a terminal reader failure, or {@code null} while the client is healthy.
+	 * Implementations must expose the same terminal failure observed by their
+	 * polling/consumer thread; returning a synthetic {@code null} hides a failed
+	 * reader from readiness and backup coordination.
+	 *
 	 * @return terminal failure, or {@code null}
 	 */
-	default RuntimeException failure()
-	{
-		return null;
-	}
+	RuntimeException failure();
 
 	/**
 	 * Returns the latest lifecycle result. Implementations that can distinguish a
 	 * resolved transaction boundary should override this method; the fallback
-	 * preserves the historic "stopped means complete" contract of simple clients.
+	 * treats a stopped client without a reported failure as a resolved boundary.
 	 */
 	default StopOutcome stopOutcome()
 	{
@@ -62,8 +63,8 @@ public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 	 */
 	default StopResult stopResult()
 	{
-		final MessageInfo info = this.messageInfo();
-		return new StopResult(this.stopOutcome(), info.messageIndex(), -1L);
+		final ReplicationCursor cursor = this.cursor();
+		return new StopResult(this.stopOutcome(), cursor.logicalSequence(), -1L);
 	}
 
 	/** Reports whether the reader is live.
@@ -82,27 +83,21 @@ public interface ClusterStorageBinaryDataClient extends StorageBinaryDataClient
 	/** Creates a neutral client for tests and disabled replication.
 	 *
 	 * @param startingCursor initial cursor, or {@code null}
-	 * @param listener callback after data is applied
 	 * @return neutral client
 	 */
-	static ClusterStorageBinaryDataClient NoOp(
-		final ReplicationCursor startingCursor,
-		final AfterDataMessageConsumedListener listener
-	)
+	static ClusterStorageBinaryDataClient NoOp(final ReplicationCursor startingCursor)
 	{
 		final ReplicationCursor cursor = startingCursor == null
 			? new ReplicationCursor("none", null, -1, new byte[0])
 			: startingCursor;
 		return new ClusterStorageBinaryDataClient()
 		{
-			private final MessageInfo info = MessageInfo.New(
-				cursor.logicalSequence(), cursor.transport(), cursor.storeGeneration(), cursor.providerPosition()
-			);
 
 			@Override public void start() { }
 			@Override public void stopAtLatestMessage() { }
-			@Override public MessageInfo messageInfo() { return this.info; }
+			@Override public ReplicationCursor cursor() { return cursor; }
 			@Override public boolean isRunning() { return false; }
+			@Override public RuntimeException failure() { return null; }
 			@Override public void resume() { }
 			@Override public void dispose() { }
 		};

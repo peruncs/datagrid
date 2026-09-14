@@ -23,8 +23,8 @@
 	<modules>
 		<module>distributed</module>
 		<module>index</module>
-		<module>kafka</module>
 		<module>aeron</module>
+		<module>kafka</module>
 	</modules>
 
 	<dependencyManagement>

@@ -62,7 +62,7 @@ public class ClusterFoundationFactory
 	@Singleton
 	public ClusterFoundation<?> clusterFoundation(
 		final EmbeddedStorageConfigurationProvider configProvider,
-		@Property(name = "eclipsestore.distribution.kafka.async", defaultValue = "false") final boolean async,
+		@Property(name = "eclipsestore.distribution.async", defaultValue = "false") final boolean async,
 		final ObjectGraphUpdateHandler objectGraphUpdateHandler
 	)
 	{

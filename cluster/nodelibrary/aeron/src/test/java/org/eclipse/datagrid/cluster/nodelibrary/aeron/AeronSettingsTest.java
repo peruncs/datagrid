@@ -16,14 +16,18 @@ package org.eclipse.datagrid.cluster.nodelibrary.aeron;
 
 import org.eclipse.datagrid.cluster.nodelibrary.types.NodelibraryPropertiesProvider;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.Base64;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /** Direct validation tests for configuration combinations that must fail before runtime startup. */
 class AeronSettingsTest
@@ -60,6 +64,22 @@ class AeronSettingsTest
 		assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
 			"ECLIPSE_DATAGRID_AERON_RETENTION_SECRET", Base64.getEncoder().encodeToString(new byte[8])
 		))));
+	}
+
+	@Test
+	void readsRetentionSecretFromOwnerOnlyFile(@TempDir final Path temporaryDirectory) throws Exception
+	{
+		final byte[] secret = "sixteen-byte-key".getBytes(StandardCharsets.US_ASCII);
+		final Path file = temporaryDirectory.resolve("retention.secret");
+		Files.writeString(file, Base64.getEncoder().encodeToString(secret), StandardCharsets.US_ASCII);
+		Files.setPosixFilePermissions(file, Set.of(PosixFilePermission.OWNER_READ));
+
+		final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+			"ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE", file.toString(),
+			"ECLIPSE_DATAGRID_AERON_RETENTION_READERS", UUID.randomUUID().toString()
+		)));
+
+		assertArrayEquals(secret, settings.retentionSecret());
 	}
 
 	@Test
@@ -103,7 +123,54 @@ class AeronSettingsTest
 		))));
 	}
 
+	@Test
+	void rejectsUnsafeFilesystemSyncInProduction()
+	{
+		assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+			"ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL", "0"), true)));
+	}
+
+	@Test
+	void rejectsIpv6WildcardInProduction()
+	{
+		assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+			"ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL", "aeron:udp?control=[::]:40123|control-mode=dynamic|fc=max",
+			"ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL", "aeron:udp?endpoint=[::]:0|control=[::]:40123|control-mode=dynamic"
+		), true)));
+	}
+
+	@Test
+	void rejectsExpandedIpv6WildcardInProduction()
+	{
+		assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+			"ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+				"aeron:udp?control=[0:0:0:0:0:0:0:0]:40123|control-mode=dynamic|fc=max",
+			"ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
+				"aeron:udp?endpoint=[0:0:0:0:0:0:0:0]:0|control=[0:0:0:0:0:0:0:0]:40123|control-mode=dynamic"
+		), true)));
+	}
+
+	@Test
+	void rejectsFramingOverrideThatDisagreesWithReplication()
+	{
+		assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+			"ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+				"aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=8m"
+		))));
+	}
+
+	@Test
+	void rejectsLoopbackEndpointsInProduction()
+	{
+		assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(), true)));
+	}
+
 	private static NodelibraryPropertiesProvider properties(final Map<String, String> overrides)
+	{
+		return properties(overrides, false);
+	}
+
+	private static NodelibraryPropertiesProvider properties(final Map<String, String> overrides, final boolean production)
 	{
 		final Path root = Path.of(System.getProperty("java.io.tmpdir"), "aeron-settings-" + UUID.randomUUID());
 		final UUID cluster = UUID.randomUUID();
@@ -111,6 +178,7 @@ class AeronSettingsTest
 		final UUID generation = UUID.randomUUID();
 		return new NodelibraryPropertiesProvider.Env()
 		{
+			@Override public boolean isProdMode() { return production; }
 			@Override public String replicationRole() { return "writer"; }
 			@Override public boolean replicationRoleConfigured() { return true; }
 			@Override public String replicationProperty(final String name)

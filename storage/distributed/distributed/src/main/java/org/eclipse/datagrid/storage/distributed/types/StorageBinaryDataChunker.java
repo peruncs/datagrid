@@ -15,6 +15,7 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -30,15 +31,29 @@ public final class StorageBinaryDataChunker
 	{
 	}
 
-	/** One packet and its position in the source binary.
+	/**
+	 * One transport packet and its position in the source binary.
 	 *
-	 * @param bytes packet payload
+	 * <p>The payload is owned by the chunk and is not copied by the accessor.
+	 * Consumers must treat it as read-only and must not retain or mutate it after
+	 * their packet operation completes. This avoids a second copy at every Kafka
+	 * and Aeron hand-off.</p>
+	 *
+	 * @param bytes packet payload owned by this chunk
 	 * @param index zero-based packet index
-	 * @param count total packet count
-	 * @param messageLength total message length
-	 */
-	public record Chunk(byte[] bytes, int index, int count, int messageLength)
+	 * @param count packet count for the complete message
+		 * @param messageLength complete message length in bytes
+		 */
+		public record Chunk(byte[] bytes, int index, int count, int messageLength)
 	{
+		/** Validates packet ownership and positional metadata at construction time. */
+		public Chunk
+		{
+			if (bytes == null || bytes.length == 0)
+				throw new IllegalArgumentException("chunk payload must not be empty");
+			if (index < 0 || count <= 0 || index >= count || messageLength <= 0)
+				throw new IllegalArgumentException("invalid chunk metadata");
+		}
 	}
 
 	/**
@@ -51,77 +66,95 @@ public final class StorageBinaryDataChunker
 	public static List<Chunk> chunk(final Binary data, final int maxPacketSize)
 	{
 		notNull(data);
-		if (maxPacketSize <= 0)
-		{
-			throw new IllegalArgumentException("maxPacketSize must be positive");
-		}
-
+		if (maxPacketSize <= 0) throw new IllegalArgumentException("maxPacketSize must be positive");
 		final List<Chunk> chunks = new ArrayList<>();
 		visit(data, maxPacketSize, chunks::add);
 		return chunks;
 	}
 
+	/**
+	 * Visits transport chunks in source order. The packet count is derived from
+	 * the immutable binary length, so this method does not buffer the complete
+	 * message before invoking the consumer.
+	 *
+	 * @param data source Store binary
+	 * @param maxPacketSize maximum packet payload size, in bytes
+	 * @param consumer callback for each chunk
+	 */
+	public static void forEach(final Binary data, final int maxPacketSize, final Consumer<Chunk> consumer)
+	{
+		notNull(consumer);
+		notNull(data);
+		if (maxPacketSize <= 0) throw new IllegalArgumentException("maxPacketSize must be positive");
+		visit(data, maxPacketSize, consumer);
+	}
+
 	private static void visit(final Binary data, final int maxPacketSize, final Consumer<Chunk> consumer)
 	{
-		/* Binary.buffers() exposes only the first Serializer channel.  A Store
-		 * transaction can span several channels, so traverse every channel in
-		 * Serializer order. We count first, then stream the same views directly
-		 * into packets; no flattened buffer array or payload copy is retained. */
-		final long messageLength = totalLength(data);
-		final int length = (int)messageLength;
-		if (length == 0) return;
-
-		final int count = (int)((messageLength + maxPacketSize - 1L) / maxPacketSize);
-		final PacketWriter writer = new PacketWriter(maxPacketSize, count, length, consumer);
+		final long totalLength = totalLength(data);
+		if (totalLength < 0L || totalLength > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH)
+		{
+			throw new IllegalArgumentException("binary is too large for transport metadata");
+		}
+		final long packetCount = totalLength == 0L ? 0L : ((totalLength - 1L) / maxPacketSize) + 1L;
+		if (packetCount > StorageBinaryDataMessage.MAX_PACKET_COUNT)
+		{
+			throw new IllegalArgumentException("binary has too many transport packets");
+		}
+		final PacketWriter writer = new PacketWriter(maxPacketSize, (int)totalLength,
+			(int)packetCount, consumer);
 		data.iterateChannelChunks(channel ->
 		{
-			if (channel == null) throw new IllegalStateException("binary contains a null channel");
+			if (channel == null) throw new StorageBinaryDataException("binary contains a null channel");
 			for (final ByteBuffer source : channel.buffers())
 			{
-				if (source == null) throw new IllegalStateException("binary contains a null channel buffer");
+				if (source == null) throw new StorageBinaryDataException("binary contains a null channel buffer");
 				writer.copy(source);
 			}
 		});
-		writer.finish();
+		writer.finish(totalLength);
 	}
 
 	private static long totalLength(final Binary data)
 	{
-		final long[] total = {0L};
+		final long[] length = {0L};
 		data.iterateChannelChunks(channel ->
 		{
-			if (channel == null) throw new IllegalStateException("binary contains a null channel");
+			if (channel == null) throw new StorageBinaryDataException("binary contains a null channel");
 			for (final ByteBuffer buffer : channel.buffers())
 			{
-				if (buffer == null) throw new IllegalStateException("binary contains a null channel buffer");
-				total[0] = Math.addExact(total[0], buffer.remaining());
-				if (total[0] > Integer.MAX_VALUE)
+				if (buffer == null) throw new StorageBinaryDataException("binary contains a null channel buffer");
+				try
 				{
-					throw new IllegalArgumentException("binary is too large for transport metadata");
+					length[0] = Math.addExact(length[0], buffer.remaining());
+				}
+				catch (final ArithmeticException e)
+				{
+					throw new StorageBinaryDataException("binary length overflow", e);
 				}
 			}
 		});
-		return total[0];
+		return length[0];
 	}
 
 	/** Streams source channels into fixed-size packet payloads. */
 	private static final class PacketWriter
 	{
 		private final int maxPacketSize;
-		private final int count;
 		private final int messageLength;
+		private final int packetCount;
 		private final Consumer<Chunk> consumer;
 		private byte[] packet;
 		private int packetOffset;
-		private int index;
-		private int copied;
+		private int packetIndex;
+		private long copied;
 
-		PacketWriter(final int maxPacketSize, final int count, final int messageLength,
+		PacketWriter(final int maxPacketSize, final int messageLength, final int packetCount,
 			final Consumer<Chunk> consumer)
 		{
 			this.maxPacketSize = maxPacketSize;
-			this.count = count;
 			this.messageLength = messageLength;
+			this.packetCount = packetCount;
 			this.consumer = consumer;
 		}
 
@@ -130,64 +163,40 @@ public final class StorageBinaryDataChunker
 			final ByteBuffer buffer = source.duplicate();
 			while (buffer.hasRemaining())
 			{
-				if (this.copied >= this.messageLength)
-				{
-					throw new IllegalStateException("binary grew while chunking");
-				}
-				if (this.packet == null)
-				{
-					this.packet = new byte[Math.min(this.maxPacketSize, this.messageLength - this.copied)];
-				}
+				if (this.packet == null) this.packet = new byte[this.maxPacketSize];
 				final int amount = Math.min(buffer.remaining(), this.packet.length - this.packetOffset);
 				buffer.get(this.packet, this.packetOffset, amount);
 				this.packetOffset += amount;
 				this.copied += amount;
-				if (this.packetOffset == this.packet.length)
-				{
-					this.consumer.accept(new Chunk(this.packet, this.index++, this.count, this.messageLength));
-					this.packet = null;
-					this.packetOffset = 0;
-				}
+				if (this.packetOffset == this.packet.length) this.emit(this.packet);
 			}
 		}
 
-		void finish()
+		void finish(final long expectedLength)
 		{
-			if (this.packet != null)
+		if (this.packetOffset > 0)
+		{
+			final byte[] payload = new byte[this.packetOffset];
+			System.arraycopy(this.packet, 0, payload, 0, this.packetOffset);
+			this.emit(payload);
+		}
+			if (this.copied != expectedLength || this.packetIndex != this.packetCount)
 			{
-				this.consumer.accept(new Chunk(this.packet, this.index++, this.count, this.messageLength));
+				throw new StorageBinaryDataException("binary changed while it was being chunked");
 			}
-			if (this.copied != this.messageLength || this.index != this.count)
-			{
-				throw new IllegalStateException("binary changed while chunking");
-			}
+		}
+
+		private void emit(final byte[] payload)
+		{
+			this.consumer.accept(new Chunk(payload, this.packetIndex++, this.packetCount, this.messageLength));
+			this.packet = null;
+			this.packetOffset = 0;
 		}
 	}
 
-	/**
-	 * Visits transport chunks in source order. This form keeps distributor implementations
-	 * from duplicating packet traversal and preserves the source binary's buffer positions.
-	 *
+	/** Collects duplicate source views in channel order.
 	 * @param data source Store binary
-	 * @param maxPacketSize maximum packet payload size, in bytes
-	 * @param consumer callback for each chunk
-	 */
-	public static void forEach(
-		final Binary data,
-		final int maxPacketSize,
-		final Consumer<Chunk> consumer
-	)
-	{
-		notNull(consumer);
-		notNull(data);
-		if (maxPacketSize <= 0) throw new IllegalArgumentException("maxPacketSize must be positive");
-		visit(data, maxPacketSize, consumer);
-	}
-
-	/** Collects channel buffers in order without advancing their positions.
-	 *
-	 * @param data source Store binary
-	 * @return source buffers in channel order
+	 * @return duplicate views in channel order
 	 */
 	public static List<ByteBuffer> buffers(final Binary data)
 	{
@@ -195,13 +204,119 @@ public final class StorageBinaryDataChunker
 		final List<ByteBuffer> buffers = new ArrayList<>();
 		data.iterateChannelChunks(chunk ->
 		{
-			if (chunk == null) throw new IllegalStateException("binary contains a null channel");
+			if (chunk == null) throw new StorageBinaryDataException("binary contains a null channel");
 			for (final ByteBuffer buffer : chunk.buffers())
 			{
-				if (buffer == null) throw new IllegalStateException("binary contains a null channel buffer");
-				buffers.add(buffer);
+				if (buffer == null) throw new StorageBinaryDataException("binary contains a null channel buffer");
+				buffers.add(buffer.duplicate());
 			}
 		});
 		return buffers;
+	}
+
+	/** Returns duplicate source views in channel order.
+	 * @param data source Store binary
+	 * @return duplicate views in channel order
+	 */
+	public static ByteBuffer[] bufferArray(final Binary data)
+	{
+		return buffers(data).toArray(ByteBuffer[]::new);
+	}
+
+	/**
+	 * Creates a {@link ChunksWrapper} from borrowed packet buffers without
+	 * changing those buffers. The wrapper format stores each logical length in
+	 * the buffer position, while packet data exposes it as the remaining range.
+	 *
+	 * @param buffers borrowed direct packet buffers
+	 * @return read-only wrapper over duplicate buffer views
+	 */
+	public static ChunksWrapper wrap(final Iterable<ByteBuffer> buffers)
+	{
+		notNull(buffers);
+		final List<ByteBuffer> normalized = new ArrayList<>();
+		for (final ByteBuffer source : buffers)
+		{
+			if (source == null || !source.isDirect())
+			{
+				throw new StorageBinaryDataException("packet payload must be a direct buffer");
+			}
+			final ByteBuffer duplicate = source.asReadOnlyBuffer();
+			duplicate.position(duplicate.limit());
+			normalized.add(duplicate);
+		}
+		return ChunksWrapper.New(normalized.toArray(ByteBuffer[]::new));
+	}
+
+	/**
+	 * Returns the original direct buffers of an owned binary and normalizes them
+	 * in place for Store import. This method is only for a caller that has
+	 * already taken ownership of the binary and therefore may transfer release
+	 * responsibility for the returned buffers.
+	 *
+	 * @param data owned binary
+	 * @return original direct buffers, positioned at zero
+	 */
+	public static ByteBuffer[] ownedArray(final Binary data)
+	{
+		notNull(data);
+		final List<ByteBuffer> buffers = new ArrayList<>();
+		final List<Integer> logicalLengths = new ArrayList<>();
+		data.iterateChannelChunks(channel ->
+		{
+			if (channel == null) throw new StorageBinaryDataException("binary contains a null channel");
+			for (final ByteBuffer buffer : channel.buffers())
+			{
+				if (buffer == null || !buffer.isDirect())
+				{
+					throw new StorageBinaryDataException("owned binary contains a non-direct buffer");
+				}
+				final int logicalLength = data instanceof ChunksWrapper ? buffer.position() : buffer.remaining();
+				if (logicalLength < 0 || logicalLength > buffer.capacity())
+				{
+					throw new StorageBinaryDataException("owned binary contains an invalid buffer length");
+				}
+				buffers.add(buffer);
+				logicalLengths.add(logicalLength);
+			}
+		});
+		for (int index = 0; index < buffers.size(); index++)
+		{
+			final ByteBuffer buffer = buffers.get(index);
+			buffer.clear();
+			buffer.limit(logicalLengths.get(index));
+		}
+		return buffers.toArray(ByteBuffer[]::new);
+	}
+
+	/**
+	 * Returns import-ready duplicate views with position zero. Serializer's
+	 * {@link ChunksWrapper} stores its logical length in the source position;
+	 * ordinary binaries expose the remaining bytes instead.
+	 *
+	 * @param data source Store binary
+	 * @return import-ready duplicate views
+	 */
+	public static ByteBuffer[] importArray(final Binary data)
+	{
+		notNull(data);
+		final ByteBuffer[] source = bufferArray(data);
+		final ByteBuffer[] result = new ByteBuffer[source.length];
+		for (int index = 0; index < source.length; index++)
+		{
+			final ByteBuffer buffer = source[index];
+			if (data instanceof ChunksWrapper)
+			{
+				final int logicalLength = buffer.position();
+				if (logicalLength < 0 || logicalLength > buffer.capacity())
+				{
+					throw new StorageBinaryDataException("invalid wrapped binary buffer length");
+				}
+				buffer.clear();
+				buffer.limit(logicalLength);
+			}
+			result[index] = buffer.slice();
+		}
+		return result;
 	}
 }

@@ -180,6 +180,18 @@ public final class AtomicFileStore
 		write(path, encoder, null);
 	}
 
+	/** Writes raw bytes through the atomic replacement protocol.
+	 *
+	 * @param path destination path
+	 * @param bytes complete file contents
+	 * @throws IOException if writing or replacement fails
+	 */
+	public static void writeBytes(final Path path, final byte[] bytes) throws IOException
+	{
+		if (bytes == null) throw new NullPointerException("bytes");
+		write(path, channel -> writeFully(channel, java.nio.ByteBuffer.wrap(bytes)));
+	}
+
 	/**
 	 * Verifies that the directory containing {@code path} supports the complete
 	 * atomic metadata protocol without changing the target file.
@@ -231,10 +243,26 @@ public final class AtomicFileStore
 	 */
 	public static void delete(final Path path) throws IOException
 	{
+		delete(path, true);
+	}
+
+	/**
+	 * Deletes a metadata file and optionally forces its parent directory.
+	 *
+	 * <p>Callers may omit the directory force only for fail-closed markers whose
+	 * stale presence is safe after a crash. A stale marker causes reseeding; it
+	 * must never make an uncheckpointed Store import appear durable.</p>
+	 *
+	 * @param path file to remove
+	 * @param forceParentDirectory whether to force the parent directory after removal
+	 * @throws IOException if the file or, when requested, its parent directory cannot be synced
+	 */
+	public static void delete(final Path path, final boolean forceParentDirectory) throws IOException
+	{
 		final Path absolute = path.toAbsolutePath();
 		if (Files.deleteIfExists(absolute))
 		{
-			forceDirectory(absolute.getParent());
+			if (forceParentDirectory) forceDirectory(absolute.getParent());
 		}
 	}
 

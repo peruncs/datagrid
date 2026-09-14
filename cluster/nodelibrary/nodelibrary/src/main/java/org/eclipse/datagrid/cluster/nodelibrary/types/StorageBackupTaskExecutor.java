@@ -19,14 +19,19 @@ import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
 import static org.eclipse.serializer.util.X.notNull;
 
 /**
  * This executor runs backups and storage checks without blocking a request.
  *
- * <p>At most one backup thread is active. A new request waits for the current
- * backup to finish instead of starting a second backup against the same
- * storage.</p>
+ * <p>At most one backup thread is active. A concurrent request is rejected
+ * explicitly instead of being silently discarded, so callers can retry or
+ * report the busy state to an operator.</p>
  */
 public interface StorageBackupTaskExecutor extends StorageTaskExecutor
 {
@@ -54,39 +59,93 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor
 	final class Default extends StorageTaskExecutor.Abstract implements StorageBackupTaskExecutor
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(StorageBackupTaskExecutor.class);
+		private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
 		private final StorageBackupManager backupManager;
+		private final ExecutorService backupExecutor;
 
-		private Thread backupThread;
-
+		private Future<?> backupTask;
+		private boolean backupCloseRequested;
 		private Default(final StorageConnection connection, final StorageBackupManager backupManager)
 		{
 			super(connection);
 			this.backupManager = backupManager;
+			this.backupExecutor = Executors.newSingleThreadExecutor(task ->
+			{
+				final Thread thread = new Thread(task, "EclipseStore-StorageBackup");
+				thread.setDaemon(true);
+				return thread;
+			});
 		}
 
 		@Override
-		public void runBackup(final boolean useManualSlot)
+		public synchronized void runBackup(final boolean useManualSlot)
 		{
-			if (this.backupThread == null || !this.backupThread.isAlive())
+			if (this.backupCloseRequested) throw new IllegalStateException("Storage backup task executor is closed");
+			if (this.backupTask != null && !this.backupTask.isDone())
 			{
-				LOG.debug("Issuing new storage backup");
-				this.backupThread = new Thread(
-					() -> this.backupManager.createStorageBackup(useManualSlot),
-					"EclipseStore-StorageBackup"
-				);
-				this.backupThread.start();
+				throw new IllegalStateException("Storage backup is already running");
 			}
+			LOG.debug("Issuing new storage backup");
+			this.backupTask = this.backupExecutor.submit(() ->
+				{
+					try
+					{
+						this.backupManager.createStorageBackup(useManualSlot);
+					}
+					catch (final Throwable failure)
+					{
+						LOG.error("Storage backup failed", failure);
+					}
+				});
 		}
 
 		@Override
-		public boolean isRunningBackup()
+		public synchronized boolean isRunningBackup()
 		{
-			if (this.backupThread != null && !this.backupThread.isAlive())
+			return this.backupTask != null && !this.backupTask.isDone();
+		}
+
+		@Override
+		public void close()
+		{
+			final Future<?> task;
+			synchronized (this)
 			{
-				LOG.trace("Cleanup previous storage backup thread");
-				this.backupThread = null;
+				if (this.backupCloseRequested) return;
+				this.backupCloseRequested = true;
+				task = this.backupTask;
 			}
-			return this.backupThread != null;
+			Throwable failure = null;
+			if (task != null) task.cancel(true);
+			this.backupExecutor.shutdownNow();
+			try
+			{
+				if (!this.backupExecutor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS))
+				{
+					failure = new IllegalStateException(
+						"Storage backup did not stop within " + CLOSE_TIMEOUT_MILLIS + " ms");
+				}
+			}
+			catch (final InterruptedException interrupted)
+			{
+				Thread.currentThread().interrupt();
+				failure = new IllegalStateException("Interrupted while stopping storage backup", interrupted);
+			}
+			try
+			{
+				super.close();
+			}
+			catch (final Throwable closeFailure)
+			{
+				if (failure == null) failure = closeFailure;
+				else failure.addSuppressed(closeFailure);
+			}
+			if (failure != null)
+			{
+				if (failure instanceof Error error)
+                    throw error;
+                throw (RuntimeException) failure;
+            }
 		}
 	}
 }

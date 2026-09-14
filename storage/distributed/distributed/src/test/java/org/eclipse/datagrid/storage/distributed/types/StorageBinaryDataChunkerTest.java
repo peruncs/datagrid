@@ -15,8 +15,9 @@ package org.eclipse.datagrid.storage.distributed.types;
  */
 
 import org.eclipse.serializer.memory.XMemory;
-import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.ChunksBuffer;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import org.eclipse.serializer.util.BufferSizeProviderIncremental;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
@@ -24,8 +25,6 @@ import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
 
 /** Tests storage binary data chunker behavior. */
 class StorageBinaryDataChunkerTest
@@ -76,24 +75,69 @@ class StorageBinaryDataChunkerTest
 	@Test
 	void chunksAllSerializerChannelsInOrder()
 	{
-		final ByteBuffer first = XMemory.toDirectByteBuffer(new byte[] { 1, 2 });
-		final ByteBuffer second = XMemory.toDirectByteBuffer(new byte[] { 3, 4 });
-		final Binary binary = mock(Binary.class);
-		when(binary.buffers()).thenReturn(new ByteBuffer[] { first });
-		doAnswer(invocation ->
+		final ChunksBuffer[] channels = new ChunksBuffer[2];
+		final var bufferSize = BufferSizeProviderIncremental.New(32);
+		channels[0] = ChunksBuffer.New(channels, bufferSize);
+		channels[1] = ChunksBuffer.New(channels, bufferSize);
+		channels[0].store_bytes(1L, 1L, new byte[] { 1, 2 });
+		channels[1].store_bytes(1L, 2L, new byte[] { 3, 4 });
+		channels[0].complete();
+		channels[1].complete();
+		try
 		{
-			final java.util.function.Consumer<? super Binary> consumer = invocation.getArgument(0);
-			consumer.accept(ChunksWrapper.New(first));
-			consumer.accept(ChunksWrapper.New(second));
-			return null;
-		}).when(binary).iterateChannelChunks(any());
+			final var chunks = StorageBinaryDataChunker.chunk(channels[0], 3);
+			final var expected = new ArrayList<Byte>(channels[0].buffers()[0].remaining()
+				+ channels[1].buffers()[0].remaining());
+			for (final ChunksBuffer channel : channels)
+			{
+				final ByteBuffer buffer = channel.buffers()[0].duplicate();
+				while (buffer.hasRemaining()) expected.add(buffer.get());
+			}
+			final var actual = new ArrayList<Byte>();
+			for (final var chunk : chunks)
+				for (final byte value : chunk.bytes()) actual.add(value);
+			assertEquals(expected, actual);
+		}
+		finally
+		{
+			channels[0].clear();
+			channels[1].clear();
+		}
+	}
 
-		final var chunks = StorageBinaryDataChunker.chunk(binary, 3);
-
-		assertEquals(2, chunks.size());
-		assertArrayEquals(new byte[] { 1, 2, 3 }, chunks.get(0).bytes());
-		assertArrayEquals(new byte[] { 4 }, chunks.get(1).bytes());
+	/** The receiver fast path must collect exactly one array without a list copy. */
+	@Test
+	void bufferArrayPreservesAllChannelBuffers()
+	{
+		final ByteBuffer first = XMemory.toDirectByteBuffer(new byte[] { 1 });
+		final ByteBuffer second = XMemory.toDirectByteBuffer(new byte[] { 2 });
+		final var binary = ChunksWrapper.New(first, second);
+		final ByteBuffer[] buffers = StorageBinaryDataChunker.bufferArray(binary);
+		assertEquals(2, buffers.length);
+		assertEquals(first, buffers[0]);
+		assertEquals(second, buffers[1]);
 		assertEquals(0, first.position());
 		assertEquals(0, second.position());
+	}
+
+	/** Import views normalize Serializer's position-as-length representation without mutating it. */
+	@Test
+	void importArrayNormalizesChunksWrapperBuffers()
+	{
+		final ByteBuffer source = XMemory.allocateDirectNative(8);
+		try
+		{
+			source.put(new byte[] { 1, 2, 3 });
+			final var binary = ChunksWrapper.New(source);
+			final ByteBuffer[] normalized = StorageBinaryDataChunker.importArray(binary);
+			assertEquals(1, normalized.length);
+			assertEquals(0, normalized[0].position());
+			assertEquals(3, normalized[0].remaining());
+			assertEquals(3, source.position());
+		}
+		finally
+		{
+			XMemory.deallocateDirectByteBuffer(source);
+		}
 	}
 }

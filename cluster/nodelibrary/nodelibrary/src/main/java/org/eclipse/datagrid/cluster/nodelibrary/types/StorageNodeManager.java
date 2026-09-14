@@ -17,7 +17,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NotADistributorException;
-import org.eclipse.store.storage.types.StorageController;
+import org.eclipse.datagrid.cluster.nodelibrary.exceptions.ReplicationPositionUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,10 +44,12 @@ public interface StorageNodeManager extends ClusterNodeManager
 	 * @return {@code true} when the transition completed
 	 * @throws NotADistributorException if the node is not ready
 	 */
-	boolean finishDistributonSwitch() throws NotADistributorException;
+	boolean finishDistributionSwitch() throws NotADistributorException;
 
+	/** Returns the last applied or published logical replication sequence, or {@code -1}. */
 	long getCurrentMessageIndex();
 
+	/** Returns the latest known writer logical sequence, or {@code -1} when unavailable. */
 	long getLatestMessageIndex();
 
 	/** Returns the selected transport id for monitoring (for example {@code aeron}). */
@@ -56,45 +58,12 @@ public interface StorageNodeManager extends ClusterNodeManager
 	/** Returns the provider lifecycle state shown by monitoring endpoints. */
 	ReplicationHealth.State getReplicationState();
 
-	/** Creates a manager with the default transport label.
-	 *
-	 * @param dataDistributor binary distributor
-	 * @param storageTaskExecutor storage task executor
-	 * @param dataClient replication client
-	 * @param healthCheck health check
-	 * @param storageController Store controller
-	 * @param storageDiskSpaceReader disk-space reader
-	 * @param positionProvider position provider
-	 * @return storage node manager
-	 */
-	static StorageNodeManager New(
-		final ClusterStorageBinaryDataDistributor dataDistributor,
-		final StorageTaskExecutor storageTaskExecutor,
-		final ClusterStorageBinaryDataClient dataClient,
-		final StorageNodeHealthCheck healthCheck,
-		final StorageController storageController,
-		final StorageDiskSpaceReader storageDiskSpaceReader,
-		final ReplicationPositionProvider positionProvider
-	)
-	{
-		return new Default(
-			notNull(dataDistributor),
-			notNull(storageTaskExecutor),
-			notNull(dataClient),
-			notNull(healthCheck),
-			notNull(storageController),
-			notNull(storageDiskSpaceReader),
-			notNull(positionProvider)
-		);
-	}
-
 	/** Creates a manager with an explicit transport id for monitoring labels.
 	 *
 	 * @param dataDistributor binary distributor
 	 * @param storageTaskExecutor storage task executor
 	 * @param dataClient replication client
 	 * @param healthCheck health check
-	 * @param storageController Store controller
 	 * @param storageDiskSpaceReader disk-space reader
 	 * @param positionProvider position provider
 	 * @param replicationTransport transport id
@@ -105,7 +74,6 @@ public interface StorageNodeManager extends ClusterNodeManager
 		final StorageTaskExecutor storageTaskExecutor,
 		final ClusterStorageBinaryDataClient dataClient,
 		final StorageNodeHealthCheck healthCheck,
-		final StorageController storageController,
 		final StorageDiskSpaceReader storageDiskSpaceReader,
 		final ReplicationPositionProvider positionProvider,
 		final String replicationTransport
@@ -113,7 +81,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 	{
 		return new Default(
 			notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient), notNull(healthCheck),
-			notNull(storageController), notNull(storageDiskSpaceReader), notNull(positionProvider),
+			notNull(storageDiskSpaceReader), notNull(positionProvider),
 			replicationTransport
 		);
 	}
@@ -127,7 +95,6 @@ public interface StorageNodeManager extends ClusterNodeManager
 		private final StorageTaskExecutor storageTaskExecutor;
 		private final ClusterStorageBinaryDataClient dataClient;
 		private final StorageNodeHealthCheck healthCheck;
-		private final StorageController storageController;
 		private final StorageDiskSpaceReader storageDiskSpaceReader;
 		private final ReplicationPositionProvider positionProvider;
 		private final String replicationTransport;
@@ -137,37 +104,12 @@ public interface StorageNodeManager extends ClusterNodeManager
 		private volatile boolean closed;
 		private volatile boolean positionProviderClosed;
 
-		/** Creates a manager with the legacy neutral transport label.
-		 *
-		 * @param dataDistributor binary distributor
-		 * @param storageTaskExecutor storage task executor
-		 * @param dataClient replication client
-		 * @param healthCheck health check
-		 * @param storageController Store controller
-		 * @param storageDiskSpaceReader disk-space reader
-		 * @param positionProvider position provider
-		 */
-		public Default(
-			final ClusterStorageBinaryDataDistributor dataDistributor,
-			final StorageTaskExecutor storageTaskExecutor,
-			final ClusterStorageBinaryDataClient dataClient,
-			final StorageNodeHealthCheck healthCheck,
-			final StorageController storageController,
-			final StorageDiskSpaceReader storageDiskSpaceReader,
-			final ReplicationPositionProvider positionProvider
-		)
-		{
-			this(dataDistributor, storageTaskExecutor, dataClient, healthCheck, storageController,
-				storageDiskSpaceReader, positionProvider, "unknown");
-		}
-
 		/** Creates a manager with the selected transport label.
 		 *
 		 * @param dataDistributor binary distributor
 		 * @param storageTaskExecutor storage task executor
 		 * @param dataClient replication client
 		 * @param healthCheck health check
-		 * @param storageController Store controller
 		 * @param storageDiskSpaceReader disk-space reader
 		 * @param positionProvider position provider
 		 * @param replicationTransport transport id
@@ -177,7 +119,6 @@ public interface StorageNodeManager extends ClusterNodeManager
 			final StorageTaskExecutor storageTaskExecutor,
 			final ClusterStorageBinaryDataClient dataClient,
 			final StorageNodeHealthCheck healthCheck,
-			final StorageController storageController,
 			final StorageDiskSpaceReader storageDiskSpaceReader,
 			final ReplicationPositionProvider positionProvider,
 			final String replicationTransport
@@ -186,12 +127,14 @@ public interface StorageNodeManager extends ClusterNodeManager
 			this.dataDistributor = dataDistributor;
 			this.dataClient = dataClient;
 			this.healthCheck = healthCheck;
-			this.storageController = storageController;
 			this.storageDiskSpaceReader = storageDiskSpaceReader;
 			this.storageTaskExecutor = storageTaskExecutor;
 			this.positionProvider = positionProvider;
-			this.replicationTransport = replicationTransport == null || replicationTransport.isBlank()
-				? "unknown" : replicationTransport;
+		if (replicationTransport == null || replicationTransport.isBlank())
+		{
+			throw new IllegalArgumentException("replicationTransport must not be blank");
+		}
+		this.replicationTransport = replicationTransport;
 		}
 
 		@Override
@@ -209,27 +152,13 @@ public interface StorageNodeManager extends ClusterNodeManager
 		@Override
 		public boolean isReady() throws NodelibraryException
 		{
-			if (this.isDistributor)
-			{
-				return this.storageController.isRunning() && !this.storageController.isStartingUp();
-			}
-			else
-			{
-				return this.healthCheck.isReady();
-			}
+			return this.healthCheck.isReady();
 		}
 
 		@Override
 		public boolean isHealthy()
 		{
-			if (this.isDistributor)
-			{
-				return this.storageController.isRunning() && !this.storageController.isStartingUp();
-			}
-			else
-			{
-				return this.healthCheck.isHealthy();
-			}
+			return this.healthCheck.isHealthy();
 		}
 
 		@Override
@@ -251,14 +180,15 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				return;
 			}
-			if ("aeron".equalsIgnoreCase(this.replicationTransport))
+			if ("aeron".equalsIgnoreCase(this.replicationTransport) ||
+				"kafka".equalsIgnoreCase(this.replicationTransport))
 			{
 				/* Aeron roles are fixed at transport creation.  A reader owns a
 				 * persistent subscription and its provider deliberately has no writer
 				 * publication factory, so promoting it would report a distributor that
 				 * cannot replicate.  Reject the transition before stopping the reader. */
 				throw new UnsupportedOperationException(
-					"Aeron reader promotion is unsupported; start a node configured as writer");
+						this.replicationTransport + " reader promotion is unsupported; start a node configured as writer");
 			}
 
 			if (this.dataClient.failure() != null)
@@ -280,7 +210,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 		}
 
 		@Override
-		public synchronized boolean finishDistributonSwitch() throws NotADistributorException
+		public synchronized boolean finishDistributionSwitch() throws NotADistributorException
 		{
 			if (!this.isSwitchingToDistributor)
 			{
@@ -291,12 +221,13 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				return true;
 			}
-			if ("aeron".equalsIgnoreCase(this.replicationTransport))
+			if ("aeron".equalsIgnoreCase(this.replicationTransport) ||
+				"kafka".equalsIgnoreCase(this.replicationTransport))
 			{
 				/* Keep the invariant defensive if a stale flag or an older caller reaches
 				 * this method without passing through switchToDistribution(). */
 				throw new UnsupportedOperationException(
-					"Aeron reader promotion is unsupported; start a node configured as writer");
+					this.replicationTransport + " reader promotion is unsupported; start a node configured as writer");
 			}
 
 			final RuntimeException readerFailure = this.dataClient.failure();
@@ -317,7 +248,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 					stopOutcome);
 			}
 
-			final var messageInfo = this.dataClient.messageInfo();
+			final var cursor = this.dataClient.cursor();
 
 			// once a node has been switched to distribution it will never become a reader node anymore
 			RuntimeException failure = null;
@@ -333,7 +264,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				throw new IllegalStateException("failed to close reader resources during promotion", failure);
 			}
-			this.dataDistributor.messageIndex(messageInfo.messageIndex());
+			this.dataDistributor.messageIndex(cursor.logicalSequence());
 
 			this.isDistributor = true;
 			this.isSwitchingToDistributor = false;
@@ -349,7 +280,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 			}
 			else
 			{
-				return this.dataClient.messageInfo().messageIndex();
+				return this.dataClient.cursor().logicalSequence();
 			}
 		}
 
@@ -360,7 +291,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 			{
 				return this.positionProvider.latestSequence();
 			}
-			catch (final UnsupportedOperationException unavailable)
+			catch (final ReplicationPositionUnavailableException unavailable)
 			{
 				/* Reader roles cannot infer the writer boundary from an applied cursor.
 				 * Expose unknown as -1 to monitoring rather than turning a metrics scrape
@@ -383,9 +314,7 @@ public interface StorageNodeManager extends ClusterNodeManager
 		@Override
 		public ReplicationHealth.State getReplicationState()
 		{
-			return this.isDistributor
-				? (this.isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING)
-				: this.healthCheck.replicationState();
+			return this.healthCheck.replicationState();
 		}
 
 		@Override

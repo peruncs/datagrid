@@ -33,10 +33,6 @@ import static org.eclipse.serializer.util.X.notNull;
  */
 public final class AeronStorageBinaryTargetDistributing implements PersistenceTarget<Binary>
 {
-	private static void crashPoint(final String name, final long sequence)
-	{
-		CrashHook.invoke(name, sequence);
-	}
 	private final PersistenceTarget<Binary> delegate;
 	private final AeronReplicationWriteCoordinator coordinator;
 	private final StorageBinaryDataDistributor dictionarySource;
@@ -82,12 +78,11 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 	@Override
 	public void write(final Binary data) throws PersistenceExceptionTransfer
 	{
-		/* The target lock is the transaction boundary: prepare, local Store
-		 * acceptance, and terminal publication must not interleave with another
-		 * writer. Coordinator methods remain synchronized because they are also
-		 * used directly by the provider and tests. */
-		synchronized (this.coordinator)
-		{
+		this.coordinator.executeWriteAtomically(() -> writeInternal(data));
+	}
+
+	private void writeInternal(final Binary data)
+	{
 			if (!this.distributionEnabled.getAsBoolean())
 			{
 				data.iterateChannelChunks(Binary::mark);
@@ -110,16 +105,28 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 			data.iterateChannelChunks(Binary::mark);
 			if (this.coordinator.durabilityMode() == org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
 			{
+				boolean localAccepted = false;
 				try
 				{
 					final long localSequence = this.coordinator.markLocalEnqueue(data);
 					this.delegate.write(data);
-					crashPoint("AFTER_ENQUEUE_BEFORE_PREPARE", localSequence);
+					localAccepted = true;
+					CrashHook.invoke("AFTER_ENQUEUE_BEFORE_PREPARE", localSequence);
 				}
-				catch (final RuntimeException | Error failure)
+				catch (final Error failure)
 				{
-					try { this.coordinator.clearLocalEnqueue(); }
-					catch (final RuntimeException | Error clearFailure) { failure.addSuppressed(clearFailure); }
+					/* Preserve the durable ENQUEUED fence.  Error cleanup can allocate or
+					 * perform I/O and is unsafe when the JVM is already fatally failing. */
+					throw failure;
+				}
+				catch (final RuntimeException failure)
+				{
+					try
+					{
+						if (localAccepted) this.coordinator.markEnqueueWithoutArchive();
+						else this.coordinator.clearLocalEnqueue();
+					}
+					catch (final RuntimeException clearFailure) { failure.addSuppressed(clearFailure); }
 					throw failure;
 				}
 				finally
@@ -131,10 +138,17 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 				{
 					prepared = this.coordinator.prepare(data);
 				}
-				catch (final RuntimeException | Error failure)
+				catch (final Error failure)
+				{
+					/* The local Store write completed before preparation failed. Leave the
+					 * durable ENQUEUED fence unresolved and avoid allocating a wrapper or
+					 * performing checkpoint I/O from a fatal Error path. */
+					throw failure;
+				}
+				catch (final RuntimeException failure)
 				{
 					try { this.coordinator.markEnqueueWithoutArchive(); }
-					catch (final RuntimeException | Error markerFailure) { failure.addSuppressed(markerFailure); }
+					catch (final RuntimeException markerFailure) { failure.addSuppressed(markerFailure); }
 					throw new IllegalStateException(
 						"local Store write completed but Aeron publication could not prepare; reseed is required", failure);
 				}
@@ -151,30 +165,62 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 			{
 				prepared = this.coordinator.prepare(data);
 			}
-			catch (final RuntimeException | Error failure)
+			catch (final Error failure)
+			{
+				/* Preserve the durable ENQUEUED fence.  Error cleanup can allocate or
+				 * perform I/O and is unsafe when the JVM is already fatally failing. */
+				throw failure;
+			}
+			catch (final RuntimeException failure)
 			{
 				data.iterateChannelChunks(Binary::reset);
 				throw failure;
 			}
 			try (prepared)
 			{
-				crashPoint("AFTER_PREPARE_BEFORE_LOCAL_WRITE", prepared.sequence());
+				CrashHook.invoke("AFTER_PREPARE_BEFORE_LOCAL_WRITE", prepared.sequence());
+				boolean localAccepted = false;
 				try
 				{
 					this.delegate.write(data);
-					crashPoint("AFTER_LOCAL_WRITE_BEFORE_COMMIT", prepared.sequence());
+					localAccepted = true;
+					CrashHook.invoke("AFTER_LOCAL_WRITE_BEFORE_COMMIT", prepared.sequence());
 				}
-				catch (final RuntimeException | Error failure)
-				{
-					try { this.coordinator.abort(prepared); }
-					catch (final RuntimeException | Error abortFailure) { failure.addSuppressed(abortFailure); }
+			catch (final Error failure)
+			{
+				/* The local Store may already have accepted the bytes.  Abandon the
+				 * token without emitting a contradictory ABORT; the PREPARING fence
+				 * remains the fail-closed recovery evidence. */
+				prepared.abandonWithoutAbort();
+				throw failure;
+			}
+			catch (final RuntimeException failure)
+			{
+					try
+					{
+						if (localAccepted)
+						{
+							try
+							{
+								this.coordinator.markCommittingUncertain(prepared);
+							}
+							finally
+							{
+								/* Never let try-with-resources manufacture an ABORT after
+								 * local Store acceptance, even when the uncertainty marker
+								 * itself cannot be persisted. */
+								prepared.abandonWithoutAbort();
+							}
+						}
+						else this.coordinator.abort(prepared);
+					}
+					catch (final RuntimeException abortFailure) { failure.addSuppressed(abortFailure); }
 					throw failure;
 				}
 				finally { data.iterateChannelChunks(Binary::reset); }
 				this.coordinator.markEnqueued(prepared);
 				this.commitAndNotify(prepared);
 			}
-		}
 	}
 
 	/** Commits a prepared transaction and preserves the fail-closed uncertainty marker. */
@@ -188,6 +234,6 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
 	@Override
 	public boolean isWritable()
 	{
-		return this.delegate.isWritable();
+		return this.delegate.isWritable() && this.coordinator.isWritable();
 	}
 }

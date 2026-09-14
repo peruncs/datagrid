@@ -38,6 +38,7 @@ final class AeronHealth implements ReplicationHealth
 	private final LongSupplier writerDurablePosition;
 	private final LongSupplier writerDurableSequence;
 	private final LongSupplier appliedSequence;
+	private final BooleanSupplier watermarkFailed;
 	private volatile boolean active = true;
 
 	AeronHealth(final StorageControllerAdapter storage, final ClusterStorageBinaryDataClient client,
@@ -45,7 +46,7 @@ final class AeronHealth implements ReplicationHealth
 		final BooleanSupplier writerReady, final BooleanSupplier writerRole,
 		final Supplier<ReplicationHealth.State> checkpointState, final LongSupplier archiveUsableSpace,
 		final LongSupplier writerDurablePosition, final LongSupplier writerDurableSequence,
-		final LongSupplier appliedSequence)
+		final LongSupplier appliedSequence, final BooleanSupplier watermarkFailed)
 	{
 		this.storage = Objects.requireNonNull(storage, "storage");
 		this.client = client;
@@ -59,6 +60,7 @@ final class AeronHealth implements ReplicationHealth
 		this.writerDurablePosition = Objects.requireNonNull(writerDurablePosition, "writerDurablePosition");
 		this.writerDurableSequence = Objects.requireNonNull(writerDurableSequence, "writerDurableSequence");
 		this.appliedSequence = Objects.requireNonNull(appliedSequence, "appliedSequence");
+		this.watermarkFailed = Objects.requireNonNull(watermarkFailed, "watermarkFailed");
 	}
 
 	boolean matches(final StorageControllerAdapter storage, final ClusterStorageBinaryDataClient client)
@@ -89,7 +91,7 @@ final class AeronHealth implements ReplicationHealth
 		/* Do not invoke a lifecycle supplier after this view has been closed.  In
 		 * particular, writerReady may initialise an Archive; a health object that
 		 * has already been disposed must be a pure, side-effect-free failure view. */
-		if (!this.active || this.closed.getAsBoolean()) return false;
+		if (!this.active || this.closed.getAsBoolean() || this.watermarkFailed.getAsBoolean()) return false;
 		/* Writer readiness is a side-effect-free lifecycle snapshot. */
 		final boolean writerIsReady = this.writerReady.getAsBoolean();
 		return this.storage.isReady()
@@ -102,7 +104,8 @@ final class AeronHealth implements ReplicationHealth
 	@Override
 	public ReplicationHealth.State state()
 	{
-		if (!this.active || this.closed.getAsBoolean() || this.driverFailed.getAsBoolean())
+		if (!this.active || this.closed.getAsBoolean() || this.driverFailed.getAsBoolean() ||
+			this.watermarkFailed.getAsBoolean())
 		{
 			return ReplicationHealth.State.FAILED;
 		}

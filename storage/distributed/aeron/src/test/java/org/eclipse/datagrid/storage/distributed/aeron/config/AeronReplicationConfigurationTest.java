@@ -15,6 +15,7 @@ package org.eclipse.datagrid.storage.distributed.aeron.config;
  */
 
 import org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationLimits;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -66,6 +67,9 @@ class AeronReplicationConfigurationTest
 		properties.setProperty(AeronReplicationConfiguration.CHUNK_SIZE_PROPERTY, "32768");
 		properties.setProperty(AeronReplicationConfiguration.MAX_TRANSACTION_BYTES_PROPERTY, "262144");
 		properties.setProperty(AeronReplicationConfiguration.OFFER_TIMEOUT_NANOS_PROPERTY, "5000");
+		properties.setProperty(AeronReplicationConfiguration.RECORDING_START_TIMEOUT_NANOS_PROPERTY, "6000");
+		properties.setProperty(AeronReplicationConfiguration.RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY, "7000");
+		properties.setProperty(AeronReplicationConfiguration.RECORDING_STOP_TIMEOUT_NANOS_PROPERTY, "8000");
 		properties.setProperty(AeronReplicationConfiguration.DURABILITY_MODE_PROPERTY, "enqueue-then-archive");
 
 		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.from(properties);
@@ -73,6 +77,9 @@ class AeronReplicationConfigurationTest
 		assertEquals(32768, configuration.chunkSize());
 		assertEquals(262144, configuration.maxTransactionBytes());
 		assertEquals(5000, configuration.offerTimeoutNanos());
+		assertEquals(6000, configuration.recordingStartTimeoutNanos());
+		assertEquals(7000, configuration.recordedPositionTimeoutNanos());
+		assertEquals(8000, configuration.recordingStopTimeoutNanos());
 		assertEquals(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, configuration.durabilityMode());
 	}
 
@@ -89,11 +96,31 @@ class AeronReplicationConfigurationTest
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
 			.offerTimeoutNanos(0).build());
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
+			.recordingStartTimeoutNanos(0).build());
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
+			.recordedPositionTimeoutNanos(0).build());
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
+			.recordingStopTimeoutNanos(0).build());
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
 			.maxTransactionBytes(0).build());
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
 			.maxTransactionBytes(1024 * 1024 * 1024 + 1).build());
 		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
 			.termLength(1 << 30).chunkSize(20 * 1024 * 1024).maxTransactionBytes(20 * 1024 * 1024).build());
+	}
+
+	/** Verifies that the packet-count limit is inclusive and rejects its first overflow. */
+	@Test
+	void validatesMaximumPacketCount()
+	{
+		assertDoesNotThrow(() -> AeronReplicationConfiguration.builder()
+			.chunkSize(1)
+			.maxTransactionBytes(ReplicationLimits.MAX_PACKET_COUNT)
+			.build());
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
+			.chunkSize(1)
+			.maxTransactionBytes(ReplicationLimits.MAX_PACKET_COUNT + 1)
+			.build());
 	}
 
 	/** Verifies rejection of invalid properties before aeron starts. */
@@ -106,6 +133,15 @@ class AeronReplicationConfigurationTest
 		assertThrows(NullPointerException.class, () -> AeronReplicationConfiguration.from(null));
 	}
 
+	/** The Store API has no durable-first callback, so the mode is not part of the Aeron contract. */
+	@Test
+	void rejectsRemovedLocalDurableFirstMode()
+	{
+		final java.util.Properties properties = new java.util.Properties();
+		properties.setProperty(AeronReplicationConfiguration.DURABILITY_MODE_PROPERTY, "local-durable-first");
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.from(properties));
+	}
+
 	/** Verifies reporting of invalid numeric properties with their key. */
 	@Test
 	void reportsInvalidNumericPropertiesWithTheirKey()
@@ -115,5 +151,14 @@ class AeronReplicationConfigurationTest
 		final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
 			() -> AeronReplicationConfiguration.from(properties));
 		assertTrue(failure.getMessage().contains(AeronReplicationConfiguration.MTU_LENGTH_PROPERTY));
+	}
+
+	/** Unknown Aeron-prefixed settings must not be silently ignored. */
+	@Test
+	void rejectsUnknownAeronProperties()
+	{
+		final java.util.Properties properties = new java.util.Properties();
+		properties.setProperty("eclipsestore.distribution.aeron.typo", "true");
+		assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.from(properties));
 	}
 }

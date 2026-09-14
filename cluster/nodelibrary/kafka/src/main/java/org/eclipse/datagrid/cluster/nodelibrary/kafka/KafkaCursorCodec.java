@@ -16,7 +16,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.kafka;
 
 import org.apache.kafka.common.TopicPartition;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
-import org.eclipse.datagrid.cluster.nodelibrary.types.MessageInfo;
+import org.eclipse.datagrid.cluster.nodelibrary.types.ReplicationCursor;
 import org.eclipse.serializer.collections.EqHashTable;
 import org.eclipse.serializer.collections.types.XImmutableMap;
 
@@ -27,18 +27,22 @@ final class KafkaCursorCodec
 {
 	private KafkaCursorCodec() { }
 
-	static XImmutableMap<TopicPartition, Long> decode(final MessageInfo info) throws NodelibraryException
-	{
-		return decode(info, null);
-	}
-
 	static XImmutableMap<TopicPartition, Long> decode(
-		final MessageInfo info,
+		final ReplicationCursor cursor,
 		final String expectedTopic
 	) throws NodelibraryException
 	{
+		if (cursor == null || !"kafka".equals(cursor.transport()))
+		{
+			throw new NodelibraryException("Replication cursor does not belong to Kafka");
+		}
+		final byte[] encoded = cursor.providerPosition();
+		if (encoded == null || encoded.length > 1 << 20)
+		{
+			throw new NodelibraryException("Kafka cursor encoding is missing or too large");
+		}
 		final EqHashTable<TopicPartition, Long> offsets = EqHashTable.New();
-		final String text = new String(info.providerPosition(), StandardCharsets.UTF_8).trim();
+		final String text = new String(encoded, StandardCharsets.UTF_8).trim();
 		if (text.isEmpty())
 		{
 			return offsets.immure();
@@ -66,6 +70,10 @@ final class KafkaCursorCodec
 				throw new NodelibraryException(
 					"Kafka cursor must contain only " + expectedTopic + " partition 0; found " + partition
 				);
+			}
+			if (partition.partition() < 0 || offset < 0L)
+			{
+				throw new NodelibraryException("Kafka cursor contains a negative partition or offset: " + row);
 			}
 			if (offsets.get(partition) != null)
 			{

@@ -60,6 +60,12 @@ public class ObjectMaterializer implements BinaryEntityRawDataAcceptor
 		final PersistenceTypeDefinition ptd = this.persistenceTypeDictionary.lookupTypeById(
 			Binary.getEntityTypeIdRawValue(entityStartAddress)
 		);
+		if (ptd == null)
+		{
+			throw new StorageBinaryDataException(
+				"Cannot materialize persisted entity with unknown type id " +
+					Binary.getEntityTypeIdRawValue(entityStartAddress));
+		}
 		if (
 			PersistenceRoots.class.isAssignableFrom(ptd.type())
 				|| PersistenceRootReference.class.isAssignableFrom(ptd.type())
@@ -93,14 +99,19 @@ public class ObjectMaterializer implements BinaryEntityRawDataAcceptor
 	/** Materializes each object collected by {@link #acceptEntityData(long, long)}. */
 	public void materialize()
 	{
-		// Batch-materializes all collected objects in the live graph
-		this.loader.collect(obj ->
+		try
 		{
-			// no-op
-		}, this.oids);
-
-		// Help the GC
-		this.oids.truncate();
+			// Batch-materializes all collected objects in the live graph
+			this.loader.collect(obj ->
+			{
+				// no-op
+			}, this.oids);
+		}
+		finally
+		{
+			// Help the GC even when materialization fails
+			this.oids.truncate();
+		}
 	}
 
 }

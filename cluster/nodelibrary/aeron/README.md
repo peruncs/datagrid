@@ -46,7 +46,12 @@ and 64 MiB transaction limit; override with the full environment keys
 `ECLIPSE_DATAGRID_AERON_MTU_LENGTH`,
 `ECLIPSE_DATAGRID_AERON_CHUNK_SIZE`,
 `ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES`, and
-`ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS`.
+`ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS`. Archive recording startup,
+recorded-position, and stop waits are independently configurable with
+`ECLIPSE_DATAGRID_AERON_RECORDING_START_TIMEOUT_NANOS`,
+`ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS`, and
+`ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS`; reader shutdown uses
+`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
 Archive runtime tuning is controlled by
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL`,
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH`,
@@ -61,7 +66,9 @@ Writer checkpoint persistence is enabled in the provider. Authenticated,
 segment-boundary retention is available only when an embedded writer is started
 with `ECLIPSE_DATAGRID_AERON_RETENTION_SECRET` (base64, at least 16 bytes) and
 `ECLIPSE_DATAGRID_AERON_RETENTION_READERS` (a comma-separated list of reader
-UUIDs). Configure the same secret plus
+UUIDs). The secret may instead be supplied through
+`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE`, an owner-only regular file
+containing the base64 key. Configure the same secret plus
 `ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL` and
 `ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID` on every participant. Each reader
 first persists its recovery cursor and then sends an HMAC-SHA256

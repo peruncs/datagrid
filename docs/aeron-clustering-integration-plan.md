@@ -1,12 +1,12 @@
 # Aeron clustering middleware integration plan
 
-Status: implementation in progress; revised after independent review
+Status: core transport implemented; release gates and operational hardening are tracked below
 
 Scope: fixed one-writer, N-reader Eclipse DataGrid topology
 
 Target transport: Aeron reliable UDP with Aeron Archive
 Consensus: intentionally out of scope
-JCache invalidation: `cache/clustered/aeron` adapter in scope (synchronous sender, best-effort receiver)
+JCache invalidation: `cache/clustered/aeron` adapter in scope (synchronous sender, fail-closed receiver)
 
 Implementation snapshot: `storage-distributed-aeron` now contains the optional
 fixed-envelope publisher, Archive publisher, live and Archive-backed readers,
@@ -27,13 +27,13 @@ The neutral persistence configurator accepts a provider target factory, so the
 Aeron provider can preserve Archive-prepare/local-enqueue/Archive-commit
 ordering without leaking Aeron into the core artifact. The Aeron packet path
 also waits for the neutral merger's completed materialization hook before
-advancing its cursor. Backup manifest precedence/restore validation, provider
-checkpoint integration tests,
-Store durable-completion acknowledgement, provider checkpoint-driven recording
-restart recovery, and
-Lucene/vector readiness remain explicit
-follow-on gates; the release checklist below does not claim those production
-hooks are complete until their phase tests pass. Framework adapters are also
+advancing its cursor. Backup artifacts now have a forced manifest/ready
+publication boundary and startup applies generation-aware local precedence.
+Cross-backend restore validation, an unconditional filesystem-force contract
+for Store completion, and Lucene/vector readiness remain explicit follow-on
+gates; the release checklist below does not claim those production hooks are
+complete until their phase tests pass.
+Framework adapters are also
 provider-neutral: Spring Boot, Micronaut, and Helidon depend only on the
 neutral nodelibrary, and an application adds exactly one provider module.
 The neutral storage root defaults to `/storage` and may be overridden with
@@ -61,6 +61,16 @@ stream. Readers persist their ordinary recording cursor first, then advertise
 the same durable boundary to the writer. The writer requires the complete
 configured reader quorum before retention maintenance can run.
 
+Current working-tree status is intentionally split into implementation classes:
+
+| Area | Current state | Release interpretation |
+|---|---|---|
+| Core Aeron transport, Archive replay/live join, atomic writer/reader cursors, one-writer/N-reader lifecycle, failure propagation, and crash barriers | Implemented and covered by unit, UDP/Archive, Store, benchmark, and process tests | Eligible for normal transport review |
+| Real Store integration (four channels, three readers, restart, dictionary rejection/retry, embedded Lucene/JVector persistence) and the full-path benchmark | Implemented; benchmark numbers are diagnostic rather than machine-dependent gates | Required regression coverage is present; live transient-index refresh is still a separate Store lifecycle gate |
+| Authenticated watermark delivery/retention and Archive free-space admission | Implemented for an embedded writer when the secret and fixed reader set are configured; otherwise fail closed | Opt-in operational feature; requires the private-network and runbook requirements below |
+| Backup artifact visibility (manifest + ready marker), generation-aware local precedence, live Lucene/JVector rematerialization, and slow-reader/replay fan-out | Artifact visibility and local cursor precedence are implemented; cross-backend restore validation and the remaining lifecycle/index/fan-out behavior are not implemented or not proven | Only complete, marked backups are selectable; cross-backend conflicts, live index refresh, and slow-reader/replay limits remain explicit release gates |
+| In-process writer promotion | Explicitly rejected for the fixed-role Aeron provider | A reader cannot be promoted by `StorageNodeManager`; a future promotion protocol must fence the old writer and establish a new recording/epoch before changing role |
+
 ## 1. Decision and feasibility
 
 The integration is feasible and should be implemented as an additional transport, not as a rewrite of Eclipse Store persistence.
@@ -80,7 +90,7 @@ This is a good fit when the writer is known by configuration and automatic leade
 
 The strongest design makes the Archive the recovery WAL: archive a prepared transaction, wait for Eclipse Store's storage task to complete, then archive a replication commit marker. In the Store 5 source used by this project, `StorageRequestAcceptor.storeData(Binary)` calls `waitOnTask(enqueueStoreTask(data))`; a normal return therefore proves task completion, not merely queue admission. It still does **not** prove an unconditional per-transaction filesystem force: Store follows its configured synchronization and rollover policy. The commit marker therefore means “the transaction is durable in Archive and the writer Store task completed under the configured Store durability policy.”
 
-Phase 0 must prove duplicate `StorageConnection.importData` plus live-object rematerialization across restart. The Store API documents replacement by object ID, so the result is expected to be storage-idempotent, but the complete DataGrid behavior must still be tested. If that proof fails, use `ENQUEUE_THEN_ARCHIVE` compatibility mode and accept its detected-but-not-repairable crash gap. `LOCAL_DURABLE_FIRST` requires Store synchronization settings that make successful task completion a durable-media boundary; startup must reject that mode when the configured Store policy cannot provide it.
+Phase 0 must prove duplicate `StorageConnection.importData` plus live-object rematerialization across restart. The Store API documents replacement by object ID, so the result is expected to be storage-idempotent, but the complete DataGrid behavior must still be tested. If that proof fails, use `ENQUEUE_THEN_ARCHIVE` compatibility mode and accept its detected-but-not-repairable crash gap. The former `LOCAL_DURABLE_FIRST` experiment is intentionally removed: the Store API does not expose a durable-completion boundary that the replication coordinator can verify, so configuration rejects that value instead of pretending it is safe.
 
 ## 2. Goals, guarantees, and non-goals
 
@@ -91,7 +101,11 @@ Phase 0 must prove duplicate `StorageConnection.importData` plus live-object rem
 3. A late, restarted, disconnected, or slow reader resumes from its durable Aeron position without Kafka.
 4. Type dictionaries always precede data that references their type IDs.
 5. A reader never imports a partial logical Eclipse Store write.
-6. Reader readiness is false until its durable object graph is caught up to the configured threshold.
+6. Reader readiness is false until replay has joined the live publication and
+   the durable object-graph materialization boundary has completed. The
+   current provider does not expose a configurable lag-byte threshold; it
+   reports `REPLAYING` until the subscription is live and reports failures
+   instead of guessing freshness from a local cursor.
 7. Existing Kafka behavior remains available during migration and its tests continue to pass.
 8. Backups contain the replication cursor required to replay from the writer Archive.
 9. GigaMap bitmap, Lucene, and vector searches on readers converge to writer results.
@@ -106,7 +120,11 @@ Phase 0 must prove duplicate `StorageConnection.importData` plus live-object rem
 - Ordering: total order per writer publication, checked again with a monotonic logical transaction sequence.
 - Delivery: committed transactions are recoverable from Archive; reader application is at least once at the crash boundary and must be storage-idempotent.
 - Consistency: eventual between nodes, unchanged from DataGrid's stated model; fully consistent within a node while an imported batch is applied under its write lock.
-- Durability: the replication acknowledgement is controlled by both `aeron.archive.file.sync.level` and `aeron.archive.catalog.file.sync.level`; production defaults are `1`, with `2` available for metadata forcing and `0` restricted to development/performance experiments. This is Archive durability, not proof of completion by Store's asynchronous writer.
+- Durability: the replication acknowledgement is controlled by the configured
+  `...file-sync-level` (applied to both Archive segments and its catalog);
+  production defaults are `1`, with `2` available for metadata forcing and `0`
+  restricted to development/performance experiments. This is Archive
+  durability, not proof of completion by Store's asynchronous writer.
 - Backpressure: the writer is gated by its local Archive recording progress, not by the slowest reader. Slow readers recover from replay.
 - Availability: the writer Archive/catalog is a single durable recovery dependency in v1. Host/disk loss requires a matched backup or optional replicated Archive; it is not masked by the fixed-reader topology.
 
@@ -121,11 +139,11 @@ Phase 0 must prove duplicate `StorageConnection.importData` plus live-object rem
 
 ## 3. Evidence and source baseline
 
-The plan was derived from the checked-out source, examples, tests, and documentation in all local projects, plus the linked [DataGrid discussion #16](https://github.com/eclipse-datagrid/datagrid/discussions/16). It was then checked against the independent GLM, big-pickle, Muse, Ling, MIMO, DS, and Kimi reviews supplied with the repository. Review claims were accepted only when confirmed in source; for example, `java.util.zip.CRC32C` does exist on the Java 17 baseline, `MessageInfo` does exist, `alias` is an Aeron channel parameter, and Aeron's default term buffer is 16 MiB, so contrary review claims about those points were not adopted.
+The plan was derived from the checked-out source, examples, tests, and documentation in all local projects, plus the linked [DataGrid discussion #16](https://github.com/eclipse-datagrid/datagrid/discussions/16). It was then checked against the independent GLM, big-pickle, Muse, Ling, MIMO, DS, and Kimi reviews supplied with the repository. Review claims were accepted only when confirmed in source; for example, `java.util.zip.CRC32C` does exist on the Java 17 baseline, the current cursor contract is `ReplicationCursor`, `alias` is an Aeron channel parameter, and Aeron's default term buffer is 16 MiB, so contrary review claims about those points were not adopted.
 
 | Project | Material used | Design consequence |
 |---|---|---|
-| DataGrid | `README.md`; `storage/distributed/*`; `cluster/nodelibrary/*`; current Kafka distributor/client, packet acceptor, merger, backup and position code | Reuse the existing persistence-target and type-dictionary interception seams, but remove Kafka types from cluster lifecycle and cursor abstractions. The repository currently has no `src/test` files, so tests must be introduced with the transport. |
+| DataGrid | `README.md`; `storage/distributed/*`; `cluster/nodelibrary/*`; current Kafka distributor/client, packet acceptor, merger, backup and position code; Aeron provider and Store integration tests | Reuse the existing persistence-target and type-dictionary interception seams, but remove Kafka types from cluster lifecycle and cursor abstractions. The current tree contains unit, UDP/Archive, Store, benchmark, and forked process tests; new tests extend those seams rather than replacing them. |
 | Aeron | `RecordedBasicPublisher`, `PersistentSubscriber`, `ReplayMergeSubscriber`, `EmbeddedRecordingThroughput`, `ReplayedBasicSubscriber`, Archive scripts README, Archive/system tests for recording extension | Use a recorded `ExclusivePublication`, wait for `RecordingPos`, extend the same recording after writer restart, and prefer `PersistentSubscription` over hand-built `ReplayMerge`. |
 | Aeron docs | [Archive overview](https://aeron.io/docs/aeron-archive/overview/), [MDC and flow control](https://aeron.io/docs/aeron/multi-destination-cast/), [publications/subscriptions](https://aeron.io/docs/aeron/publications-subscriptions/), [multi-host Archive sample](https://aeron.io/docs/aeron-archive/multi-host-sample/), [purging](https://aeron.io/docs/aeron-archive/purging-and-truncation/) | Use UDP for remote Archive control/replay, dynamic MDC for fan-out, application message assembly, explicit offer-result handling, and segment-aligned retention. |
 | Agrona | `README.md`, `AgentRunner`, `BackoffIdleStrategy`, `UnsafeBuffer`, counters | Own publication/subscription on a duty-cycle thread where needed, use direct buffers and counters, and default to a low-CPU backoff strategy with a latency-tuned override. |
@@ -141,7 +159,9 @@ Version baseline for the spike:
 - compile and test DataGrid against the local Eclipse Store/Serializer `5.0.0-SNAPSHOT` artifacts;
 - use Store 5's Lucene store-boundary and JVector/GigaMap fixes, but keep index replication experimental until the embedded rematerialization tests below pass on every supported filesystem.
 
-Do not silently upgrade to an Aeron snapshot. The local Aeron checkout is `1.54.0-SNAPSHOT`; it is useful as API/test reference, not as the initial production dependency.
+Do not silently upgrade to an Aeron snapshot. The build is pinned to Aeron
+`1.53.0`; the local Aeron checkout may be newer and is useful only as API/test
+reference until a version change is deliberately reviewed.
 
 ## 4. Current DataGrid flow and gaps
 
@@ -150,10 +170,9 @@ Current writer path:
 ```text
 application store
   -> Eclipse Store PersistenceTarget.write(Binary)
-  -> StorageBinaryTargetDistributing
-       1. local target.write(Binary)
-       2. StorageBinaryDataDistributor.distributeData(Binary)
-  -> Kafka packets
+  -> DistributedStorage provider target
+       Aeron: coordinator -> Archive prepare -> local Store -> Archive terminal
+       Kafka: local Store -> packet distributor (legacy ordering)
 ```
 
 `EmbeddedStorageBinaryTarget.write` waits for its storage task. The current ordering is “local Store task completion, then Kafka publish”; whether completion includes a filesystem force depends on Store synchronization and rollover policy.
@@ -161,37 +180,43 @@ application store
 Current reader path:
 
 ```text
-Kafka poll
-  -> ClusterStorageBinaryDataPacket(s)
-  -> ClusterStorageBinaryDataPacketAcceptor
+selected transport poll/replay
+  -> provider-specific packet or complete-binary adapter
   -> ClusterStorageBinaryDataMerger
        1. StorageConnection.importData(...)
        2. ObjectMaterializer reloads live objects
+       3. provider cursor callback after materialization
 ```
 
 Reusable seams already exist, but the cluster layer still carries a few legacy
 transport assumptions:
 
-- legacy Kafka cursor bytes encode `TopicPartition` rows; the neutral
-  `MessageInfo` contract itself no longer exposes Kafka classes;
+- Kafka cursor bytes are provider-owned; the neutral `ReplicationCursor`
+  contract no longer exposes Kafka classes;
 - provider-specific clients remain behind the generic
   `ClusterStorageBinaryDataClient`/distributor interfaces;
-- the old Kafka packet sequence is still packet-oriented, while Aeron uses a
-  complete logical Store-write sequence;
-- the Kafka offset path retains its historical truncate-write behavior; Aeron
-  uses the atomic checkpoint/cursor path and the storage root is configurable;
-- storage-node startup removes the selected local Store/cursor root before a
-  backup restore, so backup precedence remains an explicit lifecycle decision;
-- the asynchronous merger now waits for materialization before Aeron cursor
-  advancement, while the legacy Kafka path retains its adapter semantics;
+- Kafka and Aeron both use the atomic cursor path; their provider positions
+  remain distinct and are never decoded by the other transport;
+- the filesystem backup backend publishes a forced manifest and final ready
+	marker last, while the network backend puts the manifest in the single
+	uploaded archive; interrupted filesystem backup directories are ignored;
+	storage-node startup compares the local cursor with the newest backup and
+	restores on unknown/mismatched/older state while retaining a newer local image;
+- the asynchronous merger now waits for materialization before advancing any
+  transport cursor;
 - the separate `cache/clustered/kafka` and `cache/clustered/aeron` JCache
   invalidation modules are independent transports and are not part of Store
   binary replication;
-- unit, crash-matrix, and embedded UDP/Archive tests now protect the main
-  replication contract; full Store/Lucene/JVector rematerialization coverage
-  remains a follow-on gate;
+- unit, crash-matrix, embedded UDP/Archive, and real four-channel Store tests
+  protect the main replication contract; the Store fixture covers three
+  independent readers, restart, dictionary retry, and embedded Lucene/JVector
+  persistence;
 - transient Lucene/JVector runtime state is not proven to refresh when an
-  already-live reader rematerializes persisted objects.
+  already-live reader rematerializes persisted objects, and backup-manifest
+  precedence/slow-reader behavior remain separate acceptance gates;
+- Aeron `positionProvider().latest()` is writer-only. A reader cannot infer the
+  writer's durable boundary from its own applied cursor, so the neutral SPI
+  deliberately raises `UnsupportedOperationException` for reader/backup roles.
 
 These are integration concerns, not reasons to fork Eclipse Store serialization or introduce Aeron Cluster.
 
@@ -261,7 +286,8 @@ For Kubernetes, the writer MDC control endpoint and Archive control endpoint req
 - Production must set Media Driver `dirDeleteOnStart(false)` and Archive `deleteArchiveOnStart(false)`; accidental directory deletion is a data-loss event.
 - Default the media driver and Archive to dedicated threading in production and shared threading in tests. One owner thread drives each publication/Archive client and each `PersistentSubscription`; these clients are not passed between arbitrary application threads.
 - Size the publication term so `publication.maxMessageLength() = min(termLength / 8, 16 MiB)` exceeds `chunk-size + envelope overhead`. Aeron's 16 MiB default term supports a 1 MiB chunk; startup validation must reject incompatible tuning.
-- Idle strategy is configurable; `BackoffIdleStrategy` is the safe default.
+- The reader and retry loops use a bounded `BackoffIdleStrategy`; it is fixed in
+  the provider rather than exposed as a free-form context setting.
 
 ## 6. Serialization and wire protocol
 
@@ -302,7 +328,7 @@ Expose one enum, `ReplicationDurabilityMode`, with these deliberately narrow val
 |---|---|---|
 | `ARCHIVE_FIRST` | archive prepare → Store task completes → archive commit → acknowledge caller | Archive is the recovery WAL. The commit marker claims only the configured Store synchronization policy. |
 | `ENQUEUE_THEN_ARCHIVE` | persist dirty marker → Store task completes → archive transaction+commit → clear dirty marker → acknowledge caller | Compatibility fallback. An unclean restart with a dirty marker has an ambiguous missing-log window and requires reader reseed from a new writer backup. |
-| `LOCAL_DURABLE_FIRST` | durably configured Store task completes → archive transaction+commit | Valid only when Store task completion is configured to force the transaction's durable media; reject it otherwise. |
+| `LOCAL_DURABLE_FIRST` | removed | Not part of the supported Aeron configuration. The Store API cannot provide a verifiable durable-completion boundary to the coordinator; configuration rejects this value. |
 
 Do not call `ENQUEUE_THEN_ARCHIVE` “post-store durable” without naming the Store synchronization policy. `ARCHIVE_FIRST` remains preferred because Archive is the explicit recovery WAL.
 
@@ -420,7 +446,7 @@ integration has no persisted-data migration contract.
 - `transactionSequence` is the last resolved (committed or aborted) sequence; `recordingPosition` is always an Archive stream position immediately after its commit/abort marker.
 - `resolutionCrc32c` covers the encoded fixed block of the matching `TransactionCommit` or `TransactionAbort` and is the equality witness for a same-sequence replay.
 - `storeGenerationUuid` ties a cursor to the exact Store image. After any Store deletion or backup restore, the restored backup manifest and cursor win and any newer node-local cursor is discarded. A local cursor is valid only for a warm restart with the same Store generation.
-- A backup contains the Store files, this cursor, and one manifest written while the backup reader is paused after completed import/materialization at a transaction boundary. A direct writer backup, if supported, blocks new writes and drains accepted Store tasks first. The manifest is published/uploaded only after all Store files and cursor bytes are complete; there is no claim of atomicity between separately uploaded objects.
+- A backup contains the Store files, this cursor, and one manifest written while the backup reader is paused after completed import/materialization at a transaction boundary. A direct writer backup, if supported, blocks new writes and drains accepted Store tasks first. Filesystem backups publish a forced `manifest` and final `ready` marker; network backups include the manifest in the single uploaded archive. A backup is selectable only after that publication boundary is complete.
 
 ### Writer recovery and recording extension
 
@@ -455,15 +481,17 @@ Perform this before adding Aeron behavior; every refactor commit must leave Kafk
 In `cluster/nodelibrary/nodelibrary`:
 
 - rename current Kafka implementation `ClusterStorageBinaryDataClient.Default` to `KafkaClusterStorageBinaryDataClient` and move it with Kafka code;
-- replace `MessageInfo` with a versioned `ReplicationCursor` containing transport, Store generation, logical sequence, and a typed provider position (`KafkaOffsets` or `AeronPosition`); do not expose Kafka `TopicPartition` from the neutral module;
-- replace `StoredMessageInfoManager`/`MessageInfoParser` with atomic `ReplicationCursorStore` and codec;
-- generalize `KafkaMessageInfoProvider` to `LatestReplicationPositionProvider`;
-- generalize `KafkaRecordDeleter` to `ReplicationLogRetention`;
+- use the versioned `ReplicationCursor` containing transport, Store generation, logical sequence, and a typed provider position (`KafkaOffsets` or `AeronPosition`); do not expose Kafka `TopicPartition` from the neutral module;
+- replace the old message-info persistence path with atomic `ReplicationCursorStore` and codec;
+- generalize the Kafka latest-position lookup to the transport-neutral cursor contract;
+- expose Kafka retention only through `ReplicationLogRetention`; keep it
+  unsupported until an authenticated reader-watermark registry exists;
 - make `StorageNodeHealthCheck` depend on `ReplicationHealth`, not a Kafka consumer;
 - keep `ClusterStorageBinaryDataDistributor` and client lifecycle interfaces, but remove Kafka imports from their signatures;
 - add one explicit `ClusterReplicationTransport` supplied to `ClusterFoundation`; it owns distributor, client, latest-position, health, and retention services;
-- replace `kafkaTopicName()` with a transport-neutral `replicationStreamName()` in core configuration;
-- keep Kafka environment aliases for one deprecation cycle.
+- use the transport-neutral `replicationStreamName()` in core configuration;
+- remove the old Kafka environment aliases; deployments must use the explicit
+  transport-neutral configuration keys.
 
 The provider boundary is composition, not a generic message broker API:
 
@@ -482,8 +510,7 @@ Roles that do not use a component return an explicit no-op implementation rather
 ### Module layout
 
 ```text
-storage/distributed/distributed       existing neutral Store capture/merge
-storage/distributed/kafka             existing simple Kafka adapter
+storage/distributed/distributed       neutral Store capture/merge
 storage/distributed/aeron             fixed envelope + reusable Aeron adapter
 cluster/nodelibrary/nodelibrary       neutral lifecycle/orchestration only
 cluster/nodelibrary/kafka             moved Kafka cluster provider
@@ -493,9 +520,29 @@ cache/clustered/kafka                 Kafka JCache invalidation adapter
 cache/clustered/aeron                 Aeron JCache invalidation adapter
 ```
 
-These are repository paths, not renames of existing artifacts. Keep `cluster/nodelibrary/nodelibrary` as artifact `cluster-nodelibrary`; add sibling artifacts `cluster-nodelibrary-kafka` and `cluster-nodelibrary-aeron` under the existing `cluster/nodelibrary/pom.xml`. Add `storage-distributed-aeron` under `storage/distributed/pom.xml`. The neutral nodelibrary depends on `storage-distributed`, not `storage-distributed-kafka`; provider modules depend on the neutral nodelibrary.
+Every leaf artifact in the table is a named JPMS module with a production
+`module-info.java`; the parent and aggregator projects remain Maven `pom`
+artifacts and therefore intentionally have no module descriptor. Every
+production Java package also carries a `package-info.java` contract. The
+descriptors export only application-facing packages, keep wire and lifecycle
+helpers encapsulated, and declare the client library used by that artifact
+directly rather than relying on transitive readability. Test-only dependencies
+(including allocation counters and JUnit) are not promoted into production
+module descriptors.
 
-There are currently two Kafka binary distributors (`storage/distributed/kafka` and `cluster/nodelibrary/nodelibrary`) with different header encodings. Phase 1 must characterize both with tests, choose one canonical provider implementation, and preserve wire compatibility or document the break. Framework modules accept a `ClusterReplicationTransport` bean/provider; Kafka remains the compatibility provider for one release, while Aeron is selected explicitly. Framework artifacts do not pull either provider transitively.
+The current repository keeps `cluster/nodelibrary/nodelibrary` as artifact
+`cluster-nodelibrary`, with sibling artifacts `cluster-nodelibrary-kafka` and
+`cluster-nodelibrary-aeron` under `cluster/nodelibrary/pom.xml`. The
+`storage-distributed-aeron` artifact lives under `storage/distributed/pom.xml`.
+The neutral nodelibrary depends on `storage-distributed`; provider modules
+depend on the neutral nodelibrary.
+
+The repository also keeps `storage/distributed/kafka` as an independently
+maintained legacy adapter for applications that use the neutral storage API
+directly. It is not a drop-in replacement for the cluster provider: select one
+adapter consistently for a deployment and test any cross-module wire use
+explicitly. Framework modules accept a `ClusterReplicationTransport` provider;
+framework artifacts do not pull Kafka or Aeron transitively.
 
 The independent `cache/clustered/kafka` and `cache/clustered/aeron` JCache
 invalidation modules sit outside this Store-replication SPI. Both implement the
@@ -528,8 +575,8 @@ module owns the Hibernate region factory, `TimestampsRegionUpdateMessage`, and
 `...clustered.com-provider` property.
 
 Unlike Store replication, the invalidation sender is synchronous and fails the
-local cache operation when it cannot publish, while the receiver is
-best-effort:
+local cache operation when it cannot publish. The receiver rejects malformed
+frames and fails closed when a valid invalidation cannot be applied:
 
 - one shared Aeron channel and stream id per cluster, configured with
   `...clustered.aeron.channel` and `...clustered.aeron.stream-id`;
@@ -539,9 +586,10 @@ best-effort:
   publication to accept the frame, retrying connection and back pressure for at
   most `...clustered.aeron.offer-timeout-millis`, then throws
   `CacheEntryListenerException`. It never silently drops an invalidation;
-- the receiver is an Agrona `Agent` on an `AgentRunner` with a backoff idle
-  strategy; it logs and skips a malformed frame rather than failing the node,
-  because the timestamp region reconciles from the database independently;
+- the receiver owns one daemon polling thread with Agrona's backoff idle
+  strategy; malformed frames and sequence gaps stop the receiver and are
+  exposed through health because the Aeron invalidation stream is volatile and
+  cannot replay a failed application;
 - invalidation loss cannot corrupt Store data, and the invalidation stream is
   never used to recover Store state;
 - an embedded MediaDriver is launched only when
@@ -617,40 +665,47 @@ Introduce typed configuration and map environment/framework properties into it. 
 
 | Property | Writer default / meaning |
 |---|---|
-| `eclipsestore.distribution.transport` | `kafka` for compatibility release; `aeron` in new deployment examples |
+| `eclipsestore.distribution.transport` | explicit `none`, `kafka`, or `aeron` selection; defaults to `none` |
 | `eclipsestore.distribution.aeron.cluster-id` | required UUID, identical on all nodes |
 | `...node-id` | required stable UUID for each reader/writer |
 | `...role` | required `writer`, `reader`, or `backup-reader` |
 | `...durability-mode` | `archive-first`; `enqueue-then-archive` only when the Phase 0 gate rejects Archive-first recovery |
-| `...fixed-reader-ids` | writer-only explicit set used for ACK/retention; removal requires an operator retirement action |
+| `...retention-readers` | writer-only explicit UUID set used for authenticated watermark quorum; removal requires an operator retirement action |
 | `...live-channel` | required dynamic MDC UDP URI; no IPC in clustered tests |
 | `...live-stream-id` | default `1001` |
 | `...archive-control-channel` | writer UDP endpoint / reader request target; stable and routable |
 | `...archive-control-response-channel` | reader-bound UDP response endpoint; port `0` only on directly routable networks |
-| `...archive-control-stream-id` | default `1002` |
+| `...archive-control-stream-id` | not exposed; Aeron Archive uses its protocol default |
 | `...archive-replication-channel` | explicit writer Archive UDP endpoint reserved for optional `replicate(...)`/standby use |
 | `...archive-dir` | required persistent writer path |
 | `...media-driver-dir` | node-local; `/dev/shm/...` recommended on Linux |
 | `...replay-channel` | reader UDP endpoint, port `0` where routing permits |
-| `...replay-stream-id` | default `1003` |
-| `...ack-channel` | reader-to-writer UDP endpoint |
-| `...ack-stream-id` | default `1004` |
+| `...replay-stream-id` | derived as `live-stream-id + 1`; not independently configurable |
+| `...watermark-channel` | reader-to-writer latest-value UDP endpoint (retention opt-in) |
+| `ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID` | configured latest-value stream; defaults to `live-stream-id + 2` (retention opt-in) |
 | `...term-length` | `16MiB`; power of two and at least `8 * (chunk-size + envelope-overhead)` |
 | `...mtu-length` | `1408` unless deployment testing selects another valid value; persist and reuse on recording extension |
 | `...chunk-size` | `1MiB`, validated against the created publication's `maxMessageLength()` |
 | `...max-transaction-bytes` | default `64MiB`; explicit deployment limit, rejected before allocation on writer and reader |
 | `...offer-timeout` | default `30s` |
-| `...archive-catchup-timeout` | default `30s` |
-| `...file-sync-level` | Archive segment sync: production `1`, development `0` |
-| `...catalog-file-sync-level` | Archive catalog sync: production `1`, development `0` |
+| `...file-sync-level` | Archive segment and catalog sync: production `1`, development `0` |
 | `...segment-file-length` | default `128MiB`; power of two, at least term length, and the retention granularity |
-| `...low-storage-space-threshold` | at least one segment plus operating reserve; crossing it rejects new acknowledged writes before exhaustion |
-| `...idle-strategy` | `backoff`; allow `yielding`/`busy-spin` only by operator choice |
-| `...flow-control` | `max`; document `min` trade-off |
-| `...cursor-path` | node-local durable path, included in backups |
-| `...max-replay-lag-bytes` | readiness threshold; `0` means live only |
+| `...archive-low-storage-space-threshold` | at least one segment plus operating reserve; crossing it rejects new acknowledged writes before exhaustion |
+| `...min-archive-free-bytes` | embedded-writer admission floor; `0` disables the additional free-space check |
+| `...driver-timeout-millis` | Aeron client driver timeout; positive and bounded by deployment startup budgets |
+| `...archive-threading-mode` | derived from `...threading-mode` (`DEDICATED` or `SHARED`) |
+| `...idle-strategy` | fixed bounded `BackoffIdleStrategy`; not independently configurable |
+| `...flow-control` | supplied in the live-channel URI; embedded writers require `fc=max` |
+| `...cursor-path` | derived beside the configured checkpoint/storage root; not independently configurable |
+| `...max-replay-lag-bytes` | not exposed; reader readiness does not infer the writer watermark from its own cursor |
 | `...max-concurrent-replays` | measured deployment limit; queue/stagger additional cold readers so recording has priority |
 | `...threading-mode` | `DEDICATED` production, `SHARED` tests/development |
+
+Only keys consumed by `AeronSettings.fromEnvironment` are effective runtime
+configuration. Rows marked derived or fixed document invariants and defaults;
+they are not accepted environment keys. Archive control and replay stream IDs
+are intentionally owned by the Aeron protocol, while the deployed reader-to-
+writer progress stream is named `watermark-channel`/`watermark-stream-id`.
 
 Do not expose every Aeron context setter as DataGrid configuration. Add only values required for topology, durability, resource sizing, and measured tuning. Provide an escape hatch accepting a preconfigured context for expert embedding.
 
@@ -661,7 +716,11 @@ Writer startup constructs these objects in order:
 1. `MediaDriver.Context`: persistent unique Aeron directory name, `dirDeleteOnStart(false)`, configured term/MTU/socket settings and threading mode.
 2. `Archive.Context`: same Aeron directory, persistent `archiveDir`, UDP remote `controlChannel`, IPC `localControlChannel`, explicit UDP `replicationChannel` even when standby replication is disabled, segment length, low-space threshold, file/catalog sync levels, and `deleteArchiveOnStart(false)`.
 3. `ArchivingMediaDriver.launch(driverContext, archiveContext)`.
-4. An `Aeron` client connected to that directory and a separate writer-local `AeronArchive` client using the existing Aeron client plus IPC request/response channels.
+4. An `Aeron` client connected to that directory and a separate writer-local
+   `AeronArchive` client using the existing Aeron client plus the configured
+   control request/response channels. The embedded Archive also exposes its
+   IPC local-control channel for diagnostics, but the provider does not switch
+   control transports implicitly.
 5. `AeronArchive.addRecordedExclusivePublication(liveChannel, liveStreamId)`, followed by recording descriptor/counter discovery and readiness wait.
 
 Reader startup creates its Media Driver and Aeron client, then:
@@ -702,7 +761,9 @@ the fixed reader set and retire a reader as an operator action before removing
 it from the quorum.
 
 The provider enables retention only for an embedded writer with
-`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET` (base64, at least 16 bytes) and
+`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET` (base64, at least 16 bytes), or the
+equivalent owner-only regular file named by
+`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE`, and
 `ECLIPSE_DATAGRID_AERON_RETENTION_READERS`. Every configured reader must use
 the same secret and watermark channel. External Archives and incomplete
 quorums remain unsupported. Operators must monitor Archive capacity and
@@ -731,7 +792,20 @@ Apply the replay limit with `Archive.Context.maxConcurrentReplays(...)`. A reade
 
 Each phase is independently reviewable. Do not begin a later phase until the listed exit criteria pass.
 
-### Phase 0 — feasibility spikes and executable contracts
+### Phase 0 — feasibility spikes and executable contracts (implemented core; release gates remain)
+
+The four-channel Store fixture, duplicate-import/restart checks, dictionary
+retry coverage, embedded index persistence checks, and the exact zero-reader
+UDP/Archive spike are now in the tree. Store-level unconditional force and
+live transient-index refresh remain explicit acceptance gates.
+
+The historical spike names below are mapped to the checked-in tests rather
+than additional missing classes: `AeronStoreIntegrationIT` covers the real
+Store, restart, dictionary, three-reader, Lucene, and JVector scenarios;
+`AeronProviderDriverFailureTest` covers the forked driver-failure contract;
+`AeronFullPathBenchmarkTest` records the end-to-end allocation/latency
+baseline; and `AeronReplicationMonitoringTest` covers the zero-reader writer
+and health/capacity boundary.
 
 Deliverables:
 
@@ -755,14 +829,18 @@ Exit criteria:
 
 If duplicate import fails, mark Archive-first recovery blocked and select `ENQUEUE_THEN_ARCHIVE`; its unclean-shutdown reseed behavior becomes a release-blocking integration test.
 
-### Phase 1 — make the cluster lifecycle transport-neutral
+### Phase 1 — make the cluster lifecycle transport-neutral (implemented)
+
+The neutral SPI, provider selection, Kafka isolation, framework module
+descriptors, and transport-neutral lifecycle are implemented. The remaining
+framework smoke and backup-precedence cases are tracked as Phase 4 tests.
 
 Deliverables:
 
 1. Introduce `ReplicationCursor`, atomic cursor storage, transport health/latest-position/retention contracts, and explicit `ClusterReplicationTransport` injection.
-2. Characterize both existing Kafka packet/header formats, then move Kafka-specific implementations to `cluster-nodelibrary-kafka` without accidental wire changes.
+2. Keep Kafka-specific implementations in `cluster-nodelibrary-kafka` and use its single fixed-width, versioned wire format. The independently maintained `storage-distributed-kafka` adapter remains available only for direct neutral-storage users; the two adapters are not wire-compatible.
 3. Replace Kafka names/imports in `ClusterFoundation`, `StorageNodeManager`, `StorageNodeHealthCheck`, `StorageBackupManager`, `ClusterRestRequestController`, `NodelibraryPropertiesProvider`, scheduled jobs, and framework modules.
-4. Preserve old Kafka environment keys as deprecated aliases and add migration documentation.
+4. Remove old Kafka environment aliases; deployments use the explicit transport-neutral keys.
 5. Consolidate duplicate packet/merger code where doing so is mechanical; do not redesign it until tests protect behavior.
 
 Tests:
@@ -779,7 +857,12 @@ Exit criteria:
 - the newly added Kafka characterization/adapter tests pass for both current distributor paths;
 - `ClusterFoundation` can run against a deterministic in-memory fake transport.
 
-### Phase 2 — versioned envelope and reusable Aeron transport
+### Phase 2 — versioned envelope and reusable Aeron transport (implemented)
+
+The fixed envelope, bounded assembler/chunker, explicit Aeron contexts,
+recording discovery, direct test hooks, and UDP/Archive coverage are present.
+The wire package remains module-internal and no reflection is used by the
+checked-in provider crash child.
 
 Deliverables:
 
@@ -809,7 +892,12 @@ Exit criteria:
 - no retained Aeron callback buffers;
 - deterministic cleanup of all driver/archive directories in tests.
 
-### Phase 3 — durable transaction, replay, and restart
+### Phase 3 — durable transaction, replay, and restart (implemented; fail-closed edges explicit)
+
+Writer fences/checkpoints, recording extension, reader cursors, stop/restart
+semantics, and the process crash matrix are implemented. Archive loss,
+slow-reader, and orphan-tail outcomes intentionally fail closed and remain
+operator-visible rather than being inferred as successful recovery.
 
 Deliverables:
 
@@ -841,16 +929,23 @@ Exit criteria:
 - no partial transaction reaches `StorageBinaryDataReceiver`;
 - if Archive-first gate failed, corresponding tests prove dirty-window detection and mandatory reseed behavior for `ENQUEUE_THEN_ARCHIVE`.
 
-### Phase 4 — DataGrid cluster wiring and operations
+### Phase 4 — DataGrid cluster wiring and operations (implemented core; operational gates remain)
+
+The provider is wired into the DataGrid lifecycle, including the deployed
+authenticated watermark stream and free-space admission for configured
+embedded writers. Backup artifact publication and generation-aware local
+precedence are implemented. Cross-backend manifest conflict validation,
+slow-reader/replay fan-out, retirement operations, and complete framework smoke
+coverage remain release gates.
 
 Deliverables:
 
 1. Add `cluster-nodelibrary-aeron` provider and wire all `ClusterFoundation` roles.
 2. Add typed environment, Spring Boot, Micronaut, and Helidon configuration mappings.
-3. Replace Kafka-offset backup metadata with the versioned backup manifest + `ReplicationCursor`; after any restore, discard a newer node-local cursor whose Store generation differs.
+3. Replace Kafka-offset backup metadata with the versioned backup manifest + `ReplicationCursor`; publish filesystem manifests and ready markers atomically, ignore incomplete backup directories, and after any restore discard a newer node-local cursor whose Store generation differs.
 4. Define readiness states: `STARTING`, `REPLAYING`, `LIVE`, `DEGRADED_ARCHIVE`, `RESEED_REQUIRED`, `FAILED`.
 5. Expose current sequence/position, Archive recorded position, replay lag, live/replay state, last applied time, error, disk usage, and fixed-reader ACK positions.
-6. Add a writer-owned progress tracker. Accept only configured reader IDs and matching cluster/recording/epoch; positions and sequences must be monotonic and no greater than resolved commit/abort Archive state. Readers re-ACK after every forced cursor and periodically while idle, so UDP loss/reordering can only delay retention.
+6. Add a writer-owned progress tracker. Accept only configured reader IDs and matching cluster/recording/epoch; positions and sequences must be monotonic and no greater than resolved commit/abort Archive state. Readers publish a signed watermark after every forced cursor and on restart, so UDP loss/reordering can only delay retention. A periodic idle heartbeat is optional and is not required for persisted quorum state.
 7. Make retirement an explicit persisted operator/configuration action; a heartbeat timeout alerts but never silently removes a reader from the retention set. Automatic purge is enabled only on an authenticated/private network matching the security model.
 8. Calculate a purge watermark as the minimum of all non-retired fixed-reader durable positions and the newest restorable backup cursor. Convert it with Aeron's segment-base calculation and use only an Archive deletion API verified against the selected Aeron version for complete inactive leading segments. A replay using a segment blocks purge; retry later, retain data, and alert before the low-space threshold. Never use `truncateRecording` for active-history retention.
 9. Limit/stagger concurrent cold replays so Archive recording work has priority; benchmark the limit instead of assuming MDC fan-out also applies to replay.
@@ -877,7 +972,12 @@ Exit criteria:
 - backup/restore and safe retention are automated and covered by JUnit integration tests;
 - operators can distinguish replaying, live, stalled, corrupt, and reseed-required states.
 
-### Phase 5 — Lucene/JVector correctness
+### Phase 5 — Lucene/JVector correctness (partially implemented; live refresh remains gated)
+
+Embedded Lucene/JVector persistence is covered by the current three-reader
+Store fixture. Runtime refresh of already-live index objects, background
+rebuild readiness, and a released Store/Serializer 5.x baseline are not yet
+release claims.
 
 Deliverables:
 
@@ -903,7 +1003,11 @@ Exit criteria:
 - no external index file is sent through the Aeron protocol;
 - the supported Store/Serializer release is pinned in DataGrid.
 
-### Phase 6 — performance, security, and disaster recovery hardening
+### Phase 6 — performance, security, and disaster recovery hardening (ongoing)
+
+The full-path benchmark and private-network deployment checks are present.
+Kafka-comparative SLOs, long-running capacity operations, and optional Archive
+standby replication still require deployment-specific evidence.
 
 Deliverables:
 
@@ -1036,9 +1140,17 @@ readiness/capacity gates. `AeronFullPathBenchmarkTest` exercises an actual
 four-channel Store writer, Archive, reader import/materialization, and atomic
 cursor; `AeronProviderDriverFailureTest` runs the production provider in a
 forked JVM and proves a driver timeout is reported instead of exiting the host.
-These are test-only release gates. Multi-reader replay, backup bootstrap,
-slow-reader, Lucene, and vector gates remain separate acceptance work because
-they require their own topologies and Store fixtures.
+`FilesystemVolumeBackupBackendTest` proves interrupted filesystem backup
+directories remain invisible until their manifest and forced ready marker
+exist. These are test-only release gates. The current Store integration fixture also
+exercises one writer with three independent readers, four-channel Store graph
+convergence, reader stop/restart from an atomic cursor, and embedded Lucene and
+JVector state after each reader is reopened. The measured convergence timings
+are diagnostic only (there is no machine-dependent throughput gate). Live
+index-runtime refresh after import, backup bootstrap, and slow-reader behavior
+remain separate acceptance work because they require Store rematerialization
+hooks or their own topologies and fixtures. Object update/delete convergence is
+covered by the three-reader Store fixture.
 
 ## 13. Failure behavior and operator action
 
@@ -1075,8 +1187,10 @@ Export at least:
 - writer publication position and Archive recording position;
 - Archive acknowledgement latency and offer retry counts by result code;
 - Archive bytes, segment count, usable disk, and oldest/newest positions;
-- per-reader durable sequence/position, and (once the planned ACK protocol is
-  enabled) reported ACK, replay lag bytes, time since apply, and live/replay state;
+- per-reader durable sequence/position; when authenticated retention is
+  configured, also export the reported watermark, replay lag bytes, time since
+  apply, and live/replay state. Without that opt-in the writer reports ACK
+  state as unavailable rather than inferring it from a local reader cursor;
 - transaction bytes/chunks and assembly memory;
 - import/materialization latency;
 - Lucene/vector rebuild state, duration, and pending structural version;
@@ -1109,17 +1223,13 @@ If network isolation is insufficient, add Aeron Archive authentication/authorisa
 
 Archive authentication protects Archive control sessions, not the separate live stream. The provider's retention controller rejects forged progress with signed watermarks and private-network deployment is still mandatory; automatic purge is enabled only when the configured quorum and secret are present.
 
-## 16. Migration and rollback
+## 16. Transport changes
 
-1. Land Phase 1 with Kafka as the active provider.
-2. Deploy an Aeron shadow reader fed from a non-authoritative test writer or a test-only `TeeDistributor`; compare Store roots and query results. Do not make dual-publish a permanent production abstraction.
-3. Create a full backup and record both Kafka and Aeron positions.
-4. Stop writes, wait for Kafka readers and Aeron shadow reader to converge, then restart the fixed topology with the Aeron provider.
-5. Retain Kafka infrastructure and the pre-cutover backup for the rollback window; do not dual-write indefinitely.
-6. Rollback means stop writes, restore the pre-cutover backup, and resume Kafka from its recorded cursor. Never merge two independently advanced logs.
-7. Remove Kafka dependencies/configuration only after the rollback window and Aeron soak tests pass.
-
-Kafka offsets cannot be translated mathematically into Aeron recording positions; they are unrelated logs. Migration is anchored by the stopped-write backup manifest that records both positions. An old Kafka `/storage/offset` file is parsed only by the Kafka provider and is never reinterpreted as an Aeron cursor.
+Kafka offsets cannot be translated mathematically into Aeron recording positions;
+they are unrelated logs. A deployment selects one provider and its matching
+cursor/backup format. Changing providers requires a fresh compatible backup and
+restart; the implementation does not retain or reinterpret the deleted Kafka
+wire format, old aliases, or old `/storage/offset` file.
 
 Wire formats are append-only and versioned. Never reuse schema/template/field IDs. Upgrade readers before writers when a newer writer may emit newer optional fields/templates.
 
@@ -1131,17 +1241,25 @@ The Aeron provider is ready for release only when:
 - Kafka remains functional or its removal is an explicit breaking release decision;
 - a two-node example starts with one Maven command and no external server;
 - writer/reader/backup configuration and network ports are documented for every framework integration;
-- backup/bootstrap, replay, writer restart, retention, disk-full, and corruption runbooks exist;
+- backup/bootstrap, replay, writer restart, retention, disk-full, and
+  corruption procedures are specified in this plan; a deployment-owned
+  runbook with tested commands and escalation contacts is still a release gate;
 - Store/Serializer/Aeron versions are pinned and supported;
 - the fixed-writer/no-consensus limitation is prominent in README and API docs;
 - the independent JCache invalidation path offers both `cache-clustered/kafka` and
   `cache-clustered/aeron` as JPMS modules, depends on neither transport from the
   neutral `cache-clustered` module, and gives both the same synchronous
-  sender/fail-on-error contract while the receiver tolerates malformed frames;
+  sender/fail-on-error contract while the receiver rejects malformed frames
+  and fails closed on sequence or application errors;
 - Lucene/JVector modes remain explicitly unsupported/disabled until the separate Phase 5 upstream and DataGrid gates pass; they may be released later than the core Aeron provider;
 - `mvn verify` includes the merge-gating integration suite.
 
 ## 18. Recommended implementation order for a coder
+
+The ordering below is the historical implementation sequence. Phases 0–4 are
+now implemented in the working tree, with the explicit release gates called
+out above; use this list for future work rather than assuming every numbered
+deliverable is still outstanding.
 
 1. Add Phase 0 tests first; commit the observed compatibility matrix and `ReplicationDurabilityMode` decision.
 2. Refactor cursor/lifecycle names while Kafka tests stay green.
@@ -1182,7 +1300,7 @@ Changes accepted after source verification:
 Claims deliberately not adopted because the checked-out sources contradict them:
 
 - Java 17 does include `java.util.zip.CRC32C`;
-- DataGrid does contain `MessageInfo` and it contains Kafka `TopicPartition` values;
+- the historical baseline contained `MessageInfo` and Kafka `TopicPartition` values; the current code removes both from the neutral API;
 - `alias` is a supported Aeron channel URI parameter;
 - Aeron's network term-buffer default is 16 MiB, not 64 KiB, although the chunk/term invariant still needs validation;
 - `AeronArchive.addRecordedExclusivePublication(...)` creates the publication and recording; it does not require the caller to create the publication first;

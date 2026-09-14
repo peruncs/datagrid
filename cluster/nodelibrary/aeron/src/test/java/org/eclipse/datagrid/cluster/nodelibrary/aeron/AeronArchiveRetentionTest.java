@@ -39,11 +39,34 @@ class AeronArchiveRetentionTest
 	private static final byte[] SECRET = "retention-test-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
 	@Test
-	void retentionIsUnsupportedUntilTheConfiguredReaderHasReported()
+	void retentionIsUnsupportedWhenWatermarkDeliveryIsNotAvailable()
 	{
-		final AeronArchiveRetention retention = retention(() -> { throw new AssertionError("writer must not start"); });
+		final AeronArchiveRetention retention = retention(
+			() -> { throw new AssertionError("writer must not start"); }, false);
 		assertFalse(retention.isSupported());
+		assertThrows(UnsupportedOperationException.class, () -> retention.retireReader(READER));
 		retention.close();
+	}
+
+	@Test
+	void disabledRetentionDoesNotReadDormantState()
+	{
+		final Path state = Path.of(System.getProperty("java.io.tmpdir"),
+			"aeron-retention-disabled-" + UUID.randomUUID() + ".state");
+		try
+		{
+			assertDoesNotThrow(() -> Files.write(state, new byte[] { 0x01, 0x02, 0x03 }));
+			final AeronArchiveRetention retention = retention(
+				() -> { throw new AssertionError("disabled retention must not start the writer"); }, state, false);
+			assertFalse(retention.isSupported());
+			assertThrows(UnsupportedOperationException.class,
+				() -> retention.recordReaderWatermark(cursor(READER)));
+			retention.close();
+		}
+		finally
+		{
+			assertDoesNotThrow(() -> Files.deleteIfExists(state));
+		}
 	}
 
 	@Test
@@ -54,6 +77,18 @@ class AeronArchiveRetentionTest
 		assertThrows(IllegalArgumentException.class, () -> retention.recordReaderWatermark(
 			new ReplicationCursor("aeron", GENERATION, 1, new byte[] { 1, 2, 3 })));
 		assertFalse(started.get(), "authentication must precede lazy writer startup");
+		retention.close();
+	}
+
+	@Test
+	void unresolvedWatermarkIsRejectedBeforeStartingTheWriter()
+	{
+		final AtomicBoolean started = new AtomicBoolean();
+		final AeronArchiveRetention retention = retention(() -> started.set(true));
+		final AeronAuthenticatedWatermark unresolved = AeronAuthenticatedWatermark.sign(
+			READER, CLUSTER, GENERATION, 1, 17, -1, -1, SECRET);
+		assertThrows(SecurityException.class, () -> retention.recordReaderWatermark(unresolved));
+		assertFalse(started.get(), "an unresolved watermark must not start lazy writer recovery");
 		retention.close();
 	}
 
@@ -178,14 +213,47 @@ class AeronArchiveRetentionTest
 		{
 			Files.write(state, ByteBuffer.allocate(Integer.BYTES * 3)
 				.putInt(2).putInt(0).putInt(0).array());
+			final AeronArchiveRetention retention = retention(() -> { }, state);
 			final IllegalStateException failure = assertThrows(IllegalStateException.class,
-				() -> retention(() -> { }, state));
+				retention::isSupported);
 			assertInstanceOf(java.io.IOException.class, failure.getCause());
 			assertEquals("unsupported retention state version", failure.getCause().getMessage());
+			retention.close();
 		}
 		finally
 		{
 			Files.deleteIfExists(state);
+		}
+	}
+
+	@Test
+	void rejectsSymbolicLinkRetentionState() throws Exception
+	{
+		final Path directory = Files.createTempDirectory("aeron-retention-symlink-");
+		final Path target = directory.resolve("outside.state");
+		final Path state = directory.resolve("state");
+		try
+		{
+			final AeronArchiveRetention first = retention(() -> { }, target);
+			first.recordReaderWatermark(cursor(READER));
+			first.close();
+			try
+			{
+				Files.createSymbolicLink(state, target.getFileName());
+			}
+			catch (final UnsupportedOperationException | java.nio.file.FileSystemException unsupported)
+			{
+				return; // Symbolic links are unavailable on some supported filesystems.
+			}
+			final AeronArchiveRetention restarted = retention(() -> { }, state);
+			assertThrows(IllegalStateException.class, restarted::isSupported);
+			restarted.close();
+		}
+		finally
+		{
+			Files.deleteIfExists(state);
+			Files.deleteIfExists(target);
+			Files.deleteIfExists(directory);
 		}
 	}
 
@@ -252,25 +320,77 @@ class AeronArchiveRetentionTest
 	}
 
 	@Test
+	void rejectsPersistedWatermarkForReaderOutsideCurrentConfiguration() throws Exception
+	{
+		final Path state = Files.createTempFile("aeron-retention-unconfigured-", ".state");
+		final UUID replacementReader = UUID.randomUUID();
+		try
+		{
+			Files.deleteIfExists(state);
+			final AeronArchiveRetention first = retention(Set.of(READER), state);
+			first.recordReaderWatermark(cursor(READER));
+			first.close();
+
+			final AeronArchiveRetention restarted = retention(Set.of(replacementReader), state);
+			final IllegalStateException failure = assertThrows(IllegalStateException.class,
+				restarted::isSupported);
+			assertTrue(failure.getMessage().contains("cannot load authenticated Aeron retention state"));
+			restarted.close();
+		}
+		finally
+		{
+			Files.deleteIfExists(state);
+		}
+	}
+
+	@Test
+	void malformedRetentionStateDoesNotPartiallyMutateQuorum() throws Exception
+	{
+		final UUID secondReader = UUID.randomUUID();
+		final Path state = Files.createTempFile("aeron-retention-partial-", ".state");
+		try
+		{
+			/* The first retirement is valid, but the duplicate second entry makes the
+			 * file malformed. Loading must be atomic: a retry after the file is fixed
+			 * must still be able to acknowledge both configured readers. */
+			final ByteBuffer encoded = ByteBuffer.allocate(Integer.BYTES * 3 + 32)
+				.putInt(3).putInt(0).putInt(2)
+				.putLong(secondReader.getMostSignificantBits()).putLong(secondReader.getLeastSignificantBits())
+				.putLong(secondReader.getMostSignificantBits()).putLong(secondReader.getLeastSignificantBits());
+			Files.write(state, encoded.array());
+			final Set<UUID> readers = Set.of(READER, secondReader);
+			final AeronArchiveRetention retention = retention(readers, state);
+			assertThrows(IllegalStateException.class, retention::isSupported);
+			Files.delete(state);
+			retention.recordReaderWatermark(cursor(READER));
+			retention.recordReaderWatermark(cursor(secondReader));
+			assertTrue(retention.isSupported(), "failed restore must not retire a configured reader in memory");
+			retention.close();
+		}
+		finally
+		{
+			Files.deleteIfExists(state);
+		}
+	}
+
+	@Test
 	void watermarkPersistenceFailureRollsBackTheQuorum() throws Exception
 	{
 		final Path directory = Files.createTempDirectory("aeron-retention-rollback-");
 		final Path state = directory.resolve("state");
-		final AeronArchiveRetention retention = retention(() -> { }, state);
-		try
+		try (final AeronArchiveRetention retention = retention(() -> { }, state))
 		{
 			Files.createDirectory(state);
 			assertThrows(IllegalStateException.class,
 				() -> retention.recordReaderWatermark(cursor(READER)));
+			Files.delete(state);
 			assertFalse(retention.isSupported(),
 				"an acknowledgement that was not persisted must not complete the quorum");
-			Files.delete(state);
 			retention.recordReaderWatermark(cursor(READER));
 			assertTrue(retention.isSupported());
 		}
 		finally
 		{
-			retention.close();
 			Files.deleteIfExists(state);
 			Files.deleteIfExists(directory);
 		}
@@ -282,8 +402,7 @@ class AeronArchiveRetentionTest
 		final UUID secondReader = UUID.randomUUID();
 		final Path directory = Files.createTempDirectory("aeron-retirement-rollback-");
 		final Path state = directory.resolve("state");
-		final AeronArchiveRetention retention = retention(Set.of(READER, secondReader), state);
-		try
+		try (final AeronArchiveRetention retention = retention(Set.of(READER, secondReader), state))
 		{
 			Files.createDirectory(state);
 			assertThrows(IllegalStateException.class, () -> retention.retireReader(secondReader));
@@ -296,7 +415,6 @@ class AeronArchiveRetentionTest
 		}
 		finally
 		{
-			retention.close();
 			Files.deleteIfExists(state);
 			Files.deleteIfExists(directory);
 		}
@@ -304,12 +422,26 @@ class AeronArchiveRetentionTest
 
 	private static AeronArchiveRetention retention(final Runnable ensureWriter)
 	{
-		return retention(ensureWriter, null);
+		return retention(ensureWriter, null, true);
 	}
 
 	private static AeronArchiveRetention retention(final Runnable ensureWriter, final Path state)
 	{
-		return retention(Set.of(READER), state, ensureWriter);
+		return retention(ensureWriter, state, true);
+	}
+
+	private static AeronArchiveRetention retention(final Runnable ensureWriter, final boolean watermarkDeliveryAvailable)
+	{
+		return retention(ensureWriter, null, watermarkDeliveryAvailable);
+	}
+
+	private static AeronArchiveRetention retention(final Runnable ensureWriter, final Path state,
+		final boolean watermarkDeliveryAvailable)
+	{
+		return new AeronArchiveRetention(SECRET, Set.of(READER), ensureWriter, unavailableRecording(), () -> 17,
+			() -> new AeronWriterBoundary(4, 17, 8_192), ignored -> 0L,
+			CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
+			() -> watermarkDeliveryAvailable, state);
 	}
 
 	private static AeronArchiveRetention retention(final Set<UUID> readers, final Path state)

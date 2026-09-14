@@ -85,16 +85,10 @@ import static org.eclipse.serializer.util.X.notNull;
 		public void distributeData(final Binary data)
 		{
 			final String dictionary = this.typeDictionaryData.get();
+			this.typeDictionaryData.remove();
 			if (dictionary != null)
 			{
-				try
-				{
-					this.delegate.distributeTypeDictionary(dictionary);
-				}
-				finally
-				{
-					this.typeDictionaryData.remove();
-				}
+				this.delegate.distributeTypeDictionary(dictionary);
 			}
 			this.delegate.distributeData(data);
 		}
@@ -110,14 +104,8 @@ import static org.eclipse.serializer.util.X.notNull;
 		@Override
 		public void distributeTypeDictionary(final String typeDictionaryData)
 		{
-			if (typeDictionaryData == null)
-			{
-				this.typeDictionaryData.remove();
-			}
-			else
-			{
-				this.typeDictionaryData.set(typeDictionaryData);
-			}
+			if (typeDictionaryData == null) this.typeDictionaryData.remove();
+			else this.typeDictionaryData.set(typeDictionaryData);
 		}
 
 		@Override

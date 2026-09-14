@@ -7,8 +7,10 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
 import org.eclipse.datagrid.storage.distributed.aeron.wire.AeronReplicationEnvelope;
 
+import java.lang.ref.Cleaner;
 import java.nio.ByteBuffer;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongUnaryOperator;
 import java.util.zip.CRC32C;
 
@@ -36,7 +38,8 @@ import java.util.zip.CRC32C;
  */
 final class AeronReplicationPublisher implements AutoCloseable
 {
-	private static final UnsafeBuffer EMPTY_BUFFER = new UnsafeBuffer(new byte[0]);
+	private static final Cleaner CLEANER = Cleaner.create();
+	private static final UnsafeBuffer EMPTY_BUFFER = new UnsafeBuffer();
 	private final AeronOfferRetryer offerer;
 	private final int maxMessageLength;
 	private final AeronReplicationConfiguration configuration;
@@ -46,26 +49,30 @@ final class AeronReplicationPublisher implements AutoCloseable
 	 * the value primitive avoids an allocation and makes the ownership rule
 	 * explicit instead of implying lock-free access. */
 	private long nextSequence;
+	/* A reservation is an ownership token, not merely a value derived from
+	 * nextSequence. Keeping it explicitly prevents an unrelated caller from
+	 * bypassing the durable fence by reusing the incremented value. */
+	private long reservedSequence = -1L;
 	private final AutoCloseable closeAction;
 	private final LongUnaryOperator commitPositionAwaiter;
 	private final ByteBuffer envelopeStorage;
 	private final UnsafeBuffer envelopeBuffer;
+	private final DirectBufferCleanup directBufferCleanup;
+	private final Cleaner.Cleanable cleanable;
+	private final byte[] crcScratch = new byte[16 * 1024];
 	/* Publisher methods are synchronized, so one reusable CRC instance is enough
 	 * and avoids retaining a ThreadLocal value on every caller thread. */
 	private final CRC32C dataCrc = new CRC32C();
+	private final CRC32C chunkCrc = new CRC32C();
 	private FailedPrepare failedPrepare;
 	private PreparedTransaction pendingTransaction;
 	private Object coordinatorOwner;
 	private volatile boolean failed;
 	private boolean closeRequested;
 	private boolean closeInProgress;
+	private boolean terminalOperation;
 	private boolean envelopeFreed;
 	private boolean closed;
-
-	private static void crashPoint(final String name, final long sequence)
-	{
-		CrashHook.invoke(name, sequence);
-	}
 
 	private static AeronOfferRetryer.Offerer offerer(final ExclusivePublication publication)
 	{
@@ -108,12 +115,11 @@ final class AeronReplicationPublisher implements AutoCloseable
 		if (publication == null) throw new NullPointerException("publication");
 		if (configuration == null) throw new NullPointerException("configuration");
 		final int actual = publication.maxMessageLength();
-		if (actual != configuration.maxMessageLength())
+		if (actual <= 0)
 		{
-			throw new IllegalArgumentException("Aeron publication maxMessageLength=" + actual +
-				" does not match replication configuration value " + configuration.maxMessageLength());
+			throw new IllegalArgumentException("Aeron publication has no usable message capacity");
 		}
-		return actual;
+		return Math.min(actual, configuration.maxMessageLength());
 	}
 
 	AeronReplicationPublisher(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
@@ -145,7 +151,8 @@ final class AeronReplicationPublisher implements AutoCloseable
 	{
 		if (offerer == null || configuration == null || clusterId == null || commitPositionAwaiter == null ||
 			initialSequence < 0 || initialSequence == Long.MAX_VALUE || maxMessageLength <= 0 ||
-			maxMessageLength > configuration.maxMessageLength())
+			maxMessageLength > configuration.maxMessageLength() ||
+			(long)configuration.chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength)
 		{
 			throw new IllegalArgumentException("invalid publisher configuration");
 		}
@@ -159,11 +166,32 @@ final class AeronReplicationPublisher implements AutoCloseable
 		this.commitPositionAwaiter = commitPositionAwaiter;
 		this.envelopeStorage = ByteBuffer.allocateDirect(maxMessageLength);
 		this.envelopeBuffer = new UnsafeBuffer(this.envelopeStorage);
+		this.directBufferCleanup = new DirectBufferCleanup(this.envelopeStorage);
+		this.cleanable = CLEANER.register(this, this.directBufferCleanup);
+	}
+
+	/** Cleaner action deliberately contains no reference to the publisher. */
+	private static final class DirectBufferCleanup implements Runnable
+	{
+		private final ByteBuffer buffer;
+		private final AtomicBoolean freed = new AtomicBoolean();
+
+		private DirectBufferCleanup(final ByteBuffer buffer)
+		{
+			this.buffer = buffer;
+		}
+
+		@Override
+		public void run()
+		{
+			if (this.freed.compareAndSet(false, true)) BufferUtil.free(this.buffer);
+		}
 	}
 
 	/** Publishes one transaction and its terminal commit marker. */
 	synchronized long publishTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers)
 	{
+		this.ensureNoSequenceReservation();
 		return this.commit(this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length));
 	}
 
@@ -190,6 +218,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		final ByteBuffer[] dataBuffers, final int bufferCount)
 	{
 		this.ensureOpen();
+		this.ensureNoSequenceReservation();
 		if (this.coordinatorOwner != null)
 		{
 			throw new IllegalStateException(
@@ -197,7 +226,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		}
 		this.failedPrepare = null;
 		this.ensureNoPendingTransaction();
-		crashPoint("BEFORE_PREPARE", this.nextSequence);
+		CrashHook.invoke("BEFORE_PREPARE", this.nextSequence);
 		final int dictionaryLength = dictionary == null ? 0 : dictionary.length;
 		final long totalDataLength = totalRemaining(dataBuffers, bufferCount);
 		if (totalDataLength > (long)this.configuration.maxTransactionBytes() - dictionaryLength)
@@ -247,7 +276,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		this.failedPrepare = null;
 		this.ensureNoPendingTransaction();
 		if (metadata == null || reservedSequence < 0 || reservedSequence == Long.MAX_VALUE ||
-			this.nextSequence != reservedSequence + 1)
+			this.reservedSequence != reservedSequence || this.nextSequence != reservedSequence + 1)
 		{
 			throw new IllegalStateException("reserved replication sequence is no longer current");
 		}
@@ -258,7 +287,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		{
 			throw new IllegalArgumentException("transaction metadata does not match Store data");
 		}
-		crashPoint("BEFORE_PREPARE", reservedSequence);
+		CrashHook.invoke("BEFORE_PREPARE", reservedSequence);
 		return this.prepareReserved(dictionary, dataBuffers, bufferCount, reservedSequence, metadata.dataLength(),
 			metadata.dataChunkCount(), metadata.crc32c(), true);
 	}
@@ -272,21 +301,37 @@ final class AeronReplicationPublisher implements AutoCloseable
 			if (dictionary != null && dictionary.length != 0)
 			{
 				this.publishDictionaryChunks(sequence, new UnsafeBuffer(dictionary), dictionary.length);
-				crashPoint("AFTER_DICTIONARY_CHUNKS", sequence);
+				CrashHook.invoke("AFTER_DICTIONARY_CHUNKS", sequence);
 			}
 			final int dataCrc32c = this.publishDataChunks(sequence, dataBuffers, bufferCount, dataLength);
 			if (verifyExpectedCrc && dataCrc32c != expectedCrc32c)
 			{
 				throw new IllegalArgumentException("transaction data changed after durable fence");
 			}
-			crashPoint("AFTER_DATA_CHUNKS", sequence);
+			CrashHook.invoke("AFTER_DATA_CHUNKS", sequence);
 			final PreparedTransaction prepared = new PreparedTransaction(this, sequence, dataLength, dataChunks,
 				dataCrc32c);
 			this.pendingTransaction = prepared;
-			crashPoint("AFTER_PREPARE", sequence);
+			if (this.reservedSequence == sequence) this.reservedSequence = -1L;
+			CrashHook.invoke("AFTER_PREPARE", sequence);
 			return prepared;
 		}
-		catch (final RuntimeException | Error failure)
+		catch (final Error failure)
+		{
+			/* Do not allocate, compute a checksum, or offer a compensating marker
+			 * while the JVM is already in a fatal Error path.  The durable fence (when
+			 * one exists) remains unresolved and therefore forces fail-closed recovery. */
+			final PreparedTransaction pending = this.pendingTransaction;
+			if (pending != null)
+			{
+				pending.terminal = true;
+				this.pendingTransaction = null;
+			}
+			if (this.reservedSequence == sequence) this.reservedSequence = -1L;
+			this.failed = true;
+			throw failure;
+		}
+		catch (final RuntimeException failure)
 		{
 			/* AFTER_PREPARE can throw after the token has become the pending
 			 * transaction. The recovery abort below is the terminal decision for
@@ -298,7 +343,11 @@ final class AeronReplicationPublisher implements AutoCloseable
 			{
 				failedCrc32c = this.computeDataCrc(dataBuffers, bufferCount, dataLength);
 			}
-			catch (final RuntimeException | Error crcFailure)
+			catch (final Error crcFailure)
+			{
+				throw crcFailure;
+			}
+			catch (final RuntimeException crcFailure)
 			{
 				failure.addSuppressed(crcFailure);
 			}
@@ -309,9 +358,13 @@ final class AeronReplicationPublisher implements AutoCloseable
 				// itself is gone this fails as well, and recovery must retain the tail.
 				this.offerMarker(sequence, AeronReplicationEnvelope.Kind.ABORT, dataLength, dataChunks, 0);
 				this.failed = true;
-				crashPoint("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
+				CrashHook.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
 			}
-			catch (final RuntimeException | Error abortFailure)
+			catch (final Error abortFailure)
+			{
+				throw abortFailure;
+			}
+			catch (final RuntimeException abortFailure)
 			{
 				failure.addSuppressed(abortFailure);
 			}
@@ -320,6 +373,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 				pending.terminal = true;
 				this.pendingTransaction = null;
 			}
+			if (this.reservedSequence == sequence) this.reservedSequence = -1L;
 			this.failed = true;
 			throw failure;
 		}
@@ -354,23 +408,53 @@ final class AeronReplicationPublisher implements AutoCloseable
 	{
 		this.ensureOpen();
 		this.ensureNoPendingTransaction();
+		if (this.reservedSequence != -1L)
+		{
+			throw new IllegalStateException("an Aeron sequence reservation is already outstanding");
+		}
 		final long sequence = this.nextSequence;
 		if (sequence < 0 || sequence == Long.MAX_VALUE)
 		{
 			throw new IllegalStateException("Aeron replication sequence space is exhausted");
 		}
 		this.nextSequence = sequence + 1;
+		this.reservedSequence = sequence;
 		return sequence;
 	}
 
 	/** Releases a reservation when the local Store rejects the fenced write. */
 	synchronized void releaseReservedSequence(final long sequence)
 	{
-		if (sequence < 0 || sequence == Long.MAX_VALUE || this.nextSequence != sequence + 1)
+		if (sequence < 0 || sequence == Long.MAX_VALUE || this.reservedSequence != sequence ||
+			this.nextSequence != sequence + 1)
 		{
 			throw new IllegalStateException("replication sequence reservation is no longer current");
 		}
 		this.nextSequence = sequence;
+		this.reservedSequence = -1L;
+	}
+
+	/**
+	 * Abandons a reservation after local Store acceptance when publication cannot
+	 * even be prepared. The sequence remains consumed and the caller must have
+	 * persisted an in-flight uncertainty marker; rewinding it would let a later
+	 * write reuse a sequence whose local bytes already exist.
+	 */
+	synchronized void abandonReservedSequence(final long sequence)
+	{
+		if (sequence < 0 || sequence == Long.MAX_VALUE || this.reservedSequence != sequence ||
+			this.nextSequence != sequence + 1)
+		{
+			throw new IllegalStateException("replication sequence reservation is no longer current");
+		}
+		this.reservedSequence = -1L;
+		this.failed = true;
+	}
+
+	/** Returns whether a durable fence currently owns the next sequence. */
+	synchronized boolean hasSequenceReservation()
+	{
+		return this.reservedSequence != -1L;
 	}
 
 	/** Computes transaction metadata for the populated prefix of a reusable buffer array. */
@@ -423,6 +507,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		for (int chunkIndex = 0; chunkIndex < count; chunkIndex++)
 		{
 			final int chunkLength = Math.min(this.configuration.chunkSize(), length - logicalOffset);
+			this.chunkCrc.reset();
 			int copied = 0;
 			while (copied < chunkLength)
 			{
@@ -432,16 +517,18 @@ final class AeronReplicationPublisher implements AutoCloseable
 					source = sources[sourceIndex];
 					sourcePosition = source.position();
 				}
-				final int amount = Math.min(source.limit() - sourcePosition, chunkLength - copied);
-				updateCrc(crc, source, sourcePosition, amount);
-				this.envelopeBuffer.putBytes(
-					AeronReplicationEnvelope.HEADER_LENGTH + copied, source, sourcePosition, amount);
+				final int amount = Math.min(this.crcScratch.length,
+					Math.min(source.limit() - sourcePosition, chunkLength - copied));
+				source.get(sourcePosition, this.crcScratch, 0, amount);
+				crc.update(this.crcScratch, 0, amount);
+				this.chunkCrc.update(this.crcScratch, 0, amount);
+				this.envelopeBuffer.putBytes(AeronReplicationEnvelope.HEADER_LENGTH + copied,
+					this.crcScratch, 0, amount);
 				sourcePosition += amount;
 				copied += amount;
 			}
-			this.offerEncoded(sequence, AeronReplicationEnvelope.Kind.STORE_BINARY,
-				length, chunkIndex, count, logicalOffset, 0, this.envelopeBuffer,
-				AeronReplicationEnvelope.HEADER_LENGTH, chunkLength);
+			this.offerDataChunk(sequence, length, chunkIndex, count, logicalOffset,
+				chunkLength, (int)this.chunkCrc.getValue());
 			logicalOffset += chunkLength;
 		}
 		return (int)crc.getValue();
@@ -467,53 +554,70 @@ final class AeronReplicationPublisher implements AutoCloseable
 		return (int)crc.getValue();
 	}
 
-	/** Updates CRC32C without allocating a duplicate view or retaining caller state. */
-	private static void updateCrc(final CRC32C crc, final ByteBuffer source,
+	/** Updates CRC32C using absolute reads without mutating caller state. */
+	private void updateCrc(final CRC32C crc, final ByteBuffer source,
 		final int offset, final int length)
 	{
-		final int position = source.position();
-		final int limit = source.limit();
-		try
+		for (int copied = 0; copied < length; )
 		{
-			source.position(offset);
-			source.limit(offset + length);
-			crc.update(source);
-		}
-		finally
-		{
-			source.limit(limit);
-			source.position(position);
+			final int amount = Math.min(this.crcScratch.length, length - copied);
+			source.get(offset + copied, this.crcScratch, 0, amount);
+			crc.update(this.crcScratch, 0, amount);
+			copied += amount;
 		}
 	}
 
 	/** Publishes the commit marker and waits for the configured durability boundary. */
-	synchronized long commit(final PreparedTransaction transaction)
+	long commit(final PreparedTransaction transaction)
 	{
-		this.ensureOpen();
-		this.validate(transaction);
-		if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
+		final long commitPosition;
+		synchronized (this)
+		{
+			this.ensureOpen();
+			this.validate(transaction);
+			if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
+			if (this.terminalOperation) throw new IllegalStateException("publisher terminal operation is already running");
+			this.terminalOperation = true;
+			try
+			{
+				CrashHook.invoke("BEFORE_COMMIT_OFFER", transaction.sequence);
+				commitPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.COMMIT,
+					transaction.dataLength, transaction.dataChunkCount, transaction.crc32c);
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				transaction.terminal = true;
+				this.pendingTransaction = null;
+				this.terminalOperation = false;
+				this.failed = true;
+				throw failure;
+			}
+		}
 		try
 		{
-			crashPoint("BEFORE_COMMIT_OFFER", transaction.sequence);
-			final long commitPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.COMMIT,
-				transaction.dataLength, transaction.dataChunkCount, transaction.crc32c);
-			crashPoint("AFTER_COMMIT_OFFER", transaction.sequence);
+			CrashHook.invoke("AFTER_COMMIT_OFFER", transaction.sequence);
 			final long recordedPosition = this.commitPositionAwaiter.applyAsLong(commitPosition);
-			crashPoint("AFTER_COMMIT_RECORDED", transaction.sequence);
-			transaction.terminal = true;
-			this.pendingTransaction = null;
+			CrashHook.invoke("AFTER_COMMIT_RECORDED", transaction.sequence);
+			synchronized (this)
+			{
+				transaction.terminal = true;
+				this.pendingTransaction = null;
+				this.terminalOperation = false;
+			}
 			return recordedPosition;
 		}
 		catch (final RuntimeException | Error failure)
 		{
-			// Once the commit marker was offered it may still be delivered or
-			// recorded.  Publishing an abort after an archive acknowledgement
-			// timeout would create two terminal markers for one sequence and can
-			// make readers apply a transaction that the writer later considers
-			// failed.  Fail closed and require recovery instead.
-			transaction.terminal = true;
-			this.pendingTransaction = null;
-			this.failed = true;
+			/* Once the commit marker was offered it may still be delivered or
+			 * recorded. Publishing an abort after an acknowledgement timeout would
+			 * create two terminal markers for one sequence. Fail closed instead. */
+			synchronized (this)
+			{
+				transaction.terminal = true;
+				this.pendingTransaction = null;
+				this.terminalOperation = false;
+				this.failed = true;
+			}
 			throw failure;
 		}
 	}
@@ -521,13 +625,40 @@ final class AeronReplicationPublisher implements AutoCloseable
 	/** Publishes an abort marker after the local Store rejects the transaction. */
 	long abort(final PreparedTransaction transaction)
 	{
-		final long position;
+		final long offeredPosition;
 		synchronized (this)
 		{
-			position = this.abortLocked(transaction);
+			this.ensureOpen();
+			this.validate(transaction);
+			if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
+			if (this.terminalOperation) throw new IllegalStateException("publisher terminal operation is already running");
+			this.terminalOperation = true;
+			try
+			{
+				offeredPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.ABORT,
+					transaction.dataLength, transaction.dataChunkCount, 0);
+				transaction.abortAttempted = true;
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				transaction.terminal = true;
+				this.pendingTransaction = null;
+				this.terminalOperation = false;
+				this.failed = true;
+				throw failure;
+			}
 		}
 		try
 		{
+			final long position = this.commitPositionAwaiter.applyAsLong(offeredPosition);
+			synchronized (this)
+			{
+				transaction.abortPosition = position;
+				transaction.terminal = true;
+				this.pendingTransaction = null;
+				this.terminalOperation = false;
+			}
+			CrashHook.invoke("AFTER_ABORT_OFFERED", transaction.sequence);
 			/* Notify outside the publisher monitor. Checkpoint listeners may acquire the
 			 * provider lock, and invoking them while holding this lock would create a
 			 * publisher/provider lock-order cycle during shutdown. */
@@ -539,45 +670,14 @@ final class AeronReplicationPublisher implements AutoCloseable
 			/* The marker may already have been offered when the Archive acknowledgement
 			 * failed. Surface that attempted abort with its known-or-unknown position so
 			 * the coordinator can persist an uncertain state instead of losing evidence. */
-			try
-			{
-				transaction.invokeAbortAction(transaction.abortPosition);
-			}
-			catch (final RuntimeException | Error callbackFailure)
-			{
-				failure.addSuppressed(callbackFailure);
-			}
 			synchronized (this)
 			{
+				transaction.terminal = true;
+				this.pendingTransaction = null;
+				this.terminalOperation = false;
 				this.failed = true;
 			}
-			throw failure;
-		}
-	}
-
-	/** Performs the marker offer while the publisher monitor is held. */
-	private long abortLocked(final PreparedTransaction transaction)
-	{
-		this.ensureOpen();
-		this.validate(transaction);
-		if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
-		try
-		{
-			final long offeredPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.ABORT,
-				transaction.dataLength, transaction.dataChunkCount, 0);
-			transaction.abortAttempted = true;
-			final long position = this.commitPositionAwaiter.applyAsLong(offeredPosition);
-			transaction.abortPosition = position;
-			crashPoint("AFTER_ABORT_OFFERED", transaction.sequence);
-			transaction.terminal = true;
-			this.pendingTransaction = null;
-			return position;
-		}
-		catch (final RuntimeException | Error failure)
-		{
-			transaction.terminal = true;
-			this.pendingTransaction = null;
-			this.failed = true;
+			this.invokeAbortActionAfterFailure(transaction, failure);
 			throw failure;
 		}
 	}
@@ -619,6 +719,39 @@ final class AeronReplicationPublisher implements AutoCloseable
 		return this.offerer.offer(this.envelopeBuffer, encodedLength);
 	}
 
+	private void offerDataChunk(final long sequence, final int payloadLength, final int chunkIndex,
+		final int chunkCount, final int chunkOffset, final int payloadChunkLength, final int payloadCrc32c)
+	{
+		final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.envelopeBuffer, 0,
+			this.clusterId, this.epoch, sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
+			chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
+			AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
+			payloadCrc32c);
+		if (encodedLength > this.maxMessageLength)
+		{
+			throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+		}
+		this.offerer.offer(this.envelopeBuffer, encodedLength);
+	}
+
+	/** Replays an abort callback after a publication failure, retaining callback failures. */
+	private void invokeAbortActionAfterFailure(final PreparedTransaction transaction, final Throwable failure)
+	{
+		final long abortPosition;
+		synchronized (this)
+		{
+			abortPosition = transaction.abortPosition;
+		}
+		try
+		{
+			transaction.invokeAbortAction(abortPosition);
+		}
+		catch (final RuntimeException callbackFailure)
+		{
+			failure.addSuppressed(callbackFailure);
+		}
+	}
+
 	private long offerMarker(final long sequence, final AeronReplicationEnvelope.Kind kind,
 		final int payloadLength, final int chunkCount, final int commitCrc32c)
 	{
@@ -631,6 +764,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 	{
 		if (next < 0) throw new IllegalArgumentException("next sequence must be non-negative");
 		this.ensureNoPendingTransaction();
+		this.ensureNoSequenceReservation();
 		if (next > this.nextSequence) this.nextSequence = next;
 	}
 
@@ -653,6 +787,14 @@ final class AeronReplicationPublisher implements AutoCloseable
 		}
 	}
 
+	private void ensureNoSequenceReservation()
+	{
+		if (this.reservedSequence != -1L)
+		{
+			throw new IllegalStateException("an Aeron sequence reservation is already outstanding");
+		}
+	}
+
 	/** Returns whether an uncommitted prepared transaction owns this publisher. */
 	synchronized boolean hasPendingTransaction()
 	{
@@ -666,7 +808,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 	}
 
 	/** Claims the publisher for its single write coordinator. */
-	synchronized void claimCoordinator(final Object coordinator)
+	synchronized void claimCoordinator(final AeronReplicationWriteCoordinator coordinator)
 	{
 		this.ensureOpen();
 		if (this.coordinatorOwner != null && this.coordinatorOwner != coordinator)
@@ -677,7 +819,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 	}
 
 	/** Releases the coordinator claim during owner disposal. */
-	synchronized void releaseCoordinator(final Object coordinator)
+	synchronized void releaseCoordinator(final AeronReplicationWriteCoordinator coordinator)
 	{
 		if (this.coordinatorOwner == coordinator) this.coordinatorOwner = null;
 	}
@@ -730,10 +872,14 @@ final class AeronReplicationPublisher implements AutoCloseable
 	{
 		final PreparedTransaction pending;
 		final boolean abortPending;
-		synchronized (this)
-		{
-			if (this.closed) return;
-			if (this.closeInProgress)
+			synchronized (this)
+			{
+				if (this.closed) return;
+				if (this.terminalOperation)
+				{
+					throw new IllegalStateException("Aeron publisher terminal operation is still in progress");
+				}
+				if (this.closeInProgress)
 			{
 				throw new IllegalStateException("Aeron publisher close is already in progress");
 			}
@@ -750,21 +896,33 @@ final class AeronReplicationPublisher implements AutoCloseable
 				this.pendingTransaction = null;
 				this.failed = true;
 			}
+			if (this.reservedSequence != -1L)
+			{
+				/* A fence can exist before preparation creates a token.  Keep the
+				 * sequence consumed for fail-closed recovery, but drop the in-memory
+				 * reservation so close retry cannot reuse it. */
+				this.reservedSequence = -1L;
+				this.failed = true;
+			}
 		}
 		RuntimeException failure = null;
 		Error fatalFailure = null;
 		boolean abortCompleted = !abortPending;
-		if (abortPending)
-		{
-			boolean abortMarkerOffered = false;
-			try
+			if (abortPending)
 			{
-					final long offeredPosition = this.offerMarker(pending.sequence, AeronReplicationEnvelope.Kind.ABORT,
-					pending.dataLength, pending.dataChunkCount, 0);
+				boolean abortMarkerOffered = false;
+				try
+				{
+					final long offeredPosition;
+					synchronized (this)
+					{
+						offeredPosition = this.offerMarker(pending.sequence, AeronReplicationEnvelope.Kind.ABORT,
+							pending.dataLength, pending.dataChunkCount, 0);
+						pending.abortAttempted = true;
+					}
 					abortMarkerOffered = true;
-					pending.abortAttempted = true;
 					final long position = this.commitPositionAwaiter.applyAsLong(offeredPosition);
-				pending.abortPosition = position;
+					synchronized (this) { pending.abortPosition = position; }
 				abortCompleted = true;
 				pending.invokeAbortAction(position);
 			}
@@ -777,17 +935,10 @@ final class AeronReplicationPublisher implements AutoCloseable
 				if (abortMarkerOffered)
 				{
 					this.failed = true;
-					try
-					{
-						/* The marker was accepted but its durable position is unknown. A
-						 * coordinator callback records COMMITTING_UNCERTAIN and keeps restart
-						 * on the safe reseed path. */
-						pending.invokeAbortAction(pending.abortPosition);
-					}
-					catch (final RuntimeException | Error callbackFailure)
-					{
-						abortFailure.addSuppressed(callbackFailure);
-					}
+					/* The marker was accepted but its durable position is unknown. A
+					 * coordinator callback records COMMITTING_UNCERTAIN and keeps restart
+					 * on the safe reseed path. */
+					this.invokeAbortActionAfterFailure(pending, abortFailure);
 					/* Aeron accepted the marker, so a second close must never emit a
 					 * contradictory terminal marker.  Its recorded position is unknown,
 					 * therefore the checkpoint callback is intentionally not invoked and
@@ -855,7 +1006,8 @@ final class AeronReplicationPublisher implements AutoCloseable
 					free = !this.envelopeFreed;
 					this.envelopeFreed = true;
 				}
-				if (free) BufferUtil.free(this.envelopeStorage);
+				if (free) this.directBufferCleanup.run();
+				this.cleanable.clean();
 			}
 		}
 		try
@@ -895,7 +1047,7 @@ final class AeronReplicationPublisher implements AutoCloseable
 		private boolean abortActionInvoked;
 		private boolean abortAttempted;
 		private volatile boolean terminal;
-		private volatile long abortPosition = Aeron.NULL_VALUE;
+		private long abortPosition = Aeron.NULL_VALUE;
 
 		private PreparedTransaction(final AeronReplicationPublisher owner, final long sequence, final int dataLength,
 			final int dataChunkCount, final int crc32c)
@@ -914,11 +1066,11 @@ final class AeronReplicationPublisher implements AutoCloseable
 		int dataCrc32c() { return this.crc32c; }
 
 		/**
-	 * Registers a callback for an abort whose publication has been attempted.
-	 * The callback runs synchronously on the caller that completes the abort; a
-	 * late registration is invoked immediately when the publisher already
-	 * completed that path. A position of {@code -1} means the marker was offered
-	 * but its durable Archive position is unknown.
+		 * Registers a callback for an abort whose publication has been attempted.
+		 * The callback runs synchronously on the caller that completes the abort; a
+		 * late registration is invoked immediately when the publisher already
+		 * completed that path. A position of {@code -1} means the marker was offered
+		 * but its durable Archive position is unknown.
 		 *
 		 * @param action receives the recorded abort position
 		 */
@@ -936,7 +1088,12 @@ final class AeronReplicationPublisher implements AutoCloseable
 				invoke = this.terminal && this.abortAttempted && !this.abortActionInvoked;
 				if (invoke) this.abortActionInvoked = true;
 			}
-			if (invoke) action.accept(this.abortPosition);
+			final long position;
+			synchronized (this.owner)
+			{
+				position = this.abortPosition;
+			}
+			if (invoke) action.accept(position);
 		}
 
 		private void invokeAbortAction(final long position)
@@ -952,13 +1109,29 @@ final class AeronReplicationPublisher implements AutoCloseable
 		}
 
 		/**
+		 * Detaches this token without emitting an abort marker. This is used only
+		 * after the local Store accepted data but a later step failed: an abort would
+		 * contradict the accepted Store state, so the publisher is failed closed and
+		 * the durable uncertainty fence is left for restart recovery.
+		 */
+		void abandonWithoutAbort()
+		{
+			synchronized (this.owner)
+			{
+				if (this.terminal) return;
+				this.terminal = true;
+				if (this.owner.pendingTransaction == this) this.owner.pendingTransaction = null;
+				this.owner.failed = true;
+			}
+		}
+
+		/**
 		 * Aborts an abandoned transaction so its sequence is terminated in the log.
 		 * Closing after commit or abort has no effect.
 		 */
 		@Override
 		public void close()
 		{
-			final long position;
 			synchronized (this.owner)
 			{
 				if (this.terminal) return;
@@ -972,21 +1145,8 @@ final class AeronReplicationPublisher implements AutoCloseable
 					if (this.owner.pendingTransaction == this) this.owner.pendingTransaction = null;
 					return;
 				}
-				position = this.owner.abortLocked(this);
 			}
-			/* Run the callback after releasing the publisher monitor. */
-			try
-			{
-				this.invokeAbortAction(position);
-			}
-			catch (final RuntimeException | Error failure)
-			{
-				synchronized (this.owner)
-				{
-					this.owner.failed = true;
-				}
-				throw failure;
-			}
+			this.owner.abort(this);
 		}
 	}
 }

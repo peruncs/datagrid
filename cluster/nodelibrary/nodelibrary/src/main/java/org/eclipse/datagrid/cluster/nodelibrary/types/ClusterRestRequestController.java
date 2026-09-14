@@ -408,7 +408,7 @@ public interface ClusterRestRequestController extends AutoCloseable
 		@Override
 		public boolean postActivateDistributorFinish() throws HttpResponseException
 		{
-			return this.handleRequest(this.storageNodeManager::finishDistributonSwitch);
+			return this.handleRequest(this.storageNodeManager::finishDistributionSwitch);
 		}
 
 		@Override

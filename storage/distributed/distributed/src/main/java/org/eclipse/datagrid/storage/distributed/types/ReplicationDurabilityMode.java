@@ -23,7 +23,5 @@ public enum ReplicationDurabilityMode
 	/** Record the prepared transaction before accepting the local Store enqueue. */
 	ARCHIVE_FIRST,
 	/** Accept the local Store enqueue before recording the transaction; recovery is conservative. */
-	ENQUEUE_THEN_ARCHIVE,
-	/** Reserved for a Store API that reports durable task completion. */
-	LOCAL_DURABLE_FIRST
+	ENQUEUE_THEN_ARCHIVE
 }

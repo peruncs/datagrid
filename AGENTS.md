@@ -17,7 +17,7 @@ Review @docs/aeron-clustering-integration-plan.md for the  genral outline of Aer
 12. Any security gaps.
 13. Any performance issues.
 14. Any threading, races, deadlocks, TOCTOU and data corruption issues.
-15. Robustness inface of network issues, configurable retrys.
+15. Robustness in face of network issues, configurable retrys.
 16. Proper exception design, handling, propagation and reporting.
 17. Correct and informative javadocs, including javadocs for packages (package-info.java) and modules (module-info.java)
 18. Addd ample junit test and simulation coverage, especially since clustering is inolved. 

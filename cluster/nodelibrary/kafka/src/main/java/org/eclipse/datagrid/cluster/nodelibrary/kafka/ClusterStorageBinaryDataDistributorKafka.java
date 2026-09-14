@@ -20,23 +20,21 @@ import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageBinaryDataDistributor;
+import org.eclipse.datagrid.storage.distributed.types.Crc32c;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationRetry;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataChunker;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.kafka.clients.producer.ProducerConfig.*;
 import static org.eclipse.serializer.chars.XChars.notEmpty;
@@ -85,14 +83,17 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 	/** Shared Kafka producer, ordering, failure, and disposal behavior. */
 	abstract class Abstract implements ClusterStorageBinaryDataDistributorKafka
 	{
-		private static final Logger LOG = LoggerFactory.getLogger(ClusterStorageBinaryDataDistributorKafka.class);
+		private static final System.Logger LOG =
+			System.getLogger(ClusterStorageBinaryDataDistributorKafka.class.getName());
 
 		private final String topicName;
 		private final KafkaProducer<String, byte[]> producer;
 		private final AtomicLong messageIndex = new AtomicLong(-1L);
 		private final AtomicLong droppedAfterFailure = new AtomicLong();
 		private final AtomicBoolean ignoreDistribution = new AtomicBoolean();
-		private volatile RuntimeException failure;
+		private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
+		private final Object lifecycleMonitor = new Object();
+		private int activeActions;
 		private volatile boolean disposed;
 		private volatile boolean disposing;
 
@@ -108,7 +109,11 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			properties.putAll(kafkaPropertiesProvider.provide());
 			properties.setProperty(KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
 			properties.setProperty(VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
-			properties.setProperty(COMPRESSION_TYPE_CONFIG, CompressionType.ZSTD.name);
+			properties.putIfAbsent(COMPRESSION_TYPE_CONFIG, CompressionType.ZSTD.name);
+			/* Bound producer construction and acknowledgement separately; the
+			 * Future timeout alone does not bound partitionsFor() or send(). */
+			properties.putIfAbsent(MAX_BLOCK_MS_CONFIG, "30000");
+			properties.putIfAbsent(DELIVERY_TIMEOUT_MS_CONFIG, "35000");
 			KafkaProducer<String, byte[]> created = null;
 			try
 			{
@@ -138,29 +143,42 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		 */
 		protected abstract void execute(Runnable action);
 
+		/** Returns whether a previously failed action may be dropped from a queue.
+		 * @return {@code true} for an asynchronous queue-backed distributor
+		 */
+		protected abstract boolean asynchronous();
+
 		private void distribute(final MessageType messageType, final Binary data)
 		{
 			this.distribute(messageType, data, null);
 		}
 
-		private void distribute(final MessageType messageType, final Binary data, final Runnable cleanup)
+		private void distribute(
+			final MessageType messageType,
+			final Binary data,
+			final Runnable cleanup
+		)
 		{
 			Objects.requireNonNull(data, "data");
-			if (this.disposed || this.disposing)
+			synchronized (this.lifecycleMonitor)
 			{
-				if (cleanup != null) cleanup.run();
-				throw new IllegalStateException(this.disposed ? "Kafka distributor is disposed" : "Kafka distributor is stopping");
-			}
-			if (this.failure != null)
-			{
-				if (cleanup != null) cleanup.run();
-				throw new IllegalStateException("Kafka distributor has failed", this.failure);
-			}
-			if (this.ignoreDistribution.get())
-			{
-				LOG.trace("Ignoring distribution for data of type {}", messageType);
-				if (cleanup != null) cleanup.run();
-				return;
+				if (this.disposed || this.disposing)
+				{
+					if (cleanup != null) cleanup.run();
+					throw new IllegalStateException(this.disposed ? "Kafka distributor is disposed" : "Kafka distributor is stopping");
+				}
+				if (this.failure.get() != null)
+				{
+					if (cleanup != null) cleanup.run();
+					throw new IllegalStateException("Kafka distributor has failed", this.failure.get());
+				}
+				if (this.ignoreDistribution.get())
+				{
+					LOG.log(System.Logger.Level.DEBUG, "Ignoring distribution for data of type " + messageType);
+					if (cleanup != null) cleanup.run();
+					return;
+				}
+				this.activeActions++;
 			}
 			final List<StorageBinaryDataChunker.Chunk> chunks;
 			try
@@ -169,114 +187,174 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 				 * on the caller thread so an asynchronous worker owns byte arrays rather
 				 * than borrowed Serializer buffers. */
 				chunks = StorageBinaryDataChunker.chunk(
-					data, ClusterStorageBinaryDistributedKafka.maxPacketSize());
+					data, KafkaHeaderCodec.maxPacketSize());
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				this.completeAction();
+				throw failure;
 			}
 			finally
 			{
 				if (cleanup != null) cleanup.run();
 			}
+			final AtomicBoolean completed = new AtomicBoolean();
 			try
 			{
 				this.execute(() ->
-					this.tryExecuteDistribution(messageType, chunks));
+				{
+					try
+					{
+						this.tryExecuteDistribution(messageType, chunks);
+					}
+					finally
+					{
+						if (completed.compareAndSet(false, true)) this.completeAction();
+					}
+				});
 			}
 			catch (final RuntimeException | Error submissionFailure)
 			{
-				this.recordFailure(submissionFailure);
+				if (completed.compareAndSet(false, true)) this.completeAction();
 				throw submissionFailure;
+			}
+		}
+
+		private void completeAction()
+		{
+			synchronized (this.lifecycleMonitor)
+			{
+				if (--this.activeActions == 0) this.lifecycleMonitor.notifyAll();
 			}
 		}
 
 		private void tryExecuteDistribution(final MessageType messageType,
 			final List<StorageBinaryDataChunker.Chunk> chunks)
 		{
-			if (this.failure != null)
+			if (this.failure.get() != null)
 			{
+				if (!this.asynchronous())
+					throw new IllegalStateException("Kafka distributor has failed", this.failure.get());
 				final long dropped = this.droppedAfterFailure.incrementAndGet();
-				LOG.warn("Dropping queued Kafka distribution {} after terminal failure", dropped);
+				LOG.log(System.Logger.Level.WARNING,
+					"Dropping queued Kafka distribution " + dropped + " after terminal failure");
 				return;
 			}
 			try
 			{
 				this.executeDistribution(messageType, chunks);
 			}
-			catch (final Throwable t)
+			catch (final RuntimeException | Error failure)
 			{
-				this.recordFailure(t);
-				LOG.error("Kafka distribution failed", t);
+				this.recordFailure(failure);
+				LOG.log(System.Logger.Level.ERROR, "Kafka distribution failed", failure);
 				/* Synchronous callers must observe the same failure that is retained for
-				 * asynchronous health checks.  Async.execute catches this rethrow at its
+				 * asynchronous health checks. Async.execute catches this rethrow at its
 				 * executor boundary; Sync.execute lets it reach distributeData(). */
-				if (t instanceof Error error)
-                    throw error;
-                throw (RuntimeException) t;
-            }
+				throw failure;
+			}
 		}
 
 		/** Records the first terminal distribution failure.
 		 * @param failure terminal failure
 		 */
-		protected final synchronized void recordFailure(final Throwable failure)
+		protected final void recordFailure(final Throwable failure)
 		{
-			if (this.failure == null)
-			{
-				this.failure = failure instanceof RuntimeException runtime
-					? runtime
-					: new IllegalStateException("Kafka distribution failed", failure);
-			}
+			final RuntimeException normalized = failure instanceof RuntimeException runtime
+				? runtime
+				: new IllegalStateException("Kafka distribution failed", failure);
+			this.failure.compareAndSet(null, normalized);
 		}
 
 		/** Claims disposal ownership before an asynchronous worker is drained. */
-		protected final synchronized void beginDisposal()
+		protected final void beginDisposal()
 		{
-			if (this.disposed) return;
-			if (this.disposing) throw new IllegalStateException("Kafka distributor disposal is already in progress");
-			this.disposing = true;
+			synchronized (this.lifecycleMonitor)
+			{
+				if (this.disposed) return;
+				if (this.disposing) throw new IllegalStateException("Kafka distributor disposal is already in progress");
+				this.disposing = true;
+			}
 		}
 
 		/** Reopens admission after a bounded disposal attempt could not stop the worker. */
-		protected final synchronized void cancelDisposal()
+		protected final void cancelDisposal()
 		{
-			this.disposing = false;
-			this.disposed = false;
+			synchronized (this.lifecycleMonitor)
+			{
+				this.disposing = false;
+				this.disposed = false;
+			}
 		}
 
 		/** Releases the disposal claim after the producer has been handled. */
-		protected final synchronized void finishDisposal()
+		protected final void finishDisposal()
 		{
-			this.disposing = false;
+			synchronized (this.lifecycleMonitor) { this.disposing = false; }
+		}
+
+		private void awaitActions()
+		{
+			final long deadline = ReplicationRetry.deadlineNanos(TimeUnit.SECONDS.toNanos(30L));
+			synchronized (this.lifecycleMonitor)
+			{
+				while (this.activeActions != 0)
+				{
+					final long remaining = ReplicationRetry.remainingNanos(deadline);
+					if (remaining <= 0L)
+					{
+						throw new IllegalStateException("Kafka distributor has in-flight sends after disposal timeout");
+					}
+					try
+					{
+						TimeUnit.NANOSECONDS.timedWait(this.lifecycleMonitor, remaining);
+					}
+					catch (final InterruptedException interrupted)
+					{
+						Thread.currentThread().interrupt();
+						throw new IllegalStateException("Interrupted while waiting for Kafka sends", interrupted);
+					}
+				}
+			}
 		}
 
 		private void executeDistribution(final MessageType messageType, final List<StorageBinaryDataChunker.Chunk> chunks)
 		{
+			final long messageIndex = this.messageIndex.incrementAndGet();
+			final var checksum = Crc32c.accumulator();
 			for (final StorageBinaryDataChunker.Chunk chunk : chunks)
 			{
-				if (this.failure != null)
+				final byte[] payload = chunk.bytes();
+				checksum.update(payload, 0, payload.length);
+			}
+			final int messageCrc32c = (int)checksum.getValue();
+			for (final StorageBinaryDataChunker.Chunk chunk : chunks)
+			{
+				if (this.failure.get() != null)
 				{
-					throw new IllegalStateException("Kafka distributor has failed", this.failure);
+					throw new IllegalStateException("Kafka distributor has failed", this.failure.get());
 				}
-				final var kafkaRecord = new ProducerRecord<String, byte[]>(
+				final var kafkaRecord = new ProducerRecord<>(
 					this.topicName, 0, PARTITION_KEY, chunk.bytes());
 
-				final long messageIndex = this.messageIndex.incrementAndGet();
-
-				ClusterStorageBinaryDistributedKafka.addPacketHeaders(
+				KafkaHeaderCodec.addPacketHeaders(
 					kafkaRecord.headers(),
 					messageType,
 					chunk.messageLength(),
 					chunk.index(),
 					chunk.count(),
-					messageIndex
+					messageIndex,
+					messageCrc32c
 				);
 
-				if (LOG.isDebugEnabled() && messageIndex % 10_000 == 0)
+				if (messageIndex % 10_000 == 0)
 				{
-					LOG.debug("Sending kafka packet at message index {}", messageIndex);
+					LOG.log(System.Logger.Level.DEBUG, "Sending kafka packet at message index " + messageIndex);
 				}
 
 				try
 				{
-					this.producer.send(kafkaRecord).get();
+					this.producer.send(kafkaRecord).get(30L, TimeUnit.SECONDS);
 				}
 			catch (final InterruptedException e)
 			{
@@ -289,6 +367,10 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 				if (cause instanceof Error error) throw error;
 				if (cause instanceof RuntimeException runtime) throw runtime;
 				throw new IllegalStateException("Kafka record send failed", cause);
+			}
+			catch (final TimeoutException e)
+			{
+				throw new IllegalStateException("Timed out waiting for Kafka record acknowledgement", e);
 			}
 
 			}
@@ -304,7 +386,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		public void distributeTypeDictionary(final String typeDictionaryData)
 		{
 			final java.nio.ByteBuffer buffer = XMemory.toDirectByteBuffer(
-				ClusterStorageBinaryDistributedKafka.serializeString(typeDictionaryData));
+				KafkaHeaderCodec.serializeString(typeDictionaryData));
 			final Runnable cleanup = releaseOnce(buffer);
 			try
 			{
@@ -334,8 +416,19 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			{
 				throw new IllegalArgumentException("message index must be in [-1, Long.MAX_VALUE)");
 			}
-			LOG.info("Setting distributor message index to {}", index);
-			this.messageIndex.set(index);
+			synchronized (this.lifecycleMonitor)
+			{
+				if (this.activeActions != 0)
+				{
+					throw new IllegalStateException("Kafka message index can only change while the distributor is quiescent");
+				}
+				if (this.disposed || this.disposing)
+				{
+					throw new IllegalStateException("Kafka distributor is not accepting index changes");
+				}
+				LOG.log(System.Logger.Level.INFO, "Setting distributor message index to " + index);
+				this.messageIndex.set(index);
+			}
 		}
 
 		/** Returns the latest packet index; concurrent writes may advance it immediately. */
@@ -348,7 +441,17 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		/** Returns the terminal send failure, or {@code null} while healthy. */
 		public RuntimeException failure()
 		{
-			return this.failure;
+			return this.failure.get();
+		}
+
+		/**
+		 * Returns whether the producer has completed disposal.
+		 *
+		 * @return {@code true} after the producer has completed disposal
+		 */
+		protected final boolean isDisposed()
+		{
+			return this.disposed;
 		}
 
 		@Override
@@ -364,24 +467,32 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		}
 
 		@Override
-		public synchronized void dispose()
+		public void dispose()
 		{
-			if (this.disposed) return;
-			if (!this.disposing) this.disposing = true;
-			this.disposed = true;
-			LOG.trace("Disposing data distributor");
+			this.beginDisposal();
+			if (this.isDisposed()) return;
+			this.disposeClaimed();
+		}
+
+		/** Completes a disposal claim after any asynchronous worker has stopped. */
+		protected final void disposeClaimed()
+		{
+			if (this.isDisposed()) return;
+			LOG.log(System.Logger.Level.DEBUG, "Disposing data distributor");
 			try
 			{
-				this.producer.close();
+				this.awaitActions();
+				synchronized (this.lifecycleMonitor) { this.disposed = true; }
+				this.producer.close(java.time.Duration.ofSeconds(5L));
 			}
 			catch (final RuntimeException | Error failure)
 			{
 				/* A failed close must remain retryable; otherwise a transient broker or
 				 * interrupt leaves the producer permanently owned but unreachable. */
-				this.disposed = false;
-				this.disposing = false;
+				this.cancelDisposal();
 				throw failure;
 			}
+			this.finishDisposal();
 		}
 	}
 
@@ -398,23 +509,32 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 		{
 			action.run();
 		}
+
+		@Override
+		protected boolean asynchronous() { return false; }
 	}
 
 	/** Sends packets on a dedicated executor without blocking the caller. */
-	class Async extends Abstract
-	{
-		private final ExecutorService executor;
+		class Async extends Abstract
+		{
+		private static final int MAX_QUEUED_ACTIONS = 1;
+		private final ThreadPoolExecutor executor;
 
 		private Async(final String topicName, final KafkaPropertiesProvider kafkaPropertiesProvider)
 		{
 			super(topicName, kafkaPropertiesProvider);
-			this.executor = Executors.newSingleThreadExecutor(this::createThread);
+			this.executor = new ThreadPoolExecutor(
+				1, 1, 0L, TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(MAX_QUEUED_ACTIONS),
+				this::createThread,
+				new ThreadPoolExecutor.AbortPolicy());
 		}
 
 		private Thread createThread(final Runnable runnable)
 		{
 			final Thread thread = new Thread(runnable);
 			thread.setName("Eclipse-Datagrid-StorageDistributor-Kafka");
+			thread.setDaemon(true);
 			return thread;
 		}
 
@@ -425,7 +545,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 			 * retained by tryExecuteDistribution; allowing the exception to escape the
 			 * executor would kill the worker and make queued tasks disappear without the
 			 * explicit dropped-after-failure diagnostic. */
-			this.executor.execute(() ->
+			final Runnable guarded = () ->
 			{
 				try
 				{
@@ -434,14 +554,37 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 				catch (final Throwable failure)
 				{
 					recordFailure(failure);
+					if (failure instanceof Error error) throw error;
 				}
-			});
+			};
+			try
+			{
+				this.executor.execute(guarded);
+			}
+			catch (final RejectedExecutionException rejected)
+			{
+				if (this.executor.isShutdown()) throw rejected;
+				try
+				{
+					if (!this.executor.getQueue().offer(guarded, 30L, TimeUnit.SECONDS))
+						throw new RejectedExecutionException("Kafka distributor queue remained full", rejected);
+				}
+				catch (final InterruptedException interrupted)
+				{
+					Thread.currentThread().interrupt();
+					throw new IllegalStateException("Interrupted while waiting for Kafka distributor capacity", interrupted);
+				}
+			}
 		}
 
 		@Override
-		public synchronized void dispose()
+		protected boolean asynchronous() { return true; }
+
+		@Override
+		public void dispose()
 		{
 			this.beginDisposal();
+			if (this.isDisposed()) return;
 			if (!this.executor.isShutdown())
 			{
 				this.executor.shutdown();
@@ -467,14 +610,7 @@ public interface ClusterStorageBinaryDataDistributorKafka extends ClusterStorage
 					throw new IllegalStateException(
 						"Interrupted while stopping Kafka distributor; producer remains open for retry", interrupted);
 				}
-			try
-			{
-				super.dispose();
-			}
-			finally
-			{
-				this.finishDisposal();
-			}
+			this.disposeClaimed();
 		}
 	}
 }

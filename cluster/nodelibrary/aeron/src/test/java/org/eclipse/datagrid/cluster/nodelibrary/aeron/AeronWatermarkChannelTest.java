@@ -20,8 +20,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -29,6 +31,17 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Exercises the deployed reader-to-writer progress stream without reflection. */
 class AeronWatermarkChannelTest
 {
+	@Test
+	void endpointFactoriesRejectMissingAeronOrReceiver()
+	{
+		assertThrows(NullPointerException.class,
+			() -> AeronWatermarkChannel.reader(null, "aeron:ipc", 1));
+		assertThrows(NullPointerException.class,
+			() -> AeronWatermarkChannel.writer(null, "aeron:ipc", 1, (buffer, offset, length) -> { }));
+		assertThrows(NullPointerException.class,
+			() -> AeronWatermarkChannel.writer(null, "aeron:ipc", 1, null));
+	}
+
 	@Test
 	void closeWaitsForAnInProgressReceiverWithoutDeadlocking(@TempDir final Path directory) throws Exception
 	{
@@ -57,7 +70,7 @@ class AeronWatermarkChannelTest
 				});
 			try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 79))
 			{
-				reader.publish(new byte[] { 1 });
+				reader.publish(watermarkBytes());
 				assertTrue(receiverEntered.await(5, TimeUnit.SECONDS));
 				final Thread closer = new Thread(() ->
 				{
@@ -96,7 +109,7 @@ class AeronWatermarkChannelTest
 		{
 			final AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 78);
 			reader.close();
-			assertThrows(IllegalStateException.class, () -> reader.publish(new byte[] { 1 }));
+			assertThrows(IllegalStateException.class, () -> reader.publish(watermarkBytes()));
 			reader.close();
 		}
 	}
@@ -113,7 +126,8 @@ class AeronWatermarkChannelTest
 			final Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()));
 			final AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 81);
 			aeron.close();
-			reader.publish(new byte[] { 1 });
+			assertThrows(IllegalArgumentException.class, () -> reader.publish(new byte[] { 1 }));
+			reader.publish(watermarkBytes());
 			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 			while (reader.failure() == null && System.nanoTime() < deadline)
 			{
@@ -121,6 +135,7 @@ class AeronWatermarkChannelTest
 			}
 			assertNotNull(reader.failure(), "a closed Aeron publication must fail the watermark worker");
 			assertThrows(RuntimeException.class, reader::close);
+			assertDoesNotThrow(reader::close, "a terminal watermark close must be idempotent");
 		}
 	}
 
@@ -152,7 +167,7 @@ class AeronWatermarkChannelTest
 				});
 			try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 80))
 			{
-				reader.publish(new byte[] { 1 });
+				reader.publish(watermarkBytes());
 				assertTrue(receiverEntered.await(5, TimeUnit.SECONDS));
 				final Thread interruptedCloser = new Thread(() ->
 				{
@@ -202,7 +217,7 @@ class AeronWatermarkChannelTest
 				});
 				AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 77))
 			{
-				final byte[] expected = { 1, 2, 3, 4 };
+				final byte[] expected = watermarkBytes();
 				reader.publish(expected);
 				assertTrue(received.await(5, TimeUnit.SECONDS));
 				assertArrayEquals(expected, actual.get());
@@ -210,5 +225,46 @@ class AeronWatermarkChannelTest
 				assertNull(reader.failure());
 			}
 		}
+	}
+
+	@Test
+	void callerOwnedPublishCanBeMixedWithEncodedPublish(@TempDir final Path directory) throws Exception
+	{
+		final MediaDriver.Context context = new MediaDriver.Context()
+			.aeronDirectoryName(directory.resolve("mixed-publish-driver").toString())
+			.dirDeleteOnStart(true)
+			.dirDeleteOnShutdown(true);
+		try (MediaDriver driver = MediaDriver.launch(context);
+			Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName())))
+		{
+			final CountDownLatch firstReceived = new CountDownLatch(1);
+			final CountDownLatch secondReceived = new CountDownLatch(1);
+			final AtomicInteger deliveries = new AtomicInteger();
+			try (AeronWatermarkChannel writer = AeronWatermarkChannel.writer(aeron, "aeron:ipc", 82,
+				(value, offset, length) ->
+				{
+					if (deliveries.getAndIncrement() == 0) firstReceived.countDown();
+					else secondReceived.countDown();
+				});
+				AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 82))
+			{
+				final byte[] callerOwned = watermarkBytes();
+				reader.publish(callerOwned);
+				callerOwned[115] = 99;
+				assertTrue(firstReceived.await(5, TimeUnit.SECONDS));
+				reader.publishEncoded(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+					1, 2, 3, 4, new byte[32]);
+				assertTrue(secondReceived.await(5, TimeUnit.SECONDS),
+					"fixed buffers must remain reusable after caller-owned publish");
+			}
+		}
+	}
+
+	private static byte[] watermarkBytes()
+	{
+		final byte[] bytes = new byte[116];
+		bytes[0] = 1;
+		bytes[115] = 4;
+		return bytes;
 	}
 }

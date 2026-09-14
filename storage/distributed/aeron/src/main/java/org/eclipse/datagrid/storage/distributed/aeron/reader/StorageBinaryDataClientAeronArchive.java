@@ -6,12 +6,14 @@ import io.aeron.archive.client.PersistentSubscription;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationRetry;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataReceiver;
 
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /*-
  * #%L
@@ -51,7 +53,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 	private volatile boolean disposeRequested;
 	private volatile boolean live;
 	private volatile boolean stopAtLatest;
-	private volatile long stopDeadlineNanos;
+	private final AtomicLong stopDeadlineNanos = new AtomicLong();
 	private volatile StorageBinaryDataClient.StopOutcome stopOutcome = StorageBinaryDataClient.StopOutcome.NOT_STARTED;
 
 
@@ -293,7 +295,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 			return;
 		}
 		this.stopAtLatest = false;
-		this.stopDeadlineNanos = 0L;
+		this.stopDeadlineNanos.set(0L);
 		this.live = false;
 		this.stopOutcome = StorageBinaryDataClient.StopOutcome.RUNNING;
 		this.stopped = new CountDownLatch(1);
@@ -321,7 +323,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 					return work;
 				},
 				() -> this.stopAtLatest && this.live && !this.assembler.hasIncompleteTransaction(),
-				() -> this.stopAtLatest && System.nanoTime() >= this.stopDeadlineNanos,
+				() -> this.stopAtLatest && ReplicationRetry.expired(this.stopDeadlineNanos.get()),
 				() ->
 				{
 					this.stopOutcome = StorageBinaryDataClient.StopOutcome.TIMED_OUT;
@@ -392,7 +394,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 			throw new IllegalStateException("Aeron Archive reader is stopping for disposal");
 		}
 		this.stopAtLatest = true;
-		this.stopDeadlineNanos = System.nanoTime() + this.stopTimeoutNanos;
+		this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
 		if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
 	}
 
@@ -544,4 +546,5 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		this.disposed = true;
 		this.stopOutcome = StorageBinaryDataClient.StopOutcome.CLOSED;
 	}
+
 }

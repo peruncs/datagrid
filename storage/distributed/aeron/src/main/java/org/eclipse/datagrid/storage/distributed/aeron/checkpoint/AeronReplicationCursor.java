@@ -14,9 +14,11 @@ package org.eclipse.datagrid.storage.distributed.aeron.checkpoint;
  * #L%
  */
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import org.eclipse.datagrid.storage.distributed.types.Crc32c;
+
 import java.util.UUID;
+
+import static org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronCheckpointCodec.*;
 
 /**
  * The reader's durable place in one Archive recording.
@@ -47,7 +49,8 @@ public record AeronReplicationCursor(
 {
 	private static final int MAGIC = 0x44474143; // DGAC
 	private static final short VERSION = 1;
-	private static final int ENCODED_LENGTH = Integer.BYTES + Short.BYTES * 2 + 16 * 3 + Long.BYTES * 4;
+	private static final int PAYLOAD_LENGTH = Integer.BYTES + Short.BYTES * 2 + UUID_BYTES * 3 + Long.BYTES * 4;
+	private static final int ENCODED_LENGTH = PAYLOAD_LENGTH + Integer.BYTES;
 
 	/** Validates the identities and position carried by the durable cursor. */
 	public AeronReplicationCursor
@@ -59,31 +62,73 @@ public record AeronReplicationCursor(
 		}
 	}
 
-	/** Encodes the complete provider cursor identity for the neutral cursor store. */
+	/**
+	 * Encodes the complete provider cursor identity for the neutral cursor store.
+	 *
+	 * @return serialized cursor bytes
+	 */
 	public byte[] encode()
 	{
-		return ByteBuffer.allocate(ENCODED_LENGTH).order(ByteOrder.BIG_ENDIAN)
-			.putInt(MAGIC).putShort(VERSION).putShort((short)0)
-			.putLong(this.clusterId.getMostSignificantBits()).putLong(this.clusterId.getLeastSignificantBits())
-			.putLong(this.nodeId.getMostSignificantBits()).putLong(this.nodeId.getLeastSignificantBits())
-			.putLong(this.storeGeneration.getMostSignificantBits()).putLong(this.storeGeneration.getLeastSignificantBits())
-			.putLong(this.epoch).putLong(this.recordingId).putLong(this.recordingPosition).putLong(this.sequence)
-			.array();
+		final byte[] encoded = new byte[ENCODED_LENGTH];
+		int offset = 0;
+		offset = putInt(encoded, offset, MAGIC);
+		offset = putShort(encoded, offset, VERSION);
+		offset = putShort(encoded, offset, (short)0);
+		offset = putUuid(encoded, offset, this.clusterId);
+		offset = putUuid(encoded, offset, this.nodeId);
+		offset = putUuid(encoded, offset, this.storeGeneration);
+		offset = putLong(encoded, offset, this.epoch);
+		offset = putLong(encoded, offset, this.recordingId);
+		offset = putLong(encoded, offset, this.recordingPosition);
+		offset = putLong(encoded, offset, this.sequence);
+		putInt(encoded, offset, Crc32c.compute(encoded, 0, PAYLOAD_LENGTH));
+		return encoded;
 	}
 
-	/** Decodes the sole supported Aeron provider-position format. */
+	/**
+	 * Decodes the sole supported Aeron provider-position format.
+	 *
+	 * @param encoded serialized cursor bytes
+	 * @return decoded cursor
+	 */
 	public static AeronReplicationCursor decode(final byte[] encoded)
 	{
 		if (encoded == null) throw new NullPointerException("encoded");
 		if (encoded.length != ENCODED_LENGTH)
 			throw new IllegalArgumentException("invalid Aeron cursor encoding length");
-		final ByteBuffer buffer = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN);
-		if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION || buffer.getShort() != 0)
+		final int expectedCrc = getInt(encoded, PAYLOAD_LENGTH);
+		if (expectedCrc != Crc32c.compute(encoded, 0, PAYLOAD_LENGTH))
+		{
+			throw new IllegalArgumentException("Aeron cursor CRC32C mismatch");
+		}
+		int offset = 0;
+		if (getInt(encoded, offset) != MAGIC)
+		{
 			throw new IllegalArgumentException("unsupported Aeron cursor format");
+		}
+		offset += Integer.BYTES;
+		if (getShort(encoded, offset) != VERSION)
+		{
+			throw new IllegalArgumentException("unsupported Aeron cursor format");
+		}
+		offset += Short.BYTES;
+		if (getShort(encoded, offset) != 0)
+			throw new IllegalArgumentException("unsupported Aeron cursor format");
+		offset += Short.BYTES;
+		final UUID clusterId = getUuid(encoded, offset);
+		offset += UUID_BYTES;
+		final UUID nodeId = getUuid(encoded, offset);
+		offset += UUID_BYTES;
+		final UUID storeGeneration = getUuid(encoded, offset);
+		offset += UUID_BYTES;
+		final long epoch = getLong(encoded, offset);
+		offset += Long.BYTES;
+		final long recordingId = getLong(encoded, offset);
+		offset += Long.BYTES;
+		final long recordingPosition = getLong(encoded, offset);
+		offset += Long.BYTES;
+		final long sequence = getLong(encoded, offset);
 		return new AeronReplicationCursor(
-			new UUID(buffer.getLong(), buffer.getLong()),
-			new UUID(buffer.getLong(), buffer.getLong()),
-			new UUID(buffer.getLong(), buffer.getLong()),
-			buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong());
+			clusterId, nodeId, storeGeneration, epoch, recordingId, recordingPosition, sequence);
 	}
 }

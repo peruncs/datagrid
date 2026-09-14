@@ -18,6 +18,9 @@ import org.eclipse.datagrid.cluster.nodelibrary.types.ClusterStorageBinaryDataDi
 import org.eclipse.serializer.persistence.binary.types.Binary;
 
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 
@@ -31,9 +34,9 @@ final class AeronDistributor implements ClusterStorageBinaryDataDistributor
 {
 	private final BooleanSupplier writer;
 	private final LongConsumer sequenceSynchronizer;
-	private volatile long index = -1L;
-	private volatile boolean ignored;
-	private String dictionary;
+	private final AtomicLong index = new AtomicLong(-1L);
+	private final AtomicBoolean ignored = new AtomicBoolean();
+	private final AtomicReference<String> dictionary = new AtomicReference<>();
 
 	AeronDistributor(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer)
 	{
@@ -44,42 +47,56 @@ final class AeronDistributor implements ClusterStorageBinaryDataDistributor
 	@Override
 	public void messageIndex(final long value)
 	{
+		if (!this.writer.getAsBoolean())
+		{
+			throw new IllegalStateException("Aeron replication message index is writable only by the writer");
+		}
 		if (value < -1 || value == Long.MAX_VALUE)
 			throw new IllegalArgumentException("message index must be in [-1, Long.MAX_VALUE)");
-		this.index = value;
+		this.index.set(value);
 		this.sequenceSynchronizer.accept(value + 1);
 	}
 
 	@Override
-    public long messageIndex() { return this.index; }
-
-    @Override
-    public void ignoreDistribution(final boolean value) { this.ignored = value; }
-
-    @Override
-    public boolean ignoreDistribution() { return this.ignored; }
-
-	@Override
-	public synchronized void distributeTypeDictionary(final String value)
+	public long messageIndex()
 	{
-		this.dictionary = value;
+		return this.index.get();
 	}
 
 	@Override
-	public synchronized String consumeTypeDictionary()
+	public void ignoreDistribution(final boolean value)
 	{
-		final String value = this.dictionary;
-		this.dictionary = null;
-		return value;
+		this.ignored.set(value);
+	}
+
+	@Override
+	public boolean ignoreDistribution()
+	{
+		return this.ignored.get();
+	}
+
+	@Override
+	public void distributeTypeDictionary(final String value)
+	{
+		this.dictionary.set(value);
+	}
+
+	@Override
+	public String consumeTypeDictionary()
+	{
+		return this.dictionary.getAndSet(null);
 	}
 
 	@Override
 	public void distributeData(final Binary data)
 	{
 		Objects.requireNonNull(data, "data");
-		if (this.ignored) return;
+		if (this.ignored.get())
+		{
+			throw new IllegalStateException("Aeron replication distribution is disabled during startup");
+		}
 		if (!this.writer.getAsBoolean()) throw new IllegalStateException("Aeron replication distributor is writer-only");
-		throw new UnsupportedOperationException(
+		throw new IllegalStateException(
 			"Aeron Store binaries must be written through the replication persistence target");
 	}
 

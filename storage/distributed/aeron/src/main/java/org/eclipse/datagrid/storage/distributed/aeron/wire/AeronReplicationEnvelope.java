@@ -18,6 +18,7 @@ import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.datagrid.storage.distributed.types.Crc32c;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationLimits;
 
 import java.nio.ByteOrder;
 import java.util.UUID;
@@ -78,7 +79,7 @@ public final class AeronReplicationEnvelope
 			case 2 -> STORE_BINARY;
 			case 3 -> COMMIT;
 			case 4 -> ABORT;
-			default -> throw new IllegalArgumentException("unknown envelope kind=" + code);
+			default -> throw new ReplicationWireException("unknown envelope kind=" + code);
 			};
 		}
 	}
@@ -96,8 +97,8 @@ public final class AeronReplicationEnvelope
 	/**
 	 * Encodes an envelope into a new byte array.
 	 *
-	 * <p>This allocation-friendly form is intended for tests and compatibility
-	 * callers. The writer uses the direct-buffer overload to keep Store data off
+	 * <p>This allocation-friendly form is intended for tests and small callers.
+	 * The writer uses the direct-buffer overload to keep Store data off
 	 * the heap.</p>
 	 */
 	public static byte[] encode(
@@ -114,6 +115,10 @@ public final class AeronReplicationEnvelope
 	)
 	{
 		if (payload == null) throw new NullPointerException("payload");
+		if (payload.length > ReplicationLimits.MAX_MESSAGE_BYTES)
+		{
+			throw new IllegalArgumentException("envelope payload exceeds replication message limit");
+		}
 		final byte[] encoded = new byte[Math.addExact(HEADER_LENGTH, payload.length)];
 		final UnsafeBuffer target = new UnsafeBuffer(encoded);
 		encode(target, 0, clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
@@ -159,6 +164,51 @@ public final class AeronReplicationEnvelope
 		final int chunkLength
 	)
 	{
+		return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, sequence, kind, payloadLength,
+			chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength,
+			crc32c(payload, payloadOffset, chunkLength));
+	}
+
+	/**
+	 * Encodes an envelope when the caller already computed the payload checksum
+	 * while staging the bytes. This avoids a second full pass over every data
+	 * chunk on the writer hot path.
+	 *
+	 * @param target destination buffer
+	 * @param targetOffset destination offset
+	 * @param clusterId replication cluster identity
+	 * @param epoch writer epoch
+	 * @param sequence transaction sequence
+	 * @param kind envelope kind
+	 * @param payloadLength logical payload length
+	 * @param chunkIndex zero-based chunk index
+	 * @param chunkCount total chunk count
+	 * @param chunkOffset logical payload offset
+	 * @param commitCrc32c complete transaction checksum for terminal markers
+	 * @param payload source payload
+	 * @param payloadOffset source offset
+	 * @param chunkLength bytes in this frame
+	 * @param payloadCrc32c checksum of the staged payload bytes
+	 * @return encoded frame length
+	 */
+	public static int encodeWithPayloadCrc(
+		final MutableDirectBuffer target,
+		final int targetOffset,
+		final UUID clusterId,
+		final long epoch,
+		final long sequence,
+		final Kind kind,
+		final int payloadLength,
+		final int chunkIndex,
+		final int chunkCount,
+		final int chunkOffset,
+		final int commitCrc32c,
+		final DirectBuffer payload,
+		final int payloadOffset,
+		final int chunkLength,
+		final int payloadCrc32c
+	)
+	{
 		validate(clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
 			chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength);
 		final int encodedLength = Math.addExact(HEADER_LENGTH, chunkLength);
@@ -176,7 +226,7 @@ public final class AeronReplicationEnvelope
 		target.putInt(targetOffset + 28, chunkIndex, ByteOrder.BIG_ENDIAN);
 		target.putInt(targetOffset + 32, chunkCount, ByteOrder.BIG_ENDIAN);
 		target.putInt(targetOffset + 36, chunkOffset, ByteOrder.BIG_ENDIAN);
-		target.putInt(targetOffset + 40, crc32c(payload, payloadOffset, chunkLength), ByteOrder.BIG_ENDIAN);
+		target.putInt(targetOffset + 40, payloadCrc32c, ByteOrder.BIG_ENDIAN);
 		target.putInt(targetOffset + 44, commitCrc32c, ByteOrder.BIG_ENDIAN);
 		target.putLong(targetOffset + 48, clusterId.getMostSignificantBits(), ByteOrder.BIG_ENDIAN);
 		target.putLong(targetOffset + 56, clusterId.getLeastSignificantBits(), ByteOrder.BIG_ENDIAN);
@@ -208,7 +258,9 @@ public final class AeronReplicationEnvelope
 	{
 		if (clusterId == null || kind == null || payload == null)
 			throw new NullPointerException("clusterId, kind, and payload are required");
-		if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 || chunkIndex < 0 || chunkCount <= 0 ||
+		if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
+			payloadLength > ReplicationLimits.MAX_MESSAGE_BYTES || chunkIndex < 0 ||
+			chunkCount <= 0 || chunkCount > ReplicationLimits.MAX_PACKET_COUNT ||
 			chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
 			payloadOffset > payload.capacity() - chunkLength)
 		{
@@ -282,22 +334,22 @@ public final class AeronReplicationEnvelope
 		if (source == null || offset < 0 || length < HEADER_LENGTH || length > source.capacity() ||
 			offset > source.capacity() - length)
 		{
-			throw new IllegalArgumentException("truncated envelope");
+			throw new ReplicationWireException("truncated envelope");
 		}
 		if (source.getInt(offset, ByteOrder.BIG_ENDIAN) != MAGIC ||
 			source.getShort(offset + 4, ByteOrder.BIG_ENDIAN) != VERSION)
 		{
-			throw new IllegalArgumentException("unknown DataGrid envelope");
+			throw new ReplicationWireException("unknown DataGrid envelope");
 		}
 		if (source.getInt(offset + HEADER_CRC_OFFSET, ByteOrder.BIG_ENDIAN) !=
 			crc32c(source, offset, HEADER_CRC_OFFSET))
 		{
-			throw new IllegalArgumentException("envelope header CRC32C mismatch");
+			throw new ReplicationWireException("envelope header CRC32C mismatch");
 		}
 		final int kindCode = source.getByte(offset + 6) & 0xff;
 		if (source.getByte(offset + 7) != 0)
 		{
-			throw new IllegalArgumentException("unknown envelope flags");
+			throw new ReplicationWireException("unknown envelope flags");
 		}
 		final Kind kind = Kind.fromCode(kindCode);
 		final long epoch = source.getLong(offset + 8, ByteOrder.BIG_ENDIAN);
@@ -306,42 +358,44 @@ public final class AeronReplicationEnvelope
 		final int chunkIndex = source.getInt(offset + 28, ByteOrder.BIG_ENDIAN);
 		final int chunkCount = source.getInt(offset + 32, ByteOrder.BIG_ENDIAN);
 		final int chunkOffset = source.getInt(offset + 36, ByteOrder.BIG_ENDIAN);
-		if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 || chunkIndex < 0 ||
-			chunkCount <= 0 || chunkIndex >= chunkCount || chunkOffset < 0 ||
+		if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
+			payloadLength > ReplicationLimits.MAX_MESSAGE_BYTES || chunkIndex < 0 ||
+			chunkCount <= 0 || chunkCount > ReplicationLimits.MAX_PACKET_COUNT ||
+			chunkIndex >= chunkCount || chunkOffset < 0 ||
 			(kind != Kind.COMMIT && kind != Kind.ABORT &&
 				(length - HEADER_LENGTH > payloadLength ||
 					(chunkIndex == chunkCount - 1 && (long)chunkOffset + length - HEADER_LENGTH != payloadLength))))
 		{
-			throw new IllegalArgumentException("invalid envelope bounds");
+			throw new ReplicationWireException("invalid envelope bounds");
 		}
 		if ((kind == Kind.COMMIT || kind == Kind.ABORT) && length != HEADER_LENGTH)
 		{
-			throw new IllegalArgumentException("marker carries a payload");
+			throw new ReplicationWireException("marker carries a payload");
 		}
 		if ((kind == Kind.COMMIT || kind == Kind.ABORT) &&
 			(chunkIndex != 0 || chunkOffset != 0 || (kind == Kind.ABORT && source.getInt(offset + 44,
 				ByteOrder.BIG_ENDIAN) != 0)))
 		{
-			throw new IllegalArgumentException("non-canonical terminal marker");
+			throw new ReplicationWireException("non-canonical terminal marker");
 		}
 		final int payloadOnWire = length - HEADER_LENGTH;
 		if (kind != Kind.COMMIT && kind != Kind.ABORT &&
 			((long)chunkOffset + payloadOnWire > payloadLength))
 		{
-			throw new IllegalArgumentException("chunk exceeds logical payload length");
+			throw new ReplicationWireException("chunk exceeds logical payload length");
 		}
 		if (kind != Kind.COMMIT && kind != Kind.ABORT && payloadLength == 0 &&
 			(chunkIndex != 0 || chunkCount != 1 || chunkOffset != 0 || payloadOnWire != 0))
 		{
-			throw new IllegalArgumentException("empty payload must use one canonical chunk");
+			throw new ReplicationWireException("empty payload must use one canonical chunk");
 		}
 		if (kind != Kind.COMMIT && kind != Kind.ABORT && payloadLength > 0 && payloadOnWire == 0)
 		{
-			throw new IllegalArgumentException("non-empty payload chunks must carry bytes");
+			throw new ReplicationWireException("non-empty payload chunks must carry bytes");
 		}
 		if (source.getInt(offset + 40, ByteOrder.BIG_ENDIAN) != crc32c(source, offset + HEADER_LENGTH, payloadOnWire))
 		{
-			throw new IllegalArgumentException("payload CRC32C mismatch");
+			throw new ReplicationWireException("payload CRC32C mismatch");
 		}
 		view.set(source, offset + HEADER_LENGTH, payloadOnWire,
 			source.getLong(offset + 48, ByteOrder.BIG_ENDIAN),
@@ -365,9 +419,10 @@ public final class AeronReplicationEnvelope
 		}
 		final CRC32C crc = DIRECT_CRC.get();
 		crc.reset();
-		/* Agrona's bulk copy keeps this path allocation-free after the first use
-		 * on a polling thread and avoids allocating a ByteBuffer duplicate for
-		 * every decoded fragment. */
+		/* Always use the DirectBuffer abstraction. In addition to working for
+		 * custom implementations, this handles heap, direct, and sliced buffers
+		 * without depending on their backing-buffer coordinate system. The bounded
+		 * thread-local scratch keeps this allocation-free after warm-up. */
 		final byte[] scratch = CRC_SCRATCH.get();
 		for (int copied = 0; copied < length; )
 		{
@@ -385,16 +440,16 @@ public final class AeronReplicationEnvelope
 		private DirectBuffer source;
 		private int payloadOffset;
 		private int payloadLengthOnWire;
-		long clusterMostSignificantBits;
-		long clusterLeastSignificantBits;
-		long epoch;
-		long sequence;
-		Kind kind;
-		int payloadLength;
-		int chunkIndex;
-		int chunkCount;
-		int chunkOffset;
-		int commitCrc32c;
+		private long clusterMostSignificantBits;
+		private long clusterLeastSignificantBits;
+		private long epoch;
+		private long sequence;
+		private Kind kind;
+		private int payloadLength;
+		private int chunkIndex;
+		private int chunkCount;
+		private int chunkOffset;
+		private int commitCrc32c;
 
 		public EnvelopeView()
 		{
@@ -458,10 +513,38 @@ public final class AeronReplicationEnvelope
 	{
 		public Envelope
 		{
-			if (payload == null) throw new NullPointerException("payload");
+			if (clusterId == null || kind == null || payload == null)
+			{
+				throw new NullPointerException("envelope identity, kind, and payload are required");
+			}
+			if (payloadLength < 0 || payloadLength > ReplicationLimits.MAX_MESSAGE_BYTES ||
+				chunkIndex < 0 || chunkCount <= 0 || chunkCount > ReplicationLimits.MAX_PACKET_COUNT ||
+				chunkIndex >= chunkCount || chunkOffset < 0)
+			{
+				throw new ReplicationWireException("invalid owned envelope bounds");
+			}
+			if (kind == Kind.COMMIT || kind == Kind.ABORT)
+			{
+				if (chunkIndex != 0 || chunkOffset != 0 || payload.length != 0 ||
+					(kind == Kind.ABORT && commitCrc32c != 0))
+				{
+					throw new ReplicationWireException("invalid owned terminal envelope");
+				}
+			}
+			else if (payloadLength == 0)
+			{
+				if (chunkIndex != 0 || chunkCount != 1 || chunkOffset != 0 || payload.length != 0)
+				{
+					throw new ReplicationWireException("invalid owned empty payload envelope");
+				}
+			}
+			else if (payload.length == 0 || (long)chunkOffset + payload.length > payloadLength)
+			{
+				throw new ReplicationWireException("owned envelope payload exceeds logical bounds");
+			}
 		}
 
-		/** Returns a defensive copy for codec tests and compatibility callers. */
+		/** Returns a defensive copy so callers cannot mutate the decoded envelope. */
 		@Override
 		public byte[] payload()
 		{

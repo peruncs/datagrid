@@ -332,7 +332,7 @@ class ProviderCrashMatrixIT
 						assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase3 child did not exit");
 					}
 					outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
-					if (!outcome.contains("Active media driver detected")) break;
+					if (!isActiveDriverRetry(outcome)) break;
 					assertEquals(storeSizeBeforeRetry, fileSize(base.resolve("store.records")),
 						"recovery retry changed the Store fixture before startup " + restartAttempts);
 					Thread.sleep(1_000L);
@@ -431,7 +431,7 @@ class ProviderCrashMatrixIT
 					Thread.sleep(1_000L);
 				}
 				while (System.nanoTime() < restartDeadline);
-				assertFalse(outcome.contains("Active media driver detected"),
+				assertFalse(isActiveDriverRetry(outcome),
 					"recording never became stopped before phase2 restart deadline; attempts=" + restartAttempts +
 						" outcome=" + outcome + "\n" + diagnostics(base.resolve("control")));
 				final CrashOutcome result;
@@ -485,6 +485,14 @@ class ProviderCrashMatrixIT
 				}
 			}
 		}
+	}
+
+	private static boolean isActiveDriverRetry(final String outcome)
+	{
+		final String normalized = outcome.toLowerCase(java.util.Locale.ROOT);
+		return normalized.contains("active media driver") ||
+			normalized.contains("active mark file") ||
+			normalized.contains("driver directory remained active");
 	}
 
 	private static void assertNotHarnessError(final CrashOutcome outcome, final String raw)

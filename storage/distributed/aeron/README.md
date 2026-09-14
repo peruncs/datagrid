@@ -37,7 +37,9 @@ The envelope is deliberately not an SBE-generated second payload format:
 Eclipse Serializer's `Binary` bytes remain the authoritative Store payload,
 while the fixed header supplies only framing and validation. Configure
 `AeronReplicationConfiguration` (or the provider environment variables) for
-term length, MTU, chunk size, transaction limit, and offer timeout. Chunk size
+term length, MTU, chunk size, transaction limit, publication timeout, and the
+independent Archive recording-start, recorded-position, recording-stop, and
+reader-stop timeouts. Chunk size
 must remain below `min(termLength / 8, 16 MiB) - 64`; Aeron fragments each
 envelope as needed for the selected MTU.
 

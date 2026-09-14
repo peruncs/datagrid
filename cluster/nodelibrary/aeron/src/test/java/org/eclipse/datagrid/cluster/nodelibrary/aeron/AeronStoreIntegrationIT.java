@@ -1,18 +1,25 @@
 package org.eclipse.datagrid.cluster.nodelibrary.aeron;
 
+import org.apache.lucene.document.Document;
 import org.eclipse.datagrid.cluster.nodelibrary.types.*;
+import org.eclipse.datagrid.storage.distributed.index.ClusterStoreIndexes;
 import org.eclipse.datagrid.storage.distributed.types.DistributedStorage;
 import org.eclipse.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataClient;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.store.gigamap.jvector.*;
+import org.eclipse.store.gigamap.lucene.DocumentPopulator;
+import org.eclipse.store.gigamap.lucene.LuceneIndex;
+import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -22,8 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /*-
  * #%L
@@ -42,6 +48,120 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Exercises the Aeron target with a real four-channel Embedded Store across a restart. */
 class AeronStoreIntegrationIT
 {
+	private static ReplicationCursor latest(final ClusterReplicationTransport transport) throws Exception
+	{
+		final ReplicationPositionProvider positionProvider = transport.positionProvider("store");
+		positionProvider.init();
+		return positionProvider.latest();
+	}
+
+	private static long latestSequence(final ClusterReplicationTransport transport) throws Exception
+	{
+		final ReplicationPositionProvider positionProvider = transport.positionProvider("store");
+		positionProvider.init();
+		return positionProvider.latestSequence();
+	}
+
+	@Test
+	void aeronReplicatesEmbeddedLuceneAndVectorStateToAReader() throws Exception
+	{
+		final Path root = Files.createTempDirectory("dg-aeron-index-readers-");
+		final UUID clusterId = UUID.randomUUID();
+		final UUID generation = UUID.randomUUID();
+		final int controlPort = freePort();
+		final int livePort = freePort();
+		final int watermarkPort = freePort();
+		final Path writerStore = root.resolve("writer-store");
+		final Path readerStore = root.resolve("reader-store");
+		try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+			properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
+				controlPort, livePort, watermarkPort)))
+		{
+			final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+			final IndexRoot initial = new IndexRoot();
+			initial.articles = GigaMap.New();
+			configureIndexes(initial.articles);
+			final EmbeddedStorageManager seeded = startIndex(writerStore, initial, distributor,
+				writerTransport.persistenceTargetFactory("store", distributor));
+			seeded.storeRoot();
+			seeded.shutdown();
+			final ReplicationCursor baseline = latest(writerTransport);
+			copyDirectory(writerStore, readerStore);
+
+			final EmbeddedStorageManager writer = startExistingIndex(writerStore, distributor,
+				writerTransport.persistenceTargetFactory("store", distributor));
+			try (ReaderNode reader = ReaderNode.open(root.resolve("reader"), readerStore, "reader",
+				UUID.randomUUID(), clusterId, generation, baseline, controlPort, livePort, watermarkPort))
+			{
+				reader.start();
+				reader.awaitLive();
+				final IndexRoot writerRoot = writer.root();
+				writerRoot.articles.add(
+					new IndexedArticle("Aeron", "embedded replication", new float[]{1.0f, 0.0f, 0.0f}));
+				writerRoot.articles.store();
+			final ReplicationCursor target = latest(writerTransport);
+				reader.await(target);
+				reader.stopAtLatest();
+				reader.close();
+
+				try (EmbeddedStorageManager restartedReader = foundation(readerStore).start())
+				{
+					final IndexRoot imported = restartedReader.root();
+					ClusterStoreIndexes.validateVectorIndexes(imported.articles);
+					final LuceneIndex<IndexedArticle> text = luceneIndex(imported.articles);
+					final VectorIndices<IndexedArticle> vectors = imported.articles.index().get(VectorIndices.Category());
+					assertEquals(1, text.query("body:replication").size(), "Lucene state did not follow the Aeron transaction");
+					final VectorSearchResult<IndexedArticle> nearest = vectors.get("articles")
+						.search(new float[]{1.0f, 0.0f, 0.0f}, 4);
+					assertEquals(1, nearest.size(), "JVector state did not follow the Aeron transaction");
+					assertEquals("Aeron", nearest.toList().get(0).entity().title);
+				}
+			}
+			finally
+			{
+				writer.shutdown();
+			}
+		}
+		finally
+		{
+			delete(root);
+		}
+	}
+
+	private static void configureIndexes(final GigaMap<IndexedArticle> articles)
+	{
+		ClusterStoreIndexes.registerLucene(articles, new IndexedArticlePopulator());
+		final VectorIndices<IndexedArticle> vectors = articles.index().register(VectorIndices.Category());
+		ClusterStoreIndexes.addVector(vectors, "articles", VectorIndexConfiguration.builder()
+			.dimension(3).similarityFunction(VectorSimilarityFunction.COSINE).build(), new IndexedArticleVectorizer());
+	}
+
+	@SuppressWarnings("unchecked") // Lucene's class token cannot retain its entity type.
+	private static LuceneIndex<IndexedArticle> luceneIndex(final GigaMap<IndexedArticle> articles)
+	{
+		return articles.index().get(LuceneIndex.class);
+	}
+
+	private static EmbeddedStorageManager startIndex(
+		final Path path,
+		final IndexRoot root,
+		final StorageBinaryDataDistributor distributor,
+		final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory)
+	{
+		final EmbeddedStorageFoundation<?> foundation = foundation(path);
+		DistributedStorage.configureWriting(foundation, distributor, targetFactory);
+		return foundation.start(root);
+	}
+
+	private static EmbeddedStorageManager startExistingIndex(
+		final Path path,
+		final StorageBinaryDataDistributor distributor,
+		final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory)
+	{
+		final EmbeddedStorageFoundation<?> foundation = foundation(path);
+		DistributedStorage.configureWriting(foundation, distributor, targetFactory);
+		return foundation.start();
+	}
 	@Test
 	void ordinaryAndBackupReadersImportRealStoreDataAndResumeFromAtomicCursors() throws Exception
 	{
@@ -70,7 +190,7 @@ class AeronStoreIntegrationIT
 				writerTransport.persistenceTargetFactory("store", distributor));
 			seeded.storeRoot();
 			seeded.shutdown();
-			final ReplicationCursor baseline = writerTransport.positionProvider("store").latest();
+			final ReplicationCursor baseline = latest(writerTransport);
 			copyDirectory(writerStore, ordinaryStore);
 			copyDirectory(writerStore, backupStore);
 
@@ -82,7 +202,7 @@ class AeronStoreIntegrationIT
 			writerRoot.payload = new byte[256 * 1024];
 			java.util.Arrays.fill(writerRoot.payload, (byte)0x5a);
 			writer.storeAll(List.of(writerRoot, writerRoot.values, writerRoot.objects));
-			final ReplicationCursor firstTarget = writerTransport.positionProvider("store").latest();
+			final ReplicationCursor firstTarget = latest(writerTransport);
 
 			replicateAndVerify(root.resolve("ordinary-reader"), ordinaryStore, "reader", ordinaryReaderId,
 				clusterId, generation, baseline, firstTarget, controlPort, livePort, watermarkPort,
@@ -90,16 +210,15 @@ class AeronStoreIntegrationIT
 
 			writerRoot.values.add("restart-update");
 			writer.store(writerRoot.values);
-			final ReplicationCursor secondTarget = writerTransport.positionProvider("store").latest();
+			final ReplicationCursor secondTarget = latest(writerTransport);
 			final Path ordinaryCursor = root.resolve("ordinary-reader/cursor");
-			final MessageInfo persisted;
-			try (StoredMessageInfoManager cursorManager = StoredMessageInfoManager.NewAtomic(
-				ordinaryCursor, MessageInfoParser.New()))
+			final ReplicationCursor persisted;
+			try (StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(ordinaryCursor))
 			{
 				persisted = cursorManager.get();
 			}
 			replicateAndVerify(root.resolve("ordinary-reader"), ordinaryStore, "reader", ordinaryReaderId,
-				clusterId, generation, cursor(persisted), secondTarget, controlPort, livePort, watermarkPort,
+				clusterId, generation, persisted, secondTarget, controlPort, livePort, watermarkPort,
 				retentionSecret, retentionReaders, "restart-update", false);
 
 			replicateAndVerify(root.resolve("backup-reader"), backupStore, "backup-reader", backupReaderId,
@@ -116,17 +235,16 @@ class AeronStoreIntegrationIT
 				org.eclipse.datagrid.cluster.nodelibrary.types.ReplicationLogRetention.MaintenanceResult.Status.DELETED,
 				writerTransport.retention().deleteThrough(secondTarget).status(),
 				"authenticated quorum must permit online purge at a complete segment boundary");
-			final MessageInfo postRetentionStart;
-			try (StoredMessageInfoManager cursorManager = StoredMessageInfoManager.NewAtomic(
-				ordinaryCursor, MessageInfoParser.New()))
+			final ReplicationCursor postRetentionStart;
+			try (StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(ordinaryCursor))
 			{
 				postRetentionStart = cursorManager.get();
 			}
 			writerRoot.values.add("post-retention-update");
 			writer.store(writerRoot.values);
-			final ReplicationCursor postRetentionTarget = writerTransport.positionProvider("store").latest();
+			final ReplicationCursor postRetentionTarget = latest(writerTransport);
 			replicateAndVerify(root.resolve("ordinary-reader"), ordinaryStore, "reader", ordinaryReaderId,
-				clusterId, generation, cursor(postRetentionStart), postRetentionTarget, controlPort, livePort, watermarkPort,
+				clusterId, generation, postRetentionStart, postRetentionTarget, controlPort, livePort, watermarkPort,
 				retentionSecret, retentionReaders, "post-retention-update", false);
 			writer.shutdown();
 		}
@@ -159,7 +277,7 @@ class AeronStoreIntegrationIT
 		try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(
 			properties(readerRoot, clusterId, nodeId, generation, role, -1L,
 				controlPort, livePort, watermarkPort, retentionSecret, retentionReaders));
-			StoredMessageInfoManager cursorManager = StoredMessageInfoManager.NewAtomic(cursorPath, MessageInfoParser.New()))
+			StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(cursorPath))
 		{
 			final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
 			final EmbeddedStorageManager reader = readerFoundation.start();
@@ -169,7 +287,7 @@ class AeronStoreIntegrationIT
 			final ClusterStorageBinaryDataPacketAcceptor acceptor = ClusterStorageBinaryDataPacketAcceptor.New(merger);
 			final ClusterStorageBinaryDataClient client = transport.client(acceptor, "store", new AfterDataMessageConsumedListener()
 			{
-				@Override public void onChange(final MessageInfo info) { cursorManager.set(info); }
+				@Override public void onApplied(final ReplicationCursor cursor) { cursorManager.set(cursor); }
 				@Override public void close() { }
 			},
 				startingCursor, "backup-reader".equals(role));
@@ -177,14 +295,14 @@ class AeronStoreIntegrationIT
 			{
 				client.start();
 				final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-				while (client.messageInfo().messageIndex() < target.logicalSequence() && client.failure() == null &&
+				while (client.cursor().logicalSequence() < target.logicalSequence() && client.failure() == null &&
 					System.nanoTime() < deadline)
 				{
 					Thread.onSpinWait();
 					java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
 				}
 				if (client.failure() != null) throw client.failure();
-				assertEquals(target.logicalSequence(), client.messageInfo().messageIndex(),
+				assertEquals(target.logicalSequence(), client.cursor().logicalSequence(),
 					role + " did not reach the writer boundary");
 				acceptor.awaitApplied();
 				client.stopAtLatestMessage();
@@ -202,7 +320,7 @@ class AeronStoreIntegrationIT
 				acceptor.dispose();
 				reader.shutdown();
 			}
-			assertEquals(target.logicalSequence(), cursorManager.get().messageIndex(),
+			assertEquals(target.logicalSequence(), cursorManager.get().logicalSequence(),
 				role + " did not persist its atomic cursor");
 		}
 
@@ -247,7 +365,7 @@ class AeronStoreIntegrationIT
 				writerTransport.persistenceTargetFactory("store", distributor));
 			seeded.storeRoot();
 			seeded.shutdown();
-			final ReplicationCursor baseline = writerTransport.positionProvider("store").latest();
+			final ReplicationCursor baseline = latest(writerTransport);
 			copyDirectory(writerStore, ordinaryStore);
 			copyDirectory(writerStore, backupStore);
 
@@ -268,7 +386,7 @@ class AeronStoreIntegrationIT
 				writerRoot.values.add("concurrent-broadcast");
 				writerRoot.objects.add(new NewType("concurrent-dictionary"));
 				writer.storeAll(List.of(writerRoot, writerRoot.values, writerRoot.objects));
-				final ReplicationCursor firstTarget = writerTransport.positionProvider("store").latest();
+				final ReplicationCursor firstTarget = latest(writerTransport);
 
 				ordinary.await(firstTarget);
 				backup.await(firstTarget);
@@ -276,18 +394,18 @@ class AeronStoreIntegrationIT
 				assertTrue(backup.root().values.contains("concurrent-broadcast"));
 				assertEquals("concurrent-dictionary", ordinary.root().objects.get(0).value);
 				assertEquals("concurrent-dictionary", backup.root().objects.get(0).value);
-				assertEquals(firstTarget.logicalSequence(), ordinary.persistedCursor().messageIndex());
-				assertEquals(firstTarget.logicalSequence(), backup.persistedCursor().messageIndex());
+				assertEquals(firstTarget.logicalSequence(), ordinary.persistedCursor().logicalSequence());
+				assertEquals(firstTarget.logicalSequence(), backup.persistedCursor().logicalSequence());
 
 				/* A stopped reader must not affect another reader's live subscription. */
 				ordinary.stopAtLatest();
 				ordinary.close();
 				writerRoot.values.add("surviving-reader-broadcast");
 				writer.store(writerRoot.values);
-				final ReplicationCursor secondTarget = writerTransport.positionProvider("store").latest();
+				final ReplicationCursor secondTarget = latest(writerTransport);
 				backup.await(secondTarget);
 				assertTrue(backup.root().values.contains("surviving-reader-broadcast"));
-				assertEquals(secondTarget.logicalSequence(), backup.persistedCursor().messageIndex());
+				assertEquals(secondTarget.logicalSequence(), backup.persistedCursor().logicalSequence());
 				backup.stopAtLatest();
 			}
 			finally
@@ -301,11 +419,211 @@ class AeronStoreIntegrationIT
 		}
 	}
 
-	static ReplicationCursor cursor(final MessageInfo info)
+	/**
+	 * Exercises the production-shaped topology: one writer, three independent
+	 * readers, four Store channels, and indexes that are rebuilt from the
+	 * replicated object graph.  One reader is stopped and restarted from its
+	 * durable cursor while the other two continue consuming, which makes a
+	 * reader lifecycle race visible instead of testing only a happy-path replay.
+	 */
+	@Test
+	@Timeout(value = 90, unit = TimeUnit.SECONDS)
+	void oneWriterReplicatesRealStoreIndexesToThreeReadersAcrossRestart() throws Exception
 	{
-		return new ReplicationCursor(info.transport(), info.storeGeneration(), info.messageIndex(), info.providerPosition());
+		final Path root = Files.createTempDirectory("dg-aeron-three-readers-");
+		final UUID clusterId = UUID.randomUUID();
+		final UUID generation = UUID.randomUUID();
+		final int controlPort = freePort();
+		final int livePort = freePort();
+		final int watermarkPort = freePort();
+		final Path writerStore = root.resolve("writer-store");
+		final Path[] readerStores = {
+			root.resolve("reader-1-store"), root.resolve("reader-2-store"), root.resolve("reader-3-store")
+		};
+		final Path[] readerNodes = {
+			root.resolve("reader-1"), root.resolve("reader-2"), root.resolve("reader-3")
+		};
+		final UUID[] readerIds = {UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID()};
+		final AtomicInteger maximumChannels = new AtomicInteger();
+		final long[] convergenceNanos = new long[4];
+
+		try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+			properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
+				controlPort, livePort, watermarkPort)))
+		{
+			final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+			final IndexRoot initial = new IndexRoot();
+			initial.articles = GigaMap.New();
+			configureIndexes(initial.articles);
+			for (int i = 0; i < 32; i++)
+			{
+				initial.articles.add(new IndexedArticle(
+					"seed-" + i, "seed-vector-" + i, new float[]{i + 1.0f, 1.0f, 0.0f}));
+			}
+			final long mutableId = initial.articles.add(
+				new IndexedArticle("mutable-seed", "mutable-old", new float[]{0.0f, 1.0f, 1.0f}));
+			final long removedId = initial.articles.add(
+				new IndexedArticle("removeMe", "removeMe", new float[]{0.0f, 0.5f, 1.0f}));
+			final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory = delegate ->
+				writerTransport.persistenceTargetFactory("store", distributor).apply(new PersistenceTarget<>()
+				{
+					@Override
+					public void write(final Binary data)
+					{
+						final int[] channels = {0};
+						data.iterateChannelChunks(ignored -> channels[0]++);
+						maximumChannels.accumulateAndGet(channels[0], Math::max);
+						delegate.write(data);
+					}
+
+					@Override
+					public boolean isWritable()
+					{
+						return delegate.isWritable();
+					}
+				});
+			final EmbeddedStorageManager seeded = startIndex(writerStore, initial, distributor, targetFactory);
+			seeded.storeRoot();
+			seeded.shutdown();
+			assertTrue(maximumChannels.get() >= 4,
+				"the real Store fixture must emit all four configured channels");
+
+			final ReplicationCursor baseline = latest(writerTransport);
+			for (final Path readerStore : readerStores) copyDirectory(writerStore, readerStore);
+			final EmbeddedStorageManager writer = startExistingIndex(writerStore, distributor,
+				writerTransport.persistenceTargetFactory("store", distributor));
+			final ReaderNode[] readers = new ReaderNode[readerStores.length];
+			try
+			{
+				for (int i = 0; i < readers.length; i++)
+				{
+					readers[i] = ReaderNode.open(readerNodes[i], readerStores[i], "reader", readerIds[i],
+						clusterId, generation, baseline, controlPort, livePort, watermarkPort);
+					readers[i].start();
+				}
+				for (final ReaderNode reader : readers) reader.awaitLive();
+
+				final IndexRoot writerRoot = (IndexRoot)writer.root();
+				for (int update = 0; update < convergenceNanos.length; update++)
+				{
+					final String suffix = "reader-broadcast-" + update;
+					final String body = "readerbroadcast" + update;
+					final float[] vector = new float[]{update + 1.0f, 0.0f, 1.0f};
+					writerRoot.articles.add(new IndexedArticle(suffix, body, vector));
+					if (update == 2)
+					{
+						writerRoot.articles.update(mutableId, article ->
+						{
+							article.title = "mutable-updated";
+							article.body = "mutable-new-body";
+							article.vector = new float[]{0.0f, 0.0f, 1.0f};
+						});
+					}
+					if (update == 3) writerRoot.articles.removeById(removedId);
+					final long started = System.nanoTime();
+					writerRoot.articles.store();
+					final ReplicationCursor target = latest(writerTransport);
+					for (final ReaderNode reader : readers) reader.await(target);
+					convergenceNanos[update] = System.nanoTime() - started;
+					for (final ReaderNode reader : readers)
+					{
+						reader.assertHealthy();
+					assertEquals(target.logicalSequence(), reader.persistedCursor().logicalSequence(),
+							"reader cursor advanced before its Store materialization completed");
+						assertGraphState(reader, suffix, body);
+						if (update == 2) assertGraphState(reader, "mutable-updated", "mutable-new-body");
+						if (update == 3) assertGraphMissing(reader, "removeMe");
+					}
+
+					if (update == 1)
+					{
+						final ReplicationCursor restartCursor = readers[0].persistedCursor();
+						readers[0].stopAtLatest();
+						readers[0].close();
+						readers[0] = ReaderNode.open(readerNodes[0], readerStores[0], "reader", readerIds[0],
+							clusterId, generation, restartCursor, controlPort, livePort, watermarkPort);
+						readers[0].start();
+						readers[0].awaitLive();
+					}
+				}
+				/* Embedded indexes are Store-graph state, so verify their durable search
+				 * view after every reader has crossed the same terminal boundary and been
+				 * cleanly stopped.  This also catches a cursor that advanced before the
+				 * index state became durable. */
+				for (final ReaderNode reader : readers)
+					if (reader != null && reader.isRunning()) reader.stopAtLatest();
+				for (final ReaderNode reader : readers) if (reader != null) reader.close();
+				for (final Path readerStore : readerStores)
+					try (EmbeddedStorageManager restarted = foundation(readerStore).start())
+					{
+						assertIndexState(restarted.root(), "reader-broadcast-3", "readerbroadcast3",
+							new float[]{4.0f, 0.0f, 1.0f});
+						assertIndexState(restarted.root(), "mutable-updated", "mutable-new-body",
+							new float[]{0.0f, 0.0f, 1.0f});
+						assertIndexMissing(restarted.root(), "removeMe");
+					}
+
+				final long[] sorted = convergenceNanos.clone();
+				Arrays.sort(sorted);
+				System.out.printf(Locale.ROOT,
+					"Aeron 1-writer/3-reader Store+Lucene+JVector: p50-ms=%.1f p99-ms=%.1f max-channels=%d%n",
+					sorted[sorted.length / 2] / 1_000_000.0,
+					sorted[sorted.length - 1] / 1_000_000.0,
+					maximumChannels.get());
+			}
+			finally
+			{
+				for (final ReaderNode reader : readers)
+				{
+					if (reader != null && reader.isRunning()) reader.stopAtLatest();
+					if (reader != null) reader.close();
+				}
+				writer.shutdown();
+			}
+		}
+		finally
+		{
+			delete(root);
+		}
 	}
 
+	private static void assertGraphState(final ReaderNode reader, final String title, final String body)
+	{
+		final IndexRoot imported = (IndexRoot)reader.rootObject();
+		final AtomicBoolean found = new AtomicBoolean();
+		imported.articles.iterate(article ->
+		{
+			if (title.equals(article.title) && body.equals(article.body)) found.set(true);
+		});
+		assertTrue(found.get(), "reader Store graph missed " + title);
+	}
+
+	private static void assertGraphMissing(final ReaderNode reader, final String title)
+	{
+		final IndexRoot imported = (IndexRoot)reader.rootObject();
+		final AtomicBoolean found = new AtomicBoolean();
+		imported.articles.iterate(article -> { if (title.equals(article.title)) found.set(true); });
+		assertFalse(found.get(), "reader Store graph retained deleted " + title);
+	}
+
+	private static void assertIndexState(
+		final IndexRoot imported, final String title, final String body, final float[] vector)
+	{
+		assertNotNull(imported.articles, "reader Store root lost its indexed GigaMap");
+		final LuceneIndex<IndexedArticle> text = luceneIndex(imported.articles);
+		assertEquals(1, text.query("body:" + body).size(),
+			"reader Lucene index missed " + body + " (articles=" + imported.articles.size() + ")");
+		final VectorIndices<IndexedArticle> vectors = imported.articles.index().get(VectorIndices.Category());
+		final VectorSearchResult<IndexedArticle> nearest = vectors.get("articles").search(vector, 1);
+		assertEquals(1, nearest.size(), "reader JVector index missed " + body);
+		assertEquals(title, nearest.toList().get(0).entity().title);
+	}
+
+	private static void assertIndexMissing(final IndexRoot imported, final String title)
+	{
+		final LuceneIndex<IndexedArticle> text = luceneIndex(imported.articles);
+		assertEquals(0, text.query("title:" + title).size(), "reader Lucene index retained deleted " + title);
+	}
 
 	@Test
 	void fourChannelStoreTransactionSurvivesProviderRestart() throws Exception
@@ -354,7 +672,7 @@ class AeronStoreIntegrationIT
 					manager.shutdown();
 				}
 				assertTrue(sawFourChannels.get(), "the real Store transaction must cross all four configured channels");
-				firstSequence = transport.positionProvider("store").latestSequence();
+				firstSequence = latestSequence(transport);
 				assertTrue(firstSequence >= 0, "real Store write did not reach the Aeron terminal checkpoint");
 			}
 
@@ -366,7 +684,7 @@ class AeronStoreIntegrationIT
 			final Root resumed = manager.root();
 				resumed.values.add("after-restart");
 				manager.store(resumed.values);
-				assertTrue(transport.positionProvider("store").latestSequence() > firstSequence,
+				assertTrue(latestSequence(transport) > firstSequence,
 					"the restarted real Store did not publish a later Aeron transaction");
 				manager.shutdown();
 			}
@@ -581,9 +899,9 @@ class AeronStoreIntegrationIT
 					case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> root.resolve("archive").toString();
 					case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> root.resolve("checkpoint/writer.checkpoint").toString();
 					case "ECLIPSE_DATAGRID_AERON_RECORDING_ID" -> Long.toString(recordingId);
-					case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH" -> "65536";
+					case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH",
+						"ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH" -> "65536";
 					case "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE" -> "4096";
-					case "ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH" -> "65536";
 					case "ECLIPSE_DATAGRID_AERON_EXTERNAL_ARCHIVE" -> Boolean.toString(!"writer".equals(role));
 					case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> "writer".equals(role)
 						? "aeron:udp?control=localhost:" + livePort +
@@ -638,7 +956,7 @@ class AeronStoreIntegrationIT
 	private static final class ReaderNode implements AutoCloseable
 	{
 		private final ClusterReplicationTransport transport;
-		private final StoredMessageInfoManager cursorManager;
+		private final StoredReplicationCursorManager cursorManager;
 		private final EmbeddedStorageManager storage;
 		private final ClusterStorageBinaryDataPacketAcceptor acceptor;
 		private final ClusterStorageBinaryDataClient client;
@@ -661,8 +979,7 @@ class AeronStoreIntegrationIT
 				nodeRoot, clusterId, nodeId, generation, role, -1L, controlPort, livePort, watermarkPort));
 			try
 			{
-				this.cursorManager = StoredMessageInfoManager.NewAtomic(
-					nodeRoot.resolve("cursor"), MessageInfoParser.New());
+				this.cursorManager = StoredReplicationCursorManager.NewAtomic(nodeRoot.resolve("cursor"));
 				final EmbeddedStorageFoundation<?> foundation = foundation(storePath);
 				this.storage = foundation.start();
 				final ClusterStorageBinaryDataMerger merger = ClusterStorageBinaryDataMerger.New(
@@ -671,7 +988,7 @@ class AeronStoreIntegrationIT
 				this.acceptor = ClusterStorageBinaryDataPacketAcceptor.New(merger);
 				this.client = this.transport.client(this.acceptor, "store", new AfterDataMessageConsumedListener()
 				{
-					@Override public void onChange(final MessageInfo info) { ReaderNode.this.cursorManager.set(info); }
+					@Override public void onApplied(final ReplicationCursor cursor) { ReaderNode.this.cursorManager.set(cursor); }
 					@Override public void close() { }
 				}, startingCursor, "backup-reader".equals(role));
 			}
@@ -721,16 +1038,28 @@ class AeronStoreIntegrationIT
 		void await(final ReplicationCursor target)
 		{
 			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L);
-			while (this.client.messageInfo().messageIndex() < target.logicalSequence() &&
+			while (this.client.cursor().logicalSequence() < target.logicalSequence() &&
 				this.client.failure() == null && System.nanoTime() < deadline)
 			{
 				Thread.onSpinWait();
 				java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
 			}
 			if (this.client.failure() != null) throw this.client.failure();
-			assertEquals(target.logicalSequence(), this.client.messageInfo().messageIndex(),
+			assertEquals(target.logicalSequence(), this.client.cursor().logicalSequence(),
 				"reader did not resolve the writer transaction");
 			this.acceptor.awaitApplied();
+		}
+
+		void assertHealthy()
+		{
+			assertNull(this.client.failure(), "reader reported a terminal failure");
+			assertTrue(this.client.isRunning(), "reader stopped while the writer was live");
+			assertTrue(this.client.isLive(), "reader lost its live Aeron image");
+		}
+
+		boolean isRunning()
+		{
+			return this.client.isRunning();
 		}
 
 		void stopAtLatest()
@@ -741,6 +1070,10 @@ class AeronStoreIntegrationIT
 			{
 				java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
 			}
+			if (this.client.failure() != null)
+			{
+				throw new AssertionError("reader failed while stopping", this.client.failure());
+			}
 			assertEquals(StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY,
 				this.client.stopOutcome(), "reader did not stop at a resolved boundary");
 		}
@@ -750,7 +1083,12 @@ class AeronStoreIntegrationIT
 			return this.storage.root();
 		}
 
-		MessageInfo persistedCursor()
+		Object rootObject()
+		{
+			return this.storage.root();
+		}
+
+		ReplicationCursor persistedCursor()
 		{
 			return this.cursorManager.get();
 		}
@@ -794,5 +1132,43 @@ class AeronStoreIntegrationIT
 		public String value;
 
 		NewType(final String value) { this.value = value; }
+	}
+
+	public static final class IndexRoot
+	{
+		public GigaMap<IndexedArticle> articles;
+	}
+
+	public static final class IndexedArticle
+	{
+		public String title;
+		public String body;
+		public float[] vector;
+
+		IndexedArticle(final String title, final String body, final float[] vector)
+		{
+			this.title = title;
+			this.body = body;
+			this.vector = vector;
+		}
+	}
+
+	private static final class IndexedArticlePopulator extends DocumentPopulator<IndexedArticle>
+	{
+		@Override
+		public void populate(final Document document, final IndexedArticle article)
+		{
+			document.add(createTextField("title", article.title));
+			document.add(createTextField("body", article.body));
+		}
+	}
+
+	private static final class IndexedArticleVectorizer extends Vectorizer<IndexedArticle>
+	{
+		@Override
+		public float[] vectorize(final IndexedArticle article)
+		{
+			return article.vector;
+		}
 	}
 }

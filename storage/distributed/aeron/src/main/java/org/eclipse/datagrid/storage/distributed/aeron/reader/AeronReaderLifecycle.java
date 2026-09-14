@@ -16,6 +16,7 @@ package org.eclipse.datagrid.storage.distributed.aeron.reader;
 
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationRetry;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -118,6 +119,10 @@ final class AeronReaderLifecycle
 	)
 	{
 		if (timeoutNanos <= 0L) throw new IllegalArgumentException("timeoutNanos must be positive");
+		if (active == null || closeSubscription == null)
+			throw new NullPointerException("active and closeSubscription");
+		if (thread != null && stopped == null)
+			throw new NullPointerException("stopped latch is required for a polling thread");
 		active.set(false);
 		RuntimeException failure = null;
 		if (thread != null)
@@ -130,10 +135,10 @@ final class AeronReaderLifecycle
 				throw new IllegalStateException("cannot dispose Aeron reader from its polling thread");
 			}
 			thread.interrupt();
-			final long deadline = System.nanoTime() + timeoutNanos;
+			final long deadline = ReplicationRetry.deadlineNanos(timeoutNanos);
 			try
 			{
-				final long remaining = deadline - System.nanoTime();
+				final long remaining = ReplicationRetry.remainingNanos(deadline);
 				if (remaining <= 0L || !stopped.await(remaining, java.util.concurrent.TimeUnit.NANOSECONDS))
 				{
 					failure = new IllegalStateException("Aeron reader polling thread did not stop");
@@ -143,7 +148,7 @@ final class AeronReaderLifecycle
 					/* The latch is released from the polling thread's finally block. Use
 					 * the same deadline for the tiny interval between countDown() and
 					 * Thread termination; an unbounded join defeats the shutdown budget. */
-					final long joinNanos = deadline - System.nanoTime();
+					final long joinNanos = ReplicationRetry.remainingNanos(deadline);
 					if (joinNanos <= 0L)
 					{
 						failure = new IllegalStateException("Aeron reader polling thread did not stop");
@@ -184,4 +189,5 @@ final class AeronReaderLifecycle
 			throw failure;
 		}
 	}
+
 }

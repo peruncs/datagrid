@@ -18,5 +18,7 @@
  * factories keep one neutral cluster foundation, storage manager, and update
  * handler graph for the application context. They must not create a second
  * node graph outside that context.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.cluster.nodelibrary.micronaut.types;

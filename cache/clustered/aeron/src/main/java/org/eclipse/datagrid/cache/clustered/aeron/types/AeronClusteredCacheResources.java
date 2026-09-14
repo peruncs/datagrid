@@ -19,16 +19,16 @@ import io.aeron.ConcurrentPublication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
-import org.agrona.ErrorHandler;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Owns the Aeron client, optional embedded driver, publication, and
@@ -49,9 +49,8 @@ import java.util.Objects;
  */
 final class AeronClusteredCacheResources implements AutoCloseable
 {
-	private static final Logger logger = LoggerFactory.getLogger(AeronClusteredCacheResources.class);
-	private static final ErrorHandler ERROR_HANDLER =
-		failure -> logger.error("Aeron clustered-cache transport error", failure);
+	private static final System.Logger LOGGER =
+		System.getLogger(AeronClusteredCacheResources.class.getName());
 
 	private final String aeronDirectory;
 	private final String channel;
@@ -60,11 +59,13 @@ final class AeronClusteredCacheResources implements AutoCloseable
 	private final boolean embeddedDriver;
 
 	private String resolvedAeronDirectory;
+	private boolean generatedAeronDirectory;
 	private Aeron aeron;
 	private MediaDriver mediaDriver;
 	private ConcurrentPublication publication;
 	private Subscription subscription;
 	private boolean closed;
+	private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
 
 	/**
 	 * Creates the resource owner with no connection yet.
@@ -141,44 +142,24 @@ final class AeronClusteredCacheResources implements AutoCloseable
 	synchronized void closePublication()
 	{
 		final ConcurrentPublication current = this.publication;
-		this.publication = null;
-		this.closeResource(current == null ? null : current::close);
+		if (current != null)
+		{
+			current.close();
+			this.publication = null;
+		}
+		this.closeIfUnused();
 	}
 
 	/** Closes the subscription; releases Aeron when no other resource remains open. */
 	synchronized void closeSubscription()
 	{
 		final Subscription current = this.subscription;
-		this.subscription = null;
-		this.closeResource(current == null ? null : current::close);
-	}
-
-	private void closeResource(final Runnable closeResource)
-	{
-		Throwable failure = null;
-		if (closeResource != null)
+		if (current != null)
 		{
-			try
-			{
-				closeResource.run();
-			}
-			catch (final Throwable closeFailure)
-			{
-				failure = closeFailure;
-			}
+			current.close();
+			this.subscription = null;
 		}
-		try
-		{
-			this.closeIfUnused();
-		}
-		catch (final Throwable closeFailure)
-		{
-			failure = append(failure, closeFailure);
-		}
-		if (failure != null)
-		{
-			throw rethrowAsRuntime(failure);
-		}
+		this.closeIfUnused();
 	}
 
 	private void ensureConnected()
@@ -191,33 +172,87 @@ final class AeronClusteredCacheResources implements AutoCloseable
 		{
 			return;
 		}
-		if (this.embeddedDriver && this.mediaDriver == null)
+		try
 		{
-			this.ensureDirectory();
-			final MediaDriver.Context context = new MediaDriver.Context()
-				.dirDeleteOnStart(false)
-				.dirDeleteOnShutdown(true)
-				.threadingMode(ThreadingMode.SHARED)
-				.errorHandler(ERROR_HANDLER);
-			if (this.aeronDirectory != null)
+			if (this.embeddedDriver && this.mediaDriver == null)
 			{
-				context.aeronDirectoryName(this.aeronDirectory);
+				this.ensureDirectory();
+				final MediaDriver.Context context = new MediaDriver.Context()
+					.dirDeleteOnStart(false)
+					/* The directory may be configured outside the application and can
+					 * contain unrelated state. Never delete it as a close side effect. */
+					.dirDeleteOnShutdown(false)
+					.threadingMode(ThreadingMode.SHARED)
+					.errorHandler(this::recordFailure);
+				if (this.aeronDirectory != null)
+				{
+					context.aeronDirectoryName(this.aeronDirectory);
+				}
+				this.mediaDriver = MediaDriver.launchEmbedded(context);
+				this.resolvedAeronDirectory = this.mediaDriver.aeronDirectoryName();
+				this.generatedAeronDirectory = this.aeronDirectory == null;
+				this.hardenDirectory(this.resolvedAeronDirectory);
 			}
-			this.mediaDriver = MediaDriver.launchEmbedded(context);
-			this.resolvedAeronDirectory = this.mediaDriver.aeronDirectoryName();
-			this.hardenDirectory(this.resolvedAeronDirectory);
+			final Aeron.Context context = new Aeron.Context()
+				.driverTimeoutMs(this.driverTimeoutMillis)
+				.errorHandler(this::recordFailure)
+				.subscriberErrorHandler(this::recordFailure);
+			final String directory =
+				this.resolvedAeronDirectory != null ? this.resolvedAeronDirectory : this.aeronDirectory;
+			if (directory != null)
+			{
+				context.aeronDirectoryName(directory);
+			}
+			this.aeron = Aeron.connect(context);
 		}
-		final Aeron.Context context = new Aeron.Context()
-			.driverTimeoutMs(this.driverTimeoutMillis)
-			.errorHandler(ERROR_HANDLER)
-			.subscriberErrorHandler(ERROR_HANDLER);
-		final String directory =
-			this.resolvedAeronDirectory != null ? this.resolvedAeronDirectory : this.aeronDirectory;
-		if (directory != null)
+		catch (final RuntimeException | Error failure)
 		{
-			context.aeronDirectoryName(directory);
+			/* this.aeron is still null here: the only assignment above either
+			 * succeeded (no catch) or threw before publishing the client. Only
+			 * an embedded driver started earlier in this method can need cleanup. */
+			if (this.mediaDriver != null)
+			{
+				try
+				{
+					this.mediaDriver.close();
+					this.mediaDriver = null;
+					this.deleteGeneratedDirectory();
+					this.resolvedAeronDirectory = null;
+				}
+				catch (final Throwable closeFailure)
+				{
+					failure.addSuppressed(closeFailure);
+				}
+			}
+			if (failure instanceof final Error error)
+			{
+				throw error;
+			}
+			throw (RuntimeException)failure;
 		}
-		this.aeron = Aeron.connect(context);
+	}
+
+	/** Returns the first terminal driver/client failure, if one was reported. */
+	synchronized RuntimeException failure()
+	{
+		return this.failure.get();
+	}
+
+	/** Returns whether this owner has completed its terminal close. */
+	synchronized boolean isClosed()
+	{
+		return this.closed;
+	}
+
+	/** Retains the first transport failure so senders and receivers can fail closed. */
+	private void recordFailure(final Throwable failure)
+	{
+		final RuntimeException normalized = failure instanceof RuntimeException runtime
+			? runtime : new IllegalStateException("Aeron clustered-cache transport failed", failure);
+		if (this.failure.compareAndSet(null, normalized))
+		{
+			LOGGER.log(System.Logger.Level.ERROR, "Aeron clustered-cache transport error", failure);
+		}
 	}
 
 	private void closeIfUnused()
@@ -239,30 +274,36 @@ final class AeronClusteredCacheResources implements AutoCloseable
 		{
 			return;
 		}
-		this.closed = true;
-		final Aeron currentAeron = this.aeron;
-		this.aeron = null;
-		final MediaDriver currentDriver = this.mediaDriver;
-		this.mediaDriver = null;
-		this.resolvedAeronDirectory = null;
-
+		/* Never close the client or embedded driver underneath an owner that still
+		 * holds a publication/subscription. Provider shutdown disposes those handles
+		 * first; rejecting an out-of-order close turns accidental use-after-close
+		 * into a retryable lifecycle error instead of corrupting an active poller. */
+		if (this.publication != null || this.subscription != null)
+		{
+			throw new IllegalStateException(
+				"cannot close Aeron clustered-cache resources while publication or subscription is open");
+		}
 		Throwable failure = null;
-		if (currentAeron != null)
+		if (this.aeron != null)
 		{
 			try
 			{
-				currentAeron.close();
+				this.aeron.close();
+				this.aeron = null;
 			}
 			catch (final Throwable closeFailure)
 			{
 				failure = closeFailure;
 			}
 		}
-		if (currentDriver != null)
+		if (this.mediaDriver != null)
 		{
 			try
 			{
-				currentDriver.close();
+				this.mediaDriver.close();
+				this.mediaDriver = null;
+				this.deleteGeneratedDirectory();
+				this.resolvedAeronDirectory = null;
 			}
 			catch (final Throwable closeFailure)
 			{
@@ -273,6 +314,7 @@ final class AeronClusteredCacheResources implements AutoCloseable
 		{
 			throw rethrowAsRuntime(failure);
 		}
+		this.closed = true;
 	}
 
 	/** Aggregates a close failure with an earlier one. */
@@ -313,6 +355,11 @@ final class AeronClusteredCacheResources implements AutoCloseable
 		final Path path = Paths.get(this.aeronDirectory);
 		try
 		{
+			if (Files.isSymbolicLink(path) || Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
+				!Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+			{
+				throw new IOException("Aeron driver path is not a real directory: " + path);
+			}
 			try
 			{
 				Files.createDirectories(path,
@@ -320,6 +367,8 @@ final class AeronClusteredCacheResources implements AutoCloseable
 			}
 			catch (final UnsupportedOperationException ignored)
 			{
+				LOGGER.log(System.Logger.Level.WARNING,
+					"Aeron clustered-cache driver directory does not support POSIX permissions: " + path);
 				Files.createDirectories(path);
 			}
 			try
@@ -328,12 +377,36 @@ final class AeronClusteredCacheResources implements AutoCloseable
 			}
 			catch (final UnsupportedOperationException ignored)
 			{
-				/* Non-POSIX filesystem. */
+				LOGGER.log(System.Logger.Level.WARNING,
+					"Aeron clustered-cache driver directory permissions cannot be hardened on this filesystem: " + path);
 			}
 		}
 		catch (final IOException failure)
 		{
 			throw new IllegalStateException("cannot create or protect Aeron driver directory " + path, failure);
+		}
+	}
+
+	/** Deletes only the private directory generated by this resource owner. */
+	private void deleteGeneratedDirectory()
+	{
+		if (!this.generatedAeronDirectory || this.resolvedAeronDirectory == null) return;
+		final Path generated = Paths.get(this.resolvedAeronDirectory);
+		try
+		{
+			if (Files.exists(generated, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+			{
+				try (final var paths = Files.walk(generated))
+				{
+					final List<Path> ordered = paths.sorted(Comparator.reverseOrder()).toList();
+					for (final Path path : ordered) Files.deleteIfExists(path);
+				}
+			}
+			this.generatedAeronDirectory = false;
+		}
+		catch (final IOException failure)
+		{
+			throw new IllegalStateException("cannot delete generated Aeron directory " + generated, failure);
 		}
 	}
 
@@ -346,7 +419,9 @@ final class AeronClusteredCacheResources implements AutoCloseable
 		}
 		catch (final UnsupportedOperationException ignored)
 		{
-			/* Non-POSIX filesystem. */
+			LOGGER.log(System.Logger.Level.WARNING,
+				"Aeron clustered-cache generated driver directory permissions cannot be hardened on this filesystem: " +
+					directory);
 		}
 		catch (final IOException failure)
 		{

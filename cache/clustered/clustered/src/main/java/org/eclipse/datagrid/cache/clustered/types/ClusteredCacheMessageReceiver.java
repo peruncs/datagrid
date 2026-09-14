@@ -20,9 +20,12 @@ import org.eclipse.serializer.typing.Disposable;
  * This receiver listens for remote cache invalidations.
  *
  * <p>{@link #start()} begins delivery after construction. Disposal stops
- * delivery and releases the underlying transport resources. A receiver is
- * single-use: after disposal it cannot be started again; create a new receiver
- * from the provider.</p>
+ * delivery and releases the underlying transport resources. If the polling
+ * callback is still blocked when the bounded stop wait expires, disposal
+ * throws and leaves the transport owned by this receiver for a retry; callers
+ * must not close the cache manager underneath it. A receiver is single-use:
+ * after disposal it cannot be started again; create a new receiver from the
+ * provider.</p>
  */
 public interface ClusteredCacheMessageReceiver extends Disposable
 {
@@ -34,14 +37,13 @@ public interface ClusteredCacheMessageReceiver extends Disposable
 	 *
 	 * <p>Implementations report {@code false} before {@link #start()} and after
 	 * {@link #dispose()}, and also after a terminal transport failure so a node
-	 * serving stale timestamps is observable.</p>
+	 * serving stale timestamps is observable. A receiver may also stop on a
+	 * valid-message application failure; callers must inspect {@link #failure()}
+	 * before declaring the cache healthy.</p>
 	 *
 	 * @return {@code true} while the receiver is running
 	 */
-	default boolean isRunning()
-	{
-		return false;
-	}
+	boolean isRunning();
 
 	/**
 	 * Returns the terminal failure that stopped this receiver, or {@code null}
@@ -52,8 +54,5 @@ public interface ClusteredCacheMessageReceiver extends Disposable
 	 *
 	 * @return terminal failure, or {@code null}
 	 */
-	default RuntimeException failure()
-	{
-		return null;
-	}
+	RuntimeException failure();
 }

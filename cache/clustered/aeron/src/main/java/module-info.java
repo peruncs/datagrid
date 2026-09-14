@@ -18,8 +18,9 @@
  * contract. This module supplies the Aeron implementation selected through
  * {@code ClusteredCacheMessageComProvider}. It is a drop-in alternative to the
  * Kafka adapter: the sender is synchronous and fails the local operation when
- * the invalidation cannot be published, while the receiver tolerates and skips
- * a malformed frame. It is independent of the Store replication transport.</p>
+ * the invalidation cannot be published, while the receiver fails closed on
+ * malformed frames or when a valid invalidation cannot be applied. It is
+ * independent of the Store replication transport.</p>
  *
  * <p>Cache invalidation is an N-writer/N-reader broadcast (the Store
  * 1-writer/N-reader constraint does not apply). The default channel is
@@ -35,7 +36,6 @@ module org.eclipse.datagrid.cache.clustered.aeron
 {
 	requires org.eclipse.datagrid.cache.clustered;
 	requires org.eclipse.serializer;
-	requires org.slf4j;
 	requires cache.api;
 	requires io.aeron.client;
 	requires io.aeron.driver;

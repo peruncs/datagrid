@@ -20,10 +20,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageAcceptor;
-import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageReceiver;
-import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageSender;
-import org.eclipse.datagrid.cache.clustered.types.TimestampsRegionUpdateMessage;
+import org.eclipse.datagrid.cache.clustered.types.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -33,26 +30,17 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.eclipse.datagrid.cache.clustered.test.ClusteredCacheTestSupport.publish;
 import static org.eclipse.datagrid.cache.clustered.test.ClusteredCacheTestSupport.serializer;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /** Verifies the Aeron clustered-cache provider over a real embedded MediaDriver. */
 class AeronClusteredCacheMessageComProviderTest
@@ -201,15 +189,16 @@ class AeronClusteredCacheMessageComProviderTest
 		final CountDownLatch selfReceived = new CountDownLatch(1);
 		final Map<String, Object> properties = properties(root.resolve("driver"));
 		properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
+		final var serializer = serializer();
 
 		final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
 		final ClusteredCacheMessageReceiver receiver =
-			provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1), selfReceived));
+			provider.provideMessageReceiver(properties, serializer, acceptor(new ArrayBlockingQueue<>(1), selfReceived));
 		try
 		{
 			receiver.start();
 			final ClusteredCacheMessageSender<Object, Object> sender =
-				provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+				provider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
 			try
 			{
 				publish(sender, EventType.CREATED, "cache", "table", 7L);
@@ -272,6 +261,51 @@ class AeronClusteredCacheMessageComProviderTest
 	}
 
 	@Test
+	void recreatingAProviderKeepsSequenceContinuity(@TempDir final Path root) throws Exception
+	{
+		try (MediaDriver driver = launchDriver(root))
+		{
+			final String nodeId = UUID.randomUUID().toString();
+			final Map<String, Object> senderProperties = properties(root.resolve("driver"));
+			senderProperties.put(AeronClusteredConfigurationPropertyNames.NODE_ID, nodeId);
+			final Map<String, Object> observerProperties = new HashMap<>(senderProperties);
+			observerProperties.remove(AeronClusteredConfigurationPropertyNames.NODE_ID);
+			final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(4);
+			final AeronClusteredCacheMessageComProvider observerProvider =
+				new AeronClusteredCacheMessageComProvider();
+			final ClusteredCacheMessageReceiver observer = observerProvider.provideMessageReceiver(
+				observerProperties, serializer(), acceptor(received));
+			try
+			{
+				observer.start();
+				final var firstProvider = new AeronClusteredCacheMessageComProvider();
+				final var first = firstProvider.provideUpdateTimestampsCacheMessageSender(senderProperties, serializer());
+				publish(first, EventType.CREATED, "cache", "before-recreate", 1L);
+				assertNotNull(received.poll(10, TimeUnit.SECONDS));
+				first.dispose();
+
+				final var secondProvider = new AeronClusteredCacheMessageComProvider();
+				final var second = secondProvider.provideUpdateTimestampsCacheMessageSender(senderProperties, serializer());
+				try
+				{
+					publish(second, EventType.CREATED, "cache", "after-recreate", 2L);
+					assertNotNull(received.poll(10, TimeUnit.SECONDS));
+					assertEquals(0L, ((AeronClusteredCacheMessageReceiver)observer).gaps(),
+						"provider recreation must not reset a live sender incarnation sequence");
+				}
+				finally
+				{
+					second.dispose();
+				}
+			}
+			finally
+			{
+				observer.dispose();
+			}
+		}
+	}
+
+	@Test
 	void senderFailsWhenNoPeerIsConnected(@TempDir final Path root)
 	{
 		final Map<String, Object> properties = properties(root.resolve("driver"));
@@ -291,11 +325,61 @@ class AeronClusteredCacheMessageComProviderTest
 		finally
 		{
 			sender.dispose();
+			assertEquals(0, ((AeronClusteredCacheMessageSender)sender).scratchBufferCount(),
+				"sender disposal must release every callback-thread scratch buffer");
 		}
 	}
 
 	@Test
-	void malformedFrameIsSkippedAndLaterInvalidationsStillArrive(@TempDir final Path root) throws Exception
+	void senderDisposeDoesNotCloseAnInFlightPublication(@TempDir final Path root) throws Exception
+	{
+		final Map<String, Object> properties = properties(root.resolve("driver"));
+		properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
+		properties.put(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, "6000");
+		final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
+		final AeronClusteredCacheMessageSender sender = (AeronClusteredCacheMessageSender)
+			provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+		final AtomicReference<Throwable> publishFailure = new AtomicReference<>();
+		final Thread publisher = new Thread(() ->
+		{
+			try
+			{
+				publish(sender, EventType.CREATED, "cache", "table", 1L);
+			}
+			catch (final Throwable failure)
+			{
+				publishFailure.set(failure);
+			}
+		}, "blocked-cache-sender-publish-test");
+		try
+		{
+			publisher.start();
+			final long offerDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+			while (sender.offerRetries() == 0L && System.nanoTime() < offerDeadline)
+			{
+				LockSupport.parkNanos(100_000L);
+			}
+			assertTrue(sender.offerRetries() > 0L, "publish must be in the retry loop before disposal starts");
+			assertThrows(IllegalStateException.class, sender::dispose,
+				"disposal must not close a publication while a listener is publishing");
+			publisher.join(8_000L);
+			assertFalse(publisher.isAlive(), "the bounded publish timeout must eventually release the sender");
+			assertInstanceOf(CacheEntryListenerException.class, publishFailure.get(),
+				"the disconnected publication must fail the cache operation");
+		}
+		finally
+		{
+			if (publisher.isAlive())
+			{
+				publisher.interrupt();
+				publisher.join(1_000L);
+			}
+			sender.dispose();
+		}
+	}
+
+	@Test
+	void malformedFrameFailsClosedBeforeLaterInvalidations(@TempDir final Path root) throws Exception
 	{
 		try (MediaDriver driver = launchDriver(root))
 		{
@@ -320,6 +404,15 @@ class AeronClusteredCacheMessageComProviderTest
 					final UnsafeBuffer truncated =
 						new UnsafeBuffer(new byte[AeronClusteredCacheMessageCodec.HEADER_LENGTH - 1]);
 					raw.offer(truncated, 0, truncated.capacity());
+					final AeronClusteredCacheMessageReceiver aeronReceiver =
+						(AeronClusteredCacheMessageReceiver)receiver;
+					final long failureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+					while (aeronReceiver.failure() == null && System.nanoTime() < failureDeadline)
+					{
+						LockSupport.parkNanos(100_000L);
+					}
+					assertNotNull(aeronReceiver.failure(), "malformed input must fail the volatile receiver closed");
+					assertFalse(aeronReceiver.isRunning());
 
 					final AeronClusteredCacheMessageComProvider senderProvider =
 						new AeronClusteredCacheMessageComProvider();
@@ -334,13 +427,100 @@ class AeronClusteredCacheMessageComProviderTest
 						sender.dispose();
 					}
 
-					final TimestampsRegionUpdateMessage message = received.poll(10, TimeUnit.SECONDS);
-					assertNotNull(message, "a malformed frame must not stop later invalidations");
-					assertEquals(9L, message.timestamp());
+					assertNull(received.poll(1, TimeUnit.SECONDS),
+						"the receiver must not apply frames after malformed input");
 				}
 			}
 			finally
 			{
+				receiver.dispose();
+			}
+		}
+	}
+
+	@Test
+	void timedOutOfferDoesNotConsumeASequence(@TempDir final Path root) throws Exception
+	{
+		try (MediaDriver driver = launchDriver(root))
+		{
+			final Map<String, Object> properties = properties(root.resolve("driver"));
+			properties.put(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, "1");
+			final var serializer = serializer();
+			final AeronClusteredCacheMessageComProvider senderProvider =
+				new AeronClusteredCacheMessageComProvider();
+			final ClusteredCacheMessageSender<Object, Object> sender =
+				senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+			try
+			{
+				assertThrows(CacheEntryListenerException.class,
+					() -> publish(sender, EventType.CREATED, "cache", "before-connect", 1L),
+					"an offer with no subscription must time out");
+
+				final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(4);
+				final AeronClusteredCacheMessageComProvider receiverProvider =
+					new AeronClusteredCacheMessageComProvider();
+				final ClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
+					properties, serializer, acceptor(received));
+				try
+				{
+					receiver.start();
+					publish(sender, EventType.CREATED, "cache", "after-connect", 2L);
+					final TimestampsRegionUpdateMessage message = received.poll(10, TimeUnit.SECONDS);
+					assertNotNull(message, "the first successful offer must reach the receiver");
+					assertEquals("after-connect", message.tableName());
+					assertEquals(0L, ((AeronClusteredCacheMessageReceiver)receiver).gaps(),
+						"a failed offer must not create a sequence gap");
+				}
+				finally
+				{
+					receiver.dispose();
+				}
+			}
+			finally
+			{
+				sender.dispose();
+			}
+		}
+	}
+
+	@Test
+	void acceptorFailureStopsReceiverAndIsObservable(@TempDir final Path root)
+	{
+		try (MediaDriver driver = launchDriver(root))
+		{
+			final Map<String, Object> properties = properties(root.resolve("driver"));
+			final ClusteredCacheMessageComProvider receiverProvider =
+				new AeronClusteredCacheMessageComProvider();
+			final ClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
+				properties,
+				serializer(),
+				new ClusteredCacheMessageAcceptor(null)
+				{
+					@Override
+					public void accept(final TimestampsRegionUpdateMessage message)
+					{
+						throw new IllegalStateException("cache apply failed");
+					}
+				});
+			receiver.start();
+			final AeronClusteredCacheMessageComProvider senderProvider =
+				new AeronClusteredCacheMessageComProvider();
+			final ClusteredCacheMessageSender<Object, Object> sender =
+				senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+			try
+			{
+				publish(sender, EventType.CREATED, "cache", "table", 1L);
+				final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+				while (receiver.failure() == null && System.nanoTime() < deadline)
+				{
+					LockSupport.parkNanos(10_000L);
+				}
+				assertNotNull(receiver.failure(), "a valid-message application failure must be observable");
+				assertFalse(receiver.isRunning(), "a receiver with an application failure must stop polling");
+			}
+			finally
+			{
+				sender.dispose();
 				receiver.dispose();
 			}
 		}
@@ -387,10 +567,11 @@ class AeronClusteredCacheMessageComProviderTest
 		final Map<String, Object> properties = properties(root.resolve("driver"));
 		properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
 		final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
+		final var serializer = serializer();
 		final ClusteredCacheMessageSender<Object, Object> sender =
-			provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+			provider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
 		final ClusteredCacheMessageReceiver receiver =
-			provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1)));
+			provider.provideMessageReceiver(properties, serializer, acceptor(new ArrayBlockingQueue<>(1)));
 		receiver.start();
 		sender.dispose();
 		sender.dispose();
@@ -434,37 +615,175 @@ class AeronClusteredCacheMessageComProviderTest
 	}
 
 	@Test
+	void blockedReceiverDisposeIsBoundedAndRetryable(@TempDir final Path root) throws Exception
+	{
+		try (MediaDriver driver = launchDriver(root))
+		{
+			final Map<String, Object> properties = properties(root.resolve("driver"));
+			final CountDownLatch entered = new CountDownLatch(1);
+			final CountDownLatch release = new CountDownLatch(1);
+			final AeronClusteredCacheMessageComProvider receiverProvider =
+				new AeronClusteredCacheMessageComProvider();
+			final ClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
+				properties,
+				serializer(),
+				new ClusteredCacheMessageAcceptor(null)
+				{
+					@Override
+					public void accept(final TimestampsRegionUpdateMessage message)
+					{
+						entered.countDown();
+						boolean interrupted = false;
+						for (;;)
+						{
+							try
+							{
+								release.await();
+								break;
+							}
+							catch (final InterruptedException failure)
+							{
+								interrupted = true;
+							}
+						}
+						if (interrupted)
+						{
+							Thread.currentThread().interrupt();
+						}
+					}
+				});
+			receiver.start();
+			final AeronClusteredCacheMessageComProvider senderProvider =
+				new AeronClusteredCacheMessageComProvider();
+			final ClusteredCacheMessageSender<Object, Object> sender =
+				senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+			try
+			{
+				publish(sender, EventType.CREATED, "cache", "table", 1L);
+				assertTrue(entered.await(5, TimeUnit.SECONDS), "receiver callback did not start");
+				final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+				final Thread closer = new Thread(() ->
+				{
+					try
+					{
+						receiver.dispose();
+					}
+					catch (final Throwable failure)
+					{
+						closeFailure.set(failure);
+					}
+				}, "blocked-cache-receiver-close-test");
+				closer.start();
+				closer.join(6_000L);
+				assertFalse(closer.isAlive(), "dispose must have a bounded wait");
+				assertInstanceOf(IllegalStateException.class, closeFailure.get(),
+					"a blocked receiver must report a disposal timeout");
+				assertFalse(receiver.isRunning(), "a stopping receiver must not report readiness");
+				release.countDown();
+				receiver.dispose();
+			}
+			finally
+			{
+				release.countDown();
+				sender.dispose();
+				receiver.dispose();
+			}
+		}
+	}
+
+	@Test
 	void providerResourcesAreTerminalAfterFullDispose(@TempDir final Path root) throws Exception
 	{
 		try (MediaDriver driver = launchDriver(root))
 		{
 			final Map<String, Object> properties = properties(root.resolve("driver"));
 			final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
+			final var serializer = serializer();
+			final ClusteredCacheMessageAcceptor acceptor = acceptor(received);
 			final AeronClusteredCacheMessageComProvider receiverProvider =
 				new AeronClusteredCacheMessageComProvider();
 			final AeronClusteredCacheMessageComProvider senderProvider =
 				new AeronClusteredCacheMessageComProvider();
 
 			final ClusteredCacheMessageReceiver receiver =
-				receiverProvider.provideMessageReceiver(properties, serializer(), acceptor(received));
+				receiverProvider.provideMessageReceiver(properties, serializer, acceptor);
 			receiver.start();
 			final ClusteredCacheMessageSender<Object, Object> sender =
-				senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+				senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
 			publish(sender, EventType.CREATED, "cache", "table", 1L);
 			assertNotNull(received.poll(10, TimeUnit.SECONDS));
 			sender.dispose();
 			receiver.dispose();
 
-			final ClusteredCacheMessageReceiver reusedReceiver =
-				receiverProvider.provideMessageReceiver(properties, serializer(), acceptor(received));
-			assertThrows(IllegalStateException.class, reusedReceiver::start,
-				"closed resources must not reconnect");
-			final ClusteredCacheMessageSender<Object, Object> reusedSender =
-				senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
-			assertThrows(CacheEntryListenerException.class,
-				() -> publish(reusedSender, EventType.CREATED, "cache", "table", 2L),
-				"closed resources must fail the cache operation instead of reconnecting");
+			assertThrows(IllegalStateException.class,
+				() -> receiverProvider.provideMessageReceiver(properties, serializer, acceptor),
+				"a provider with closed resources must reject a new receiver lifecycle");
+			assertThrows(IllegalStateException.class,
+				() -> senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer),
+				"a provider with closed resources must reject a new sender lifecycle");
 		}
+	}
+
+	@Test
+	void providerReturnsOneOwnedSenderAndReceiverAndRejectsRebind(@TempDir final Path root)
+	{
+		final Map<String, Object> properties = properties(root.resolve("driver"));
+		final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
+		final var serializer = serializer();
+		final ClusteredCacheMessageAcceptor acceptor = acceptor(new ArrayBlockingQueue<>(1));
+
+		final ClusteredCacheMessageSender<Object, Object> sender =
+			provider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+		assertSame(sender, provider.provideUpdateTimestampsCacheMessageSender(properties, serializer));
+		final ClusteredCacheMessageReceiver receiver = provider.provideMessageReceiver(properties, serializer, acceptor);
+		assertSame(receiver, provider.provideMessageReceiver(properties, serializer, acceptor));
+
+		assertThrows(IllegalArgumentException.class,
+			() -> provider.provideUpdateTimestampsCacheMessageSender(properties, serializer()),
+			"a second serializer cannot share the provider-owned sender");
+		assertThrows(IllegalArgumentException.class,
+			() -> provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1))),
+			"a second acceptor cannot share the provider-owned receiver");
+
+		sender.dispose();
+		receiver.dispose();
+	}
+
+	@Test
+	void disposedHandlesAreNeverReturnedAgain(@TempDir final Path root)
+	{
+		final Map<String, Object> properties = properties(root.resolve("driver"));
+		properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
+		final var serializer = serializer();
+		final AeronClusteredCacheMessageComProvider senderProvider =
+			new AeronClusteredCacheMessageComProvider();
+		final AeronClusteredCacheMessageComProvider receiverProvider =
+			new AeronClusteredCacheMessageComProvider();
+		final ClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
+			properties, serializer, acceptor(new ArrayBlockingQueue<>(4)));
+		receiver.start();
+		final ClusteredCacheMessageSender<Object, Object> sender =
+			senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+		try
+		{
+			sender.dispose();
+			assertThrows(IllegalStateException.class,
+				() -> senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer));
+		}
+		finally
+		{
+			receiver.dispose();
+		}
+
+		final AeronClusteredCacheMessageComProvider receiverOnlyProvider =
+			new AeronClusteredCacheMessageComProvider();
+		final ClusteredCacheMessageReceiver disposedReceiver = receiverOnlyProvider.provideMessageReceiver(
+			properties, serializer, acceptor(new ArrayBlockingQueue<>(4)));
+		disposedReceiver.start();
+		disposedReceiver.dispose();
+		assertThrows(IllegalStateException.class,
+			() -> receiverOnlyProvider.provideMessageReceiver(properties, serializer,
+				acceptor(new ArrayBlockingQueue<>(4))));
 	}
 
 	@Test
@@ -478,10 +797,10 @@ class AeronClusteredCacheMessageComProviderTest
 
 		final Map<String, Object> conflicting = new HashMap<>(properties);
 		conflicting.put(AeronClusteredConfigurationPropertyNames.STREAM_ID, "2002");
-		assertThrows(IllegalArgumentException.class,
+		assertThrows(IllegalStateException.class,
 			() -> provider.provideMessageReceiver(conflicting, serializer(),
 				acceptor(new ArrayBlockingQueue<>(1))),
-			"a provider bound to one stream must reject a conflicting configuration");
+			"a terminal provider must reject a new receiver lifecycle");
 	}
 
 	@Test
@@ -495,10 +814,10 @@ class AeronClusteredCacheMessageComProviderTest
 
 		final Map<String, Object> conflicting = new HashMap<>(properties);
 		conflicting.put(AeronClusteredConfigurationPropertyNames.NODE_ID, UUID.randomUUID().toString());
-		assertThrows(IllegalArgumentException.class,
+		assertThrows(IllegalStateException.class,
 			() -> provider.provideMessageReceiver(conflicting, serializer(),
 				acceptor(new ArrayBlockingQueue<>(1))),
-			"a provider bound to one node id must reject a conflicting configuration");
+			"a terminal provider must reject a new receiver lifecycle");
 	}
 
 	@Test
@@ -533,8 +852,10 @@ class AeronClusteredCacheMessageComProviderTest
 					raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(frame, otherSender, 1L, payload));
 					raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(frame, otherSender, 3L, payload));
 
-					assertNotNull(received.poll(10, TimeUnit.SECONDS));
-					assertNotNull(received.poll(10, TimeUnit.SECONDS));
+					assertNotNull(received.poll(10, TimeUnit.SECONDS),
+						"the first contiguous invalidation must be applied");
+					assertNull(received.poll(1, TimeUnit.SECONDS),
+						"the invalidation after a sender gap must be rejected before cache application");
 					final AeronClusteredCacheMessageReceiver aeronReceiver =
 						(AeronClusteredCacheMessageReceiver)receiver;
 					final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -544,6 +865,10 @@ class AeronClusteredCacheMessageComProviderTest
 					}
 					assertTrue(aeronReceiver.gaps() >= 1L,
 						"a skipped sequence must be reported as a gap");
+					assertNotNull(aeronReceiver.failure(),
+						"a lost invalidation must fail the volatile receiver closed");
+					assertFalse(aeronReceiver.isRunning(),
+						"a receiver with a sequence gap must stop polling");
 				}
 			}
 			finally
@@ -630,6 +955,63 @@ class AeronClusteredCacheMessageComProviderTest
 	}
 
 	@Test
+	void receiverFailsClosedWhenSenderIdentityCardinalityIsUnbounded(@TempDir final Path root)
+	{
+		try (MediaDriver driver = launchDriver(root))
+		{
+			final Map<String, Object> properties = properties(root.resolve("driver"));
+			final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
+			final AeronClusteredCacheMessageReceiver receiver =
+				(AeronClusteredCacheMessageReceiver)provider.provideMessageReceiver(
+					properties, serializer(), acceptor(new ArrayBlockingQueue<>(2048)));
+			try
+			{
+				receiver.start();
+				try (Aeron aeron = Aeron.connect(new Aeron.Context()
+					.aeronDirectoryName(root.resolve("driver").toString())))
+				{
+					final Publication raw = aeron.addPublication(
+						(String)properties.get(AeronClusteredConfigurationPropertyNames.CHANNEL),
+						Integer.parseInt((String)properties.get(AeronClusteredConfigurationPropertyNames.STREAM_ID)));
+					try
+					{
+						awaitConnected(raw);
+						final byte[] payload = serializer().serialize(
+							new TimestampsRegionUpdateMessage("cache", "table", 1L));
+						final ExpandableArrayBuffer frame = new ExpandableArrayBuffer(128);
+						for (int index = 0; index <= 1_024; index++)
+						{
+							final byte[] sender = ByteBuffer.allocate(Long.BYTES * 2)
+								.order(ByteOrder.BIG_ENDIAN).putLong(index + 1L).putLong(index + 2L).array();
+							final int length = AeronClusteredCacheMessageCodec.encode(frame, sender, 0L, payload);
+							final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+							while (raw.offer(frame, 0, length) < 0 && System.nanoTime() < deadline)
+							{
+								LockSupport.parkNanos(10_000L);
+							}
+						}
+						final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+						while (receiver.failure() == null && System.nanoTime() < deadline)
+						{
+							LockSupport.parkNanos(10_000L);
+						}
+						assertNotNull(receiver.failure(), "sender identity cardinality must be bounded");
+						assertFalse(receiver.isRunning(), "receiver must stop after identity cardinality overflow");
+					}
+					finally
+					{
+						raw.close();
+					}
+				}
+			}
+			finally
+			{
+				receiver.dispose();
+			}
+		}
+	}
+
+	@Test
 	void sharedNodeIdDoesNotCreateFalseGaps(@TempDir final Path root)
 	{
 		try (MediaDriver driver = launchDriver(root))
@@ -701,7 +1083,7 @@ class AeronClusteredCacheMessageComProviderTest
 	}
 
 	@Test
-	void sharedNodeIdOnDifferentStreamsDoesNotCreateFalseGaps(@TempDir final Path root) throws Exception
+	void sharedNodeIdOnDifferentStreamsDoesNotCreateFalseGaps(@TempDir final Path root)
 	{
 		try (MediaDriver driver = launchDriver(root))
 		{
@@ -784,6 +1166,9 @@ class AeronClusteredCacheMessageComProviderTest
 		assertThrows(IllegalArgumentException.class,
 			() -> provideSender(properties(AeronClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES, "0")));
 		assertThrows(IllegalArgumentException.class,
+			() -> provideSender(properties(AeronClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES,
+				Integer.toString(Integer.MAX_VALUE))));
+		assertThrows(IllegalArgumentException.class,
 			() -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL, "not-a-channel")));
 		assertThrows(IllegalArgumentException.class,
 			() -> provideSender(properties(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS,
@@ -797,12 +1182,32 @@ class AeronClusteredCacheMessageComProviderTest
 				"aeron:udp?endpoint=0.0.0.0:40123|control-mode=dynamic")),
 			"wildcard endpoints must be rejected");
 		assertThrows(IllegalArgumentException.class,
+			() -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL,
+				"aeron:udp?endpoint=10.0.0.1:40123|control=0.0.0.0:40124|control-mode=dynamic")),
+			"wildcard control endpoints must be rejected");
+		assertThrows(IllegalArgumentException.class,
 			() -> provideSender(properties(AeronClusteredConfigurationPropertyNames.NODE_ID, "not-a-uuid")),
 			"an invalid node id must be rejected");
 		assertThrows(IllegalArgumentException.class,
 			() -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL,
 				"aeron:udp?endpoint=localhost:40123|control-mode=dynamic")),
 			"loopback UDP outside an embedded driver must be rejected");
+	}
+
+	@Test
+	void nodeIdWhitespaceIsNormalizedAcrossRepeatedBindings()
+	{
+		final UUID nodeId = UUID.randomUUID();
+		final Map<String, Object> firstProperties = properties(
+			AeronClusteredConfigurationPropertyNames.NODE_ID, "  " + nodeId + "  ");
+		final Map<String, Object> secondProperties = properties(
+			AeronClusteredConfigurationPropertyNames.NODE_ID, nodeId.toString());
+		final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
+		final var serializer = serializer();
+		final ClusteredCacheMessageSender<Object, Object> first =
+			provider.provideUpdateTimestampsCacheMessageSender(firstProperties, serializer);
+		assertSame(first, provider.provideUpdateTimestampsCacheMessageSender(secondProperties, serializer));
+		first.dispose();
 	}
 
 	private static void provideSender(final Map<String, Object> properties)

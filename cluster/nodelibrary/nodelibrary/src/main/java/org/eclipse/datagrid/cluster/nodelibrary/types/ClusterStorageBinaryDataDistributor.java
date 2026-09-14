@@ -18,6 +18,8 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import static org.eclipse.serializer.util.X.notNull;
 
 /**
@@ -103,7 +105,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 	{
 		private final ClusterStorageBinaryDataDistributor delegate;
 		private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();
-		private volatile String queuedTypeDictionary;
+		private final AtomicReference<String> queuedTypeDictionary = new AtomicReference<>();
 
 		private Caching(final ClusterStorageBinaryDataDistributor delegate)
 		{
@@ -111,25 +113,19 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		}
 
 		@Override
-		public synchronized void distributeData(final Binary data)
+		public void distributeData(final Binary data)
 		{
 			final String dictionary = this.typeDictionaryData.get();
+			this.typeDictionaryData.remove();
 			if (dictionary != null)
 			{
-				try
-				{
-					this.delegate.distributeTypeDictionary(dictionary);
-				}
-				finally
-				{
-					this.typeDictionaryData.remove();
-				}
+				this.delegate.distributeTypeDictionary(dictionary);
 			}
 			this.delegate.distributeData(data);
 		}
 
 		@Override
-		public synchronized void distributeTypeDictionary(final String typeDictionaryData)
+		public void distributeTypeDictionary(final String typeDictionaryData)
 		{
 			if (typeDictionaryData == null)
 			{
@@ -142,26 +138,25 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		}
 
 		@Override
-		public synchronized void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
+		public void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
 		{
 			/* A node may have accumulated an incremental dictionary while startup
 			 * distribution was disabled.  The restart snapshot is authoritative and
 			 * must replace that stale thread-bound value, otherwise consumeTypeDictionary
 			 * would return the incremental fragment and the queued full dictionary would
-			 * never reach the next Aeron transaction. */
+			 * never reach the next replicated transaction. */
 			this.typeDictionaryData.remove();
-			this.queuedTypeDictionary = typeDictionaryData;
+			this.queuedTypeDictionary.set(typeDictionaryData);
 		}
 
 		@Override
-		public synchronized String consumeTypeDictionary()
+		public String consumeTypeDictionary()
 		{
-			final String queued = this.queuedTypeDictionary;
+			final String queued = this.queuedTypeDictionary.getAndSet(null);
 			if (queued != null)
 			{
 				/* A full restart snapshot supersedes any incremental dictionary staged
 				 * on the calling thread while startup distribution was disabled. */
-				this.queuedTypeDictionary = null;
 				this.typeDictionaryData.remove();
 				return queued;
 			}
@@ -204,7 +199,7 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
 		public void dispose()
 		{
 			this.typeDictionaryData.remove();
-			this.queuedTypeDictionary = null;
+			this.queuedTypeDictionary.set(null);
 			this.delegate.dispose();
 		}
 	}

@@ -18,36 +18,38 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.errors.InterruptException;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.VoidDeserializer;
 import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageAcceptor;
 import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageReceiver;
 import org.eclipse.serializer.Serializer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
  * This receiver consumes clustered-cache timestamps from Kafka.
  *
- * <p>It uses one consumer group per node, ignores records written by its own
- * client, and commits offsets after the batch has been accepted. Disposal
- * interrupts the polling thread and waits briefly for it to finish.</p>
+ * <p>It uses one consumer group per provider instance, ignores records written
+ * by its own client, and commits offsets after the batch has been accepted.
+ * Disposal interrupts the polling thread and waits briefly for it to finish.</p>
  *
  * <p>Unlike the Aeron receiver, Kafka retains the topic, so a node that was
  * down replays missed invalidations from its committed offset after restart —
- * but only when a stable {@code group-id} is configured. Without one, the
- * consumer group is derived from the random client id, so a restarted node
- * starts a fresh group at the latest offset and does not replay. A malformed
- * or oversized record is logged and skipped; a terminal consumer failure is
- * logged loudly and reported through {@link #isRunning()} and
- * {@link #failure()} instead of silently stopping the node.</p>
+ * when a stable {@code group-id} is configured or can be derived from node and
+ * provider identity. New groups start at {@code earliest}, allowing a node with a
+ * persisted local cache to reconcile against retained invalidations. A malformed
+ * or oversized record stops the receiver before its offset is committed; a
+ * terminal consumer failure is logged loudly and reported through
+ * {@link #isRunning()} and {@link #failure()} instead of silently stopping the
+ * node. The offending record remains replayable after operator remediation.</p>
  *
  * <p>A receiver is single-use, like the Aeron receiver: after {@link #dispose()}
  * it cannot be started again.</p>
@@ -58,13 +60,13 @@ import java.util.concurrent.atomic.LongAdder;
  */
 final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageReceiver
 {
-    private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageReceiver.class);
+    private static final System.Logger LOGGER =
+        System.getLogger(KafkaClusteredCacheMessageReceiver.class.getName());
     private static final String ROLE_NAME = "eclipse-datagrid-cache-invalidation-kafka";
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1L);
     private final Properties kafkaProperties;
     private final String topicName;
     private final String groupId;
-    private final String clientId;
     private final byte[] clientIdBytes;
     private final ClusteredCacheMessageAcceptor messageAcceptor;
     private final Serializer<byte[]> serializer;
@@ -77,7 +79,8 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
     private final AtomicBoolean active = new AtomicBoolean(false);
     private volatile boolean running;
     private volatile boolean disposed;
-    private volatile RuntimeException failure;
+    private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
+    private volatile KafkaConsumer<String, byte[]> consumer;
     private Thread thread;
 
     /** Creates a receiver for one Kafka topic and client.
@@ -100,12 +103,14 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
         final int maxPayloadBytes
     )
     {
-        this.kafkaProperties = kafkaProperties;
-        this.topicName = topicName;
-        this.groupId = groupId;
-        this.clientId = clientId;
-        this.clientIdBytes = serializer.serialize(clientId);
-        this.messageAcceptor = messageAcceptor;
+        this.kafkaProperties = Objects.requireNonNull(kafkaProperties, "kafkaProperties");
+        this.topicName = Objects.requireNonNull(topicName, "topicName");
+        this.groupId = Objects.requireNonNull(groupId, "groupId");
+        this.clientIdBytes = Objects.requireNonNull(
+            Objects.requireNonNull(serializer, "serializer").serialize(
+                Objects.requireNonNull(clientId, "clientId")),
+            "serializer returned a null client identity").clone();
+        this.messageAcceptor = Objects.requireNonNull(messageAcceptor, "messageAcceptor");
         this.serializer = serializer;
         this.maxPayloadBytes = maxPayloadBytes;
     }
@@ -139,7 +144,7 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
     @Override
     public RuntimeException failure()
     {
-        return this.failure;
+        return this.failure.get();
     }
 
     private void run()
@@ -147,13 +152,32 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
         final Properties properties = new Properties();
         properties.putAll(this.kafkaProperties);
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, this.groupId);
-        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
+        /* A new node must reconcile retained invalidations before serving cache
+         * reads. Stable groups resume from their committed offset; earliest is
+         * the safe bootstrap policy for a group with no committed offset. */
+        final Object configuredReset = properties.get(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG);
+        if (configuredReset == null)
+        {
+            properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        }
+        else if (!"earliest".equals(configuredReset) && !"latest".equals(configuredReset))
+        {
+            throw new IllegalArgumentException(
+                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG + " must be earliest or latest: " + configuredReset);
+        }
+        /* Acknowledgements are committed only after every record in the poll
+         * has been applied. Kafka's default auto-commit can advance the group
+         * while the acceptor is still running and lose an invalidation after a
+         * crash. */
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, VoidDeserializer.class.getName());
         properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
 
         try
         {
-            try (final var consumer = new KafkaConsumer<String, byte[]>(properties))
+            final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(properties);
+            this.consumer = consumer;
+            try (consumer)
             {
                 consumer.subscribe(Collections.singleton(this.topicName));
                 while (this.active.get())
@@ -164,23 +188,28 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
                     {
                         records = consumer.poll(POLL_TIMEOUT);
                     }
-                    catch (final InterruptException e)
+                    catch (final WakeupException | InterruptException e)
                     {
-                        // clear interrupt flag so Kafka can properly close the consumer
-                        final var ignored = Thread.interrupted();
-                        continue;
+                        if (!this.active.get())
+                        {
+                            break;
+                        }
+                        throw e;
                     }
 
                     this.consume(records);
 
                     try
                     {
-                        consumer.commitSync();
+                        consumer.commitSync(Duration.ofSeconds(30L));
                     }
                     catch (final InterruptException e)
                     {
-                        // clear interrupt flag so Kafka can properly close the consumer
-                        final var ignored = Thread.interrupted();
+                        if (!this.active.get())
+                        {
+                            break;
+                        }
+                        throw e;
                     }
                 }
             }
@@ -191,10 +220,18 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
              * group) must not be silent. The Aeron receiver reports every agent
              * failure through its error handler; log the same terminal event here
              * so a node serving stale query-cache timestamps is observable. */
-            logger.error("Kafka clustered-cache receiver stopped", failure);
-            if (failure instanceof final RuntimeException runtime)
+            if (!this.disposed || this.active.get())
             {
-                this.failure = runtime;
+                LOGGER.log(System.Logger.Level.ERROR, "Kafka clustered-cache receiver stopped", failure);
+                if (failure instanceof final RuntimeException runtime)
+                {
+                    this.failure.compareAndSet(null, runtime);
+                }
+                else
+                {
+                    this.failure.compareAndSet(null,
+                        new IllegalStateException("Kafka clustered-cache receiver failed", failure));
+                }
             }
             if (failure instanceof final Error error)
             {
@@ -204,12 +241,14 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
         }
         finally
         {
+            this.consumer = null;
             this.running = false;
+            this.active.set(false);
         }
     }
 
-    /** Applies one polled batch. */
-    private void consume(final ConsumerRecords<String, byte[]> records)
+    /** Applies one polled batch; package-private for broker-free regression tests. */
+    void consume(final ConsumerRecords<String, byte[]> records)
     {
         for (final var record : records)
         {
@@ -218,12 +257,11 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
             {
                 final var senderHeader = record.headers().lastHeader(
                     KafkaClusteredCacheMessageSender.SENDER_ID_HEADER);
-                if (senderHeader == null)
+                if (senderHeader == null || senderHeader.value() == null)
                 {
-                    this.malformed.increment();
-                    logger.error("Discarding clustered-cache record without a {} header",
-                        KafkaClusteredCacheMessageSender.SENDER_ID_HEADER);
-                    continue;
+                    throw new IllegalStateException(
+                        "Kafka clustered-cache record is missing a valid " +
+                            KafkaClusteredCacheMessageSender.SENDER_ID_HEADER + " header");
                 }
                 /* The header carries the serialized client id; compare the raw
                  * bytes so no String is allocated for every record. */
@@ -235,17 +273,15 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
                 value = record.value();
                 if (value == null || value.length > this.maxPayloadBytes)
                 {
-                    this.malformed.increment();
-                    logger.error("Discarding clustered-cache record with {} payload bytes exceeding the limit of {}",
-                        value == null ? 0 : value.length, this.maxPayloadBytes);
-                    continue;
+                    throw new IllegalStateException(
+                        "Kafka clustered-cache record payload of " + (value == null ? 0 : value.length) +
+                            " bytes exceeds the limit of " + this.maxPayloadBytes);
                 }
             }
             catch (final RuntimeException failure)
             {
                 this.malformed.increment();
-                logger.error("Discarding unreadable Kafka clustered-cache record", failure);
-                continue;
+                throw new IllegalStateException("Kafka clustered-cache record is malformed", failure);
             }
 
             try
@@ -255,9 +291,11 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
             }
             catch (final RuntimeException failure)
             {
-                /* The record was well formed; applying it failed. Keep it out of
-                 * the malformed counter, matching the Aeron receiver. */
-                logger.error("Failed to apply Kafka clustered-cache invalidation", failure);
+                /* A well-formed invalidation that cannot be applied leaves the
+                 * local timestamps cache stale. Do not commit this batch or
+                 * continue polling as if the node were healthy. */
+                throw new IllegalStateException(
+                    "Failed to apply Kafka clustered-cache invalidation", failure);
             }
         }
     }
@@ -266,43 +304,63 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
     public void dispose()
     {
         final Thread worker;
+        final KafkaConsumer<String, byte[]> currentConsumer;
         synchronized (this)
         {
-            if (this.disposed)
+            if (this.disposed && this.thread == null)
             {
                 return;
             }
             this.disposed = true;
             this.running = false;
-            if (!this.active.compareAndSet(true, false))
-            {
-                return;
-            }
+            this.active.set(false);
             worker = this.thread;
-            this.thread = null;
+            currentConsumer = this.consumer;
         }
 
         /* Join outside the monitor, mirroring the Aeron receiver, so a
          * concurrent start() is not blocked while the worker stops. */
         if (worker != null)
         {
+            if (currentConsumer != null)
+            {
+                currentConsumer.wakeup();
+            }
             worker.interrupt();
 
             try
             {
-                worker.join(1_000L);
+                worker.join(5_000L);
             }
             catch (final InterruptedException e)
             {
                 Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while closing Kafka clustered-cache receiver", e);
             }
 
             if (worker.isAlive())
             {
-                logger.warn("Failed to wait for receiver thread to finish.");
+                LOGGER.log(System.Logger.Level.WARNING,
+                    "Kafka clustered-cache receiver did not stop; resources remain owned for retry");
+                throw new IllegalStateException(
+                    "Kafka clustered-cache receiver did not stop before disposal timeout");
+            }
+            synchronized (this)
+            {
+                if (this.thread == worker)
+                {
+                    this.thread = null;
+                }
             }
         }
-        logger.debug("Disposed Kafka clustered-cache receiver: received={}, selfSkipped={}, malformed={}",
-            this.received.sum(), this.selfSkipped.sum(), this.malformed.sum());
+        LOGGER.log(System.Logger.Level.DEBUG,
+            "Disposed Kafka clustered-cache receiver: received=" + this.received.sum() +
+                ", selfSkipped=" + this.selfSkipped.sum() + ", malformed=" + this.malformed.sum());
+    }
+
+    /** Returns whether this receiver has completed terminal disposal. */
+    boolean isDisposed()
+    {
+        return this.disposed && this.thread == null;
     }
 }

@@ -30,7 +30,6 @@ module org.eclipse.datagrid.cache.clustered
 	requires org.eclipse.store.cache.hibernate;
 	requires org.hibernate.orm.core;
 	requires cache.api;
-	requires org.slf4j;
 
 	exports org.eclipse.datagrid.cache.clustered.types;
 }

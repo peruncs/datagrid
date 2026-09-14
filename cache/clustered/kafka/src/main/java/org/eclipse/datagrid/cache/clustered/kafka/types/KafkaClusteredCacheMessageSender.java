@@ -19,13 +19,12 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageSender;
 import org.eclipse.datagrid.cache.clustered.types.TimestampsRegionUpdateMessage;
 import org.eclipse.serializer.Serializer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.cache.event.CacheEntryCreatedListener;
 import javax.cache.event.CacheEntryEvent;
 import javax.cache.event.CacheEntryListenerException;
 import javax.cache.event.CacheEntryUpdatedListener;
+import java.util.concurrent.TimeUnit;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -63,18 +62,52 @@ abstract class KafkaClusteredCacheMessageSender implements ClusteredCacheMessage
             notNull(producer),
             notNull(topicName),
             notNull(clientId),
-            notNull(serializer)
+            notNull(serializer),
+            1 << 20,
+            30_000L
         );
     }
 
-    private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageSender.class);
+    /** Creates a sender with explicit payload and send-time limits.
+     *
+     * @param producer Kafka producer
+     * @param topicName Kafka topic for cache updates
+     * @param clientId identifier used to ignore this client's own updates
+     * @param serializer message serializer
+     * @param maxPayloadBytes maximum serialized payload accepted for publication
+     * @param sendTimeoutMillis maximum wait for one Kafka acknowledgement
+     * @return timestamp update sender
+     */
+    static ClusteredCacheMessageSender<Object, Object> UpdateTimestamps(
+        final KafkaProducer<String, byte[]> producer,
+        final String topicName,
+        final String clientId,
+        final Serializer<byte[]> serializer,
+        final int maxPayloadBytes,
+        final long sendTimeoutMillis
+    )
+    {
+        if (maxPayloadBytes <= 0) throw new IllegalArgumentException("maxPayloadBytes must be positive");
+        if (sendTimeoutMillis <= 0L) throw new IllegalArgumentException("sendTimeoutMillis must be positive");
+        return new UpdateTimestamps(
+            notNull(producer), notNull(topicName), notNull(clientId), notNull(serializer),
+            maxPayloadBytes, sendTimeoutMillis);
+    }
+
+    private static final System.Logger LOGGER =
+        System.getLogger(KafkaClusteredCacheMessageSender.class.getName());
     private final KafkaProducer<String, byte[]> producer;
     private final String topicName;
     /* The serialized identity is fixed per sender; serializing it once avoids
      * an allocation and a serializer pass on every invalidation. */
     private final byte[] clientIdBytes;
     private final Serializer<byte[]> serializer;
+    private final int maxPayloadBytes;
+    private final long sendTimeoutMillis;
+    private final Object lifecycleMonitor = new Object();
     private volatile boolean disposed;
+    private boolean closing;
+    private int inFlight;
 
     /** Creates the shared sender state.
      *
@@ -82,17 +115,30 @@ abstract class KafkaClusteredCacheMessageSender implements ClusteredCacheMessage
      * @param topicName Kafka topic for cache updates
      * @param clientId identifier used to ignore this client's own updates
      * @param serializer message serializer
+     * @param maxPayloadBytes maximum serialized payload accepted for publication
+     * @param sendTimeoutMillis maximum wait for one Kafka acknowledgement
      */
     private KafkaClusteredCacheMessageSender(
         final KafkaProducer<String, byte[]> producer,
         final String topicName, final String clientId,
-        final Serializer<byte[]> serializer
+        final Serializer<byte[]> serializer,
+        final int maxPayloadBytes,
+        final long sendTimeoutMillis
     )
     {
         this.producer = producer;
         this.topicName = topicName;
-        this.clientIdBytes = serializer.serialize(clientId);
+        this.clientIdBytes = java.util.Objects.requireNonNull(
+            serializer.serialize(clientId), "serializer returned a null client identity").clone();
         this.serializer = serializer;
+        this.maxPayloadBytes = maxPayloadBytes;
+        this.sendTimeoutMillis = sendTimeoutMillis;
+    }
+
+    /** Returns whether this sender has completed its terminal disposal. */
+    boolean isDisposed()
+    {
+        return this.disposed;
     }
 
     /** Converts one cache event into a cluster update message.
@@ -114,32 +160,63 @@ abstract class KafkaClusteredCacheMessageSender implements ClusteredCacheMessage
         {
             final var cacheName = event.getSource().getName();
             final var key = event.getKey();
-            logger.debug("Sending cache message cache={}, key={}", cacheName, key);
+            LOGGER.log(System.Logger.Level.DEBUG,
+                "Sending cache message cache=" + cacheName + ", key=" + key);
 
+            final TimestampsRegionUpdateMessage messageObject;
             final byte[] message;
             try
             {
-                message = this.serializer.serialize(this.createMessage(event));
+                messageObject = this.createMessage(event);
+                message = java.util.Objects.requireNonNull(
+                    this.serializer.serialize(messageObject),
+                    "serializer returned a null clustered-cache payload");
+                if (message.length > this.maxPayloadBytes)
+                {
+                    throw new IllegalArgumentException(
+                        "serialized clustered-cache payload exceeds " + this.maxPayloadBytes + " bytes");
+                }
             }
             catch (final Exception e)
             {
                 throw new CacheEntryListenerException("Failed to serialize message for cache=" + cacheName, e);
             }
 
-            final var record = new ProducerRecord<String, byte[]>(this.topicName, message);
+            final String partitionKey = partitionKey(messageObject);
+            final var record = new ProducerRecord<>(this.topicName, partitionKey, message);
             record.headers().add(SENDER_ID_HEADER, this.clientIdBytes);
 
             this.sendRecord(record, cacheName);
         }
     }
 
+    /**
+     * Returns the stable Kafka partition key for one timestamp table. The NUL
+     * separator cannot occur in a valid Kafka topic/cache name (the provider
+     * rejects it for the topic and the message record validates its names), so
+     * the mapping is unambiguous while avoiding a per-record hashing object.
+     */
+    static String partitionKey(final TimestampsRegionUpdateMessage message)
+    {
+        return message.cacheName() + '\0' + message.tableName();
+    }
+
     private void sendRecord(final ProducerRecord<String, byte[]> record, final String cacheName)
         throws CacheEntryListenerException
     {
-        final var future = this.producer.send(record);
+        synchronized (this.lifecycleMonitor)
+        {
+            if (this.disposed || this.closing)
+            {
+                throw new CacheEntryListenerException(
+                    "Kafka clustered-cache sender is closing or disposed");
+            }
+            this.inFlight++;
+        }
         try
         {
-            future.get();
+            final var future = this.producer.send(record);
+            future.get(this.sendTimeoutMillis, TimeUnit.MILLISECONDS);
         }
         catch (final Exception e)
         {
@@ -149,23 +226,87 @@ abstract class KafkaClusteredCacheMessageSender implements ClusteredCacheMessage
             }
             throw new CacheEntryListenerException("Kafka send failed for cache=" + cacheName, e);
         }
+        finally
+        {
+            synchronized (this.lifecycleMonitor)
+            {
+                this.inFlight--;
+                if (this.inFlight == 0)
+                {
+                    this.lifecycleMonitor.notifyAll();
+                }
+            }
+        }
     }
 
     @Override
     public void dispose()
     {
-        if (this.disposed)
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+        synchronized (this.lifecycleMonitor)
         {
-            return;
-        }
-        this.disposed = true;
-        try
-        {
-            this.producer.close();
-        }
-        catch (final RuntimeException e)
-        {
-            logger.error("Failed to close Kafka producer.", e);
+            while (this.closing && !this.disposed)
+            {
+                final long remaining = deadline - System.nanoTime();
+                if (remaining <= 0L)
+                {
+                    throw new IllegalStateException(
+                        "Kafka clustered-cache sender disposal is already in progress");
+                }
+                try
+                {
+                    TimeUnit.NANOSECONDS.timedWait(this.lifecycleMonitor, remaining);
+                }
+                catch (final InterruptedException failure)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                        "interrupted while waiting for Kafka clustered-cache sender disposal", failure);
+                }
+            }
+            if (this.disposed) return;
+            this.closing = true;
+            try
+            {
+                while (this.inFlight != 0)
+                {
+                    final long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0L)
+                    {
+                        throw new IllegalStateException(
+                            "Kafka clustered-cache sender did not stop before disposal timeout");
+                    }
+                    TimeUnit.NANOSECONDS.timedWait(this.lifecycleMonitor, remaining);
+                }
+            }
+            catch (final InterruptedException failure)
+            {
+                this.closing = false;
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while closing Kafka clustered-cache sender", failure);
+            }
+            catch (final RuntimeException | Error failure)
+            {
+                this.closing = false;
+                this.lifecycleMonitor.notifyAll();
+                LOGGER.log(System.Logger.Level.ERROR,
+                    "Failed to wait for Kafka clustered-cache sends to finish.", failure);
+                throw failure;
+            }
+            try
+            {
+                this.producer.close(java.time.Duration.ofSeconds(5L));
+                this.disposed = true;
+                this.closing = false;
+                this.lifecycleMonitor.notifyAll();
+            }
+            catch (final RuntimeException | Error failure)
+            {
+                this.closing = false;
+                this.lifecycleMonitor.notifyAll();
+                LOGGER.log(System.Logger.Level.ERROR, "Failed to close Kafka producer.", failure);
+                throw failure;
+            }
         }
     }
 
@@ -179,15 +320,18 @@ abstract class KafkaClusteredCacheMessageSender implements ClusteredCacheMessage
          * @param topicName Kafka topic for cache updates
          * @param clientId identifier used to ignore this client's own updates
          * @param serializer message serializer
+         * @param maxPayloadBytes maximum serialized payload accepted for publication
          */
         private UpdateTimestamps(
             final KafkaProducer<String, byte[]> producer,
             final String topicName,
             final String clientId,
-            final Serializer<byte[]> serializer
+            final Serializer<byte[]> serializer,
+            final int maxPayloadBytes,
+            final long sendTimeoutMillis
         )
         {
-            super(producer, topicName, clientId, serializer);
+            super(producer, topicName, clientId, serializer, maxPayloadBytes, sendTimeoutMillis);
         }
 
         @Override

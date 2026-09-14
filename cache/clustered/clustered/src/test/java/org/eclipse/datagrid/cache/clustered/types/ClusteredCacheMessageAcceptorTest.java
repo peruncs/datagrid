@@ -16,7 +16,6 @@ package org.eclipse.datagrid.cache.clustered.types;
 
 import org.junit.jupiter.api.Test;
 
-import javax.cache.Cache;
 import javax.cache.configuration.CacheEntryListenerConfiguration;
 import javax.cache.configuration.Configuration;
 import javax.cache.integration.CompletionListener;
@@ -24,15 +23,13 @@ import javax.cache.processor.EntryProcessor;
 import javax.cache.processor.EntryProcessorException;
 import javax.cache.processor.EntryProcessorResult;
 import java.net.URI;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /** Verifies the acceptor applies only newer timestamps and tolerates bad state. */
 class ClusteredCacheMessageAcceptorTest
@@ -61,7 +58,7 @@ class ClusteredCacheMessageAcceptorTest
 	}
 
 	@Test
-	void equalTimestampIsApplied()
+	void equalTimestampIsUnchanged()
 	{
 		final StubCache cache = new StubCache("cache");
 		cache.entries.put("table", 42L);
@@ -104,6 +101,105 @@ class ClusteredCacheMessageAcceptorTest
 			() -> acceptor.accept(new TimestampsRegionUpdateMessage("cache", "table", 42L)));
 	}
 
+	@Test
+	void nullMessageIsRejected()
+	{
+		final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(null);
+
+		assertThrows(NullPointerException.class, () -> acceptor.accept(null));
+	}
+
+	@Test
+	void concurrentDeliveryKeepsTheGreatestTimestamp() throws Exception
+	{
+		final StubCache cache = new StubCache("cache");
+		final ClusteredCacheMessageAcceptor acceptor = acceptor(cache);
+		final int updates = 32;
+		final CountDownLatch start = new CountDownLatch(1);
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final Thread[] threads = new Thread[updates];
+		for (int i = 0; i < updates; i++)
+		{
+			final long timestamp = i;
+			threads[i] = new Thread(() ->
+			{
+				try
+				{
+					start.await();
+					acceptor.accept(new TimestampsRegionUpdateMessage("cache", "table", timestamp));
+				}
+				catch (final Throwable error)
+				{
+					failure.set(error);
+					if (error instanceof InterruptedException)
+					{
+						Thread.currentThread().interrupt();
+					}
+				}
+			}, "clustered-cache-acceptor-test-" + i);
+			threads[i].start();
+		}
+		start.countDown();
+		for (final Thread thread : threads)
+		{
+			thread.join(TimeUnit.SECONDS.toMillis(5L));
+			assertFalse(thread.isAlive(), "timestamp delivery must not deadlock");
+		}
+
+		assertNull(failure.get(), "all concurrent timestamp deliveries must complete");
+		assertEquals((long)updates - 1L, cache.entries.get("table"),
+			"an older concurrent invalidation must never overwrite a newer timestamp");
+	}
+
+	@Test
+	void remoteInvalidationCannotRegressAConcurrentLocalWrite() throws Exception
+	{
+		final StubCache cache = new StubCache("cache");
+		final ClusteredCacheMessageAcceptor acceptor = acceptor(cache);
+		final CountDownLatch start = new CountDownLatch(1);
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final Thread local = new Thread(() ->
+		{
+			try
+			{
+				start.await();
+				for (long timestamp = 1_000L; timestamp < 1_064L; timestamp++)
+				{
+					cache.putSilent("table", timestamp);
+				}
+			}
+			catch (final Throwable error)
+			{
+				failure.set(error);
+			}
+		}, "clustered-cache-local-writer-test");
+		final Thread remote = new Thread(() ->
+		{
+			try
+			{
+				start.await();
+				for (long timestamp = 1L; timestamp < 64L; timestamp++)
+				{
+					acceptor.accept(new TimestampsRegionUpdateMessage("cache", "table", timestamp));
+				}
+			}
+			catch (final Throwable error)
+			{
+				failure.set(error);
+			}
+		}, "clustered-cache-remote-writer-test");
+		local.start();
+		remote.start();
+		start.countDown();
+		local.join(TimeUnit.SECONDS.toMillis(5L));
+		remote.join(TimeUnit.SECONDS.toMillis(5L));
+		assertFalse(local.isAlive(), "local writer must complete");
+		assertFalse(remote.isAlive(), "remote writer must complete");
+		assertNull(failure.get(), "concurrent local and remote timestamp writes must complete");
+		assertEquals(1_063L, cache.entries.get("table"),
+			"the atomic max operation must preserve the greatest local timestamp");
+	}
+
 	private static ClusteredCacheMessageAcceptor acceptor(final StubCache cache)
 	{
 		final StubCacheManager manager = new StubCacheManager();
@@ -143,7 +239,7 @@ class ClusteredCacheMessageAcceptorTest
 	private static final class StubCache implements org.eclipse.store.cache.types.Cache<Object, Object>
 	{
 		private final String name;
-		private final Map<Object, Object> entries = new HashMap<>();
+		private final Map<Object, Object> entries = new ConcurrentHashMap<>();
 
 		private StubCache(final String name)
 		{
@@ -152,7 +248,7 @@ class ClusteredCacheMessageAcceptorTest
 
 		@Override public String getName() { return this.name; }
 		@Override public Object get(Object key) { return this.entries.get(key); }
-		@Override public void putSilent(Object key, Object value) { this.entries.put(key, value); }
+		@Override public synchronized void putSilent(Object key, Object value) { this.entries.put(key, value); }
 		@Override public Map<Object, Object> getAll(Set<?> keys) { throw new UnsupportedOperationException(); }
 		@Override public boolean containsKey(Object key) { throw new UnsupportedOperationException(); }
 		@Override public void put(Object key, Object value) { throw new UnsupportedOperationException(); }

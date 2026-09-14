@@ -142,7 +142,7 @@ public interface ClusterReplicationTransport extends AutoCloseable
 				final boolean commitPosition
 			)
 			{
-				return ClusterStorageBinaryDataClient.NoOp(startingCursor, cursorListener);
+				return ClusterStorageBinaryDataClient.NoOp(startingCursor);
 			}
 
 			@Override

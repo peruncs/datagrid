@@ -21,12 +21,14 @@ import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundati
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDescription;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
-import org.eclipse.serializer.util.logging.Logging;
 import org.eclipse.store.storage.types.StorageConnection;
-import org.slf4j.Logger;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -56,11 +58,13 @@ import static org.eclipse.serializer.util.X.notNull;
 	/** Imports each binary and schedules its graph update. */
 	class Default implements StorageBinaryDataMerger
 	{
-		private final static Logger logger = Logging.getLogger(StorageBinaryDataMerger.class);
+		private static final System.Logger LOGGER =
+			System.getLogger(StorageBinaryDataMerger.class.getName());
 
 		private final BinaryPersistenceFoundation<?> foundation;
 		private final StorageConnection storage;
 		private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
+		private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
 
 		Default(
 			final BinaryPersistenceFoundation<?> foundation,
@@ -75,10 +79,11 @@ import static org.eclipse.serializer.util.X.notNull;
 		}
 
 		@Override
-		public synchronized void receiveData(final Binary data)
+		public void receiveData(final Binary data)
 		{
-			logger.debug("Importing data");
-			final ByteBuffer[] sourceBuffers = StorageBinaryDataChunker.buffers(data).toArray(ByteBuffer[]::new);
+			this.ensureUsable();
+			LOGGER.log(System.Logger.Level.DEBUG, "Importing data");
+			final ByteBuffer[] sourceBuffers = StorageBinaryDataChunker.importArray(data);
 			final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, sourceBuffers);
 			/* scheduleMaterialization releases the buffers when callback registration
 			 * fails.  Do not release again here: native buffers must have exactly one
@@ -99,7 +104,7 @@ import static org.eclipse.serializer.util.X.notNull;
 
 			final ObjectGraphUpdater updater = () ->
 			{
-				logger.debug("Updating object graph");
+				LOGGER.log(System.Logger.Level.DEBUG, "Updating object graph");
 
 				try
 				{
@@ -112,11 +117,43 @@ import static org.eclipse.serializer.util.X.notNull;
 			};
 			try
 			{
-				this.objectGraphUpdateHandler.objectGraphUpdateAvailable(updater).toCompletableFuture().join();
+				this.objectGraphUpdateHandler.objectGraphUpdateAvailable(updater)
+					.toCompletableFuture().get(60L, TimeUnit.SECONDS);
+			}
+			catch (final InterruptedException failure)
+			{
+				Thread.currentThread().interrupt();
+				/* The update callback may still be running after this wait is
+				 * interrupted. Its finally block remains the sole owner of release. */
+				this.fail("Interrupted while applying Store data", failure);
+				throw new StorageBinaryDataException("Interrupted while applying Store data", failure);
+			}
+			catch (final ExecutionException failure)
+			{
+				release.run();
+				final StorageBinaryDataException terminal = new StorageBinaryDataException(
+					"Timed out or failed while applying Store data",
+					failure.getCause() == null ? failure : failure.getCause());
+				this.fail(terminal.getMessage(), terminal);
+				throw terminal;
+			}
+			catch (final TimeoutException failure)
+			{
+				/* A timed-out Future does not cancel the update callback. Releasing
+				 * here would deallocate buffers while Store materialization still uses
+				 * them; the callback's finally block owns that release. */
+				final StorageBinaryDataException terminal = new StorageBinaryDataException(
+					"Timed out while applying Store data", failure);
+				this.fail(terminal.getMessage(), terminal);
+				throw terminal;
 			}
 			catch (final RuntimeException | Error failure)
 			{
 				release.run();
+				if (failure instanceof RuntimeException runtime)
+				{
+					this.fail("Store graph update failed", runtime);
+				}
 				throw failure;
 			}
 		}
@@ -124,6 +161,9 @@ import static org.eclipse.serializer.util.X.notNull;
 		@Override
 		public synchronized void receiveTypeDictionary(final String typeDictionaryData)
 		{
+			this.ensureUsable();
+			try
+			{
 			final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
 				.setClassLoaderProvider(this.foundation.getClassLoaderProvider())
 				.setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
@@ -137,19 +177,47 @@ import static org.eclipse.serializer.util.X.notNull;
 				final PersistenceTypeDefinition localType = localTypeDictionary.lookupTypeById(remoteType.typeId());
 				if (localType == null)
 				{
-					logger.debug("New type: {}", remoteType.typeName());
+					LOGGER.log(System.Logger.Level.DEBUG, "New type: " + remoteType.typeName());
 					this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
 
 				}
 				else if (!PersistenceTypeDescription.equalStructure(localType, remoteType))
 				{
-					throw new RuntimeException(localType + " <> " + remoteType);
+					throw new StorageBinaryDataException(
+						"Remote type definition conflicts with local definition: "
+							+ localType + " <> " + remoteType
+					);
 				}
 			});
 			/* Replicated imports do not execute a local Store operation that would
 			 * normally flush the exporting dictionary manager.  Flush explicitly before
 			 * importing data that can reference the newly registered type ids. */
 			this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
+			}
+			catch (final RuntimeException failure)
+			{
+				this.fail("Store type dictionary update failed", failure);
+				throw failure;
+			}
+			catch (final Error failure)
+			{
+				this.fail("Store type dictionary update failed", failure);
+				throw failure;
+			}
+		}
+
+		private void ensureUsable()
+		{
+			final RuntimeException terminal = this.failure.get();
+			if (terminal != null)
+			{
+				throw new IllegalStateException("Storage binary merger has failed", terminal);
+			}
+		}
+
+		private void fail(final String message, final Throwable cause)
+		{
+			this.failure.compareAndSet(null, new IllegalStateException(message, cause));
 		}
 
 	}

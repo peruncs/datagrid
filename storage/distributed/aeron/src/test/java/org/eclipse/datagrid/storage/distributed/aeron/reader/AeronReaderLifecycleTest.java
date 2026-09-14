@@ -177,6 +177,15 @@ class AeronReaderLifecycleTest
 		assertTrue(closed.get());
 	}
 
+	/** A live polling thread must always provide the latch that owns its exit. */
+	@Test
+	void rejectsMissingExitLatchForLivePollingThread()
+	{
+		final Thread pollingThread = new Thread(() -> { });
+		assertThrows(NullPointerException.class, () -> AeronReaderLifecycle.stopAndClose(
+			new AtomicBoolean(true), pollingThread, null, () -> { }, 1L));
+	}
+
 	/** Verifies shared polling loop stops only after an idle poll. */
 	@Test
 	void sharedPollingLoopStopsOnlyAfterAnIdlePoll()

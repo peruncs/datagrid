@@ -37,7 +37,8 @@ public final class AeronProviderDriverFailureChildMain
 			.create(properties(root));
 		final ClusterStorageBinaryDataClient client = transport.client(null, "store", null, null, false);
 		final ReplicationHealth health = transport.health(() -> true, client);
-		transport.positionProvider("store").latest();
+		final var positionProvider = transport.positionProvider("store");
+		positionProvider.init();
 		Files.writeString(root.resolve("control/connected"), "connected");
 		AeronClusterReplicationTransportProvider.stopDriverForTest(transport);
 		final long deadline = System.nanoTime() + 5_000_000_000L;

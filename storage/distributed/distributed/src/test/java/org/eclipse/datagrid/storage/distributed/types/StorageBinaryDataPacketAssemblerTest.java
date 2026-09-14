@@ -65,9 +65,17 @@ class StorageBinaryDataPacketAssemblerTest
 	@Test
 	void rejectsOversizedMessageBeforeNativeAllocation()
 	{
-		assertThrows(IllegalArgumentException.class, () -> StorageBinaryDataMessage.New(
+		assertThrows(StorageBinaryDataException.class, () -> StorageBinaryDataMessage.New(
 			StorageBinaryDataPacket.New(DATA, StorageBinaryDataMessage.MAX_MESSAGE_LENGTH + 1,
 				0, 1, ByteBuffer.allocate(0))));
+	}
+
+	/** Packet indexes are zero-based and cannot point beyond the declared packet set. */
+	@Test
+	void rejectsPacketIndexOutsidePacketCount()
+	{
+		assertThrows(IllegalArgumentException.class, () -> StorageBinaryDataPacket.New(
+			DATA, 1, 1, 1, ByteBuffer.allocate(1)));
 	}
 
 	private static StorageBinaryDataPacket packet(final int index, final int count, final byte[] bytes)

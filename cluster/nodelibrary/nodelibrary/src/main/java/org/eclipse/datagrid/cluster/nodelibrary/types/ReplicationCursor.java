@@ -25,7 +25,7 @@ import java.util.UUID;
  * example Kafka partition offsets or an Aeron recording id/position pair).</p>
  *
  * @param transport selected provider id
- * @param storeGeneration immutable Store image identity, or {@code null} for legacy cursors
+ * @param storeGeneration immutable Store image identity, or {@code null} when the provider has none
  * @param logicalSequence last fully resolved transaction, or {@code -1} before the first one
  * @param providerPosition provider-specific position bytes
  */
@@ -33,9 +33,7 @@ public record ReplicationCursor(
 	String transport,
 	UUID storeGeneration,
 	long logicalSequence,
-	byte[] providerPosition
-)
-{
+	byte[] providerPosition) {
 	/** Validates and copies the provider position.
 	 *
 	 * @param transport selected provider id
@@ -62,14 +60,6 @@ public record ReplicationCursor(
 	public byte[] providerPosition()
 	{
 		return this.providerPosition.clone();
-	}
-
-	/** Compatibility name used by the original Kafka lifecycle.
-	 * @return logical sequence
-	 */
-	public long messageIndex()
-	{
-		return this.logicalSequence;
 	}
 
 	@Override

@@ -34,6 +34,7 @@ import java.util.concurrent.CompletionStage;
 		/** Runs an update when the object graph may be changed.
 		 *
 		 * @param updater update to run
+		 * @return stage completed after the update has finished
 		 */
 		CompletionStage<Void> objectGraphUpdateAvailable(ObjectGraphUpdater updater);
 
@@ -42,12 +43,21 @@ import java.util.concurrent.CompletionStage;
 		 * @return synchronized update handler
 		 */
 		static ObjectGraphUpdateHandler Synchronized()
-	{
-		return updater ->
 		{
-			XThreads.executeSynchronized(updater::updateObjectGraph);
-			return CompletableFuture.completedFuture(null);
-		};
-	}
+			return updater ->
+			{
+				final CompletableFuture<Void> result = new CompletableFuture<>();
+				try
+				{
+					XThreads.executeSynchronized(updater::updateObjectGraph);
+					result.complete(null);
+				}
+				catch (final Throwable failure)
+				{
+					result.completeExceptionally(failure);
+				}
+				return result;
+			};
+		}
 
 }

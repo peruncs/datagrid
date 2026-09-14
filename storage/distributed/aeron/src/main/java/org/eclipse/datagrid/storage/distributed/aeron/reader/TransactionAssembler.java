@@ -26,6 +26,9 @@ import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.CRC32C;
 
 /**
  * Reassembles chunks and releases a Store binary only after commit validation.
@@ -46,15 +49,15 @@ final class TransactionAssembler
 	private final StorageBinaryDataReceiver receiver;
 	private final Runnable transactionResolved;
 	private final ReaderDeliveryListener deliveryListener;
-	private volatile long lastResolvedSequence;
+	private final AtomicLong lastResolvedSequence = new AtomicLong();
 	/* Materialisation can succeed before the durable cursor callback completes.
 	 * Keep that observation separate for health/lag reporting. */
-	private volatile long lastAppliedSequence;
+	private final AtomicLong lastAppliedSequence = new AtomicLong();
 	/* The next sequence is reserved while the assembler monitor is held. It
 	 * closes the gap between accepting a terminal marker and invoking the
 	 * receiver callback (which deliberately runs outside the monitor). */
 	private long nextExpectedSequence;
-	private volatile long lastResolvedPosition;
+	private final AtomicLong lastResolvedPosition = new AtomicLong();
 	/* The commit/abort witness for the last resolved sequence. A resumed
 	 * assembler has no witness until it resolves one message locally. These
 	 * fields are accessed only on the subscription owner thread; cursorSnapshot()
@@ -63,11 +66,18 @@ final class TransactionAssembler
 	private AeronReplicationEnvelope.Kind lastResolutionKind;
 	private int lastResolutionDataLength;
 	private int lastResolutionDataChunkCount;
+	private int lastResolutionDictionaryLength;
+	private int lastResolutionDictionaryChunkCount;
 	private Transaction transaction;
-	private volatile RuntimeException failure;
+	private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
 	private final AeronReplicationEnvelope.EnvelopeView envelopeView =
 		new AeronReplicationEnvelope.EnvelopeView();
 	private final Delivery delivery = new Delivery();
+	/* The subscription callback is single-threaded. Reuse the checksum state and
+	 * copy scratch across transactions instead of allocating both for every
+	 * transaction, including duplicate replay validation. */
+	private final CRC32C dataCrc = new CRC32C();
+	private final byte[] crcScratch = new byte[16 * 1024];
 
 	TransactionAssembler(
 		final AeronReplicationConfiguration configuration,
@@ -137,27 +147,29 @@ final class TransactionAssembler
 		{
 			throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
 		}
-		this.lastResolvedSequence = initialSequence;
-		this.lastAppliedSequence = initialSequence;
-		this.lastResolvedPosition = initialPosition;
+		this.lastResolvedSequence.set(initialSequence);
+		this.lastAppliedSequence.set(initialSequence);
+		this.lastResolvedPosition.set(initialPosition);
 		this.nextExpectedSequence = initialSequence + 1;
 	}
 
 	void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
 	{
-		final boolean deliver;
 		try
 		{
-			/* A single reusable Delivery carries the detached transaction. Keep its
-			 * hand-off serialized so a future multi-consumer poller cannot overwrite
-			 * it while the receiver is processing the prior commit. */
+			/* A single reusable Delivery carries the detached transaction. The Aeron
+			 * subscription normally invokes this callback on one polling thread. Keep
+			 * the delivery monitor around both detachment and execution as a hard
+			 * boundary for direct/concurrent callers, while the assembler monitor is
+			 * still released before Store import and fsync. */
 			synchronized (this.delivery)
 			{
+				final boolean deliver;
 				synchronized (this)
 				{
 					final AeronReplicationEnvelope.EnvelopeView envelope =
 						AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
-					if (this.failure != null) return;
+					if (this.failure.get() != null) return;
 					deliver = this.accept(envelope, header == null ? -1 : header.position());
 				}
 				if (deliver) this.delivery.run();
@@ -181,18 +193,37 @@ final class TransactionAssembler
 		{
 			throw new IllegalArgumentException("cluster or epoch mismatch");
 		}
-		if (envelope.sequence() < this.lastResolvedSequence)
+		final long lastResolvedSequence = this.lastResolvedSequence.get();
+		if (envelope.sequence() < lastResolvedSequence)
 		{
 			throw new IllegalStateException("replication sequence regressed: last resolved " +
-			this.lastResolvedSequence + ", received " + envelope.sequence());
+			lastResolvedSequence + ", received " + envelope.sequence());
 		}
-		if (envelope.sequence() == this.lastResolvedSequence)
+		if (envelope.sequence() == lastResolvedSequence)
 		{
 			if (envelope.kind() != AeronReplicationEnvelope.Kind.COMMIT &&
 				envelope.kind() != AeronReplicationEnvelope.Kind.ABORT)
 			{
-				throw new IllegalStateException("replayed data for an already resolved sequence " +
-					this.lastResolvedSequence);
+				if (this.lastResolutionKind != AeronReplicationEnvelope.Kind.COMMIT ||
+					(envelope.kind() == AeronReplicationEnvelope.Kind.STORE_BINARY &&
+						(envelope.payloadLength() != this.lastResolutionDataLength ||
+							envelope.chunkCount() != this.lastResolutionDataChunkCount)) ||
+					(envelope.kind() == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY &&
+						(envelope.payloadLength() != this.lastResolutionDictionaryLength ||
+							envelope.chunkCount() != this.lastResolutionDictionaryChunkCount)))
+				{
+					throw new IllegalStateException("replayed data does not match the resolved transaction " +
+						lastResolvedSequence);
+				}
+				if (this.transaction == null)
+				{
+					this.transaction = new Transaction(envelope.sequence(), this.configuration.maxTransactionBytes(), true,
+						this.dataCrc, this.crcScratch);
+				}
+				if (this.transaction.sequence != envelope.sequence() || !this.transaction.duplicate)
+					throw new IllegalStateException("interleaved replayed transaction");
+				this.transaction.add(envelope);
+				return false;
 			}
 			if (this.lastResolutionKind == null)
 			{
@@ -200,7 +231,7 @@ final class TransactionAssembler
 				 * must not silently accept a contradictory terminal at that cursor;
 				 * restart from the persisted position instead. */
 				throw new IllegalStateException("terminal witness is unavailable for resolved sequence " +
-					this.lastResolvedSequence);
+						lastResolvedSequence);
 			}
 			if (envelope.kind() != this.lastResolutionKind)
 			{
@@ -216,6 +247,13 @@ final class TransactionAssembler
 				envelope.commitCrc32c() != this.lastResolutionCrc32c)
 			{
 				throw new IllegalStateException("duplicate commit has a different payload checksum");
+			}
+			if (this.transaction != null)
+			{
+				if (!this.transaction.duplicate) throw new IllegalStateException("interleaved resolved transaction");
+				this.validateDuplicateCommit(envelope);
+				this.transaction.dispose();
+				this.transaction = null;
 			}
 			return false;
 		}
@@ -257,7 +295,8 @@ final class TransactionAssembler
 		}
 		if (this.transaction == null)
 		{
-			this.transaction = new Transaction(envelope.sequence(), this.configuration.maxTransactionBytes());
+			this.transaction = new Transaction(envelope.sequence(), this.configuration.maxTransactionBytes(), false,
+				this.dataCrc, this.crcScratch);
 		}
 		if (this.transaction.sequence != envelope.sequence())
 		{
@@ -265,6 +304,22 @@ final class TransactionAssembler
 		}
 		this.transaction.add(envelope);
 		return false;
+	}
+
+	private void validateDuplicateCommit(final AeronReplicationEnvelope.EnvelopeView envelope)
+	{
+		final Transaction duplicate = this.transaction;
+		if (duplicate.dataLength != envelope.payloadLength() ||
+			duplicate.dataChunkCount != envelope.chunkCount() ||
+			duplicate.dataNextChunk != duplicate.dataChunkCount ||
+			duplicate.dataOffset != duplicate.dataLength ||
+			(duplicate.dictionary != null &&
+				(duplicate.dictionaryOffset != duplicate.dictionaryLength ||
+					duplicate.dictionaryNextChunk != duplicate.dictionaryChunkCount)) ||
+			duplicate.dataCrc32c() != envelope.commitCrc32c())
+		{
+			throw new IllegalStateException("replayed transaction does not match its resolved commit");
+		}
 	}
 
 	private void commit(final AeronReplicationEnvelope.EnvelopeView envelope, final long position)
@@ -287,8 +342,7 @@ final class TransactionAssembler
 			this.transaction.dictionary != null &&
 				(this.transaction.dictionaryOffset != this.transaction.dictionaryLength ||
 				 this.transaction.dictionaryNextChunk != this.transaction.dictionaryChunkCount) ||
-			(this.transaction.dataLength == 0 ? 0 :
-				AeronReplicationEnvelope.crc32c(this.transaction.data, 0, this.transaction.dataLength)) !=
+			this.transaction.dataCrc32c() !=
 				envelope.commitCrc32c())
 		{
 			this.transaction.dispose();
@@ -398,14 +452,16 @@ final class TransactionAssembler
 					 * callers never report an aborted sequence as applied data. */
 					if (this.resolutionKind == AeronReplicationEnvelope.Kind.COMMIT)
 					{
-						lastAppliedSequence = this.sequence;
+						lastAppliedSequence.set(this.sequence);
 					}
-					lastResolvedSequence = this.sequence;
-					lastResolvedPosition = this.position;
+					lastResolvedSequence.set(this.sequence);
+					lastResolvedPosition.set(this.position);
 					lastResolutionCrc32c = this.resolutionCrc32c;
 					lastResolutionKind = this.resolutionKind;
 					lastResolutionDataLength = this.resolutionDataLength;
 					lastResolutionDataChunkCount = this.resolutionDataChunkCount;
+					lastResolutionDictionaryLength = this.completed == null ? 0 : this.completed.dictionaryLength;
+					lastResolutionDictionaryChunkCount = this.completed == null ? 0 : this.completed.dictionaryChunkCount;
 				}
 				transactionResolved.run();
 				if (this.data != null && deliveryListener != null)
@@ -424,15 +480,15 @@ final class TransactionAssembler
 		}
 	}
 
-	long lastResolvedSequence() { return this.lastResolvedSequence; }
-	long lastAppliedSequence() { return this.lastAppliedSequence; }
+	long lastResolvedSequence() { return this.lastResolvedSequence.get(); }
+	long lastAppliedSequence() { return this.lastAppliedSequence.get(); }
 	UUID clusterId() { return this.clusterId; }
 	long epoch() { return this.epoch; }
-	long lastResolvedPosition() { return this.lastResolvedPosition; }
+	long lastResolvedPosition() { return this.lastResolvedPosition.get(); }
 
 	synchronized CursorSnapshot cursorSnapshot()
 	{
-		return new CursorSnapshot(this.lastResolvedSequence, this.lastResolvedPosition);
+		return new CursorSnapshot(this.lastResolvedSequence.get(), this.lastResolvedPosition.get());
 	}
 
 	/** Returns whether chunks are waiting for a terminal marker. */
@@ -441,7 +497,7 @@ final class TransactionAssembler
 		return this.transaction != null;
 	}
 
-	RuntimeException failure() { return this.failure; }
+	RuntimeException failure() { return this.failure.get(); }
 
 	void failure(final RuntimeException exception)
 	{
@@ -450,9 +506,8 @@ final class TransactionAssembler
 		{
 			synchronized (this)
 			{
-				if (this.failure == null)
+				if (this.failure.compareAndSet(null, exception))
 				{
-					this.failure = exception;
 					if (this.transaction != null)
 					{
 						this.transaction.dispose();
@@ -496,11 +551,19 @@ final class TransactionAssembler
 		private int dataChunkCount = -1;
 		private int dictionaryLength;
 		private int dataLength;
+		private final boolean duplicate;
+		private final CRC32C dataCrc;
+		private final byte[] crcScratch;
 
-		Transaction(final long sequence, final int maxBytes)
+		Transaction(final long sequence, final int maxBytes, final boolean duplicate,
+			final CRC32C dataCrc, final byte[] crcScratch)
 		{
 			this.sequence = sequence;
 			this.maxBytes = maxBytes;
+			this.duplicate = duplicate;
+			this.dataCrc = dataCrc;
+			this.crcScratch = crcScratch;
+			this.dataCrc.reset();
 		}
 
 		void add(final AeronReplicationEnvelope.EnvelopeView envelope)
@@ -561,11 +624,28 @@ final class TransactionAssembler
 				{
 					if (this.data == null) throw new IllegalStateException("Store data storage is unavailable");
 					this.data.putBytes(offset, envelope.source(), envelope.payloadOffset(), wireLength);
+					this.updateDataCrc(envelope.source(), envelope.payloadOffset(), wireLength);
 				}
 				this.dataOffset += wireLength;
 				this.dataNextChunk++;
 				this.dataChunkCount = envelope.chunkCount();
 			}
+		}
+
+		private void updateDataCrc(final DirectBuffer source, final int offset, final int length)
+		{
+			for (int copied = 0; copied < length;)
+			{
+				final int amount = Math.min(this.crcScratch.length, length - copied);
+				source.getBytes(offset + copied, this.crcScratch, 0, amount);
+				this.dataCrc.update(this.crcScratch, 0, amount);
+				copied += amount;
+			}
+		}
+
+		int dataCrc32c()
+		{
+			return (int)this.dataCrc.getValue();
 		}
 
 		void dispose()

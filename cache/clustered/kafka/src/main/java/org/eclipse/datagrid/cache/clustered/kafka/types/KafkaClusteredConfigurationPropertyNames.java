@@ -26,6 +26,10 @@ public interface KafkaClusteredConfigurationPropertyNames
     String TOPIC = PREFIX + "topic";
     /** Property fixing the consumer group id; a stable value makes a restarted node replay missed invalidations from its committed offset. */
     String GROUP_ID = PREFIX + "group-id";
+    /** Optional stable node identity used to derive an inferred consumer group. */
+    String NODE_ID = PREFIX + "node-id";
+    /** Optional stable provider identity used when a node hosts multiple cache providers. */
+    String PROVIDER_ID = PREFIX + "provider-id";
     /** Prefix for settings shared by the Kafka producer and consumer. */
     String KAFKA_CONFIG_PREFIX = PREFIX + "config.";
 
@@ -36,4 +40,6 @@ public interface KafkaClusteredConfigurationPropertyNames
 
     /** Property bounding the accepted serialized payload size; defaults to 1 MiB. */
     String MAX_PAYLOAD_BYTES = PREFIX + "max-payload-bytes";
+    /** Property bounding one Kafka send acknowledgement wait; defaults to 30 seconds. */
+    String SEND_TIMEOUT_MILLIS = PREFIX + "send-timeout-millis";
 }

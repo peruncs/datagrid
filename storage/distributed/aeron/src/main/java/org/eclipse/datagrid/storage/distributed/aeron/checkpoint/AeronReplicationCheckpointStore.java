@@ -19,8 +19,11 @@ import org.eclipse.datagrid.storage.distributed.types.Crc32c;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.UUID;
 
 /**
@@ -32,9 +35,6 @@ import java.util.UUID;
  */
 public final class AeronReplicationCheckpointStore
 {
-	private static final ThreadLocal<ByteBuffer> ENCODE_BUFFER = ThreadLocal.withInitial(
-		() -> ByteBuffer.allocate(AeronReplicationCheckpoint.ENCODED_BYTES).order(ByteOrder.BIG_ENDIAN));
-
 	private AeronReplicationCheckpointStore() { }
 
 	/**
@@ -46,8 +46,30 @@ public final class AeronReplicationCheckpointStore
 	 */
 	public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException
 	{
-		final ByteBuffer encoded = ENCODE_BUFFER.get();
-		encoded.clear();
+		if (path == null || checkpoint == null) throw new NullPointerException("path and checkpoint");
+		/* The encoded bytes are intentionally owned by this invocation. A callback
+		 * (including a crash hook) can therefore not overwrite a shared ThreadLocal
+		 * buffer while AtomicFileStore is still consuming it. Checkpoint writes are
+		 * infrequent and the fixed-size allocation is preferable to an escaping,
+		 * re-entrancy-sensitive mutable buffer. */
+		final byte[] bytes = encode(checkpoint);
+		final String phase = checkpoint.recordType() == AeronReplicationCheckpoint.RecordType.READER_CURSOR
+			? AtomicFileStore.PHASE_CURSOR
+			: AtomicFileStore.PHASE_CHECKPOINT;
+		AtomicFileStore.write(path, channel ->
+		{
+			final ByteBuffer encoded = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
+			while (encoded.hasRemaining())
+			{
+				if (channel.write(encoded) == 0) throw new IOException("Aeron checkpoint write made no progress");
+			}
+		}, phase);
+	}
+
+	private static byte[] encode(final AeronReplicationCheckpoint checkpoint)
+	{
+		final ByteBuffer encoded = ByteBuffer.allocate(AeronReplicationCheckpoint.ENCODED_BYTES)
+			.order(ByteOrder.BIG_ENDIAN);
 		encoded.putInt(AeronReplicationCheckpoint.MAGIC)
 			.putShort(AeronReplicationCheckpoint.VERSION)
 			.put((byte)checkpoint.recordTypeCode())
@@ -60,18 +82,10 @@ public final class AeronReplicationCheckpointStore
 		encoded.putLong(checkpoint.recordingId()).putLong(checkpoint.writerEpoch())
 			.putLong(checkpoint.transactionSequence()).putLong(checkpoint.recordingPosition())
 			.putInt(checkpoint.dataLength()).putInt(checkpoint.dataChunkCount())
-			.putInt(checkpoint.resolutionCrc32c())
-			.putInt(Crc32c.compute(encoded.array(), 0,
-				AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES))
-			.flip();
-		AtomicFileStore.write(path, channel ->
-		{
-			while (encoded.hasRemaining())
-			{
-				if (channel.write(encoded) == 0) throw new IOException("Aeron checkpoint write made no progress");
-			}
-		},
-			AtomicFileStore.PHASE_CHECKPOINT);
+			.putInt(checkpoint.resolutionCrc32c());
+		final byte[] bytes = encoded.array();
+		encoded.putInt(Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
+		return bytes;
 	}
 
 	/**
@@ -83,16 +97,7 @@ public final class AeronReplicationCheckpointStore
 	 */
 	public static AeronReplicationCheckpoint read(final Path path) throws IOException
 	{
-		final long size = Files.size(path);
-		if (size != AeronReplicationCheckpoint.ENCODED_BYTES)
-		{
-			throw new IOException("invalid Aeron checkpoint length=" + size);
-		}
-		final byte[] bytes = Files.readAllBytes(path);
-		if (bytes.length != AeronReplicationCheckpoint.ENCODED_BYTES)
-		{
-			throw new IOException("invalid Aeron checkpoint length=" + bytes.length);
-		}
+		final byte[] bytes = readFixedRecord(path);
 		final int expected = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
 			.getInt(AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES);
 		if (expected != Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES))
@@ -120,6 +125,30 @@ public final class AeronReplicationCheckpointStore
 		catch (final RuntimeException e)
 		{
 			throw new IOException("invalid Aeron checkpoint fields", e);
+		}
+	}
+
+	private static byte[] readFixedRecord(final Path path) throws IOException
+	{
+		if (path == null) throw new NullPointerException("path");
+		/* Keep the file descriptor open while reading and request NOFOLLOW_LINKS.
+		 * The old size/readAllBytes sequence allowed a symlink swap between the
+		 * validation and read, which could make recovery consume attacker-controlled
+		 * metadata from outside the configured checkpoint directory. */
+		try (SeekableByteChannel channel = Files.newByteChannel(
+			path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))
+		{
+			final long size = channel.size();
+			if (size != AeronReplicationCheckpoint.ENCODED_BYTES)
+				throw new IOException("invalid Aeron checkpoint length=" + size);
+			final byte[] bytes = new byte[AeronReplicationCheckpoint.ENCODED_BYTES];
+			final ByteBuffer target = ByteBuffer.wrap(bytes);
+			while (target.hasRemaining())
+			{
+				final int read = channel.read(target);
+				if (read <= 0) throw new IOException("Aeron checkpoint read made no progress");
+			}
+			return bytes;
 		}
 	}
 

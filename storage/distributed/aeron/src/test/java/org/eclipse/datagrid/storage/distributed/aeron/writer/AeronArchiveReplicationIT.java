@@ -378,6 +378,68 @@ class AeronArchiveReplicationIT
 		}
 	}
 
+	/**
+	 * A closed Archive must not make the publisher report a successful close while
+	 * its recording may still be active. The wrapper is retained so a caller can
+	 * retry the Archive stop after reconnecting the control client.
+	 */
+	@Test
+	void archiveStopFailureKeepsPublisherOpenForRetry() throws Exception
+	{
+		final int controlPort = freePort();
+		final String directory = Files.createTempDirectory("datagrid-aeron-close-").toString();
+		final File archiveDirectory = new File(directory, "archive");
+		final String controlChannel = "aeron:udp?endpoint=localhost:" + controlPort;
+		final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
+			.maxTransactionBytes(256 * 1024).offerTimeoutNanos(2_000_000_000L).build();
+		final MediaDriver.Context mediaContext = new MediaDriver.Context()
+			.aeronDirectoryName(directory).threadingMode(ThreadingMode.SHARED)
+			.dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+		final AeronArchive.Context archiveClientContext = new AeronArchive.Context()
+			.aeronDirectoryName(directory).controlRequestChannel(controlChannel)
+			.controlResponseChannel(CONTROL_RESPONSE_CHANNEL).messageTimeoutNs(10_000_000_000L);
+		final Archive.Context archiveContext = new Archive.Context()
+			.aeronDirectoryName(directory).archiveDir(archiveDirectory).deleteArchiveOnStart(true)
+			.threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+			.controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
+		try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext))
+		{
+			final AeronArchive archive = AeronArchive.connect(archiveClientContext);
+			final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+				archive, liveChannel, 1001, configuration, UUID.randomUUID(), 1, 0);
+			try
+			{
+				await(publisher.publication()::isConnected, 10_000);
+				publisher.publishTransaction(null, new ByteBuffer[] { ByteBuffer.wrap(new byte[] { 1, 2, 3 }) });
+				awaitRecordingId(publisher);
+				archive.close();
+				assertThrows(IllegalStateException.class, publisher::close);
+				assertFalse(publisher.isClosed(), "an unconfirmed Archive stop must remain retryable");
+			}
+			finally
+			{
+				if (!publisher.isClosed())
+				{
+					try
+					{
+						publisher.close();
+					}
+					catch (final RuntimeException ignored)
+					{
+						// The control client was deliberately closed; the driver owns cleanup.
+					}
+				}
+			}
+		}
+		finally
+		{
+			delete(archiveDirectory);
+			delete(new File(directory));
+		}
+	}
+
 	private static long awaitRecordingId(final AeronArchiveReplicationPublisher publisher)
 	{
 		final long deadline = System.nanoTime() + 10_000_000_000L;

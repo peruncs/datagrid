@@ -166,7 +166,7 @@ public record AeronReplicationCheckpoint(
 		}
 	}
 
-	static final int MAGIC = 0x44474152; // DGAR
+	static final int MAGIC = 0x44474350; // DGCP
 	static final short VERSION = 1;
 	static final int ENCODED_BYTES = 108;
 

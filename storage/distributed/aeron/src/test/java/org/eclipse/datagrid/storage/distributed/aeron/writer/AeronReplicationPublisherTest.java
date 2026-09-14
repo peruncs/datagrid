@@ -465,6 +465,47 @@ class AeronReplicationPublisherTest
 		}
 	}
 
+	/** A durable reservation cannot be bypassed by an independent publisher call. */
+	@Test
+	void reservationMustBeConsumedOrReleasedBeforeAnotherPublication()
+	{
+		final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+		try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0))
+		{
+			final long reserved = publisher.reserveSequence();
+			assertEquals(0L, reserved);
+			assertTrue(publisher.hasSequenceReservation());
+			assertThrows(IllegalStateException.class,
+				() -> publisher.publishTransaction(null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})}));
+			assertThrows(IllegalStateException.class,
+				() -> publisher.synchronizeNextSequence(2L));
+			publisher.releaseReservedSequence(reserved);
+			assertFalse(publisher.hasSequenceReservation());
+			assertDoesNotThrow(() -> publisher.publishTransaction(
+				null, new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})}));
+		}
+	}
+
+	/** Explicit preparation consumes exactly the reservation returned by reserveSequence. */
+	@Test
+	void explicitPreparationConsumesTheMatchingReservation()
+	{
+		final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+		try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0))
+		{
+			final ByteBuffer[] buffers = {ByteBuffer.wrap(new byte[] {3, 4})};
+			final AeronReplicationPublisher.TransactionMetadata metadata = publisher.transactionMetadata(buffers, 1);
+			final long reserved = publisher.reserveSequence();
+			final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+				null, buffers, reserved, metadata);
+			assertFalse(publisher.hasSequenceReservation());
+			assertEquals(reserved, prepared.sequence());
+			publisher.commit(prepared);
+		}
+	}
+
 	private static byte[] preparedData(final byte[] message)
 	{
 		final AeronReplicationEnvelope.Envelope envelope = AeronReplicationEnvelope.decode(

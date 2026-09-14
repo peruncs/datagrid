@@ -36,10 +36,10 @@ module org.eclipse.datagrid.cluster.nodelibrary
 	requires org.eclipse.store.storage.embedded;
 	requires org.eclipse.serializer.afs;
 	requires org.eclipse.store.afs.nio;
-	requires org.quartz;
 	requires com.fasterxml.jackson.core;
 	requires com.fasterxml.jackson.databind;
 	requires java.net.http;
+	requires org.apache.commons.compress;
 
 	uses org.eclipse.datagrid.cluster.nodelibrary.types.ClusterReplicationTransportProvider;
 

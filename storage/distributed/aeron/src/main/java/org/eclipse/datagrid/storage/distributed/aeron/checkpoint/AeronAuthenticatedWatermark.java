@@ -18,11 +18,12 @@ import org.agrona.DirectBuffer;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.util.*;
+
+import static org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronCheckpointCodec.*;
 
 /**
  * Authenticated, monotonic reader watermark used by the Archive-retention
@@ -43,19 +44,21 @@ import java.util.*;
  * @param authentication  HMAC over the identity and progress fields
  */
 public record AeronAuthenticatedWatermark(
-		UUID readerId,
-		UUID clusterId,
-		UUID storeGeneration,
-		long writerEpoch,
-		long recordingId,
-		long sequence,
-		long position,
-		byte[] authentication) {
+	UUID readerId,
+	UUID clusterId,
+	UUID storeGeneration,
+	long writerEpoch,
+	long recordingId,
+	long sequence,
+	long position,
+	byte[] authentication)
+{
 
 	private static final int VERSION = 1;
-	private static final int UUID_BYTES = 16;
 	private static final int IDENTITY_LENGTH = Integer.BYTES + UUID_BYTES * 3 + Long.BYTES * 4;
 	private static final int AUTHENTICATION_LENGTH = 32;
+	/** Serialized watermark length in bytes. */
+	public static final int ENCODED_LENGTH = IDENTITY_LENGTH + AUTHENTICATION_LENGTH;
 	private static final String ALGORITHM = "HmacSHA256";
 	private static final UUID UUID_ZERO = new UUID(0L, 0L);
 	private static final ThreadLocal<Mac> MAC = ThreadLocal.withInitial(() -> {
@@ -66,23 +69,36 @@ public record AeronAuthenticatedWatermark(
 		}
 	});
 	private static final ThreadLocal<byte[]> AUTHENTICATION_SCRATCH =
-			ThreadLocal.withInitial(() -> new byte[AUTHENTICATION_LENGTH]);
-	private static final ThreadLocal<ByteBuffer> CANONICAL_SCRATCH = ThreadLocal.withInitial(() ->
-			ByteBuffer.allocate(IDENTITY_LENGTH).order(ByteOrder.BIG_ENDIAN));
+		ThreadLocal.withInitial(() -> new byte[AUTHENTICATION_LENGTH]);
+	private static final ThreadLocal<byte[]> CANONICAL_SCRATCH =
+		ThreadLocal.withInitial(() -> new byte[IDENTITY_LENGTH]);
 
 	/**
 	 * Creates a watermark and copies the authentication bytes so the token is
 	 * immutable after construction.
 	 */
 	public AeronAuthenticatedWatermark {
-		if (readerId == null || clusterId == null || storeGeneration == null || authentication == null) {
+		if (readerId == null || clusterId == null || storeGeneration == null || authentication == null)
+		{
 			throw new NullPointerException("watermark identity and authentication are required");
 		}
 		if (writerEpoch < 0 || recordingId < 0 || sequence < -1 || sequence == Long.MAX_VALUE || position < -1 ||
-			authentication.length != AUTHENTICATION_LENGTH) {
+			authentication.length != AUTHENTICATION_LENGTH)
+		{
 			throw new IllegalArgumentException("invalid Aeron watermark");
 		}
 		authentication = authentication.clone();
+	}
+
+	/**
+	 * Returns a defensive copy so callers cannot mutate the signed token.
+	 *
+	 * @return authentication tag copy
+	 */
+	@Override
+	public byte[] authentication()
+	{
+		return this.authentication.clone();
 	}
 
 	/**
@@ -107,7 +123,9 @@ public record AeronAuthenticatedWatermark(
 			final long sequence,
 			final long position,
 			final byte[] secret
-	) {
+		)
+	{
+		validateFields(readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
 		final byte[] authentication = authenticate(canonical(readerId, clusterId,
 						storeGeneration, writerEpoch, recordingId, sequence, position),
 				secret);
@@ -116,7 +134,19 @@ public record AeronAuthenticatedWatermark(
 				authentication);
 	}
 
-	/** Signs directly into the fixed wire representation used by the watermark publication. */
+	/**
+	 * Signs directly into the fixed wire representation used by the watermark publication.
+	 *
+	 * @param readerId reader that produced the watermark
+	 * @param clusterId replication cluster identity
+	 * @param storeGeneration Store image identity
+	 * @param writerEpoch writer epoch associated with the recording
+	 * @param recordingId Aeron Archive recording identity
+	 * @param sequence transaction sequence acknowledged by the reader
+	 * @param position Archive position acknowledged by the reader
+	 * @param secret HMAC secret
+	 * @return serialized signed watermark
+	 */
 	public static byte[] signEncoded(
 			final UUID readerId,
 			final UUID clusterId,
@@ -126,12 +156,45 @@ public record AeronAuthenticatedWatermark(
 			final long sequence,
 			final long position,
 			final byte[] secret
-	) {
-		final byte[] encoded = new byte[IDENTITY_LENGTH + AUTHENTICATION_LENGTH];
-		putCanonical(ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN), readerId, clusterId,
-				storeGeneration, writerEpoch, recordingId, sequence, position);
-		authenticateInto(encoded, IDENTITY_LENGTH, secret, encoded, IDENTITY_LENGTH);
+	)
+	{
+		final byte[] encoded = new byte[ENCODED_LENGTH];
+		signEncodedInto(encoded, readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position,
+			secret);
 		return encoded;
+	}
+
+	/**
+	 * Writes a signed watermark into a caller-provided fixed-size array. This is
+	 * used by the latest-value control channel to reuse its two hand-off buffers.
+	 *
+	 * @param target destination with exactly {@link #ENCODED_LENGTH} bytes
+	 * @param readerId reader that produced the watermark
+	 * @param clusterId replication cluster identity
+	 * @param storeGeneration Store image identity
+	 * @param writerEpoch writer epoch associated with the recording
+	 * @param recordingId Aeron Archive recording identity
+	 * @param sequence transaction sequence acknowledged by the reader
+	 * @param position Archive position acknowledged by the reader
+	 * @param secret HMAC secret
+	 */
+	public static void signEncodedInto(
+		final byte[] target,
+		final UUID readerId,
+		final UUID clusterId,
+		final UUID storeGeneration,
+		final long writerEpoch,
+		final long recordingId,
+		final long sequence,
+		final long position,
+		final byte[] secret
+	)
+	{
+		validateFields(readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
+		if (target == null || target.length != ENCODED_LENGTH)
+			throw new IllegalArgumentException("watermark target must contain exactly " + ENCODED_LENGTH + " bytes");
+		putCanonical(target, readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
+		authenticateInto(target, IDENTITY_LENGTH, secret, target, IDENTITY_LENGTH);
 	}
 
 	/**
@@ -141,30 +204,48 @@ public record AeronAuthenticatedWatermark(
 	 * @param encoded serialized watermark bytes
 	 * @return decoded watermark
 	 */
-	public static AeronAuthenticatedWatermark decode(final byte[] encoded) {
+	public static AeronAuthenticatedWatermark decode(final byte[] encoded)
+	{
 		if (encoded == null) throw new NullPointerException("encoded");
-		if (encoded.length != IDENTITY_LENGTH + AUTHENTICATION_LENGTH) {
+		if (encoded.length != ENCODED_LENGTH)
+		{
 			throw new IllegalArgumentException("invalid Aeron watermark encoding length");
 		}
-		final ByteBuffer buffer = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN);
-		if (buffer.getInt() != VERSION) throw new IllegalArgumentException("unsupported Aeron watermark version");
-		final UUID readerId = new UUID(buffer.getLong(), buffer.getLong());
-		final UUID clusterId = new UUID(buffer.getLong(), buffer.getLong());
-		final UUID storeGeneration = new UUID(buffer.getLong(), buffer.getLong());
-		final long epoch = buffer.getLong();
-		final long recordingId = buffer.getLong();
-		final long sequence = buffer.getLong();
-		final long position = buffer.getLong();
+		if (getInt(encoded, 0) != VERSION)
+			throw new IllegalArgumentException("unsupported Aeron watermark version");
+		int offset = Integer.BYTES;
+		final UUID readerId = getUuid(encoded, offset);
+		offset += UUID_BYTES;
+		final UUID clusterId = getUuid(encoded, offset);
+		offset += UUID_BYTES;
+		final UUID storeGeneration = getUuid(encoded, offset);
+		offset += UUID_BYTES;
+		final long epoch = getLong(encoded, offset);
+		offset += Long.BYTES;
+		final long recordingId = getLong(encoded, offset);
+		offset += Long.BYTES;
+		final long sequence = getLong(encoded, offset);
+		offset += Long.BYTES;
+		final long position = getLong(encoded, offset);
+		offset += Long.BYTES;
 		final byte[] authentication = new byte[AUTHENTICATION_LENGTH];
-		buffer.get(authentication);
+		System.arraycopy(encoded, offset, authentication, 0, AUTHENTICATION_LENGTH);
 		return new AeronAuthenticatedWatermark(
 				readerId, clusterId, storeGeneration, epoch, recordingId, sequence, position, authentication);
 	}
 
-	/** Decodes directly from an Aeron/Agrona frame without copying the identity bytes. */
-	public static AeronAuthenticatedWatermark decode(final DirectBuffer encoded, final int offset, final int length) {
+	/**
+	 * Decodes directly from an Aeron/Agrona frame without copying the identity bytes.
+	 *
+	 * @param encoded source frame containing one serialized watermark
+	 * @param offset first byte of the serialized watermark
+	 * @param length serialized watermark length; must be {@link #ENCODED_LENGTH}
+	 * @return decoded watermark
+	 */
+	public static AeronAuthenticatedWatermark decode(final DirectBuffer encoded, final int offset, final int length)
+	{
 		if (encoded == null) throw new NullPointerException("encoded");
-		if (offset < 0 || length != IDENTITY_LENGTH + AUTHENTICATION_LENGTH ||
+		if (offset < 0 || length != ENCODED_LENGTH ||
 			offset > encoded.capacity() - length) {
 			throw new IllegalArgumentException("invalid Aeron watermark encoding length");
 		}
@@ -202,15 +283,23 @@ public record AeronAuthenticatedWatermark(
 	 * @return a signed watermark at the least advanced boundary
 	 */
 	public static AeronAuthenticatedWatermark aggregate(
-			final Collection<AeronAuthenticatedWatermark> watermarks, final byte[] secret) {
+		final Collection<AeronAuthenticatedWatermark> watermarks, final byte[] secret)
+	{
 		if (watermarks == null || watermarks.isEmpty()) throw new IllegalArgumentException("watermarks are empty");
+		final Set<UUID> readers = new HashSet<>();
 		AeronAuthenticatedWatermark least = null;
-		for (final AeronAuthenticatedWatermark watermark : watermarks) {
+		for (final AeronAuthenticatedWatermark watermark : watermarks)
+		{
 			if (watermark == null || !watermark.verify(secret))
 				throw new SecurityException("invalid Aeron watermark authentication");
-			if (least == null) {
+			if (!readers.add(watermark.readerId()))
+				throw new IllegalArgumentException("duplicate Aeron watermark reader identity");
+			if (least == null)
+			{
 				least = watermark;
-			} else {
+			}
+			else
+			{
 				if (!sameWriterIdentity(least, watermark))
 					throw new IllegalArgumentException("watermarks do not belong to one Aeron writer");
 				if (compareProgress(watermark, least) < 0) least = watermark;
@@ -221,41 +310,58 @@ public record AeronAuthenticatedWatermark(
 	}
 
 	private static byte[] canonical(
-			final UUID readerId, final UUID clusterId, final UUID storeGeneration, final long writerEpoch,
-			final long recordingId, final long sequence, final long position) {
+		final UUID readerId, final UUID clusterId, final UUID storeGeneration, final long writerEpoch,
+		final long recordingId, final long sequence, final long position)
+	{
 		if (readerId == null || clusterId == null || storeGeneration == null)
 			throw new NullPointerException("watermark identity");
 		final byte[] canonical = new byte[IDENTITY_LENGTH];
-		putCanonical(ByteBuffer.wrap(canonical).order(ByteOrder.BIG_ENDIAN), readerId, clusterId,
-				storeGeneration, writerEpoch, recordingId, sequence, position);
+		putCanonical(canonical, readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
 		return canonical;
 	}
 
-	private static void putCanonical(final ByteBuffer buffer,
-									 final UUID readerId, final UUID clusterId, final UUID storeGeneration, final long writerEpoch,
-									 final long recordingId, final long sequence, final long position) {
-		buffer.putInt(VERSION)
-				.putLong(readerId.getMostSignificantBits()).putLong(readerId.getLeastSignificantBits())
-				.putLong(clusterId.getMostSignificantBits()).putLong(clusterId.getLeastSignificantBits())
-				.putLong(storeGeneration.getMostSignificantBits()).putLong(storeGeneration.getLeastSignificantBits())
-				.putLong(writerEpoch).putLong(recordingId).putLong(sequence).putLong(position);
+	private static void putCanonical(final byte[] target,
+		final UUID readerId, final UUID clusterId, final UUID storeGeneration, final long writerEpoch,
+		final long recordingId, final long sequence, final long position)
+	{
+		int cursor = 0;
+		cursor = putInt(target, cursor, VERSION);
+		cursor = putUuid(target, cursor, readerId);
+		cursor = putUuid(target, cursor, clusterId);
+		cursor = putUuid(target, cursor, storeGeneration);
+		cursor = putLong(target, cursor, writerEpoch);
+		cursor = putLong(target, cursor, recordingId);
+		cursor = putLong(target, cursor, sequence);
+		putLong(target, cursor, position);
+	}
+
+	private static void validateFields(final UUID readerId, final UUID clusterId, final UUID storeGeneration,
+		final long writerEpoch, final long recordingId, final long sequence, final long position)
+	{
+		if (readerId == null || clusterId == null || storeGeneration == null)
+			throw new NullPointerException("watermark identity");
+		if (writerEpoch < 0 || recordingId < 0 || sequence < -1 || sequence == Long.MAX_VALUE || position < -1)
+			throw new IllegalArgumentException("invalid Aeron watermark progress");
 	}
 
 	private static boolean sameWriterIdentity(
-			final AeronAuthenticatedWatermark left, final AeronAuthenticatedWatermark right) {
+		final AeronAuthenticatedWatermark left, final AeronAuthenticatedWatermark right)
+	{
 		return left.clusterId().equals(right.clusterId()) &&
 			   left.storeGeneration().equals(right.storeGeneration()) &&
 			   left.writerEpoch() == right.writerEpoch() && left.recordingId() == right.recordingId();
 	}
 
 	private static int compareProgress(
-			final AeronAuthenticatedWatermark left, final AeronAuthenticatedWatermark right) {
+		final AeronAuthenticatedWatermark left, final AeronAuthenticatedWatermark right)
+	{
 		final int sequence = Long.compare(left.sequence(), right.sequence());
 		return sequence == 0 ? Long.compare(left.position(), right.position()) : sequence;
 	}
 
 	private static boolean monotonicProgress(
-			final AeronAuthenticatedWatermark newer, final AeronAuthenticatedWatermark previous) {
+		final AeronAuthenticatedWatermark newer, final AeronAuthenticatedWatermark previous)
+	{
 		/* Recording positions are monotonic independently of the logical sequence.
 		 * Comparing sequence first alone would accept (N+1, position before N),
 		 * producing a cursor that claims to have advanced while pointing backwards
@@ -269,37 +375,33 @@ public record AeronAuthenticatedWatermark(
 		return newer.sequence() > previous.sequence() && newer.position() > previous.position();
 	}
 
-	private static byte[] authenticate(final byte[] value, final byte[] secret) {
+	private static byte[] authenticate(final byte[] value, final byte[] secret)
+	{
 		final byte[] authentication = new byte[AUTHENTICATION_LENGTH];
 		authenticateInto(value, value.length, secret, authentication, 0);
 		return authentication;
 	}
 
 	private static void authenticateInto(final byte[] value, final int length,
-										 final byte[] secret, final byte[] target, final int targetOffset) {
-		if (secret == null || secret.length == 0) throw new IllegalArgumentException("watermark secret is empty");
+		final byte[] secret, final byte[] target, final int targetOffset)
+	{
+		if (secret == null || secret.length < 16)
+			throw new IllegalArgumentException("watermark secret must contain at least 16 bytes");
 		try {
 			final Mac mac = MAC.get();
 			mac.init(new SecretKeySpec(secret, ALGORITHM));
 			mac.update(value, 0, length);
 			mac.doFinal(target, targetOffset);
-		} catch (final GeneralSecurityException failure) {
+		}
+		catch (final GeneralSecurityException failure)
+		{
 			throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
 		}
 	}
 
-	/**
-	 * Returns a defensive copy of the authentication bytes.
-	 *
-	 * @return copied authentication bytes
-	 */
 	@Override
-	public byte[] authentication() {
-		return this.authentication.clone();
-	}
-
-	@Override
-	public boolean equals(final Object candidate) {
+	public boolean equals(final Object candidate)
+	{
 		if (this == candidate) return true;
 		if (!(candidate instanceof AeronAuthenticatedWatermark other)) return false;
 		return this.writerEpoch == other.writerEpoch && this.recordingId == other.recordingId &&
@@ -310,7 +412,8 @@ public record AeronAuthenticatedWatermark(
 	}
 
 	@Override
-	public int hashCode() {
+	public int hashCode()
+	{
 		int result = Objects.hash(this.readerId, this.clusterId, this.storeGeneration,
 				this.writerEpoch, this.recordingId, this.sequence, this.position);
 		return 31 * result + Arrays.hashCode(this.authentication);
@@ -322,13 +425,13 @@ public record AeronAuthenticatedWatermark(
 	 * @param secret HMAC secret
 	 * @return {@code true} when the token was signed with the secret
 	 */
-	public boolean verify(final byte[] secret) {
-		final ByteBuffer canonical = CANONICAL_SCRATCH.get();
-		canonical.clear();
+	public boolean verify(final byte[] secret)
+	{
+		final byte[] canonical = CANONICAL_SCRATCH.get();
 		putCanonical(canonical, this.readerId, this.clusterId, this.storeGeneration, this.writerEpoch,
-				this.recordingId, this.sequence, this.position);
+			this.recordingId, this.sequence, this.position);
 		final byte[] expected = AUTHENTICATION_SCRATCH.get();
-		authenticateInto(canonical.array(), IDENTITY_LENGTH, secret, expected, 0);
+		authenticateInto(canonical, IDENTITY_LENGTH, secret, expected, 0);
 		return MessageDigest.isEqual(this.authentication, expected);
 	}
 
@@ -337,12 +440,12 @@ public record AeronAuthenticatedWatermark(
 	 *
 	 * @return serialized watermark bytes
 	 */
-	public byte[] encode() {
-		final byte[] encoded = new byte[IDENTITY_LENGTH + AUTHENTICATION_LENGTH];
-		final ByteBuffer buffer = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN);
-		putCanonical(buffer, this.readerId, this.clusterId, this.storeGeneration,
+	public byte[] encode()
+	{
+		final byte[] encoded = new byte[ENCODED_LENGTH];
+			putCanonical(encoded, this.readerId, this.clusterId, this.storeGeneration,
 				this.writerEpoch, this.recordingId, this.sequence, this.position);
-		buffer.put(this.authentication);
+		System.arraycopy(this.authentication, 0, encoded, IDENTITY_LENGTH, AUTHENTICATION_LENGTH);
 		return encoded;
 	}
 
@@ -350,17 +453,20 @@ public record AeronAuthenticatedWatermark(
 	 * Tracks the greatest accepted watermark and rejects replay, rollback, or a
 	 * conflicting position for an already acknowledged sequence.
 	 */
-	public static final class Validator {
+	public static final class Validator implements AutoCloseable {
 		private final byte[] secret;
 		private final Map<UUID, AeronAuthenticatedWatermark> latest = new HashMap<>();
+		private boolean erased;
 
 		/**
 		 * Creates a validator for one HMAC secret.
 		 *
 		 * @param secret HMAC secret
 		 */
-		public Validator(final byte[] secret) {
-			if (secret == null || secret.length == 0) throw new IllegalArgumentException("watermark secret is empty");
+		public Validator(final byte[] secret)
+		{
+			if (secret == null || secret.length < 16)
+				throw new IllegalArgumentException("watermark secret must contain at least 16 bytes");
 			this.secret = secret.clone();
 		}
 
@@ -369,7 +475,9 @@ public record AeronAuthenticatedWatermark(
 		 *
 		 * @param watermark watermark to accept
 		 */
-		public synchronized void accept(final AeronAuthenticatedWatermark watermark) {
+		public synchronized void accept(final AeronAuthenticatedWatermark watermark)
+		{
+			this.ensureOpen();
 			if (watermark == null || !watermark.verify(this.secret))
 				throw new SecurityException("invalid Aeron watermark authentication");
 			final AeronAuthenticatedWatermark previous = this.latest.get(watermark.readerId());
@@ -386,7 +494,9 @@ public record AeronAuthenticatedWatermark(
 		 * @param readerId reader identity
 		 * @return latest accepted watermark, or {@code null}
 		 */
-		public synchronized AeronAuthenticatedWatermark latest(final UUID readerId) {
+		public synchronized AeronAuthenticatedWatermark latest(final UUID readerId)
+		{
+			this.ensureOpen();
 			return this.latest.get(readerId);
 		}
 
@@ -396,9 +506,18 @@ public record AeronAuthenticatedWatermark(
 		 * @param readerId	reader identity
 		 * @param watermark prior watermark, or {@code null} to remove the entry
 		 */
-		public synchronized void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark) {
-			if (watermark == null) this.latest.remove(readerId);
-			else this.latest.put(readerId, watermark);
+		public synchronized void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark)
+		{
+			this.ensureOpen();
+			if (readerId == null) throw new NullPointerException("readerId");
+			if (watermark == null)
+			{
+				this.latest.remove(readerId);
+				return;
+			}
+			if (!readerId.equals(watermark.readerId()) || !watermark.verify(this.secret))
+				throw new SecurityException("cannot restore an unauthenticated Aeron watermark");
+			this.latest.put(readerId, watermark);
 		}
 
 		/**
@@ -406,13 +525,57 @@ public record AeronAuthenticatedWatermark(
 		 *
 		 * @return immutable reader-to-watermark snapshot
 		 */
-		public synchronized Map<UUID, AeronAuthenticatedWatermark> snapshot() {
+		public synchronized Map<UUID, AeronAuthenticatedWatermark> snapshot()
+		{
+			this.ensureOpen();
 			return Map.copyOf(this.latest);
+		}
+
+		/** Returns whether every supplied reader has a validated watermark. */
+		synchronized boolean containsAll(final Set<UUID> readers)
+		{
+			this.ensureOpen();
+			return this.latest.keySet().containsAll(readers);
+		}
+
+		/** Removes a reader's validated watermark when its retirement is persisted. */
+		synchronized void remove(final UUID readerId)
+		{
+			this.ensureOpen();
+			this.latest.remove(readerId);
+		}
+
+		/** Returns whether this validator has a watermark for the supplied reader. */
+		synchronized boolean contains(final UUID readerId)
+		{
+			this.ensureOpen();
+			return this.latest.containsKey(readerId);
+		}
+
+		/** Rejects operations after the secret has been erased. */
+		synchronized void ensureOpen()
+		{
+			if (this.erased) throw new IllegalStateException("Aeron watermark validator is closed");
+		}
+
+		/** Erases the HMAC key when the owning retention controller is closed. */
+		synchronized void clearSecret() {
+			if (!this.erased)
+			{
+				Arrays.fill(this.secret, (byte)0);
+				this.erased = true;
+			}
+		}
+
+		/** Erases the retained HMAC key. */
+		@Override
+		public void close() {
+			this.clearSecret();
 		}
 	}
 
 	/** Verifies and aggregates a configured set of reader acknowledgements. */
-	public static final class Quorum {
+	public static final class Quorum implements AutoCloseable {
 		private final Set<UUID> expectedReaders;
 		private final Set<UUID> activeReaders;
 		private final Set<UUID> retiredReaders = new HashSet<>();
@@ -441,6 +604,7 @@ public record AeronAuthenticatedWatermark(
 		 * @param watermark acknowledgement to accept
 		 */
 		public synchronized void accept(final AeronAuthenticatedWatermark watermark) {
+			this.validator.ensureOpen();
 			if (watermark == null || watermark.sequence() < 0 || watermark.position() < 0 ||
 				!this.activeReaders.contains(watermark.readerId()))
 				throw new SecurityException("Aeron watermark reader is not part of the configured quorum");
@@ -452,14 +616,37 @@ public record AeronAuthenticatedWatermark(
 		 *
 		 * @return least advanced authenticated acknowledgement
 		 */
-		public synchronized AeronAuthenticatedWatermark aggregate() {
-			final Map<UUID, AeronAuthenticatedWatermark> snapshot = this.validator.snapshot();
+		public synchronized AeronAuthenticatedWatermark aggregate()
+		{
+			this.validator.ensureOpen();
 			if (this.activeReaders.isEmpty())
 				throw new IllegalStateException("Aeron reader quorum has no active readers");
-			if (!snapshot.keySet().containsAll(this.activeReaders))
-				throw new IllegalStateException("Aeron reader quorum has not acknowledged the requested boundary");
-			return AeronAuthenticatedWatermark.aggregate(
-					this.activeReaders.stream().map(snapshot::get).toList(), this.validator.secret);
+			AeronAuthenticatedWatermark least = null;
+			for (final UUID readerId : this.activeReaders)
+			{
+				final AeronAuthenticatedWatermark watermark = this.validator.latest(readerId);
+				if (watermark == null)
+				{
+					throw new IllegalStateException(
+						"Aeron reader quorum has not acknowledged the requested boundary; missing=" +
+							this.missingReaders());
+				}
+				/* Entries in Validator have already passed HMAC and monotonic checks.
+				 * Compare them in place instead of copying every token into a temporary
+				 * list and authenticating the same bytes a second time. */
+				if (least == null)
+				{
+					least = watermark;
+				}
+				else
+				{
+					if (!sameWriterIdentity(least, watermark))
+						throw new IllegalStateException("Aeron reader quorum contains mixed writer identities");
+					if (compareProgress(watermark, least) < 0) least = watermark;
+				}
+			}
+		return sign(UUID_ZERO, least.clusterId(), least.storeGeneration(), least.writerEpoch(),
+			least.recordingId(), least.sequence(), least.position(), this.validator.secret);
 		}
 
 		/**
@@ -467,9 +654,29 @@ public record AeronAuthenticatedWatermark(
 		 *
 		 * @return {@code true} when every configured reader has reported
 		 */
-		public synchronized boolean isComplete() {
+		public synchronized boolean isComplete()
+		{
+			this.validator.ensureOpen();
 			return !this.activeReaders.isEmpty() &&
-				   this.validator.snapshot().keySet().containsAll(this.activeReaders);
+				   this.validator.containsAll(this.activeReaders);
+		}
+
+		/**
+		 * Returns the active readers that have not supplied a durable watermark.
+		 * This is intended for health and operator diagnostics; it is not a
+		 * retention authorization by itself.
+		 *
+		 * @return immutable set of readers still missing from the quorum
+		 */
+		public synchronized Set<UUID> missingReaders()
+		{
+			this.validator.ensureOpen();
+			final HashSet<UUID> missing = new HashSet<>();
+			for (final UUID readerId : this.activeReaders)
+			{
+				if (!this.validator.contains(readerId)) missing.add(readerId);
+			}
+			return Set.copyOf(missing);
 		}
 
 		/**
@@ -479,26 +686,43 @@ public record AeronAuthenticatedWatermark(
 		 * @return {@code true} when the reader belongs to the quorum
 		 */
 		public synchronized boolean acceptsReader(final UUID readerId) {
+			this.validator.ensureOpen();
 			return this.activeReaders.contains(readerId);
 		}
 
-		/** Permanently retires a configured reader from subsequent quorum decisions. */
+		/**
+		 * Permanently retires a configured reader from subsequent quorum decisions.
+		 *
+		 * @param readerId configured reader identity
+		 * @return {@code true} when the reader was newly retired
+		 */
 		public synchronized boolean retire(final UUID readerId) {
+			this.validator.ensureOpen();
 			if (!this.expectedReaders.contains(readerId))
 				throw new IllegalArgumentException("reader is not configured for this Aeron quorum: " + readerId);
 			if (!this.retiredReaders.add(readerId)) return false;
 			this.activeReaders.remove(readerId);
-			this.validator.restore(readerId, null);
+			this.validator.remove(readerId);
 			return true;
 		}
 
-		/** Restores a reader when durable retirement persistence fails. */
+		/**
+		 * Restores a reader when durable retirement persistence fails.
+		 *
+		 * @param readerId configured reader identity
+		 */
 		public synchronized void reinstate(final UUID readerId) {
+			this.validator.ensureOpen();
 			if (this.retiredReaders.remove(readerId)) this.activeReaders.add(readerId);
 		}
 
-		/** Returns the durable retirement tombstones. */
+		/**
+		 * Returns the durable retirement tombstones.
+		 *
+		 * @return immutable set of retired reader identities
+		 */
 		public synchronized Set<UUID> retiredReaders() {
+			this.validator.ensureOpen();
 			return Set.copyOf(this.retiredReaders);
 		}
 
@@ -508,6 +732,7 @@ public record AeronAuthenticatedWatermark(
 		 * @return immutable reader-to-watermark snapshot
 		 */
 		public synchronized Map<UUID, AeronAuthenticatedWatermark> snapshot() {
+			this.validator.ensureOpen();
 			return this.validator.snapshot();
 		}
 
@@ -518,6 +743,7 @@ public record AeronAuthenticatedWatermark(
 		 * @return current acknowledgement, or {@code null}
 		 */
 		public synchronized AeronAuthenticatedWatermark latest(final UUID readerId) {
+			this.validator.ensureOpen();
 			return this.validator.latest(readerId);
 		}
 
@@ -528,7 +754,23 @@ public record AeronAuthenticatedWatermark(
 		 * @param watermark prior watermark, or {@code null} to remove the entry
 		 */
 		public synchronized void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark) {
+			this.validator.ensureOpen();
+			if (readerId == null || !this.expectedReaders.contains(readerId))
+				throw new IllegalArgumentException("reader is not configured for this Aeron quorum: " + readerId);
+			if (watermark != null && !this.activeReaders.contains(readerId))
+				throw new IllegalStateException("cannot restore a watermark for a retired Aeron reader: " + readerId);
 			this.validator.restore(readerId, watermark);
+		}
+
+		/** Erases the validator key after the retention controller releases it. */
+		public synchronized void clearSecret() {
+			this.validator.clearSecret();
+		}
+
+		/** Erases the retained HMAC key. */
+		@Override
+		public void close() {
+			this.clearSecret();
 		}
 
 	}

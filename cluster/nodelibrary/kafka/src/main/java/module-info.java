@@ -30,7 +30,6 @@ module org.eclipse.datagrid.cluster.nodelibrary.kafka
 	requires kafka.clients;
 	requires org.eclipse.serializer.base;
 	requires org.eclipse.serializer.persistence.binary;
-	requires org.slf4j;
 
 	provides org.eclipse.datagrid.cluster.nodelibrary.types.ClusterReplicationTransportProvider
 		with org.eclipse.datagrid.cluster.nodelibrary.kafka.KafkaClusterReplicationTransportProvider;

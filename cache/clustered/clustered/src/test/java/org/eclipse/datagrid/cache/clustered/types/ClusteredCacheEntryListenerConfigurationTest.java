@@ -18,11 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import javax.cache.configuration.CacheEntryListenerConfiguration;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /** Verifies the listener configuration owns its sender and disposes it once. */
 class ClusteredCacheEntryListenerConfigurationTest
@@ -53,6 +49,13 @@ class ClusteredCacheEntryListenerConfigurationTest
 		assertTrue(listener.isSynchronous(), "clustered invalidations must be synchronous");
 		assertFalse(listener.isOldValueRequired());
 		assertNull(listener.getCacheEntryEventFilterFactory());
+	}
+
+	@Test
+	void nullSenderIsRejected()
+	{
+		assertThrows(NullPointerException.class,
+			() -> new ClusteredCacheEntryListenerConfiguration<>(null));
 	}
 
 	/** Sender stub whose dispose is idempotent, like every real transport sender. */

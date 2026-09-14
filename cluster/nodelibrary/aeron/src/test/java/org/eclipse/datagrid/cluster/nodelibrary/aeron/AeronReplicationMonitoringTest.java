@@ -1,5 +1,6 @@
 package org.eclipse.datagrid.cluster.nodelibrary.aeron;
 
+import org.eclipse.datagrid.cluster.nodelibrary.exceptions.ReplicationPositionUnavailableException;
 import org.eclipse.datagrid.cluster.nodelibrary.types.*;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
 import org.eclipse.serializer.memory.XMemory;
@@ -49,7 +50,9 @@ class AeronReplicationMonitoringTest
 		{
 			/* Health inspection must not start the runtime. Start it through the
 			 * explicit position-provider lifecycle first. */
-			transport.positionProvider("stream").latest();
+			final ReplicationPositionProvider positionProvider = transport.positionProvider("stream");
+			positionProvider.init();
+			positionProvider.latest();
 			final ClusterStorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
 			final ReplicationHealth health = transport.health(() -> true, client);
 			health.init();
@@ -68,7 +71,10 @@ class AeronReplicationMonitoringTest
 		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
 			.create(properties("writer")))
 		{
-			final ReplicationCursor cursor = transport.positionProvider("stream").latest();
+			final ReplicationPositionProvider positionProvider = transport.positionProvider("stream");
+			assertThrows(ReplicationPositionUnavailableException.class, positionProvider::latest);
+			positionProvider.init();
+			final ReplicationCursor cursor = positionProvider.latest();
 			assertEquals("aeron", cursor.transport());
 			final AeronReplicationCursor aeronCursor = AeronReplicationCursor.decode(cursor.providerPosition());
 			assertEquals(cursor.logicalSequence(), aeronCursor.sequence());
@@ -83,6 +89,7 @@ class AeronReplicationMonitoringTest
 		try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
 			.create(properties("writer")))
 		{
+			transport.positionProvider("stream").init();
 			final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
 			final PersistenceTarget<Binary> target = transport.persistenceTargetFactory("stream", distributor)
 				.apply(new PersistenceTarget<>()
@@ -103,10 +110,19 @@ class AeronReplicationMonitoringTest
 			.create(properties("writer")))
 		{
 			final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
-			assertThrows(UnsupportedOperationException.class,
+			assertThrows(IllegalStateException.class,
 				() -> distributor.distributeData(ChunksWrapper.New(
 					XMemory.toDirectByteBuffer(new byte[] { 3, 2, 1 }))));
 		}
+	}
+
+	@Test
+	void readerCannotChangeWriterMessageIndex()
+	{
+		final AeronDistributor distributor = new AeronDistributor(() -> false,
+			ignored -> { throw new AssertionError("reader must not synchronize a writer sequence"); });
+		assertThrows(IllegalStateException.class, () -> distributor.messageIndex(0L));
+		assertEquals(-1L, distributor.messageIndex());
 	}
 
 	/** Retention must fail explicitly while authenticated watermarks are absent. */
@@ -139,7 +155,7 @@ class AeronReplicationMonitoringTest
 			assertFalse(failedHealth.isReady());
 			assertFalse(failedHealth.isHealthy());
 			assertEquals(ReplicationHealth.State.FAILED, failedHealth.state());
-			assertThrows(UnsupportedOperationException.class,
+			assertThrows(ReplicationPositionUnavailableException.class,
 				() -> transport.positionProvider("stream").latest(),
 				"a reader cannot substitute its applied cursor for the writer's durable boundary");
 			health.close();
@@ -281,9 +297,9 @@ class AeronReplicationMonitoringTest
 	{
 		@Override public void start() { }
 		@Override public void stopAtLatestMessage() { }
-		@Override public MessageInfo messageInfo()
+		@Override public ReplicationCursor cursor()
 		{
-			return MessageInfo.New(-1, "aeron", null, new byte[0]);
+			return new ReplicationCursor("aeron", null, -1, new byte[0]);
 		}
 		@Override public void resume() { }
 		@Override public boolean isLive() { return false; }

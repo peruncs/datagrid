@@ -4,6 +4,7 @@ import io.aeron.Publication;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationRetry;
 
 /*-
  * #%L
@@ -81,12 +82,17 @@ final class AeronOfferRetryer
 	private long offerLoop(final DirectBuffer source, final int length)
 	{
 		this.idle.reset();
-		final long started = System.nanoTime();
+		final long deadline = ReplicationRetry.deadlineNanos(this.configuration.offerTimeoutNanos());
 		long backPressured = 0;
 		long notConnected = 0;
 		long adminActions = 0;
 		while (true)
 		{
+			if (Thread.currentThread().isInterrupted())
+			{
+				Thread.currentThread().interrupt();
+				throw new IllegalStateException("interrupted while offering Aeron replication frame");
+			}
 			final long position = this.offerer.offer(source, 0, length);
 			if (position >= 0) return position;
 			if (position == Publication.CLOSED || position == Publication.MAX_POSITION_EXCEEDED)
@@ -102,7 +108,7 @@ final class AeronOfferRetryer
 				 * hide a protocol/API change behind a misleading timeout. */
 				throw new IllegalStateException("unknown Aeron publication result: " + position);
 			}
-			if (System.nanoTime() - started >= this.configuration.offerTimeoutNanos())
+			if (ReplicationRetry.expired(deadline))
 			{
 				final String reason;
 				if (position == Publication.BACK_PRESSURED)

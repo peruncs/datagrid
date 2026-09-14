@@ -21,18 +21,26 @@ import java.util.UUID;
 /** Provider-specific retention hook; unsupported providers retain history and report it explicitly. */
 public interface ReplicationLogRetention extends AutoCloseable
 {
-	/** Outcome of one bounded retention maintenance attempt. */
+	/** Outcome of one bounded retention maintenance attempt.
+	 *
+	 * @param status result category
+	 * @param position Archive position associated with the attempt
+	 * @param detail diagnostic detail, never {@code null}
+	 */
 	record MaintenanceResult(Status status, long position, String detail)
 	{
 		/** Retention maintenance outcome. */
 		public enum Status
 		{
+			/** One or more complete leading Archive segments were deleted. */
 			DELETED,
+			/** No complete segment was eligible for deletion. */
 			NOTHING_TO_DELETE,
 			/** A stopped recording still has a replay using a segment selected for purge. */
 			DEFERRED_ACTIVE_REPLAY
 		}
 
+		/** Normalizes the result detail and validates the status. */
 		public MaintenanceResult
 		{
 			if (status == null) throw new NullPointerException("status");
@@ -53,8 +61,9 @@ public interface ReplicationLogRetention extends AutoCloseable
 
 	/** Deletes only history proven safe by the provider's cursor/watermark rules.
 	 *
-	 * @param cursor deletion boundary
-	 * @throws NodelibraryException if deletion fails
+		 * @param cursor deletion boundary
+		 * @return result of the bounded maintenance attempt
+		 * @throws NodelibraryException if deletion fails
 	 */
 	MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodelibraryException;
 

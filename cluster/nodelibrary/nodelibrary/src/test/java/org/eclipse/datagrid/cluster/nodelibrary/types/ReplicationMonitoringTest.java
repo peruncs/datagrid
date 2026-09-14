@@ -29,7 +29,7 @@ class ReplicationMonitoringTest
 		{
 			public boolean isDistributor() { return false; }
 			public void switchToDistribution() { }
-			public boolean finishDistributonSwitch() { return true; }
+			public boolean finishDistributionSwitch() { return true; }
 			public long getCurrentMessageIndex() { return 7; }
 			public long getLatestMessageIndex() { return 10; }
 			public String getReplicationTransport() { return "aeron"; }

@@ -17,5 +17,7 @@
  * <p>The controller owns the Helidon server and the provider supplies the
  * node root and cluster services used by its handlers. Start the controller
  * after the node is ready, and close it before the node's storage is closed.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.cluster.nodelibrary.helidon;

@@ -114,7 +114,7 @@ public class EclipseDataGridCluster
 	public ClusterFoundation clusterFoundation(
 		final RootProvider rootProvider,
 		final ObjectGraphUpdateHandler objectGraphUpdateHandler,
-		@ConfigProperty(name = "eclipsestore.distribution.kafka.async", defaultValue = "false") final boolean async
+		@ConfigProperty(name = "eclipsestore.distribution.async", defaultValue = "false") final boolean async
 	)
 	{
 		return ClusterFoundation.New()

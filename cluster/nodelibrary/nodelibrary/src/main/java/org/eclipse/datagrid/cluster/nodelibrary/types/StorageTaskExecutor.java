@@ -19,6 +19,11 @@ import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
 import static org.eclipse.serializer.util.X.notNull;
 
 /**
@@ -28,7 +33,7 @@ import static org.eclipse.serializer.util.X.notNull;
  * active is ignored, and the next request can start after the previous thread
  * has finished.</p>
  */
-public interface StorageTaskExecutor
+public interface StorageTaskExecutor extends AutoCloseable
 {
 	/** Starts a storage check task. */
 	void runChecks();
@@ -37,6 +42,12 @@ public interface StorageTaskExecutor
 	 * @return {@code true} when running
 	 */
 	boolean isRunningChecks();
+
+	/** Stops outstanding maintenance work and releases executor state. */
+	@Override
+	default void close()
+	{
+	}
 
 	/** Creates a storage task executor.
 	 * @param connection Store connection
@@ -51,9 +62,12 @@ public interface StorageTaskExecutor
 	class Abstract implements StorageTaskExecutor
 	{
 		private static final Logger LOG = LoggerFactory.getLogger(Abstract.class);
+		private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
 		private final StorageConnection connection;
+		private final ExecutorService executor;
 
-		private Thread checksThread;
+		private Future<?> checksTask;
+		private boolean closed;
 
 		/** Creates the shared executor state.
 		 * @param connection Store connection
@@ -61,33 +75,70 @@ public interface StorageTaskExecutor
 		protected Abstract(final StorageConnection connection)
 		{
 			this.connection = connection;
+			this.executor = Executors.newSingleThreadExecutor(task ->
+			{
+				final Thread thread = new Thread(task, "EclipseStore-StorageChecks");
+				thread.setDaemon(true);
+				return thread;
+			});
 		}
 
 		@Override
-		public void runChecks()
+		public synchronized void runChecks()
 		{
-			if (this.checksThread == null || !this.checksThread.isAlive())
+			if (this.closed) throw new IllegalStateException("Storage task executor is closed");
+			if (this.checksTask == null || this.checksTask.isDone())
 			{
 				LOG.debug("Issuing new storage checks");
-				this.checksThread = new Thread(() ->
-				{
-					this.connection.issueFullGarbageCollection();
-					this.connection.issueFullCacheCheck();
-					this.connection.issueFullFileCheck();
-				}, "EclipseStore-StorageChecks");
-				this.checksThread.start();
+				this.checksTask = this.executor.submit(this::runChecksTask);
 			}
 		}
 
 		@Override
-		public boolean isRunningChecks()
+		public synchronized boolean isRunningChecks()
 		{
-			if (this.checksThread != null && !this.checksThread.isAlive())
+			return this.checksTask != null && !this.checksTask.isDone();
+		}
+
+		@Override
+		public void close()
+		{
+			final Future<?> task;
+			synchronized (this)
 			{
-				LOG.trace("Cleanup previous storage checks thread");
-				this.checksThread = null;
+				if (this.closed) return;
+				this.closed = true;
+				task = this.checksTask;
 			}
-			return this.checksThread != null;
+			if (task != null) task.cancel(true);
+			this.executor.shutdownNow();
+			try
+			{
+				if (!this.executor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS))
+				{
+					throw new IllegalStateException(
+						"Storage checks did not stop within " + CLOSE_TIMEOUT_MILLIS + " ms");
+				}
+			}
+			catch (final InterruptedException interrupted)
+			{
+				Thread.currentThread().interrupt();
+				throw new IllegalStateException("Interrupted while stopping storage checks", interrupted);
+			}
+		}
+
+		private void runChecksTask()
+		{
+			try
+			{
+				this.connection.issueFullGarbageCollection();
+				this.connection.issueFullCacheCheck();
+				this.connection.issueFullFileCheck();
+			}
+			catch (final Throwable failure)
+			{
+				LOG.error("Storage checks failed", failure);
+			}
 		}
 	}
 

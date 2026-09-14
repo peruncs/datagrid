@@ -16,7 +16,10 @@ package org.eclipse.datagrid.cluster.nodelibrary.aeron;
 
 import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.client.ArchiveEvent;
+import io.aeron.archive.client.ArchiveException;
 import io.aeron.exceptions.AeronException;
+import io.aeron.exceptions.TimeoutException;
 import org.eclipse.datagrid.cluster.nodelibrary.types.*;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronAuthenticatedWatermark;
 import org.eclipse.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
@@ -35,7 +38,9 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -119,22 +124,22 @@ public final class AeronClusterReplicationTransportProvider
 		private final AeronSettings settings;
 		private final AeronArchiveCapacity archiveCapacity;
 		/** One transport-owned copy; avoids cloning the configured HMAC key for every cursor. */
-		private final byte[] retentionSecret;
+		private byte[] retentionSecret;
 		private final AtomicLong nextSequence = new AtomicLong();
 		private volatile AeronRuntime runtime;
 		private volatile AeronArchiveReplicationPublisher writer;
 		private volatile AeronReplicationWriteCoordinator coordinator;
 		private volatile StorageBinaryDataClientAeronArchive reader;
-		private volatile long readerRecordingId = Aeron.NULL_VALUE;
+		private final AtomicLong readerRecordingId = new AtomicLong(Aeron.NULL_VALUE);
 		/** Recording identity selected at writer startup; retained when RecordingPos is briefly unavailable. */
-		private volatile long writerRecordingId;
+		private final AtomicLong writerRecordingId = new AtomicLong();
 		/* Published together after the terminal checkpoint is durable.  Readers of
 		 * positionProvider() must never combine fields from two transactions. */
 		private volatile AeronWriterBoundary writerBoundary = new AeronWriterBoundary(-1, -1, -1);
 		private volatile boolean writerRecoveryInProgress;
 		private volatile ReplicationHealth.State writerRecoveryState;
 		/** First asynchronous MediaDriver failure; health must not hide it. */
-		private volatile RuntimeException driverFailure;
+		private final AtomicReference<RuntimeException> driverFailure = new AtomicReference<>();
 		private ClusterStorageBinaryDataDistributor distributor;
 		private String distributorStream;
 		private ReplicationPositionProvider positionProvider;
@@ -144,14 +149,19 @@ public final class AeronClusterReplicationTransportProvider
 		private volatile boolean closed;
 		private volatile boolean closing;
 		private final AtomicLong rejectedWatermarks = new AtomicLong();
+		/* A reader can publish its last durable cursor while the writer is still
+		 * recovering its Archive recording. Keep one authenticated value per reader
+		 * until the writer boundary exists instead of dropping that acknowledgement. */
+		private final java.util.concurrent.ConcurrentHashMap<UUID, AeronAuthenticatedWatermark>
+			deferredWatermarks = new java.util.concurrent.ConcurrentHashMap<>();
 		private final ThreadLocal<Boolean> deliveryCallback = new ThreadLocal<>();
 
 		private Transport(final AeronSettings settings)
 		{
 			this.settings = settings;
 			this.archiveCapacity = new AeronArchiveCapacity(settings);
-			this.retentionSecret = settings.retentionSecret();
-			this.writerRecordingId = settings.recordingId();
+			this.retentionSecret = settings.retentionSecretUnsafe();
+			this.writerRecordingId.set(settings.recordingId());
 		}
 
 		private void verifyMetadataStorage()
@@ -163,7 +173,10 @@ public final class AeronClusterReplicationTransportProvider
 				throw new IllegalArgumentException(
 					"Aeron checkpoint path must not be a symbolic link: " + this.settings.checkpointPath());
 			}
-			AeronRuntime.ensurePrivateDirectory(parent);
+			/* Apply the same production permission policy before the capability probe
+			 * creates any temporary metadata files.  Otherwise a non-POSIX filesystem
+			 * would pass this early probe and fail only later during runtime startup. */
+			AeronRuntime.ensurePrivateDirectory(parent, this.settings.productionMode());
 			try
 			{
 				AtomicFileStore.verify(this.settings.checkpointPath());
@@ -271,14 +284,14 @@ public final class AeronClusterReplicationTransportProvider
 		{
 			this.ensureOpen();
 			this.claimStream(streamName);
-		/* A writer owns publication only. Even with an external Archive it must not
-		 * create a second subscription against its own recording; that would violate
-		 * the one-writer/N-reader topology and expose a partially initialized reader
-		 * through the writer's health path. Configure a separate reader/backup-reader
-		 * node when replay is required. */
-		if ("writer".equals(this.settings.role()))
+			/* A writer owns publication only. Even with an external Archive it must not
+			 * create a second subscription against its own recording; that would violate
+			 * the one-writer/N-reader topology and expose a partially initialized reader
+			 * through the writer's health path. Configure a separate reader/backup-reader
+			 * node when replay is required. */
+			if ("writer".equals(this.settings.role()))
 			{
-				return ClusterStorageBinaryDataClient.NoOp(startingCursor, cursorListener);
+				return ClusterStorageBinaryDataClient.NoOp(startingCursor);
 			}
 			if (packetAcceptor == null) throw new NullPointerException("packetAcceptor");
 			if (this.reader != null)
@@ -290,7 +303,7 @@ public final class AeronClusterReplicationTransportProvider
 			this.ensureRuntime();
 			final long recordingId = this.settings.recordingId() >= 0
 				? this.settings.recordingId() : this.discoverReaderRecordingId();
-			this.readerRecordingId = recordingId;
+			this.readerRecordingId.set(recordingId);
 			this.rejectUncertainReaderImport(recordingId);
 			final ReplicationCursor cursor = startingCursor == null
 				? new ReplicationCursor("aeron", null, -1, new byte[0]) : startingCursor;
@@ -357,15 +370,19 @@ public final class AeronClusterReplicationTransportProvider
 							this.enterDeliveryCallback();
 							try
 							{
-								cursorListener.onChange(MessageInfo.New(snapshot.sequence(), "aeron",
-									this.settings.storeGeneration(), position));
+							cursorListener.onApplied(new ReplicationCursor("aeron",
+								this.settings.storeGeneration(), snapshot.sequence(), position));
 							}
 							finally
 							{
 								this.exitDeliveryCallback();
 							}
-							this.publishReaderWatermark(snapshot, recordingId);
 						}
+						/* Watermark delivery is independent from the optional neutral
+						 * cursor callback. A direct Aeron reader may not install a
+						 * persistence listener, but it must still advance the writer's
+						 * retention quorum after a durable import. */
+						this.publishReaderWatermark(snapshot, recordingId);
 					}
 				},
 				this.readerDeliveryListener(),
@@ -425,8 +442,8 @@ public final class AeronClusterReplicationTransportProvider
 					"Aeron recording discovery requires alias= on ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL");
 			}
 			final AtomicLong discovered = new AtomicLong(Aeron.NULL_VALUE);
-			final int count = this.archive().listRecordingsForUri(0L, 2, "alias=" + alias,
-				this.settings.streamId(), (controlSessionId, correlationId, recordingId, startTimestamp,
+			final int count = this.listRecordingsForUri("alias=" + alias, this.settings.streamId(),
+				(controlSessionId, correlationId, recordingId, startTimestamp,
 					stopTimestamp, startPosition, stopPosition, initialTermId, segmentFileLength,
 					termBufferLength, mtuLength, sessionId, streamId, strippedChannel, originalChannel,
 					sourceIdentity) -> discovered.set(recordingId));
@@ -448,7 +465,6 @@ public final class AeronClusterReplicationTransportProvider
 		private void rejectUncertainReaderImport(final long recordingId)
 		{
 			final Path path = this.readerUncertaintyPath();
-			if (!Files.exists(path)) return;
 			try
 			{
 				final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(path);
@@ -466,6 +482,12 @@ public final class AeronClusterReplicationTransportProvider
 				}
 				throw reseedRequired("reader Store import is uncertain at sequence " +
 					checkpoint.transactionSequence() + "; manual reseed is required: " + path, null);
+			}
+			catch (final NoSuchFileException absent)
+			{
+				/* The marker may be removed by a prior reader shutdown between the
+				 * existence check and this open.  Absence is the safe state; only a
+				 * present but unreadable marker requires reseeding. */
 			}
 			catch (final IOException failure)
 			{
@@ -490,7 +512,7 @@ public final class AeronClusterReplicationTransportProvider
 							AeronReplicationCheckpoint.RecordType.READER_CURSOR,
 							AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
 							AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
-							settings.clusterId(), settings.nodeId(), settings.storeGeneration(), readerRecordingId,
+							settings.clusterId(), settings.nodeId(), settings.storeGeneration(), readerRecordingId.get(),
 							settings.epoch(), sequence, position, dataLength, dataChunkCount, crc32c);
 						AeronReplicationCheckpointStore.write(path, checkpoint);
 					}
@@ -510,7 +532,10 @@ public final class AeronClusterReplicationTransportProvider
 					enterDeliveryCallback();
 					try
 					{
-						AtomicFileStore.delete(path);
+						/* The cursor has already been forced successfully. A directory force
+						 * here only makes marker removal durable; omitting it is safe because
+						 * a stale marker fails closed and requests a reseed after a crash. */
+						AtomicFileStore.delete(path, false);
 					}
 					catch (final IOException failure)
 					{
@@ -533,6 +558,7 @@ public final class AeronClusterReplicationTransportProvider
 			{
 				this.positionProvider = new org.eclipse.datagrid.cluster.nodelibrary.aeron.AeronPositionProvider(
 					() -> "writer".equals(this.settings.role()),
+					() -> this.writer != null && !this.writerRecoveryInProgress && !this.closed,
 					this::ensureWriter,
 					() -> this.writerBoundary,
 					this.settings::clusterId,
@@ -565,9 +591,29 @@ public final class AeronClusterReplicationTransportProvider
 				};
 				return this.retention;
 			}
-			this.retention = this.newRetentionController(retentionSecret);
-			this.ensureRuntime();
-			return this.retention;
+			final AeronArchiveRetention created = this.newRetentionController(retentionSecret);
+			/* Publish the controller before runtime startup because the writer-side
+			 * watermark setup consults this field.  If startup fails, however, do not
+			 * leave a closed/broken controller cached for the next retention() call. */
+			this.retention = created;
+			try
+			{
+				this.ensureRuntime();
+				return created;
+			}
+			catch (final RuntimeException | Error failure)
+			{
+				this.retention = null;
+				try
+				{
+					created.close();
+				}
+				catch (final RuntimeException | Error closeFailure)
+				{
+					failure.addSuppressed(closeFailure);
+				}
+				throw failure;
+			}
 		}
 
 		private AeronArchiveRetention newRetentionController(final byte[] retentionSecret)
@@ -578,10 +624,10 @@ public final class AeronClusterReplicationTransportProvider
 					if (!this.writerReady())
 						throw new IllegalStateException("Aeron writer must be running before retention maintenance");
 				}, new AeronArchiveRetention.RecordingPositions(
-					recordingId -> this.archive().getStartPosition(recordingId),
-					recordingId -> this.archive().getStopPosition(recordingId),
-					recordingId -> this.archive().getRecordingPosition(recordingId)),
-				() -> this.writerRecordingId,
+						this::getStartPosition,
+						this::getStopPosition,
+						this::getRecordingPosition),
+				this.writerRecordingId::get,
 				() -> this.writerBoundary, boundary ->
 				{
 					final AeronReplicationWriteCoordinator currentCoordinator = this.coordinator;
@@ -606,9 +652,8 @@ public final class AeronClusterReplicationTransportProvider
 			final AeronWatermarkChannel channel = this.watermarkChannel;
 			final byte[] secret = this.retentionSecret;
 			if (channel == null || secret == null) return;
-			channel.publish(AeronAuthenticatedWatermark.signEncoded(
-				this.settings.nodeId(), this.settings.clusterId(), this.settings.storeGeneration(),
-				this.settings.epoch(), recordingId, snapshot.sequence(), snapshot.position(), secret));
+			channel.publishEncoded(this.settings.nodeId(), this.settings.clusterId(), this.settings.storeGeneration(),
+				this.settings.epoch(), recordingId, snapshot.sequence(), snapshot.position(), secret);
 		}
 
 		private void ensureWatermarkChannel()
@@ -624,12 +669,27 @@ public final class AeronClusterReplicationTransportProvider
 				final AeronArchiveRetention controller = (AeronArchiveRetention)this.retention;
 				this.watermarkChannel = AeronWatermarkChannel.writer(this.aeron(),
 					this.settings.watermarkChannel(), this.settings.watermarkStreamId(), (encoded, offset, length) ->
-					{
-						try
 						{
-							final AeronAuthenticatedWatermark watermark =
-								AeronAuthenticatedWatermark.decode(encoded, offset, length);
-							controller.recordReaderWatermark(watermark);
+							try
+							{
+								final AeronAuthenticatedWatermark watermark =
+									AeronAuthenticatedWatermark.decode(encoded, offset, length);
+								/* A reader may publish its cursor while the writer is still
+								 * recovering its recording. Keep one authenticated value per
+								 * configured reader instead of losing the only acknowledgement. */
+								if (!this.writerReady())
+								{
+									if (this.settings.retentionReaders().contains(watermark.readerId()) &&
+										watermark.verify(this.retentionSecret) &&
+										watermark.clusterId().equals(this.settings.clusterId()) &&
+										watermark.storeGeneration().equals(this.settings.storeGeneration()) &&
+										watermark.writerEpoch() == this.settings.epoch())
+									{
+										this.deferredWatermarks.put(watermark.readerId(), watermark);
+									}
+									return;
+								}
+								controller.recordReaderWatermark(watermark);
 						}
 						catch (final RuntimeException rejected)
 						{
@@ -642,12 +702,64 @@ public final class AeronClusterReplicationTransportProvider
 									"Rejected Aeron reader watermark count=" + count, rejected);
 							}
 						}
-					});
-			}
-			else
+					}, this.settings.replication().offerTimeoutNanos());
+					}
+					else
 			{
 				this.watermarkChannel = AeronWatermarkChannel.reader(this.aeron(),
-					this.settings.watermarkChannel(), this.settings.watermarkStreamId());
+					this.settings.watermarkChannel(), this.settings.watermarkStreamId(),
+					this.settings.replication().offerTimeoutNanos());
+			}
+		}
+
+		/** Replays authenticated reader progress received during writer recovery. */
+		private void drainDeferredWatermarks()
+		{
+			if (this.deferredWatermarks.isEmpty() || !this.writerReady() || this.retention == null)
+			{
+				return;
+			}
+			final AeronArchiveRetention controller = (AeronArchiveRetention)this.retention;
+			for (final var entry : this.deferredWatermarks.entrySet())
+			{
+				try
+				{
+					controller.recordReaderWatermark(entry.getValue());
+					this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
+				}
+				catch (final RuntimeException failure)
+				{
+					/* The writer boundary is now available, so a rejected token is
+					 * stale or invalid; remove it and wait for the reader's next durable
+					 * cursor rather than retrying a bad value forever. */
+					this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
+					final long count = this.rejectedWatermarks.incrementAndGet();
+					if ((count & (count - 1)) == 0)
+					{
+						LOGGER.log(WARNING, "Rejected deferred Aeron reader watermark count=" + count, failure);
+					}
+				}
+			}
+		}
+
+		/**
+		 * Stops the writer-side watermark worker before any writer/retention resource
+		 * is closed. The worker invokes retention callbacks and must never race a
+		 * transport shutdown while the writer monitor is being dismantled.
+		 */
+		private RuntimeException closeWatermarkChannel()
+		{
+			if (this.watermarkChannel == null) return null;
+			try
+			{
+				this.watermarkChannel.close();
+				this.watermarkChannel = null;
+				return null;
+			}
+			catch (final RuntimeException failure)
+			{
+				if (this.watermarkChannel.isClosed()) this.watermarkChannel = null;
+				return failure;
 			}
 		}
 
@@ -666,19 +778,21 @@ public final class AeronClusterReplicationTransportProvider
 			this.ensureOpen();
 			if (this.health == null || !this.health.matches(storage, client))
 			{
+				if (this.health != null) this.health.close();
 				this.health = new org.eclipse.datagrid.cluster.nodelibrary.aeron.AeronHealth(
 					storage,
 					client,
 					() -> this.closed,
-					() -> this.driverFailure != null,
-					this.archiveCapacity::available,
+					() -> this.driverFailure.get() != null,
+					() -> this.archiveCapacity.available(this.settings.replication().maxTransactionBytes()),
 					this::writerReady,
 					() -> "writer".equals(this.settings.role()),
 					this::writerCheckpointState,
 					this.archiveCapacity::usableSpaceBytes,
 					() -> this.writerBoundary.position(),
 					() -> this.writerBoundary.sequence(),
-					() -> this.reader == null ? -1L : this.reader.lastAppliedSequence());
+						() -> this.reader == null ? -1L : this.reader.lastAppliedSequence(),
+						() -> this.watermarkChannel != null && this.watermarkChannel.failure() != null);
 			}
 			return this.health;
 		}
@@ -697,7 +811,7 @@ public final class AeronClusterReplicationTransportProvider
 
 		private synchronized ReplicationHealth.State writerCheckpointState()
 		{
-			if (this.driverFailure != null)
+			if (this.driverFailure.get() != null)
 			{
 				return ReplicationHealth.State.FAILED;
 			}
@@ -726,6 +840,10 @@ public final class AeronClusterReplicationTransportProvider
 
 		private synchronized AeronArchiveReplicationPublisher ensureWriter()
 		{
+			if (this.closing || this.closed)
+			{
+				throw new IllegalStateException("Aeron writer cannot start while transport is closing");
+			}
 			if (this.writer != null) return this.writer;
 			this.writerRecoveryInProgress = true;
 			try
@@ -772,25 +890,36 @@ public final class AeronClusterReplicationTransportProvider
 						this.settings.epoch(), initialSequence));
 				}
 				final long discoveredRecordingId = this.writer.recordingId();
-				this.writerRecordingId = discoveredRecordingId >= 0 ? discoveredRecordingId : recordingId;
-				if (checkpoint == null && this.writerRecordingId >= 0)
+				this.writerRecordingId.set(discoveredRecordingId >= 0 ? discoveredRecordingId : recordingId);
+				if (checkpoint == null && this.writerRecordingId.get() >= 0)
 				{
 					long startPosition = -1L;
 					try
 					{
 						startPosition = this.runtime == null ? -1L :
-							this.archive().getStartPosition(this.writerRecordingId);
+							this.getStartPosition(this.writerRecordingId.get());
 					}
-					catch (final RuntimeException ignored)
-					{
-						/* A fresh recording may not expose its catalog position until the
-						 * first image is connected. Keep the boundary sequence explicit and
-						 * leave the position unknown rather than inventing a byte offset. */
-					}
+						catch (final ArchiveException failure)
+						{
+							if (failure.errorCode() != ArchiveException.UNKNOWN_RECORDING)
+							{
+								throw reseedRequired("cannot inspect new Aeron recording " +
+									this.writerRecordingId.get(), failure);
+							}
+							/* A fresh recording may not expose its catalog position until the
+							 * first image is connected. Keep the boundary sequence explicit and
+							 * leave the position unknown rather than inventing a byte offset. */
+						}
 					this.writerBoundary = new AeronWriterBoundary(initialSequence - 1,
-						this.writerRecordingId, startPosition);
+						this.writerRecordingId.get(), startPosition);
 				}
 				this.writerRecoveryState = null;
+				/* writerRecoveryInProgress remains true until the finally block below;
+				 * publish the recovered boundary before draining deferred reader
+				 * watermarks, otherwise writerReady() would reject every queued ACK and
+				 * they would remain stranded indefinitely. */
+				this.writerRecoveryInProgress = false;
+				this.drainDeferredWatermarks();
 				return this.writer;
 			}
 			catch (final RuntimeException failure)
@@ -849,7 +978,7 @@ public final class AeronClusterReplicationTransportProvider
 			final AeronReplicationCheckpoint checkpoint = this.readWriterCheckpoint();
 			if (checkpoint != null)
 			{
-				if (checkpoint.recordingId() >= 0) this.writerRecordingId = checkpoint.recordingId();
+				if (checkpoint.recordingId() >= 0) this.writerRecordingId.set(checkpoint.recordingId());
 				this.writerBoundary = new AeronWriterBoundary(
 					checkpoint.transactionSequence(), checkpoint.recordingId(), checkpoint.recordingPosition());
 			}
@@ -860,61 +989,70 @@ public final class AeronClusterReplicationTransportProvider
 		private AeronReplicationCheckpoint readWriterCheckpoint()
 		{
 			final Path inFlightPath = this.inFlightCheckpointPath();
-			if (Files.exists(inFlightPath))
+			final AeronReplicationCheckpoint inFlight = this.readOptionalCheckpoint(inFlightPath);
+			if (inFlight != null)
 			{
-				if (!Files.exists(this.settings.checkpointPath()))
+				final AeronReplicationCheckpoint terminal = this.readOptionalCheckpoint(this.settings.checkpointPath());
+				if (terminal == null)
 				{
 					throw reseedRequired("in-flight writer transaction has no terminal checkpoint: " + inFlightPath, null);
 				}
-				try
+				this.validateWriterCheckpointIdentity(inFlight);
+				this.validateWriterCheckpointIdentity(terminal);
+				if ((terminal.state() == AeronReplicationCheckpoint.State.COMMITTED ||
+					terminal.state() == AeronReplicationCheckpoint.State.REJECTED) &&
+					terminal.transactionSequence() >= inFlight.transactionSequence())
 				{
-					final AeronReplicationCheckpoint inFlight = AeronReplicationCheckpointStore.read(inFlightPath);
-					final AeronReplicationCheckpoint terminal = AeronReplicationCheckpointStore.read(this.settings.checkpointPath());
-					this.validateWriterCheckpointIdentity(inFlight);
-					this.validateWriterCheckpointIdentity(terminal);
-						if ((terminal.state() == AeronReplicationCheckpoint.State.COMMITTED ||
-							terminal.state() == AeronReplicationCheckpoint.State.REJECTED) &&
-							terminal.transactionSequence() >= inFlight.transactionSequence())
+					if (terminal.transactionSequence() == inFlight.transactionSequence() &&
+						(terminal.dataLength() != inFlight.dataLength() ||
+							terminal.dataChunkCount() != inFlight.dataChunkCount() ||
+							terminal.resolutionCrc32c() != inFlight.resolutionCrc32c() ||
+							terminal.recordingId() != inFlight.recordingId()))
 						{
-							if (terminal.transactionSequence() == inFlight.transactionSequence() &&
-								(terminal.dataLength() != inFlight.dataLength() ||
-									terminal.dataChunkCount() != inFlight.dataChunkCount() ||
-									terminal.resolutionCrc32c() != inFlight.resolutionCrc32c() ||
-									terminal.recordingId() != inFlight.recordingId()))
-							{
-								throw reseedRequired("terminal checkpoint does not match the in-flight fence", null);
-							}
+							throw reseedRequired("terminal checkpoint does not match the in-flight fence", null);
+						}
+						try
+						{
 							AtomicFileStore.delete(inFlightPath);
-					}
-					else
-					{
-						throw reseedRequired("in-flight writer transaction is not covered by a terminal checkpoint " +
-							inFlightPath, null);
-					}
+						}
+						catch (final IOException failure)
+						{
+							throw reseedRequired("cannot clear covered in-flight writer checkpoint", failure);
+						}
 				}
-				catch (final IOException failure)
+				else
 				{
-					throw reseedRequired("cannot validate in-flight writer transaction " + inFlightPath, failure);
+					throw reseedRequired("in-flight writer transaction is not covered by a terminal checkpoint " +
+						inFlightPath, null);
 				}
 			}
-			if (!Files.exists(this.settings.checkpointPath())) return null;
-			try
-			{
-				final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(this.settings.checkpointPath());
-				this.validateWriterCheckpointIdentity(checkpoint);
-				if (checkpoint.state() != AeronReplicationCheckpoint.State.COMMITTED &&
-					checkpoint.state() != AeronReplicationCheckpoint.State.REJECTED)
+			final AeronReplicationCheckpoint checkpoint = this.readOptionalCheckpoint(this.settings.checkpointPath());
+			if (checkpoint == null) return null;
+			this.validateWriterCheckpointIdentity(checkpoint);
+			if (checkpoint.state() != AeronReplicationCheckpoint.State.COMMITTED &&
+				checkpoint.state() != AeronReplicationCheckpoint.State.REJECTED)
 				{
 					throw new ReseedRequiredException(
 						"writer checkpoint is not restartable (state=" + checkpoint.state() +
 						", sequence=" + checkpoint.transactionSequence() + ", path=" +
 							this.settings.checkpointPath() + ")");
 				}
-				return checkpoint;
+			return checkpoint;
+		}
+
+		private AeronReplicationCheckpoint readOptionalCheckpoint(final Path path)
+		{
+			try
+			{
+				return AeronReplicationCheckpointStore.read(path);
+			}
+			catch (final NoSuchFileException absent)
+			{
+				return null;
 			}
 			catch (final IOException failure)
 			{
-				throw reseedRequired("cannot read writer checkpoint", failure);
+				throw reseedRequired("cannot read Aeron writer checkpoint " + path, failure);
 			}
 		}
 
@@ -925,9 +1063,7 @@ public final class AeronClusterReplicationTransportProvider
 			{
 				case ARCHIVE_FIRST -> AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST;
 				case ENQUEUE_THEN_ARCHIVE -> AeronReplicationCheckpoint.DurabilityMode.ENQUEUE_THEN_ARCHIVE;
-				case LOCAL_DURABLE_FIRST -> throw new IllegalStateException(
-					"LOCAL_DURABLE_FIRST is not supported by the Aeron provider");
-			};
+            };
 			if (checkpoint.recordType() != AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT ||
 				checkpoint.durabilityMode() != expectedMode ||
 				!checkpoint.clusterId().equals(this.settings.clusterId()) ||
@@ -967,15 +1103,15 @@ public final class AeronClusterReplicationTransportProvider
 			final long stopPosition;
 			try
 			{
-				stopPosition = this.archive().getStopPosition(recordingId);
+				stopPosition = this.getStopPosition(recordingId);
 			}
 			catch (final RuntimeException failure)
 			{
 				throw reseedRequired("cannot inspect recording tail " + recordingId, failure);
 			}
-            new AeronWriterBoundary(checkpoint.transactionSequence(), recordingId,
-                checkpoint.recordingPosition()).validateArchiveStop(stopPosition);
-        }
+			new AeronWriterBoundary(checkpoint.transactionSequence(), recordingId,
+				checkpoint.recordingPosition()).validateArchiveStop(stopPosition);
+		}
 
 		private void validateEmptyRecordingBoundary(final long recordingId)
 		{
@@ -984,8 +1120,8 @@ public final class AeronClusterReplicationTransportProvider
 			 * sequence. */
 			try
 			{
-				final long start = this.archive().getStartPosition(recordingId);
-				final long stop = this.archive().getStopPosition(recordingId);
+				final long start = this.getStartPosition(recordingId);
+				final long stop = this.getStopPosition(recordingId);
 				if (stop < 0 || start < 0 || stop > start)
 				{
 					throw reseedRequired("recording has data but no terminal writer checkpoint", null);
@@ -1031,7 +1167,7 @@ public final class AeronClusterReplicationTransportProvider
             /* The terminal checkpoint is the durable boundary. Publish it to
              * readers before best-effort cleanup of the diagnostic fence so a
              * cleanup failure cannot make a durable commit look unavailable. */
-            this.writerBoundary = new AeronWriterBoundary(sequence, this.writerRecordingId, position);
+			this.writerBoundary = new AeronWriterBoundary(sequence, this.writerRecordingId.get(), position);
             try
 			{
 				AtomicFileStore.delete(this.inFlightCheckpointPath());
@@ -1079,16 +1215,14 @@ public final class AeronClusterReplicationTransportProvider
 			final long position)
 		{
 			final long discoveredRecordingId = this.writer == null ? Aeron.NULL_VALUE : this.writer.recordingId();
-			if (discoveredRecordingId >= 0) this.writerRecordingId = discoveredRecordingId;
-			final long recordingId = this.writerRecordingId >= 0 ? this.writerRecordingId : this.settings.recordingId();
-			final AeronReplicationCheckpoint.DurabilityMode checkpointMode = switch (
-				this.settings.replication().durabilityMode())
+			if (discoveredRecordingId >= 0) this.writerRecordingId.set(discoveredRecordingId);
+			final long writerRecordingId = this.writerRecordingId.get();
+			final long recordingId = writerRecordingId >= 0 ? writerRecordingId : this.settings.recordingId();
+			final AeronReplicationCheckpoint.DurabilityMode checkpointMode = switch (this.settings.replication().durabilityMode())
 			{
 				case ARCHIVE_FIRST -> AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST;
 				case ENQUEUE_THEN_ARCHIVE -> AeronReplicationCheckpoint.DurabilityMode.ENQUEUE_THEN_ARCHIVE;
-				case LOCAL_DURABLE_FIRST -> throw new IllegalStateException(
-					"LOCAL_DURABLE_FIRST is not supported by the Aeron provider");
-			};
+            };
 			return new AeronReplicationCheckpoint(
 				AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
 				checkpointMode,
@@ -1099,9 +1233,9 @@ public final class AeronClusterReplicationTransportProvider
 		private synchronized void ensureRuntime()
 		{
 			this.ensureOpen();
-			if (this.driverFailure != null)
+			if (this.driverFailure.get() != null)
 			{
-				throw new IllegalStateException("Aeron runtime has failed; create a new transport", this.driverFailure);
+				throw new IllegalStateException("Aeron runtime has failed; create a new transport", this.driverFailure.get());
 			}
 			if (this.runtime != null) return;
 			if ("writer".equals(this.settings.role())) this.archiveCapacity.invalidate();
@@ -1125,19 +1259,20 @@ public final class AeronClusterReplicationTransportProvider
 				aeronFailure.category() == AeronException.Category.WARN)
 			{
 				/* Aeron uses the configured handler for non-terminal operational events
-				 * too (for example, a control response disconnecting during orderly
-				 * reader shutdown). Such events are diagnostic, not a failed runtime. */
-				LOGGER.log(WARNING, "Aeron transport warning", aeronFailure);
-				return;
+				 * too. A control-response disconnect is different: it means the Archive
+				 * session can no longer validate or publish durable replication state. It
+				 * is terminal while the transport is live, but remains a normal shutdown
+				 * diagnostic after close has begun. */
+				if (!isTerminalArchiveWarning(failure) || this.closing || this.closed)
+				{
+					LOGGER.log(WARNING, "Aeron transport warning", aeronFailure);
+					return;
+				}
 			}
 			final RuntimeException normalized = failure instanceof RuntimeException runtimeException
 				? runtimeException
 				: new IllegalStateException("Aeron MediaDriver failed", failure);
-			if (this.driverFailure == null)
-			{
-				this.driverFailure = normalized;
-			}
-			else if (this.driverFailure != normalized)
+			if (!this.driverFailure.compareAndSet(null, normalized) && this.driverFailure.get() != normalized)
 			{
 				/* Health keeps the first terminal cause, but later callbacks still carry
 				 * useful diagnostics (and must not disappear silently). */
@@ -1150,16 +1285,32 @@ public final class AeronClusterReplicationTransportProvider
 			}
 		}
 
+		private static boolean isTerminalArchiveWarning(final Throwable failure)
+		{
+			return failure instanceof ArchiveEvent && failure.getMessage() != null &&
+				failure.getMessage().contains("control response publication is not connected");
+		}
+
 		private synchronized void stopDriver()
 		{
 			this.ensureOpen();
-			if (this.runtime == null) throw new IllegalStateException("Aeron driver is not running");
+			/* Stopping is idempotent: failure-injection and shutdown callers can race
+			 * without turning an already stopped runtime into a spurious failure. */
+			if (this.runtime == null) return;
 			this.runtime.stopDriver();
 		}
 
 		private RuntimeException closeRuntimeQuietly()
 		{
 			RuntimeException failure = null;
+			/* Writer-side watermark delivery calls back into this Transport. Stop that
+			 * worker first so it cannot enter ensureWriter/retention while writer close
+			 * is in progress. Reader-side channels remain open until the reader exits so
+			 * its final cursor publication is not turned into a spurious failure. */
+			if (this.reader == null && "writer".equals(this.settings.role()) && this.watermarkChannel != null)
+			{
+				failure = this.closeWatermarkChannel();
+			}
 			if (this.watermarkChannel != null)
 			{
 				try
@@ -1169,7 +1320,12 @@ public final class AeronClusterReplicationTransportProvider
 				}
 				catch (final RuntimeException closeFailure)
 				{
-					failure = closeFailure;
+					/* A terminal channel has already stopped its worker and closed both
+					 * native endpoints. Do not retain that dead object merely because one
+					 * endpoint reported a close error; otherwise the runtime below can never
+					 * be released during initialization cleanup. */
+					if (this.watermarkChannel.isClosed()) this.watermarkChannel = null;
+					failure = appendFailure(failure, closeFailure);
 				}
 			}
 			if (this.retention != null)
@@ -1196,12 +1352,36 @@ public final class AeronClusterReplicationTransportProvider
 					failure = appendFailure(failure, closeFailure);
 				}
 			}
+			if (this.watermarkChannel == null && this.retention == null && this.runtime == null)
+			{
+				this.clearRetentionSecrets();
+			}
 			return failure;
 		}
 
-		private static RuntimeException appendFailure(final RuntimeException current,
-			final RuntimeException additional)
+		private void clearRetentionSecrets()
 		{
+			this.deferredWatermarks.clear();
+			this.settings.clearRetentionSecret();
+			final byte[] secret = this.retentionSecret;
+			this.retentionSecret = null;
+			if (secret != null) Arrays.fill(secret, (byte)0);
+		}
+
+		private static RuntimeException appendFailure(final RuntimeException current,
+			final Throwable additional)
+		{
+			if (additional == null) return current;
+			final RuntimeException normalized = additional instanceof RuntimeException runtime
+				? runtime : new IllegalStateException("Aeron transport resource close failed", additional);
+			if (current == null) return normalized;
+			if (current != normalized) current.addSuppressed(normalized);
+			return current;
+		}
+
+		private static Throwable appendCloseFailure(final Throwable current, final Throwable additional)
+		{
+			if (additional == null) return current;
 			if (current == null) return additional;
 			if (current != additional) current.addSuppressed(additional);
 			return current;
@@ -1217,6 +1397,49 @@ public final class AeronClusterReplicationTransportProvider
 		{
 			if (this.runtime == null) throw new IllegalStateException("Aeron runtime is not initialized");
 			return this.runtime.archive();
+		}
+
+		/* AeronArchive's synchronous control client is not thread-safe.  Retention,
+		 * writer recovery, and reader discovery can run on different worker threads,
+		 * so every provider-owned request is serialized on the client itself.  The
+		 * lock covers only the request; callers retain their own retry/deadline logic
+		 * outside this helper. */
+		private long getStartPosition(final long recordingId)
+		{
+			final AeronArchive archive = this.archive();
+			synchronized (archive)
+			{
+				return archive.getStartPosition(recordingId);
+			}
+		}
+
+		private long getStopPosition(final long recordingId)
+		{
+			final AeronArchive archive = this.archive();
+			synchronized (archive)
+			{
+				return archive.getStopPosition(recordingId);
+			}
+		}
+
+		private long getRecordingPosition(final long recordingId)
+		{
+			final AeronArchive archive = this.archive();
+			synchronized (archive)
+			{
+				return archive.getRecordingPosition(recordingId);
+			}
+		}
+
+		private int listRecordingsForUri(final String channelFragment, final int streamId,
+			final io.aeron.archive.client.RecordingDescriptorConsumer consumer)
+		{
+			final AeronArchive archive = this.archive();
+			synchronized (archive)
+			{
+				return archive.listRecordingsForUri(0L, 2, channelFragment,
+					streamId, consumer);
+			}
 		}
 
 		private AeronArchive.Context archiveContext()
@@ -1258,22 +1481,27 @@ public final class AeronClusterReplicationTransportProvider
 		}
 
 		@Override
-		public void close()
+		public synchronized void close()
 		{
 			this.ensureNotDeliveryCallback();
 			synchronized (this)
 			{
-				if (this.closed || this.closing) return;
+				if (this.closed) return;
+				if (this.closing)
+				{
+					throw new IllegalStateException("Aeron transport close is already in progress");
+				}
 				if (this.reader == null && this.writer == null && this.coordinator == null &&
 					this.runtime == null && this.retention == null && this.watermarkChannel == null)
 				{
+					this.clearRetentionSecrets();
 					this.closed = true;
 					return;
 				}
 				this.closing = true;
 			}
 
-			RuntimeException failure = null;
+			Throwable failure = null;
 			if (this.reader != null)
 			{
 				try
@@ -1281,11 +1509,11 @@ public final class AeronClusterReplicationTransportProvider
 					this.reader.dispose();
 					this.reader = null;
 				}
-				catch (final RuntimeException readerFailure)
+				catch (final Throwable readerFailure)
 				{
 					/* Keep the shared Aeron resources open while the polling thread is
 					 * still alive; a retry of close() can finish the shutdown safely. */
-					failure = readerFailure;
+					failure = appendCloseFailure(failure, readerFailure);
 				}
 			}
 			/* The coordinator owns every pending transaction and must resolve or preserve
@@ -1299,10 +1527,9 @@ public final class AeronClusterReplicationTransportProvider
 					this.coordinator.dispose();
 					this.coordinator = null;
 				}
-				catch (final RuntimeException coordinatorFailure)
+				catch (final Throwable coordinatorFailure)
 				{
-					if (failure == null) failure = coordinatorFailure;
-					else failure.addSuppressed(coordinatorFailure);
+					failure = appendCloseFailure(failure, coordinatorFailure);
 				}
 			}
 			if (this.reader == null && this.coordinator == null && this.writer != null)
@@ -1312,11 +1539,22 @@ public final class AeronClusterReplicationTransportProvider
 					this.writer.close();
 					this.writer = null;
 				}
-				catch (final RuntimeException writerFailure)
+				catch (final Throwable writerFailure)
 				{
-					if (this.writer.isClosed()) this.writer = null;
-					if (failure == null) failure = writerFailure;
-					else failure.addSuppressed(writerFailure);
+					/* A released publication is not proof that the Archive recording
+					 * stopped. Keep the wrapper until isClosed() confirms the stop
+					 * postcondition; otherwise a transient external-Archive failure would
+					 * abandon an active recording and make a retry impossible. If the
+					 * Archive connection is definitively gone, however, retaining the
+					 * wrapper also retains the local driver forever and prevents the
+					 * failed process from exiting. The checkpoint remains fail-closed, so
+					 * release the local runtime in that terminal case. */
+					if (this.writer.isClosed() ||
+						(this.settings.externalArchive() && isArchiveUnavailable(writerFailure)))
+					{
+						this.writer = null;
+					}
+					failure = appendCloseFailure(failure, writerFailure);
 				}
 			}
 			/* A reader can publish its final durable cursor from the polling thread.
@@ -1327,15 +1565,7 @@ public final class AeronClusterReplicationTransportProvider
 			if (this.reader == null && this.writer == null && this.coordinator == null &&
 				this.watermarkChannel != null)
 			{
-				try
-				{
-					this.watermarkChannel.close();
-					this.watermarkChannel = null;
-				}
-				catch (final RuntimeException channelFailure)
-				{
-					failure = appendFailure(failure, channelFailure);
-				}
+				failure = appendCloseFailure(failure, this.closeWatermarkChannel());
 			}
 			if (this.reader == null && this.writer == null && this.coordinator == null &&
 				this.watermarkChannel == null && this.retention != null)
@@ -1345,9 +1575,9 @@ public final class AeronClusterReplicationTransportProvider
 					this.retention.close();
 					this.retention = null;
 				}
-				catch (final RuntimeException retentionFailure)
+				catch (final Throwable retentionFailure)
 				{
-					failure = appendFailure(failure, retentionFailure);
+					failure = appendCloseFailure(failure, retentionFailure);
 				}
 			}
 			/* Do not close the shared runtime while a writer or coordinator still owns
@@ -1361,23 +1591,43 @@ public final class AeronClusterReplicationTransportProvider
 					this.runtime.close();
 					this.runtime = null;
 				}
-				catch (final RuntimeException runtimeFailure)
+				catch (final Throwable runtimeFailure)
 				{
-					failure = appendFailure(failure, runtimeFailure);
+					failure = appendCloseFailure(failure, runtimeFailure);
 				}
 			}
 			if (failure != null)
 			{
 				this.closing = false;
+				if (failure instanceof Error error) throw error;
 				throw new IllegalStateException("failed to close Aeron transport", failure);
 			}
 			synchronized (this)
 			{
 				this.distributor = null;
 				this.distributorStream = null;
+				this.clearRetentionSecrets();
 				this.closed = true;
 				this.closing = false;
 			}
+		}
+
+		private static boolean isArchiveUnavailable(final Throwable failure)
+		{
+			for (Throwable current = failure; current != null; current = current.getCause())
+			{
+				if (current instanceof ArchiveException || current instanceof TimeoutException)
+				{
+					return true;
+				}
+				final String message = current.getMessage();
+				if (message != null && (message.contains("connection to the archive is no longer available") ||
+					message.contains("awaiting response")))
+				{
+					return true;
+				}
+			}
+			return false;
 		}
 	}
 
@@ -1454,10 +1704,10 @@ public final class AeronClusterReplicationTransportProvider
 	{
 		public void start() { this.delegate().start(); }
 		public void stopAtLatestMessage() { this.delegate().stopAtLatestMessage(); }
-		public MessageInfo messageInfo()
+		public ReplicationCursor cursor()
 		{
 			final CursorSnapshot snapshot = this.delegate().cursorSnapshot();
-			return MessageInfo.New(snapshot.sequence(), "aeron", this.storeGeneration(),
+			return new ReplicationCursor("aeron", this.storeGeneration(), snapshot.sequence(),
 				new AeronReplicationCursor(this.clusterId(), this.nodeId(), this.storeGeneration(),
 					this.epoch(), this.recordingId(), snapshot.position(), snapshot.sequence()).encode());
 		}

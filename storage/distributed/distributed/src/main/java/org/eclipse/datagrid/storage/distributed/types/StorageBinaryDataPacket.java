@@ -73,70 +73,37 @@ import static org.eclipse.serializer.util.X.notNull;
             final ByteBuffer buffer
     )
 	{
-		return new StorageBinaryDataPacket.Default(
+		final int validatedPacketIndex = notNegative(packetIndex);
+		final int validatedPacketCount = positive(packetCount);
+		if (validatedPacketIndex >= validatedPacketCount)
+		{
+			throw new IllegalArgumentException("packetIndex must be less than packetCount");
+		}
+		return new StorageBinaryDataPacketDefault(
 			notNull(messageType),
 			notNegative(messageLength),
-			notNegative(packetIndex),
-			positive(packetCount),
+			validatedPacketIndex,
+			validatedPacketCount,
 			notNull(buffer)
 		);
 	}
 
-	/** Immutable packet metadata and borrowed payload view. */
-	class Default implements StorageBinaryDataPacket
+	/** Immutable packet metadata and borrowed payload view.
+	 *
+	 * @param messageType message kind
+	 * @param messageLength complete message length
+	 * @param packetIndex zero-based packet index
+	 * @param packetCount total packet count
+	 * @param buffer borrowed packet payload
+	 */
+	record StorageBinaryDataPacketDefault(
+		MessageType messageType,
+		int messageLength,
+		int packetIndex,
+		int packetCount,
+			ByteBuffer buffer
+		) implements StorageBinaryDataPacket
 	{
-		private final MessageType messageType;
-		private final int messageLength;
-		private final int packetIndex;
-		private final int packetCount;
-		private final ByteBuffer buffer;
-
-		Default(
-			final MessageType messageType,
-			final int messageLength,
-			final int packetIndex,
-			final int packetCount,
-			final ByteBuffer buffer
-		)
-		{
-			super();
-			this.messageType = messageType;
-			this.messageLength = messageLength;
-			this.packetIndex = packetIndex;
-			this.packetCount = packetCount;
-			this.buffer = buffer;
-		}
-
-		@Override
-		public MessageType messageType()
-		{
-			return this.messageType;
-		}
-
-		@Override
-		public int messageLength()
-		{
-			return this.messageLength;
-		}
-
-		@Override
-		public int packetIndex()
-		{
-			return this.packetIndex;
-		}
-
-		@Override
-		public int packetCount()
-		{
-			return this.packetCount;
-		}
-
-		@Override
-		public ByteBuffer buffer()
-		{
-			return this.buffer;
-		}
-
 	}
 
 }

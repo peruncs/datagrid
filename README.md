@@ -26,8 +26,7 @@ Eclipse Data Grid itself provides you with the code to generate a cluster enviro
 The core cluster and storage artifacts are transport-neutral. Select exactly
 one provider for Store binary replication:
 
-- Kafka: `storage-distributed-kafka` plus `cluster-nodelibrary-kafka` (the
-  compatibility provider for existing deployments).
+- Kafka: `storage-distributed` plus `cluster-nodelibrary-kafka`.
 - Aeron: `storage-distributed-aeron` plus `cluster-nodelibrary-aeron`, with
   `ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron` and a stable
   `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`.
@@ -61,7 +60,7 @@ Aeron transitively. For example, add the neutral SPI and one provider:
 ```
 
 Aeron transports the bytes produced by Eclipse Serializer directly. Its small
-64-byte envelope carries only cluster/epoch/sequence, chunk, and CRC metadata;
+68-byte envelope carries only cluster/epoch/sequence, chunk, and CRC metadata;
 there is no second SBE object-graph encoding layer. `term-length`, `mtu-length`,
 `chunk-size`, `max-transaction-bytes`, `offer-timeout-nanos`, and durability
 mode are configurable with the
@@ -80,6 +79,23 @@ Writer restart safety additionally requires stable `ECLIPSE_DATAGRID_AERON_NODE_
 `ECLIPSE_DATAGRID_AERON_STORE_GENERATION`, and a durable
 `ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH`; archive and checkpoint directories
 must be outside the MediaDriver directory.
+
+Authenticated Archive retention additionally requires a shared secret on the
+writer and every reader (`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET`), plus the
+fixed reader set on the writer (`ECLIPSE_DATAGRID_AERON_RETENTION_READERS`).
+The secret may instead be supplied through
+`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE`, an owner-only regular file
+containing the base64 key. Generate one 256-bit secret and configure the same
+value on all nodes.
+Without Java (openssl):
+
+```bash
+openssl rand -base64 32
+```
+
+```bash
+export ECLIPSE_DATAGRID_AERON_RETENTION_SECRET="<generated value>"
+```
 
 Cluster monitoring exposes the same transport-neutral endpoint for every
 framework adapter: `GET /eclipse-datagrid/replication-metrics`. It emits

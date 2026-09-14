@@ -627,7 +627,8 @@ class StorageBinaryDataClientAeronTest
 		final RecordingReceiver receiver = new RecordingReceiver();
 		final TransactionAssembler assembler = assembler(receiver, 1024);
 		final byte[] malformed = new byte[AeronReplicationEnvelope.HEADER_LENGTH];
-		assertThrows(IllegalArgumentException.class, () -> accept(assembler, malformed));
+		assertThrows(org.eclipse.datagrid.storage.distributed.aeron.wire.ReplicationWireException.class,
+			() -> accept(assembler, malformed));
 		assertEquals(0, receiver.dataCalls);
 		final byte[] later = AeronReplicationEnvelope.encode(CLUSTER, EPOCH, 0,
 			AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0, 0, new byte[] {9});

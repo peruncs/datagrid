@@ -61,6 +61,16 @@ class AeronClusteredCacheMessageCodecTest
 	}
 
 	@Test
+	void rejectsExhaustedSequences()
+	{
+		final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, -1L, new byte[0]));
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, Long.MAX_VALUE, new byte[0]));
+	}
+
+	@Test
 	void sequenceOfRejectsTruncatedFrame()
 	{
 		final UnsafeBuffer buffer = new UnsafeBuffer(new byte[AeronClusteredCacheMessageCodec.HEADER_LENGTH - 1]);
@@ -158,6 +168,58 @@ class AeronClusteredCacheMessageCodecTest
 
 		assertThrows(IllegalArgumentException.class,
 			() -> AeronClusteredCacheMessageCodec.decodePayload(buffer, 0, length + Integer.BYTES, 16));
+	}
+
+	@Test
+	void selfSuppressionDoesNotHideMalformedPayloadLength()
+	{
+		final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
+		final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 2L, new byte[] { 9 });
+		buffer.putInt(AeronClusteredCacheMessageCodec.HEADER_LENGTH - Integer.BYTES, 999,
+			ByteOrder.BIG_ENDIAN);
+
+		assertFalse(AeronClusteredCacheMessageCodec.senderIdMatches(buffer, 0, length, SENDER_ID));
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronClusteredCacheMessageCodec.decodePayload(buffer, 0, length, 1024));
+	}
+
+	@Test
+	void selfSuppressionDoesNotHideInvalidSequence()
+	{
+		final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
+		final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 2L, new byte[] { 9 });
+		buffer.putLong(Integer.BYTES * 2 + Long.BYTES * 2, -1L, ByteOrder.BIG_ENDIAN);
+
+		assertFalse(AeronClusteredCacheMessageCodec.senderIdMatches(buffer, 0, length, SENDER_ID));
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronClusteredCacheMessageCodec.sequenceOf(buffer, 0, length));
+	}
+
+	@Test
+	void malformedRangesNeverEscapeSenderIdentityProbe()
+	{
+		final UnsafeBuffer buffer = new UnsafeBuffer(
+			new byte[AeronClusteredCacheMessageCodec.HEADER_LENGTH]);
+		assertFalse(AeronClusteredCacheMessageCodec.senderIdMatches(buffer, -1,
+			AeronClusteredCacheMessageCodec.HEADER_LENGTH, SENDER_ID));
+		assertFalse(AeronClusteredCacheMessageCodec.senderIdMatches(buffer, 1,
+			AeronClusteredCacheMessageCodec.HEADER_LENGTH, SENDER_ID));
+		assertFalse(AeronClusteredCacheMessageCodec.senderIdMatches(buffer, 0,
+			AeronClusteredCacheMessageCodec.HEADER_LENGTH, null));
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronClusteredCacheMessageCodec.senderIdOf(buffer, 1));
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronClusteredCacheMessageCodec.decodePayload(buffer, -1,
+				AeronClusteredCacheMessageCodec.HEADER_LENGTH, 1));
+	}
+
+	@Test
+	void encodeRejectsInsufficientDestination()
+	{
+		final UnsafeBuffer buffer = new UnsafeBuffer(
+			new byte[AeronClusteredCacheMessageCodec.HEADER_LENGTH - 1]);
+		assertThrows(IllegalArgumentException.class,
+			() -> AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 1L, new byte[0]));
 	}
 
 	private static byte[] uuidBytes(final UUID uuid)

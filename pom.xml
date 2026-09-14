@@ -88,18 +88,6 @@
 				<scope>test</scope>
 			</dependency>
 			<dependency>
-				<groupId>org.mockito</groupId>
-				<artifactId>mockito-core</artifactId>
-				<version>4.3.1</version>
-				<scope>test</scope>
-			</dependency>
-			<dependency>
-				<groupId>org.mockito</groupId>
-				<artifactId>mockito-junit-jupiter</artifactId>
-				<version>4.3.1</version>
-				<scope>test</scope>
-			</dependency>
-			<dependency>
 				<groupId>com.github.javafaker</groupId>
 				<artifactId>javafaker</artifactId>
 				<version>1.0.2</version>
@@ -210,6 +198,13 @@
 					<configuration>
 						<doclint>all</doclint>
 						<failOnWarnings>true</failOnWarnings>
+						<!-- Maven's reactor javadoc goal puts dependency jars on the
+						     class path, while their descriptors make the generated
+						     offline links named-module links. JDK 26 reports that
+						     mixed-mode linkage as a warning even when all source
+						     documentation is valid. Each module is checked separately
+						     in CI, so disable only this misleading auto-link scan. -->
+						<detectOfflineLinks>false</detectOfflineLinks>
 						<notree>true</notree>
 						<source>17</source>
 						<doctitle>Eclipse Data Grid API</doctitle>

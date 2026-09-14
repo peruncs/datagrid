@@ -15,6 +15,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataException;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
 
@@ -56,20 +57,32 @@ public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
             final int packetCount,
             final long messageIndex,
             final ByteBuffer buffer
-    )
+	)
 	{
-		return new Default(
+		if (messageIndex < -1L || messageIndex == Long.MAX_VALUE)
+		{
+			throw new StorageBinaryDataException("message index must be in [-1, Long.MAX_VALUE)");
+		}
+		final int validatedPacketIndex = notNegative(packetIndex);
+		final int validatedPacketCount = positive(packetCount);
+		if (validatedPacketIndex >= validatedPacketCount)
+		{
+			throw new IllegalArgumentException("packetIndex must be less than packetCount");
+		}
+		return new ClusterStorageBinaryDataPacketDefault(
 			notNull(messageType),
 			notNegative(messageLength),
-			notNegative(packetIndex),
-			positive(packetCount),
+			validatedPacketIndex,
+			validatedPacketCount,
 			messageIndex,
 			notNull(buffer)
 		);
 	}
 
-	/** Stores packet metadata together with its borrowed binary buffer. */
-	class Default implements ClusterStorageBinaryDataPacket
+}
+
+/** Package-private implementation of a cluster packet. */
+final class ClusterStorageBinaryDataPacketDefault implements ClusterStorageBinaryDataPacket
 	{
 		private final MessageType messageType;
 		private final int messageLength;
@@ -78,7 +91,7 @@ public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
 		private final long messageIndex;
 		private final ByteBuffer buffer;
 
-		private Default(
+		ClusterStorageBinaryDataPacketDefault(
 			final MessageType messageType,
 			final int messageLength,
 			final int packetIndex,
@@ -131,4 +144,3 @@ public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket
 			return this.buffer;
 		}
 	}
-}

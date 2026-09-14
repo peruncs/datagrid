@@ -79,7 +79,7 @@ public class NotADistributorException extends BadRequestException
 	@Override
 	public Collection<HttpHeader> extraHeaders()
 	{
-		final var headers = new ArrayList<HttpHeader>(super.extraHeaders());
+		final var headers = new ArrayList<>(super.extraHeaders());
 		headers.add(new HttpHeader(NAD_HEADER_KEY, NAD_HEADER_VALUE));
 		return Collections.unmodifiableList(headers);
 	}

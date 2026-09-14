@@ -17,26 +17,17 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 /**
  * Configuration contract shared by cluster lifecycle code and optional
- * providers. Environment-backed defaults preserve the existing Kafka
- * deployment while {@link #replicationTransport()} allows explicit
+ * providers. {@link #replicationTransport()} selects an explicit
  * {@code kafka}, {@code aeron}, or {@code none} selection.
  */
 public interface NodelibraryPropertiesProvider
 {
-	/** Existing Kafka topic contract retained for source compatibility.
-	 * @return Kafka topic, or {@code null}
-	 */
-	default String kafkaTopicName()
-	{
-		return null;
-	}
-
 	/** Returns the logical replication stream name.
 	 * @return stream name
 	 */
 	default String replicationStreamName()
 	{
-		return this.kafkaTopicName();
+		return null;
 	}
 
 	/** Returns the selected replication transport.
@@ -50,7 +41,8 @@ public interface NodelibraryPropertiesProvider
 	/**
 	 * Optional provider-specific setting, allowing embedded applications to avoid
 	 * environment variables. {@code ECLIPSE_DATAGRID_STORAGE_PATH} overrides the
-	 * default {@code /storage} root used for the Store and durable offset file.
+	 * default {@code /storage} root used for the Store and durable replication
+	 * cursor file.
 	 *
 	 * @param name provider-specific property name
 	 * @return property value, or {@code null}
@@ -68,7 +60,7 @@ public interface NodelibraryPropertiesProvider
 		return isBackupNode() ? "backup-reader" : "writer";
 	}
 
-	/** Returns whether the role was explicitly configured rather than inherited from the Kafka-era default.
+	/** Returns whether the role was explicitly configured rather than inherited from the default.
 	 * @return {@code true} when explicitly configured
 	 */
 	default boolean replicationRoleConfigured()
@@ -101,6 +93,22 @@ public interface NodelibraryPropertiesProvider
 	 */
 	Integer storageLimitCheckerIntervalMinutes();
 
+	/** Returns the storage cleanup interval in minutes.
+	 * @return interval in minutes, or {@code null} for the node default
+	 */
+	default Integer gcIntervalMinutes()
+	{
+		return null;
+	}
+
+	/** Returns the automatic backup interval in minutes.
+	 * @return interval in minutes, or {@code null} for the node default
+	 */
+	default Integer backupIntervalMinutes()
+	{
+		return null;
+	}
+
 	/** Returns the storage limit in gigabytes.
 	 * @return storage limit
 	 */
@@ -110,6 +118,17 @@ public interface NodelibraryPropertiesProvider
 	 * @return pod name
 	 */
 	String myPodName();
+
+	/**
+	 * Returns a stable node identity for transports that need to retain a
+	 * consumer-group identity across process restarts.
+	 *
+	 * @return configured node identity, or {@code null} when none was supplied
+	 */
+	default String replicationNodeIdentity()
+	{
+		return this.replicationProperty("ECLIPSE_DATAGRID_NODE_ID");
+	}
 
 	/** Returns the pod namespace.
 	 * @return namespace
@@ -150,14 +169,14 @@ public interface NodelibraryPropertiesProvider
 		/** Names of the environment variables understood by the provider. */
 		public static final class EnvKeys
 		{
-			/** Legacy Kafka topic environment variable. */
-			public static final String KAFKA_TOPIC_NAME = "MSCNL_KAFKA_TOPIC_NAME";
 			/** Replication stream environment variable. */
 			public static final String REPLICATION_STREAM_NAME = "ECLIPSE_DATAGRID_REPLICATION_STREAM";
 			/** Replication transport environment variable. */
 			public static final String REPLICATION_TRANSPORT = "ECLIPSE_DATAGRID_REPLICATION_TRANSPORT";
 			/** Store path environment variable. */
 			public static final String STORAGE_PATH = "ECLIPSE_DATAGRID_STORAGE_PATH";
+			/** Filesystem backup volume environment variable. */
+			public static final String BACKUP_PATH = "ECLIPSE_DATAGRID_BACKUP_PATH";
 			/** Backup-node environment variable. */
 			public static final String IS_BACKUP_NODE = "IS_BACKUP_NODE";
 			/** Backup-target environment variable. */
@@ -169,6 +188,10 @@ public interface NodelibraryPropertiesProvider
 			/** Storage-check interval environment variable. */
 			public static final String STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES =
 				"STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES";
+			/** Storage cleanup interval environment variable. */
+			public static final String GC_INTERVAL_MINUTES = "GC_INTERVAL_MINUTES";
+			/** Automatic backup interval environment variable. */
+			public static final String BACKUP_INTERVAL_MINUTES = "BACKUP_INTERVAL_MINUTES";
 			/** Storage limit environment variable. */
 			public static final String STORAGE_LIMIT_GB = "STORAGE_LIMIT_GB";
 			/** Pod name environment variable. */
@@ -190,23 +213,14 @@ public interface NodelibraryPropertiesProvider
 		@Override
 		public String replicationStreamName()
 		{
-			final String stream = this.envString(EnvKeys.REPLICATION_STREAM_NAME);
-			return stream == null ? this.envString(EnvKeys.KAFKA_TOPIC_NAME) : stream;
-		}
-
-		@Override
-		public String kafkaTopicName()
-		{
-			return this.replicationStreamName();
+			return this.envString(EnvKeys.REPLICATION_STREAM_NAME);
 		}
 
 		@Override
 		public String replicationTransport()
 		{
 			final String transport = this.envString(EnvKeys.REPLICATION_TRANSPORT);
-			return transport == null
-				? (this.envString(EnvKeys.KAFKA_TOPIC_NAME) == null ? "none" : "kafka")
-				: transport;
+			return transport == null ? "none" : transport;
 		}
 
 		@Override
@@ -260,16 +274,50 @@ public interface NodelibraryPropertiesProvider
 		}
 
 		@Override
+		public Integer gcIntervalMinutes()
+		{
+			return this.envInteger(EnvKeys.GC_INTERVAL_MINUTES);
+		}
+
+		@Override
+		public Integer backupIntervalMinutes()
+		{
+			return this.envInteger(EnvKeys.BACKUP_INTERVAL_MINUTES);
+		}
+
+		@Override
 		public Integer storageLimitGB()
 		{
-			// TODO: Change behaviour to set an integer instead of a formatted string like this
-			return Integer.parseInt(this.envString(EnvKeys.STORAGE_LIMIT_GB).replace("G", ""));
+			final String configured = this.envString(EnvKeys.STORAGE_LIMIT_GB);
+			if (configured == null || configured.isBlank())
+			{
+				return null;
+			}
+			final String value = configured.trim();
+			final String number = value.endsWith("G") || value.endsWith("g")
+				? value.substring(0, value.length() - 1).trim()
+				: value;
+			try
+			{
+				return Integer.valueOf(number);
+			}
+			catch (final NumberFormatException failure)
+			{
+				throw new IllegalArgumentException(
+					"Invalid " + EnvKeys.STORAGE_LIMIT_GB + " value: " + configured, failure);
+			}
 		}
 
 		@Override
 		public String myPodName()
 		{
 			return this.envString(EnvKeys.MY_POD_NAME);
+		}
+
+		@Override
+		public String replicationNodeIdentity()
+		{
+			return this.envString("ECLIPSE_DATAGRID_NODE_ID");
 		}
 
 		@Override
@@ -299,13 +347,29 @@ public interface NodelibraryPropertiesProvider
 		private Integer envInteger(final String envKey)
 		{
 			final String env = this.envString(envKey);
-			return env == null ? null : Integer.parseInt(env);
+			if (env == null || env.isBlank()) return null;
+			try
+			{
+				return Integer.valueOf(env.trim());
+			}
+			catch (final NumberFormatException failure)
+			{
+				throw new IllegalArgumentException("Invalid " + envKey + " value: " + env, failure);
+			}
 		}
 
 		private Long envLong(final String envKey)
 		{
 			final String env = this.envString(envKey);
-			return env == null ? null : Long.parseLong(env);
+			if (env == null || env.isBlank()) return null;
+			try
+			{
+				return Long.valueOf(env.trim());
+			}
+			catch (final NumberFormatException failure)
+			{
+				throw new IllegalArgumentException("Invalid " + envKey + " value: " + env, failure);
+			}
 		}
 
 		private boolean envBoolean(final String envKey)

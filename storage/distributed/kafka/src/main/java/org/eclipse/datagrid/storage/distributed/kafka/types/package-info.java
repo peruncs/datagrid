@@ -12,11 +12,15 @@
  * #L%
  */
 /**
- * This package adapts neutral storage replication to Kafka.
+ * Neutral Store replication over one Kafka topic.
  *
- * <p>The producer publishes packet metadata and binary fragments. The reader
- * consumes them and hands complete transactions to the neutral storage
- * contract. Packet order, transaction boundaries, and binary ownership remain
- * the responsibility of the neutral types package.</p>
+ * <p>The adapter preserves packet order on one Kafka partition and validates
+ * message metadata before forwarding complete messages to the neutral
+ * receiver. The topic must have exactly one partition. Packet payloads are
+ * limited to 1,000,000 bytes; configure the broker and topic record-size limits
+ * for that payload plus Kafka-header overhead. Producers use Zstandard by
+ * default.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.storage.distributed.kafka.types;

@@ -24,6 +24,8 @@ import static org.eclipse.serializer.util.X.notNull;
 /** Copies incoming Store binary buffers into owned native memory and imports them. */
 public final class StorageBinaryDataImporter
 {
+	private static final ByteBuffer EMPTY_DIRECT_BUFFER = ByteBuffer.allocateDirect(0);
+
 	private StorageBinaryDataImporter()
 	{
 	}
@@ -44,32 +46,50 @@ public final class StorageBinaryDataImporter
 	{
 		notNull(storage);
 		notNull(sourceBuffers);
+		return importAndReset(storage, copyBuffers(sourceBuffers));
+	}
+
+	private static ByteBuffer[] importAndReset(final StorageConnection storage, final ByteBuffer[] importedBuffers)
+	{
+		try
+		{
+			/* Storage.importData consumes the supplied views synchronously and does not
+			 * retain them. Reset the owned buffers afterwards because their positions are
+			 * needed by the deferred materializer. */
+			storage.importData(org.eclipse.serializer.util.X.Enum(importedBuffers));
+			for (final ByteBuffer imported : importedBuffers) imported.position(0);
+			return importedBuffers;
+		}
+		catch (final RuntimeException | Error failure)
+		{
+			release(importedBuffers);
+			throw failure;
+		}
+	}
+
+	private static ByteBuffer[] copyBuffers(final ByteBuffer[] sourceBuffers)
+	{
 		final ByteBuffer[] ownedBuffers = new ByteBuffer[sourceBuffers.length];
 		try
 		{
 			for (int i = 0; i < sourceBuffers.length; i++)
 			{
 				final ByteBuffer source = notNull(sourceBuffers[i]).duplicate();
-				/* ChunksWrapper represents its logical length in the source position,
-				 * while Store import reads from offset zero through the limit. An Aeron
-				 * assembled buffer therefore has position == limit and must be rewound;
-				 * ordinary nonzero-position buffers still use their remaining range. */
-				if (source.position() == source.limit()) source.position(0);
+				if (source.position() != 0)
+				{
+					throw new IllegalArgumentException(
+						"import buffers must be normalized to position zero; got " + source.position());
+				}
 				final int sourceLength = source.remaining();
 				if (sourceLength == 0)
 				{
-					ownedBuffers[i] = ByteBuffer.allocateDirect(0);
+					ownedBuffers[i] = EMPTY_DIRECT_BUFFER.duplicate();
 					continue;
 				}
 				final ByteBuffer owned = XMemory.allocateDirectNative(sourceLength);
 				ownedBuffers[i] = owned;
 				owned.put(source).flip();
 			}
-			/* Storage.importData consumes the supplied views synchronously and does not
-			 * retain them. Reset the owned buffers afterwards because their positions are
-			 * needed by the deferred materializer. */
-			storage.importData(org.eclipse.serializer.util.X.Enum(ownedBuffers));
-			for (final ByteBuffer owned : ownedBuffers) owned.position(0);
 			return ownedBuffers;
 		}
 		catch (final RuntimeException | Error failure)
@@ -93,11 +113,14 @@ public final class StorageBinaryDataImporter
 		for (final ByteBuffer buffer : buffers)
 		{
 			if (buffer == null || !buffer.isDirect()) return false;
+			if (buffer.position() != 0)
+			{
+				throw new IllegalArgumentException("import buffers must be normalized to position zero");
+			}
 		}
 		try
 		{
-			storage.importData(org.eclipse.serializer.util.X.Enum(buffers));
-			for (final ByteBuffer buffer : buffers) buffer.position(0);
+			importAndReset(storage, buffers);
 			return true;
 		}
 		catch (final RuntimeException | Error failure)
@@ -114,9 +137,22 @@ public final class StorageBinaryDataImporter
 	public static void release(final ByteBuffer[] buffers)
 	{
 		if (buffers == null) return;
+		RuntimeException failure = null;
 		for (final ByteBuffer buffer : buffers)
 		{
-			if (buffer != null) XMemory.deallocateDirectByteBuffer(buffer);
+			if (buffer != null && buffer.capacity() > 0)
+			{
+				try
+				{
+					XMemory.deallocateDirectByteBuffer(buffer);
+				}
+				catch (final RuntimeException cleanupFailure)
+				{
+					if (failure == null) failure = cleanupFailure;
+					else failure.addSuppressed(cleanupFailure);
+				}
+			}
 		}
+		if (failure != null) throw failure;
 	}
 }

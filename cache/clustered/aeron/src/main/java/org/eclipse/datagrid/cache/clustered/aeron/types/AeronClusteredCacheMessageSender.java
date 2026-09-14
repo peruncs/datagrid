@@ -23,14 +23,13 @@ import org.eclipse.datagrid.cache.clustered.types.ClusteredCacheMessageSender;
 import org.eclipse.datagrid.cache.clustered.types.TimestampsRegionUpdateMessage;
 import org.eclipse.serializer.Serializer;
 import org.eclipse.serializer.memory.XMemory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.cache.event.CacheEntryCreatedListener;
 import javax.cache.event.CacheEntryEvent;
 import javax.cache.event.CacheEntryListenerException;
 import javax.cache.event.CacheEntryUpdatedListener;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -53,42 +52,63 @@ import java.util.concurrent.atomic.LongAdder;
  */
 abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessageSender<Object, Object>
 {
-	private static final Logger logger = LoggerFactory.getLogger(AeronClusteredCacheMessageSender.class);
+	private static final System.Logger LOGGER =
+		System.getLogger(AeronClusteredCacheMessageSender.class.getName());
 	/** A scratch buffer larger than this is released after the frame is offered. */
 	private static final int MAX_RETAINED_SCRATCH_BYTES = 64 * 1024;
 
 	private final AeronClusteredCacheResources resources;
 	private final byte[] senderId;
-	private final AtomicLong sequence;
+	private final AeronClusteredCacheSenderSequence.SequenceLease sequence;
+	private final Object sequenceLock;
+	private final Runnable releaseSequence;
 	private final Serializer<byte[]> serializer;
 	private final long publishTimeoutNanos;
 	private final int maxPayloadBytes;
-	/* JCache listeners may publish from several threads, and BackoffIdleStrategy
-	 * is stateful, so each caller thread owns its idle strategy. The scratch is
-	 * an off-heap direct buffer per thread, so no frame bytes are staged on the
-	 * JVM heap. */
-	private final ThreadLocal<IdleStrategy> idleStrategy = ThreadLocal.withInitial(BackoffIdleStrategy::new);
-	private final ThreadLocal<UnsafeBuffer> scratch = new ThreadLocal<>();
+	/* Every publication is serialized by sequenceLock, so one stateful idle
+	 * strategy and one reusable native buffer are sufficient. */
+	private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
+	private UnsafeBuffer scratch;
 	private final LongAdder published = new LongAdder();
 	private final LongAdder offerRetries = new LongAdder();
+	private final Object lifecycleMonitor = new Object();
+	private static final long DISPOSE_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5L);
+	/* Lock order is deliberately one-way: a publish admission takes
+	 * lifecycleMonitor, then releases it before taking sequenceLock; the first
+	 * publication lookup takes sequenceLock and then the resources monitor. A
+	 * disposal holds lifecycleMonitor only while waiting for admitted callbacks,
+	 * and resources.closePublication() never calls back into this sender. This
+	 * avoids a lifecycle/sequence/resources cycle while retaining one contiguous
+	 * sequence-and-offer critical section for shared node identities. */
 
 	/* The publication is looked up once and cached; the resources monitor is
 	 * only entered on the first publish of this sender. */
 	private volatile ConcurrentPublication publication;
+	private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
 	private volatile boolean disposed;
+	private int inFlightPublishes;
+	private boolean closing;
 
 	private AeronClusteredCacheMessageSender(
 		final AeronClusteredCacheResources resources,
 		final byte[] senderId,
-		final AtomicLong sequence,
+		final AeronClusteredCacheSenderSequence.SequenceLease sequence,
+		final Object sequenceLock,
+		final Runnable releaseSequence,
 		final Serializer<byte[]> serializer,
 		final long publishTimeoutNanos,
 		final int maxPayloadBytes
 	)
 	{
 		this.resources = resources;
-		this.senderId = senderId;
+		this.senderId = java.util.Objects.requireNonNull(senderId, "senderId").clone();
+		if (this.senderId.length != Long.BYTES * 2)
+		{
+			throw new IllegalArgumentException("sender id must be exactly 16 bytes");
+		}
 		this.sequence = sequence;
+		this.sequenceLock = sequenceLock;
+		this.releaseSequence = releaseSequence;
 		this.serializer = serializer;
 		this.publishTimeoutNanos = publishTimeoutNanos;
 		this.maxPayloadBytes = maxPayloadBytes;
@@ -108,13 +128,16 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 	static ClusteredCacheMessageSender<Object, Object> UpdateTimestamps(
 		final AeronClusteredCacheResources resources,
 		final byte[] senderId,
-		final AtomicLong sequence,
+		final AeronClusteredCacheSenderSequence.SequenceLease sequence,
+		final Object sequenceLock,
+		final Runnable releaseSequence,
 		final Serializer<byte[]> serializer,
 		final long publishTimeoutNanos,
 		final int maxPayloadBytes
 	)
 	{
-		return new UpdateTimestamps(resources, senderId, sequence, serializer, publishTimeoutNanos, maxPayloadBytes);
+		return new UpdateTimestamps(resources, senderId, sequence, sequenceLock, releaseSequence, serializer,
+			publishTimeoutNanos, maxPayloadBytes);
 	}
 
 	/** Converts one cache event into a cluster update message. */
@@ -141,63 +164,121 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 
 	private void publish(final byte[] payload)
 	{
-		if (this.disposed)
-		{
-			throw new CacheEntryListenerException("Aeron clustered-cache sender is disposed",
-				new IllegalStateException("disposed"));
-		}
-		if (payload.length > this.maxPayloadBytes)
+		if (payload == null || payload.length > this.maxPayloadBytes)
 		{
 			throw new CacheEntryListenerException(
-				"Aeron clustered-cache payload of " + payload.length + " bytes exceeds the configured limit of " +
-					this.maxPayloadBytes);
+				"Aeron clustered-cache payload exceeds the configured limit of " + this.maxPayloadBytes);
 		}
-
-		final UnsafeBuffer buffer = this.scratchFor(payload.length);
-		final int length = AeronClusteredCacheMessageCodec.encode(
-			buffer, this.senderId, this.sequence.getAndIncrement(), payload);
-		final ConcurrentPublication publication = this.ensurePublication();
+		final RuntimeException terminal = this.failure.get();
+		if (terminal != null)
+		{
+			throw new CacheEntryListenerException("Aeron clustered-cache sender has failed", terminal);
+		}
+		boolean admitted = false;
+		UnsafeBuffer buffer = null;
 		try
 		{
-			this.offer(publication, buffer, length);
+			synchronized (this.lifecycleMonitor)
+			{
+				if (this.disposed || this.closing)
+				{
+					throw new CacheEntryListenerException("Aeron clustered-cache sender is disposed",
+						new IllegalStateException("disposed"));
+				}
+				this.inFlightPublishes++;
+				admitted = true;
+			}
+			final RuntimeException resourceFailure = this.resources.failure();
+			if (resourceFailure != null)
+			{
+				throw new CacheEntryListenerException(
+					"Aeron clustered-cache transport has failed", resourceFailure);
+			}
+
+					synchronized (this.sequenceLock)
+				{
+					try
+					{
+						buffer = this.scratchFor(payload.length);
+						/* Do not consume a sequence until the publication has accepted the
+						 * frame. A timed-out offer is not visible to receivers. */
+						final ConcurrentPublication publication = this.ensurePublication();
+						final long sequence = this.sequence.current();
+						if (sequence == Long.MAX_VALUE)
+						{
+							throw new CacheEntryListenerException("Aeron clustered-cache sender sequence exhausted");
+						}
+						final int length = AeronClusteredCacheMessageCodec.encode(
+							buffer, this.senderId, sequence, payload);
+						this.offer(publication, buffer, length);
+						this.sequence.advance();
+					}
+					finally
+					{
+						if (buffer != null && buffer.capacity() > MAX_RETAINED_SCRATCH_BYTES)
+						{
+							this.releaseScratch();
+						}
+					}
+					}
+		}
+		catch (final CacheEntryListenerException failure)
+		{
+			throw failure;
+		}
+		catch (final RuntimeException failure)
+		{
+			throw new CacheEntryListenerException(
+				"Failed to publish Aeron clustered-cache invalidation", failure);
 		}
 		finally
 		{
-			/* A single oversized invalidation must not pin a large off-heap
-			 * buffer on this listener thread forever. */
-			if (buffer.capacity() > MAX_RETAINED_SCRATCH_BYTES)
+			if (admitted)
 			{
-				this.releaseScratch();
+				synchronized (this.lifecycleMonitor)
+				{
+					this.inFlightPublishes--;
+					if (this.inFlightPublishes == 0)
+					{
+						this.lifecycleMonitor.notifyAll();
+					}
+				}
 			}
 		}
 	}
 
 	/**
-	 * Returns a thread-local off-heap buffer that fits the given payload,
+	 * Returns the sender-owned off-heap buffer that fits the given payload,
 	 * growing (and releasing the previous) buffer when needed.
 	 */
 	private UnsafeBuffer scratchFor(final int payloadLength)
 	{
 		final int required = AeronClusteredCacheMessageCodec.HEADER_LENGTH + payloadLength;
-		UnsafeBuffer buffer = this.scratch.get();
+		UnsafeBuffer buffer = this.scratch;
 		if (buffer == null || buffer.capacity() < required)
 		{
 			this.releaseScratch();
 			buffer = new UnsafeBuffer(XMemory.allocateDirectNative(required));
-			this.scratch.set(buffer);
+			this.scratch = buffer;
 		}
 		return buffer;
 	}
 
-	/** Releases the thread-local off-heap scratch buffer. */
+	/** Releases the sender-owned off-heap scratch buffer. */
 	private void releaseScratch()
 	{
-		final UnsafeBuffer buffer = this.scratch.get();
+		final UnsafeBuffer buffer = this.scratch;
 		if (buffer != null)
 		{
-			this.scratch.remove();
+			this.scratch = null;
 			XMemory.deallocateDirectByteBuffer(buffer.byteBuffer());
 		}
+	}
+
+	/** Releases the scratch buffer after publication quiescence. */
+	private void releaseAllScratch()
+	{
+		this.releaseScratch();
 	}
 
 	private ConcurrentPublication ensurePublication()
@@ -241,6 +322,17 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 		{
 			while (true)
 			{
+				final RuntimeException resourceFailure = this.resources.failure();
+				if (resourceFailure != null)
+				{
+					throw new CacheEntryListenerException(
+						"Aeron clustered-cache transport has failed", resourceFailure);
+				}
+				final RuntimeException senderFailure = this.failure.get();
+				if (senderFailure != null)
+				{
+					throw new CacheEntryListenerException("Aeron clustered-cache sender has failed", senderFailure);
+				}
 				if (Thread.currentThread().isInterrupted())
 				{
 					throw new CacheEntryListenerException(
@@ -249,17 +341,31 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 				final long result = publication.offer(buffer, 0, length);
 				if (result > 0)
 				{
+					this.idleStrategy.reset();
 					this.published.increment();
 					return;
 				}
 				if (result == Publication.CLOSED)
 				{
-					throw new CacheEntryListenerException("Aeron clustered-cache publication is closed");
+					final CacheEntryListenerException terminal =
+						new CacheEntryListenerException("Aeron clustered-cache publication is closed");
+					this.failure.compareAndSet(null, terminal);
+					throw terminal;
 				}
 				if (result == Publication.MAX_POSITION_EXCEEDED)
 				{
-					throw new CacheEntryListenerException(
+					final CacheEntryListenerException terminal = new CacheEntryListenerException(
 						"Aeron clustered-cache publication reached its maximum position");
+					this.failure.compareAndSet(null, terminal);
+					throw terminal;
+				}
+				if (result != Publication.NOT_CONNECTED && result != Publication.BACK_PRESSURED &&
+					result != Publication.ADMIN_ACTION)
+				{
+					final CacheEntryListenerException terminal = new CacheEntryListenerException(
+						"Aeron clustered-cache publication returned an unknown offer result: " + result);
+					this.failure.compareAndSet(null, terminal);
+					throw terminal;
 				}
 				this.offerRetries.increment();
 				if (System.nanoTime() >= deadline)
@@ -271,7 +377,7 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 				/* idle(0): a positive count means "work was done" and resets the
 				 * strategy without parking, which would busy-spin for the whole
 				 * publish timeout. */
-				this.idleStrategy.get().idle(0);
+				this.idleStrategy.idle(0);
 			}
 		}
 		catch (final IllegalArgumentException failure)
@@ -283,14 +389,56 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 	@Override
 	public void dispose()
 	{
-		if (this.disposed)
+		boolean quiescent = false;
+		boolean completed = false;
+		try
 		{
-			return;
+			synchronized (this.lifecycleMonitor)
+			{
+				if (this.disposed) return;
+				this.closing = true;
+				final long deadline = saturatingDeadline(DISPOSE_TIMEOUT_NANOS);
+				try
+				{
+					while (this.inFlightPublishes != 0)
+					{
+						final long remaining = remainingNanos(deadline);
+						if (remaining <= 0L)
+						{
+							throw new IllegalStateException(
+								"Aeron clustered-cache sender did not stop before disposal timeout");
+						}
+						TimeUnit.NANOSECONDS.timedWait(this.lifecycleMonitor, remaining);
+					}
+					quiescent = true;
+					/* Keep the handle until the shared resource owner confirms close. If
+					 * closePublication() fails, retry without leaking this sender's buffer. */
+					this.resources.closePublication();
+					this.publication = null;
+					this.disposed = true;
+					completed = true;
+				}
+				catch (final InterruptedException failure)
+				{
+					Thread.currentThread().interrupt();
+					throw new IllegalStateException("interrupted while closing Aeron clustered-cache sender", failure);
+				}
+			}
 		}
-		this.disposed = true;
-		this.resources.closePublication();
-		logger.debug("Disposed Aeron clustered-cache sender: published={}, offerRetries={}",
-			this.published.sum(), this.offerRetries.sum());
+		finally
+		{
+			if (quiescent) this.releaseAllScratch();
+			if (completed) this.releaseSequence.run();
+			if (!completed)
+			{
+				synchronized (this.lifecycleMonitor)
+				{
+					this.closing = false;
+				}
+			}
+		}
+		LOGGER.log(System.Logger.Level.DEBUG, "Disposed Aeron clustered-cache sender: published=" +
+			this.published.sum() + ", offerRetries=" + this.offerRetries.sum());
 	}
 
 	/** Package-private test seam for the published counter. */
@@ -303,6 +451,18 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 	long offerRetries()
 	{
 		return this.offerRetries.sum();
+	}
+
+	/** Package-private test seam for native scratch ownership. */
+	int scratchBufferCount()
+	{
+		return this.scratch == null ? 0 : 1;
+	}
+
+	/** Returns whether this single-use sender has completed disposal. */
+	boolean isDisposed()
+	{
+		return this.disposed;
 	}
 
 	/**
@@ -323,6 +483,14 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 		}
 	}
 
+	/** Returns the remaining wait budget without overflowing a saturated deadline. */
+	private static long remainingNanos(final long deadline)
+	{
+		if (deadline == Long.MAX_VALUE) return Long.MAX_VALUE;
+		final long remaining = deadline - System.nanoTime();
+		return Math.max(remaining, 0L);
+	}
+
 	/** Converts timestamp cache events into cluster update messages. */
 	private static final class UpdateTimestamps extends AeronClusteredCacheMessageSender
 		implements CacheEntryCreatedListener<Object, Object>, CacheEntryUpdatedListener<Object, Object>
@@ -330,13 +498,16 @@ abstract class AeronClusteredCacheMessageSender implements ClusteredCacheMessage
 		private UpdateTimestamps(
 			final AeronClusteredCacheResources resources,
 			final byte[] senderId,
-			final AtomicLong sequence,
+			final AeronClusteredCacheSenderSequence.SequenceLease sequence,
+			final Object sequenceLock,
+			final Runnable releaseSequence,
 			final Serializer<byte[]> serializer,
 			final long publishTimeoutNanos,
 			final int maxPayloadBytes
 		)
 		{
-			super(resources, senderId, sequence, serializer, publishTimeoutNanos, maxPayloadBytes);
+			super(resources, senderId, sequence, sequenceLock, releaseSequence, serializer,
+				publishTimeoutNanos, maxPayloadBytes);
 		}
 
 		@Override

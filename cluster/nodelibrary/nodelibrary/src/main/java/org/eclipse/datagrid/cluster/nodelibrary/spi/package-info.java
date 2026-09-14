@@ -18,5 +18,7 @@
  * that manager's lifecycle and must close it after replication and backup work
  * has stopped. Providers should keep transport-specific details behind this
  * small boundary.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.cluster.nodelibrary.spi;

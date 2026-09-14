@@ -16,13 +16,17 @@
  *
  * <p>It supplies the Kafka implementation selected through the neutral
  * {@code ClusteredCacheMessageComProvider}. A consumer ignores records written
- * by its own client identity, and Kafka settings stay inside this module.</p>
+ * by its own client identity, and Kafka settings stay inside this module. The
+ * explicit group or provider identity is restart-stable; otherwise each
+ * provider instance gets an isolated inferred group and new groups replay from
+ * the beginning of the retained invalidation log.</p>
  *
  * <p>Cache invalidation is an N-writer/N-reader broadcast (the Store
  * 1-writer/N-reader constraint does not apply). Kafka retains the topic, so a
  * restarted node replays missed invalidations from its committed offset when a
- * stable {@code group-id} is configured; the broker is expected to enforce
- * topic ACLs, as this adapter configures none.</p>
+ * stable {@code group-id} is configured or derived from node identity and
+ * provider identity; the broker is expected to enforce topic ACLs, as this
+ * adapter configures none.</p>
  *
  * @since 1.0
  */
@@ -33,7 +37,6 @@ module org.eclipse.datagrid.cache.clustered.kafka
 	requires org.eclipse.serializer.base;
 	requires cache.api;
 	requires kafka.clients;
-	requires org.slf4j;
 
 	exports org.eclipse.datagrid.cache.clustered.kafka.types;
 }

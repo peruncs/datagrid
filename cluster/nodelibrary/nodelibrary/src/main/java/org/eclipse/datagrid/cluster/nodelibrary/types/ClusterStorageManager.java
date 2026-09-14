@@ -17,7 +17,6 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.StorageLimitReachedException;
-import org.eclipse.datagrid.cluster.nodelibrary.exceptions.UnreachableCodeException;
 import org.eclipse.serializer.afs.types.AFile;
 import org.eclipse.serializer.collections.Set_long;
 import org.eclipse.serializer.collections.types.XGettingEnum;
@@ -33,7 +32,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -103,13 +101,41 @@ public interface ClusterStorageManager<T> extends StorageManager
 		}
 	}
 
-	/** Decides whether another Store write may be accepted. */
+	/** Reports whether the configured storage limit has been reached. */
 	interface StorageSizeValidation
 	{
-		/** Reports whether another Store write is allowed.
-		 * @return {@code true} when the size is valid
+		/** Reports whether another Store write must be rejected.
+		 * @return {@code true} when the limit is reached
 		 */
-		boolean isStorageSizeValid();
+		boolean isStorageLimitReached();
+	}
+
+	/** Runs the node callback and always gives the Store a chance to shut down. */
+	private static boolean shutdownWithCallback(
+		final StorageManager delegate, final ShutdownCallback shutdownCallback)
+	{
+		Throwable failure = null;
+		boolean result = false;
+		try
+		{
+			shutdownCallback.onShutdown();
+		}
+		catch (final Throwable callbackFailure)
+		{
+			failure = callbackFailure;
+		}
+		try
+		{
+			result = delegate.shutdown();
+		}
+		catch (final Throwable shutdownFailure)
+		{
+			if (failure == null) failure = shutdownFailure;
+			else if (failure != shutdownFailure) failure.addSuppressed(shutdownFailure);
+		}
+		if (failure instanceof Error error) throw error;
+		if (failure instanceof RuntimeException runtime) throw runtime;
+        return result;
 	}
 
 	/** Creates a manager that only adds shutdown handling.
@@ -157,8 +183,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		public boolean shutdown()
 		{
 			LOG.info("Shutting down ClusterStorageManager");
-			this.shutdownCallback.onShutdown();
-			return this.delegate.shutdown();
+			return ClusterStorageManager.shutdownWithCallback(this.delegate, this.shutdownCallback);
 		}
 
 		@Override
@@ -397,36 +422,9 @@ public interface ClusterStorageManager<T> extends StorageManager
 			this.shutdownCallback = shutdownCallback;
 		}
 
-		private <R> R exitOnThrow(final Callable<R> callable)
-		{
-			try
-			{
-				return callable.call();
-			}
-			catch (final Throwable t)
-			{
-				// TODO (MS 29.11.2024): How many non-broken-storage exceptions are there? Like the PersistenceExceptionTypeNotPersistable exception? No need to exit on those, right?
-				GlobalErrorHandling.handleFatalError(t);
-				throw new UnreachableCodeException();
-			}
-		}
-
-		private void exitOnThrow(final Runnable runnable)
-		{
-			try
-			{
-				runnable.run();
-			}
-			catch (final Throwable t)
-			{
-				// TODO (MS 29.11.2024): How many non-broken-storage exceptions are there? Like the PersistenceExceptionTypeNotPersistable exception? No need to exit on those, right?
-				GlobalErrorHandling.handleFatalError(t);
-			}
-		}
-
 		private void validateState() throws StorageLimitReachedException
 		{
-			if (this.storageSizeValidation.isStorageSizeValid())
+			if (this.storageSizeValidation.isStorageLimitReached())
 			{
 				throw new StorageLimitReachedException(
 					"Can not store more objects in storage as the storage limit has been reached"
@@ -449,7 +447,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		@Override
 		public StorageConnection createConnection()
 		{
-			return this;
+			return this.delegate.createConnection();
 		}
 
 		@Override
@@ -468,7 +466,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 		public void exportChannels(final StorageLiveFileProvider fileProvider, final boolean performGarbageCollection)
 		{
 			this.validateState();
-			this.exitOnThrow(() -> this.delegate.exportChannels(fileProvider, performGarbageCollection));
+			this.delegate.exportChannels(fileProvider, performGarbageCollection);
 		}
 
 		@Override
@@ -478,21 +476,21 @@ public interface ClusterStorageManager<T> extends StorageManager
 		)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.exportTypes(exportFileProvider, isExportType));
+			return this.delegate.exportTypes(exportFileProvider, isExportType);
 		}
 
 		@Override
 		public void importData(final XGettingEnum<ByteBuffer> importData)
 		{
 			this.validateState();
-			this.exitOnThrow(() -> this.delegate.importData(importData));
+			this.delegate.importData(importData);
 		}
 
 		@Override
 		public void importFiles(final XGettingEnum<AFile> importFiles)
 		{
 			this.validateState();
-			this.exitOnThrow(() -> this.delegate.importFiles(importFiles));
+			this.delegate.importFiles(importFiles);
 		}
 
 		@Override
@@ -535,14 +533,14 @@ public interface ClusterStorageManager<T> extends StorageManager
 		public boolean issueCacheCheck(final long nanoTimeBudget, final StorageEntityCacheEvaluator entityEvaluator)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.issueCacheCheck(nanoTimeBudget, entityEvaluator));
+			return this.delegate.issueCacheCheck(nanoTimeBudget, entityEvaluator);
 		}
 
 		@Override
 		public boolean issueFileCheck(final long nanoTimeBudget)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.issueFileCheck(nanoTimeBudget));
+			return this.delegate.issueFileCheck(nanoTimeBudget);
 		}
 
 		@Override
@@ -552,35 +550,35 @@ public interface ClusterStorageManager<T> extends StorageManager
 		)
 		{
 			this.validateState();
-			this.exitOnThrow(() -> this.delegate.issueFullBackup(targetFileProvider, typeDictionaryExporter));
+			this.delegate.issueFullBackup(targetFileProvider, typeDictionaryExporter);
 		}
 
 		@Override
 		public boolean issueGarbageCollection(final long nanoTimeBudget)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.issueGarbageCollection(nanoTimeBudget));
+			return this.delegate.issueGarbageCollection(nanoTimeBudget);
 		}
 
 		@Override
 		public void issueTransactionsLogCleanup()
 		{
 			this.validateState();
-			this.exitOnThrow(this.delegate::issueTransactionsLogCleanup);
+			this.delegate.issueTransactionsLogCleanup();
 		}
 
 		@Override
 		public boolean issueStorageFlush()
 		{
 			this.validateState();
-			return this.exitOnThrow(this.delegate::issueStorageFlush);
+			return this.delegate.issueStorageFlush();
 		}
 
 		@Override
 		public StorageIntegrityCheckResult issueIntegrityCheck(final long nanoTimeBudget)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.issueIntegrityCheck(nanoTimeBudget));
+			return this.delegate.issueIntegrityCheck(nanoTimeBudget);
 		}
 
 		@Override
@@ -600,15 +598,14 @@ public interface ClusterStorageManager<T> extends StorageManager
 		public Object setRoot(final Object newRoot)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.setRoot(newRoot));
+			return this.delegate.setRoot(newRoot);
 		}
 
 		@Override
 		public boolean shutdown()
 		{
 			LOG.info("Shutting down ClusterStorageManager");
-			this.shutdownCallback.onShutdown();
-			return this.delegate.shutdown();
+			return ClusterStorageManager.shutdownWithCallback(this.delegate, this.shutdownCallback);
 		}
 
 		@Override
@@ -622,28 +619,28 @@ public interface ClusterStorageManager<T> extends StorageManager
 		public long store(final Object instance)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.store(instance));
+			return this.delegate.store(instance);
 		}
 
 		@Override
 		public long[] storeAll(final Object... instances)
 		{
 			this.validateState();
-			return this.exitOnThrow(() -> this.delegate.storeAll(instances));
+			return this.delegate.storeAll(instances);
 		}
 
 		@Override
 		public void storeAll(final Iterable<?> instances)
 		{
 			this.validateState();
-			this.exitOnThrow(() -> this.delegate.storeAll(instances));
+			this.delegate.storeAll(instances);
 		}
 
 		@Override
 		public long storeRoot()
 		{
 			this.validateState();
-			return this.exitOnThrow(this.delegate::storeRoot);
+			return this.delegate.storeRoot();
 		}
 
 		@Override
@@ -733,7 +730,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			public long ensureObjectId(final Object object)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.ensureObjectId(object));
+				return this.delegate.ensureObjectId(object);
 			}
 
 			@Override
@@ -744,9 +741,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(
-					() -> this.delegate.ensureObjectId(object, objectIdRequestor, optionalHandler)
-				);
+				return this.delegate.ensureObjectId(object, objectIdRequestor, optionalHandler);
 			}
 
 			@Override
@@ -757,99 +752,85 @@ public interface ClusterStorageManager<T> extends StorageManager
 			)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(
-					() -> this.delegate.ensureObjectIdGuaranteedRegister(object, objectIdRequestor, optionalHandler)
-				);
+				return this.delegate.ensureObjectIdGuaranteedRegister(object, objectIdRequestor, optionalHandler);
 			}
 
 			@Override
 			public void consolidate()
 			{
 				ClusterStorageManager.Default.this.validateState();
-				ClusterStorageManager.Default.this.exitOnThrow(this.delegate::consolidate);
+				this.delegate.consolidate();
 			}
 
 			@Override
 			public boolean registerLocalRegistry(final PersistenceLocalObjectIdRegistry<Binary> localRegistry)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(
-					() -> this.delegate.registerLocalRegistry(localRegistry)
-				);
+				return this.delegate.registerLocalRegistry(localRegistry);
 			}
 
 			@Override
 			public void mergeEntries(final PersistenceLocalObjectIdRegistry<Binary> localRegistry)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.mergeEntries(localRegistry));
+				this.delegate.mergeEntries(localRegistry);
 			}
 
 			@Override
 			public long lookupObjectId(final Object object)
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.lookupObjectId(object));
+				return this.delegate.lookupObjectId(object);
 			}
 
 			@Override
 			public Object lookupObject(final long objectId)
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.lookupObject(objectId));
+				return this.delegate.lookupObject(objectId);
 			}
 
 			@Override
 			public Object get()
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::get);
+				return this.delegate.get();
 			}
 
 			@Override
 			public Object getObject(final long objectId)
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.getObject(objectId));
+				return this.delegate.getObject(objectId);
 			}
 
 			@Override
 			public <C extends Consumer<Object>> C collect(final C collector, final long... objectIds)
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(
-					() -> this.delegate.collect(collector, objectIds)
-				);
+				return this.delegate.collect(collector, objectIds);
 			}
 
 			@Override
 			public <C extends Consumer<Object>> C collect(final C collector, final Set_long objectIds)
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(
-					() -> this.delegate.collect(collector, objectIds)
-				);
+				return this.delegate.collect(collector, objectIds);
 			}
 
 			@Override
 			public long store(final Object instance)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.store(instance));
+				return this.delegate.store(instance);
 			}
 
 			@Override
 			public long[] storeAll(final Object... instances)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.storeAll(instances));
+				return this.delegate.storeAll(instances);
 			}
 
 			@Override
 			public void storeAll(final Iterable<?> instances)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.storeAll(instances));
+				this.delegate.storeAll(instances);
 			}
 
 			@Override
@@ -885,7 +866,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			@Override
 			public PersistenceLoader createLoader()
 			{
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::createLoader);
+				return this.delegate.createLoader();
 			}
 
 			@Override
@@ -902,16 +883,13 @@ public interface ClusterStorageManager<T> extends StorageManager
 			)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				ClusterStorageManager.Default.this.exitOnThrow(
-					() -> this.delegate.updateMetadata(typeDictionary, highestTypeId, highestObjectId)
-				);
+				this.delegate.updateMetadata(typeDictionary, highestTypeId, highestObjectId);
 			}
 
 			@Override
 			public PersistenceObjectRegistry objectRegistry()
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::objectRegistry);
+				return this.delegate.objectRegistry();
 			}
 
 			@Override
@@ -923,41 +901,38 @@ public interface ClusterStorageManager<T> extends StorageManager
 			@Override
 			public PersistenceTypeDictionary typeDictionary()
 			{
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::typeDictionary);
+				return this.delegate.typeDictionary();
 			}
 
 			@Override
 			public PersistenceRootsView viewRoots()
 			{
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::viewRoots);
+				return this.delegate.viewRoots();
 			}
 
 			@Override
 			public long currentObjectId()
 			{
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::currentObjectId);
+				return this.delegate.currentObjectId();
 			}
 
 			@Override
 			public PersistenceManager<Binary> updateCurrentObjectId(final long currentObjectId)
 			{
-				return ClusterStorageManager.Default.this.exitOnThrow(
-					() -> this.delegate.updateCurrentObjectId(currentObjectId)
-				);
+				return this.delegate.updateCurrentObjectId(currentObjectId);
 			}
 
 			@Override
 			public PersistenceSource<Binary> source()
 			{
-				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::source);
+				return this.delegate.source();
 			}
 
 			@Override
 			public PersistenceTarget<Binary> target()
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(this.delegate::target);
+				return this.delegate.target();
 			}
 
 			@Override
@@ -981,21 +956,21 @@ public interface ClusterStorageManager<T> extends StorageManager
 			public <U> long apply(final U instance)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.apply(instance));
+				return this.delegate.apply(instance);
 			}
 
 			@Override
 			public long register(final Object instance)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.register(instance));
+				return this.delegate.register(instance);
 			}
 
 			@Override
 			public long[] registerAll(final Object... instances)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				return ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.registerAll(instances));
+				return this.delegate.registerAll(instances);
 			}
 		}
 
@@ -1014,7 +989,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			public PersistenceStorer reinitialize()
 			{
 				ClusterStorageManager.Default.this.validateState();
-				ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.reinitialize());
+				this.delegate.reinitialize();
 				return this;
 			}
 
@@ -1022,7 +997,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			public PersistenceStorer reinitialize(final long initialCapacity)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.reinitialize(initialCapacity));
+				this.delegate.reinitialize(initialCapacity);
 				return this;
 			}
 
@@ -1030,7 +1005,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			public PersistenceStorer ensureCapacity(final long desiredCapacity)
 			{
 				ClusterStorageManager.Default.this.validateState();
-				ClusterStorageManager.Default.this.exitOnThrow(() -> this.delegate.ensureCapacity(desiredCapacity));
+				this.delegate.ensureCapacity(desiredCapacity);
 				return this;
 			}
 		}
@@ -1073,7 +1048,7 @@ public interface ClusterStorageManager<T> extends StorageManager
 			public Object commit()
 			{
 				Default.this.validateState();
-				return Default.this.exitOnThrow(this.storer::commit);
+				return this.storer.commit();
 			}
 
 			@Override

@@ -23,11 +23,49 @@ import org.agrona.SystemUtil;
 import org.eclipse.datagrid.cluster.nodelibrary.types.NodelibraryPropertiesProvider;
 import org.eclipse.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
 
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.*;
 
-/** Immutable, validated configuration for one Aeron transport. */
+/**
+ * Validated configuration for one Aeron transport. Structural values are
+ * immutable; the internal retention-key copy is erased by its owning transport
+ * during shutdown.
+ *
+ * @param replication validated publication framing and timeout settings
+ * @param clusterId stable cluster identity shared by all members
+ * @param epoch writer epoch used to reject stale frames
+ * @param streamId data stream id; replay and watermark ids are derived from it
+ * @param recordingId configured or discovered Archive recording id
+ * @param liveChannel live data publication channel
+ * @param replayChannel reader replay channel
+ * @param controlChannel embedded Archive control request channel
+ * @param controlResponseChannel Archive control response channel
+ * @param aeronDirectory MediaDriver directory
+ * @param archiveDirectory embedded Archive directory
+ * @param checkpointPath durable writer checkpoint path
+ * @param nodeId stable node identity used in writer recovery
+ * @param storeGeneration identity of the Store image handled by this node
+ * @param archiveFileSyncLevel Archive file and catalog synchronization level
+ * @param minimumArchiveFreeBytes minimum embedded-Archive free space
+ * @param externalArchive whether an external Archive owns the recording
+ * @param role configured replication role
+ * @param productionMode whether production-only validation is enabled
+ * @param threadingMode MediaDriver threading mode
+ * @param archiveThreadingMode embedded Archive threading mode
+ * @param archiveSegmentFileLength Archive segment length in bytes
+ * @param archiveLowStorageSpaceThreshold Archive low-storage threshold in bytes
+ * @param maxConcurrentReplays maximum simultaneous Archive replays
+ * @param driverTimeoutMillis MediaDriver timeout in milliseconds
+ * @param archiveReplicationChannel Archive replication channel
+ * @param watermarkChannel reader-watermark channel
+ * @param watermarkStreamId reader-watermark stream id
+ * @param retentionSecret copied HMAC key for authenticated retention, or {@code null}
+ * @param retentionReaders configured reader identities required for retention
+ */
 record AeronSettings(
 	AeronReplicationConfiguration replication,
 	UUID clusterId,
@@ -47,6 +85,7 @@ record AeronSettings(
 	long minimumArchiveFreeBytes,
 	boolean externalArchive,
 	String role,
+	boolean productionMode,
 	ThreadingMode threadingMode,
 	ArchiveThreadingMode archiveThreadingMode,
 	int archiveSegmentFileLength,
@@ -72,10 +111,27 @@ record AeronSettings(
 		return this.retentionSecret == null ? null : this.retentionSecret.clone();
 	}
 
+	/**
+	 * Returns the transport-owned key without cloning. This accessor is package
+	 * private deliberately: only the owning transport may use the key, and it
+	 * clears the array when the transport closes. Public callers always receive a
+	 * defensive copy from {@link #retentionSecret()}.
+	 */
+	byte[] retentionSecretUnsafe()
+	{
+		return this.retentionSecret;
+	}
+
 	@Override
 	public Set<UUID> retentionReaders()
 	{
 		return this.retentionReaders;
+	}
+
+	/** Erases the in-memory retention key when the owning transport closes. */
+	void clearRetentionSecret()
+	{
+		if (this.retentionSecret != null) Arrays.fill(this.retentionSecret, (byte)0);
 	}
 
 	static AeronSettings fromEnvironment(final NodelibraryPropertiesProvider properties)
@@ -109,14 +165,15 @@ record AeronSettings(
 			"ECLIPSE_DATAGRID_AERON_DURABILITY_MODE");
 		put(values, properties, AeronReplicationConfiguration.OFFER_TIMEOUT_NANOS_PROPERTY,
 			"ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS");
+		put(values, properties, AeronReplicationConfiguration.RECORDING_START_TIMEOUT_NANOS_PROPERTY,
+			"ECLIPSE_DATAGRID_AERON_RECORDING_START_TIMEOUT_NANOS");
+		put(values, properties, AeronReplicationConfiguration.RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY,
+			"ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS");
+		put(values, properties, AeronReplicationConfiguration.RECORDING_STOP_TIMEOUT_NANOS_PROPERTY,
+			"ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS");
 		put(values, properties, AeronReplicationConfiguration.READER_STOP_TIMEOUT_NANOS_PROPERTY,
 			"ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS");
 		final AeronReplicationConfiguration replication = AeronReplicationConfiguration.from(values);
-		if (replication.durabilityMode() == org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.LOCAL_DURABLE_FIRST)
-		{
-			throw new IllegalArgumentException(
-				"LOCAL_DURABLE_FIRST is not supported by the Aeron provider; use ARCHIVE_FIRST or ENQUEUE_THEN_ARCHIVE");
-		}
 		final String cluster = value(properties, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", null);
 		if (cluster == null) throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_CLUSTER_ID is required");
 		final long epoch = parseLong(properties, "ECLIPSE_DATAGRID_AERON_EPOCH", "1");
@@ -129,7 +186,7 @@ record AeronSettings(
 		final Path aeronDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_DIRECTORY", "/tmp/eclipse-datagrid-aeron"));
 		final Path archiveDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY",
 			aeronDirectory.resolveSibling(aeronDirectory.getFileName() + ".archive").toString()));
-		if (properties.isProdMode() && (aeronDirectory.toString().startsWith("/tmp") || archiveDirectory.toString().startsWith("/tmp")))
+		if (properties.isProdMode() && (temporaryPath(aeronDirectory) || temporaryPath(archiveDirectory)))
 		{
 			throw new IllegalArgumentException("Aeron directories must not use /tmp in production mode");
 		}
@@ -219,6 +276,11 @@ record AeronSettings(
 		}
 		final byte[] retentionSecret = retentionSecret(properties);
 		final Set<UUID> retentionReaders = retentionReaders(properties);
+		if ("writer".equals(role) && (retentionSecret != null) != !retentionReaders.isEmpty())
+		{
+			throw new IllegalArgumentException(
+				"ECLIPSE_DATAGRID_AERON_RETENTION_SECRET and ECLIPSE_DATAGRID_AERON_RETENTION_READERS must be configured together");
+		}
 		if (externalArchive && "writer".equals(role) &&
 			(retentionSecret != null || !retentionReaders.isEmpty()))
 		{
@@ -273,7 +335,7 @@ record AeronSettings(
 			throw new IllegalArgumentException(
 				"loopback Aeron endpoints are not allowed in production mode; configure routable node addresses");
 		}
-		return new AeronSettings(
+		final AeronSettings settings = new AeronSettings(
 			replication,
 			parseUuid(cluster, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID"),
 			epoch,
@@ -292,6 +354,7 @@ record AeronSettings(
 			minimumArchiveFreeBytes,
 			externalArchive,
 			role,
+			properties.isProdMode(),
 			threadingMode,
 			archiveThreadingMode,
 			archiveSegmentFileLength,
@@ -304,6 +367,11 @@ record AeronSettings(
 			retentionSecret,
 			retentionReaders
 		);
+		/* The record constructor keeps its own defensive copy. Erase the parser's
+		 * temporary immediately so configuration loading does not leave an extra
+		 * long-lived HMAC key on the heap. */
+		if (retentionSecret != null) Arrays.fill(retentionSecret, (byte)0);
+		return settings;
 	}
 
 	private static Set<UUID> retentionReaders(final NodelibraryPropertiesProvider properties)
@@ -325,18 +393,91 @@ record AeronSettings(
 	private static byte[] retentionSecret(final NodelibraryPropertiesProvider properties)
 	{
 		final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET", null);
-		if (configured == null || configured.isBlank()) return null;
+		final String configuredFile = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE", null);
+		if (configured != null && !configured.isBlank() && configuredFile != null && !configuredFile.isBlank())
+		{
+			throw new IllegalArgumentException(
+				"ECLIPSE_DATAGRID_AERON_RETENTION_SECRET and *_SECRET_FILE are mutually exclusive");
+		}
+		if (configured == null || configured.isBlank())
+		{
+			return configuredFile == null || configuredFile.isBlank()
+				? null : decodeRetentionSecretFile(configuredFile.trim());
+		}
+		return decodeRetentionSecret(configured.trim(), "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET");
+	}
+
+	private static byte[] decodeRetentionSecretFile(final String fileName)
+	{
+		final Path path = Paths.get(fileName).toAbsolutePath().normalize();
 		try
 		{
-			final byte[] secret = Base64.getDecoder().decode(configured.trim());
+			final BasicFileAttributes attributes = Files.readAttributes(
+				path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+			if (!attributes.isRegularFile() || Files.isSymbolicLink(path) || attributes.size() > 4096L)
+			{
+				throw new IOException("retention secret file must be a regular, non-symbolic file <= 4096 bytes");
+			}
+			try
+			{
+				final Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS);
+				if (permissions.contains(PosixFilePermission.GROUP_READ) ||
+					permissions.contains(PosixFilePermission.GROUP_WRITE) ||
+					permissions.contains(PosixFilePermission.GROUP_EXECUTE) ||
+					permissions.contains(PosixFilePermission.OTHERS_READ) ||
+					permissions.contains(PosixFilePermission.OTHERS_WRITE) ||
+					permissions.contains(PosixFilePermission.OTHERS_EXECUTE))
+				{
+					throw new IOException("retention secret file must not be readable by group or others");
+				}
+			}
+			catch (final UnsupportedOperationException unsupported)
+			{
+				throw new IOException("retention secret file permissions cannot be verified", unsupported);
+			}
+			final byte[] encoded = new byte[(int)attributes.size()];
+			try (var input = Files.newInputStream(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))
+			{
+				final byte[] buffer = new byte[256];
+				int total = 0;
+				int read;
+				while ((read = input.read(buffer)) != -1)
+				{
+					if (read > encoded.length - total) throw new IOException("retention secret file is too large");
+					System.arraycopy(buffer, 0, encoded, total, read);
+					total += read;
+				}
+				try
+				{
+					return decodeRetentionSecret(
+						new String(encoded, 0, total, StandardCharsets.US_ASCII).trim(),
+						"ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE");
+				}
+				finally
+				{
+					Arrays.fill(encoded, (byte)0);
+				}
+			}
+		}
+		catch (final IOException | IllegalArgumentException failure)
+		{
+			throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE is invalid: " + path,
+				failure);
+		}
+	}
+
+	private static byte[] decodeRetentionSecret(final String configured, final String property)
+	{
+		try
+		{
+			final byte[] secret = Base64.getDecoder().decode(configured);
 			if (secret.length < 16) throw new IllegalArgumentException(
-				"ECLIPSE_DATAGRID_AERON_RETENTION_SECRET must decode to at least 16 bytes");
+				property + " must decode to at least 16 bytes");
 			return secret;
 		}
 		catch (final IllegalArgumentException failure)
 		{
-			throw new IllegalArgumentException(
-				"ECLIPSE_DATAGRID_AERON_RETENTION_SECRET must be base64", failure);
+			throw new IllegalArgumentException(property + " must be base64 and decode to at least 16 bytes", failure);
 		}
 	}
 
@@ -471,19 +612,65 @@ record AeronSettings(
 
 	private static boolean wildcardEndpoint(final String channel)
 	{
-		return channel.contains("=0.0.0.0:") || channel.contains("=*:") ||
-			channel.contains("=[::]:") || channel.contains("=:::");
+		return endpointMatches(channel, AeronSettings::wildcardHost);
 	}
 
 	private static boolean loopbackEndpoint(final String channel)
 	{
-		return channel.contains("=localhost:") || channel.contains("=127.0.0.1:") ||
-			channel.contains("=[::1]:") || channel.contains("=::1:");
+		return endpointMatches(channel, AeronSettings::loopbackHost);
+	}
+
+	/**
+	 * Checks all endpoint-bearing URI options instead of relying on textual
+	 * substrings.  The latter misses case/format variants (for example expanded
+	 * IPv6 wildcards) and can match an unrelated option value.
+	 */
+	private static boolean endpointMatches(final String channel,
+		final java.util.function.Predicate<String> hostPredicate)
+	{
+		final ChannelUri uri = ChannelUri.parse(channel);
+		return hostPredicate.test(endpointHost(uri.get(CommonContext.ENDPOINT_PARAM_NAME))) ||
+			hostPredicate.test(endpointHost(uri.get(CommonContext.MDC_CONTROL_PARAM_NAME)));
+	}
+
+	private static String endpointHost(final String endpoint)
+	{
+		if (endpoint == null || endpoint.isBlank()) return null;
+		final String value = endpoint.trim();
+		if (value.charAt(0) == '[')
+		{
+			final int closing = value.indexOf(']');
+			return closing > 1 ? value.substring(1, closing) : value;
+		}
+		final int separator = value.lastIndexOf(':');
+		return separator > 0 ? value.substring(0, separator) : value;
+	}
+
+	private static boolean wildcardHost(final String host)
+	{
+		if (host == null) return false;
+		final String normalized = host.trim().toLowerCase(Locale.ROOT);
+		return normalized.equals("*") || normalized.equals("0.0.0.0") ||
+			normalized.equals("::") || normalized.equals("0:0:0:0:0:0:0:0");
+	}
+
+	private static boolean loopbackHost(final String host)
+	{
+		if (host == null) return false;
+		final String normalized = host.trim().toLowerCase(Locale.ROOT);
+		return normalized.equals("localhost") || normalized.equals("127.0.0.1") ||
+			normalized.equals("::1") || normalized.equals("0:0:0:0:0:0:0:1");
 	}
 
 	private static boolean overlaps(final Path left, final Path right)
 	{
 		return left.startsWith(right) || right.startsWith(left);
+	}
+
+	private static boolean temporaryPath(final Path path)
+	{
+		final Path normalized = path.toAbsolutePath().normalize();
+		return normalized.startsWith(Path.of("/tmp")) || normalized.startsWith(Path.of("/private/tmp"));
 	}
 
 	/**

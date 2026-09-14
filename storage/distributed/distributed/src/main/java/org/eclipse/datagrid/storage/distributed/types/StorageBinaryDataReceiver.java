@@ -55,8 +55,8 @@ public interface StorageBinaryDataReceiver
 
 	/**
 	 * Delivers a complete binary while allowing an implementation to take
-	 * ownership of its direct buffers. The default keeps the historical borrowed
-	 * callback contract and therefore returns {@code false}; the caller then
+	 * ownership of its direct buffers. The default uses the borrowed callback
+	 * contract and therefore returns {@code false}; the caller then
 	 * releases its buffers after this method returns. An override takes ownership
 	 * before processing and must release the buffers itself if processing fails.
 	 *

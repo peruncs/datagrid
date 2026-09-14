@@ -15,15 +15,11 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacketAcceptor;
-import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacketAssembler;
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.typing.Disposable;
 
-import java.nio.ByteBuffer;
 import java.util.List;
 
 import static org.eclipse.serializer.util.X.notNull;
@@ -55,6 +51,11 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 	default void awaitApplied()
 	{
 	}
+
+	/** Releases a retained partial message and the merger.
+	 */
+	@Override
+	void dispose();
 
 	/**
 	 * Accepts a complete binary without rebuilding packets. Aeron readers use
@@ -111,11 +112,11 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		return new Default(notNull(merger));
 	}
 
-	/** Reassembles packets and forwards complete messages to the merger. */
+	/** Reassembles packets with the shared acceptor and forwards merger callbacks. */
 	class Default implements ClusterStorageBinaryDataPacketAcceptor
 	{
 		private final ClusterStorageBinaryDataMerger merger;
-		private StorageBinaryDataMessage message;
+		private final StorageBinaryDataPacketAcceptor delegate;
 
 		/** Creates the packet acceptor implementation.
 		 * @param merger destination merger
@@ -124,18 +125,14 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 		{
 			super();
 			this.merger = merger;
+			this.delegate =
+				StorageBinaryDataPacketAcceptor.New(merger);
 		}
 
 		@Override
-		public synchronized void accept(final List<StorageBinaryDataPacket> packets)
+		public void accept(final List<StorageBinaryDataPacket> packets)
 		{
-			final StorageBinaryDataPacketAssembler.Result result =
-				StorageBinaryDataPacketAssembler.collect(this.message, packets);
-			this.message = result.pending();
-			if (!result.completed().isEmpty())
-			{
-				this.handleCompleteMessages(result.completed());
-			}
+			this.delegate.accept(packets);
 		}
 
 		@Override
@@ -168,48 +165,10 @@ public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDat
 			this.merger.receiveTypeDictionary(dictionary);
 		}
 
-		private void handleCompleteMessages(final List<StorageBinaryDataMessage> messages)
-		{
-			try
-			{
-				StorageBinaryDataPacketAssembler.dispatch(messages, this::send);
-			}
-			finally
-			{
-				messages.forEach(StorageBinaryDataMessage::dispose);
-			}
-		}
-
-		@SuppressWarnings("incomplete-switch")
-		private void send(final StorageBinaryDataMessage last, final List<ByteBuffer> buffers)
-		{
-			switch (last.type())
-			{
-			case DATA:
-			{
-				// join all buffers of previous data messages
-				this.merger.receiveData(ChunksWrapper.New(buffers.toArray(ByteBuffer[]::new)));
-			}
-				break;
-
-			case TYPE_DICTIONARY:
-			{
-				// type dictionary is always sent completely, so only the last one is relevant
-				this.merger.receiveTypeDictionary(StorageBinaryDataPacketAssembler.decodeTypeDictionary(last.data()));
-			}
-				break;
-			}
-		}
-
 		@Override
 		public synchronized void dispose()
 		{
-			final StorageBinaryDataMessage pending = this.message;
-			this.message = null;
-			if (pending != null)
-			{
-				pending.dispose();
-			}
+			this.delegate.dispose();
 			this.merger.dispose();
 		}
 

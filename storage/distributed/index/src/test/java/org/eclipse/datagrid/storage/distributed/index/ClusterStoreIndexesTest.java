@@ -14,12 +14,7 @@
 package org.eclipse.datagrid.storage.distributed.index;
 
 import org.apache.lucene.document.Document;
-import org.eclipse.store.gigamap.jvector.VectorIndex;
-import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
-import org.eclipse.store.gigamap.jvector.VectorIndices;
-import org.eclipse.store.gigamap.jvector.VectorSearchResult;
-import org.eclipse.store.gigamap.jvector.VectorSimilarityFunction;
-import org.eclipse.store.gigamap.jvector.Vectorizer;
+import org.eclipse.store.gigamap.jvector.*;
 import org.eclipse.store.gigamap.lucene.DocumentPopulator;
 import org.eclipse.store.gigamap.lucene.LuceneContext;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
@@ -32,10 +27,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Checks the cluster index boundary and the Store lifecycle it protects.
@@ -156,7 +148,7 @@ class ClusterStoreIndexesTest
 		VECTORIZE_CALLS.set(0);
 		try (EmbeddedStorageManager storage = EmbeddedStorage.start(this.storagePath))
 		{
-			final Root reloaded = (Root)storage.root();
+			final Root reloaded = storage.root();
 			assertNotNull(reloaded);
 			assertFalse(reloaded.articles.isEmpty());
 			ClusterStoreIndexes.validateVectorIndexes(reloaded.articles);
@@ -171,5 +163,14 @@ class ClusterStoreIndexesTest
 			assertEquals("Aeron", result.toList().get(0).entity().title);
 			assertEquals(0, VECTORIZE_CALLS.get(), "computed vectors must be loaded from Store state");
 		}
- 	}
+	}
+
+	@Test
+	void duplicateLuceneRegistrationFailsExplicitly()
+	{
+		final GigaMap<Article> map = GigaMap.New();
+		ClusterStoreIndexes.registerLucene(map, new ArticlePopulator());
+		assertThrows(IllegalStateException.class,
+			() -> ClusterStoreIndexes.registerLucene(map, new ArticlePopulator()));
+	}
 }

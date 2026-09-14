@@ -18,5 +18,7 @@
  * embedded server. Start the controller after the node is ready, and close it
  * before the node's storage is closed. The provider exposes framework wiring;
  * cluster behavior remains in the neutral nodelibrary.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.cluster.nodelibrary.springboot;

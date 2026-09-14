@@ -34,8 +34,13 @@ public final class StorageBinaryDataPacketAssembler
 	 * @param pending incomplete message, or {@code null}
 	 * @param completed messages completed by the batch
 	 */
-	public record Result(StorageBinaryDataMessage pending, List<StorageBinaryDataMessage> completed)
-	{
+		public record Result(StorageBinaryDataMessage pending, List<StorageBinaryDataMessage> completed)
+		{
+			/** Creates an immutable result snapshot. */
+			public Result
+		{
+			completed = List.copyOf(completed);
+		}
 	}
 
 	/**
@@ -87,9 +92,7 @@ public final class StorageBinaryDataPacketAssembler
 	 * Groups adjacent completed messages by type and sends each group once.
 	 *
 	 * @param messages completed messages in stream order
-	 * @param sender callback receiving the final message and its buffers; the
-	 * callback must consume the list before returning because the assembler
-	 * reuses it for the next type group
+	 * @param sender callback receiving the final message and its buffers
 	 */
 	public static void dispatch(
 		final List<StorageBinaryDataMessage> messages,
@@ -100,9 +103,10 @@ public final class StorageBinaryDataPacketAssembler
 		final List<ByteBuffer> buffers = new ArrayList<>();
 		for (final StorageBinaryDataMessage message : messages)
 		{
-			if (last != null && last.type() != message.type())
+			if (last != null && (last.type() != message.type() ||
+				message.type() == StorageBinaryDataMessage.MessageType.TYPE_DICTIONARY))
 			{
-				sender.accept(last, buffers);
+				sender.accept(last, List.copyOf(buffers));
 				buffers.clear();
 			}
 			buffers.add(message.data());
@@ -110,7 +114,7 @@ public final class StorageBinaryDataPacketAssembler
 		}
 		if (last != null)
 		{
-			sender.accept(last, buffers);
+			sender.accept(last, List.copyOf(buffers));
 		}
 	}
 
@@ -121,6 +125,10 @@ public final class StorageBinaryDataPacketAssembler
 	 */
 	public static String decodeTypeDictionary(final ByteBuffer data)
 	{
+		if (data == null || data.remaining() > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH)
+		{
+			throw new StorageBinaryDataException("type dictionary exceeds maximum message length");
+		}
 		return new String(XMemory.toArray(data.duplicate()), StandardCharsets.UTF_8);
 	}
 }

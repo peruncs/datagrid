@@ -138,13 +138,13 @@ public interface BackupNodeManager extends ClusterNodeManager
 		@Override
 		public boolean isHealthy()
 		{
-			return this.storageController.isRunning() && !this.storageController.isStartingUp();
+			return this.isStorageAvailable();
 		}
 
 		@Override
 		public boolean isReady() throws NodelibraryException
 		{
-			return this.storageController.isRunning() && !this.storageController.isStartingUp();
+			return this.isStorageAvailable();
 		}
 
 		@Override
@@ -169,8 +169,19 @@ public interface BackupNodeManager extends ClusterNodeManager
 		public void close()
 		{
 			LOG.info("Closing BackupNodeManager.");
-			this.dataClient.dispose();
-			//this.backupManager.close();
+			try
+			{
+				this.dataClient.dispose();
+			}
+			finally
+			{
+				this.tasks.close();
+			}
+		}
+
+		private boolean isStorageAvailable()
+		{
+			return this.storageController.isRunning() && !this.storageController.isStartingUp();
 		}
 
 	}

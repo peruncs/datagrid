@@ -38,8 +38,8 @@ final class AeronClusteredCacheMessageCodec
 {
 	/** Wire version; bump when the framing changes. */
 	static final int VERSION = 1;
-	/** Magic "DGAC" identifying a DataGrid clustered-cache frame. */
-	private static final int MAGIC = 0x44474143;
+	/** Magic "DGCC" identifying a DataGrid clustered-cache frame. */
+	private static final int MAGIC = 0x44474343;
 	/** Header bytes: magic, version, sender id, sequence, payload length. */
 	static final int HEADER_LENGTH = Integer.BYTES * 3 + Long.BYTES * 3;
 	private static final int MAGIC_OFFSET = 0;
@@ -65,17 +65,35 @@ final class AeronClusteredCacheMessageCodec
 	static int encode(final MutableDirectBuffer buffer, final byte[] senderId, final long sequence,
 		final byte[] payload)
 	{
+		if (buffer == null || payload == null)
+		{
+			throw new NullPointerException("buffer and payload");
+		}
 		if (senderId == null || senderId.length != Long.BYTES * 2)
 		{
 			throw new IllegalArgumentException("sender id must be exactly 16 bytes");
 		}
-		buffer.putInt(MAGIC_OFFSET, MAGIC, ByteOrder.BIG_ENDIAN);
-		buffer.putInt(VERSION_OFFSET, VERSION, ByteOrder.BIG_ENDIAN);
-		buffer.putBytes(SENDER_ID_OFFSET, senderId, 0, Long.BYTES);
-		buffer.putBytes(SENDER_ID_OFFSET + Long.BYTES, senderId, Long.BYTES, Long.BYTES);
-		buffer.putLong(SEQUENCE_OFFSET, sequence, ByteOrder.BIG_ENDIAN);
-		buffer.putInt(PAYLOAD_LENGTH_OFFSET, payload.length, ByteOrder.BIG_ENDIAN);
-		buffer.putBytes(PAYLOAD_OFFSET, payload, 0, payload.length);
+		if (sequence < 0 || sequence == Long.MAX_VALUE)
+		{
+			throw new IllegalArgumentException("sequence must be in [0, Long.MAX_VALUE)");
+		}
+		try
+		{
+			/* ExpandableArrayBuffer grows on demand; fixed buffers report an
+			 * insufficient destination through IndexOutOfBoundsException. Keep both
+			 * behaviours while exposing one deterministic codec exception. */
+			buffer.putInt(MAGIC_OFFSET, MAGIC, ByteOrder.BIG_ENDIAN);
+			buffer.putInt(VERSION_OFFSET, VERSION, ByteOrder.BIG_ENDIAN);
+			buffer.putBytes(SENDER_ID_OFFSET, senderId, 0, Long.BYTES);
+			buffer.putBytes(SENDER_ID_OFFSET + Long.BYTES, senderId, Long.BYTES, Long.BYTES);
+			buffer.putLong(SEQUENCE_OFFSET, sequence, ByteOrder.BIG_ENDIAN);
+			buffer.putInt(PAYLOAD_LENGTH_OFFSET, payload.length, ByteOrder.BIG_ENDIAN);
+			buffer.putBytes(PAYLOAD_OFFSET, payload, 0, payload.length);
+		}
+		catch (final IndexOutOfBoundsException failure)
+		{
+			throw new IllegalArgumentException("buffer is too small for Aeron clustered-cache frame", failure);
+		}
 		return HEADER_LENGTH + payload.length;
 	}
 
@@ -93,9 +111,15 @@ final class AeronClusteredCacheMessageCodec
 	static boolean senderIdMatches(final DirectBuffer buffer, final int offset, final int length,
 		final byte[] expectedSenderId)
 	{
-		if (length < HEADER_LENGTH ||
-			buffer.getInt(offset + MAGIC_OFFSET, ByteOrder.BIG_ENDIAN) != MAGIC ||
-			buffer.getInt(offset + VERSION_OFFSET, ByteOrder.BIG_ENDIAN) != VERSION)
+		if (expectedSenderId == null || expectedSenderId.length != Long.BYTES * 2)
+		{
+			return false;
+		}
+		try
+		{
+			validateHeader(buffer, offset, length, -1);
+		}
+		catch (final IllegalArgumentException malformed)
 		{
 			return false;
 		}
@@ -119,9 +143,20 @@ final class AeronClusteredCacheMessageCodec
 	 */
 	static SenderId senderIdOf(final DirectBuffer buffer, final int offset)
 	{
+		if (!validRange(buffer, offset, HEADER_LENGTH))
+		{
+			throw new IllegalArgumentException("Aeron clustered-cache frame header is outside the buffer");
+		}
 		return new SenderId(
 			buffer.getLong(offset + SENDER_ID_OFFSET, ByteOrder.BIG_ENDIAN),
 			buffer.getLong(offset + SENDER_ID_OFFSET + Long.BYTES, ByteOrder.BIG_ENDIAN));
+	}
+
+	/** Returns the sender identity after validating the complete frame. */
+	static SenderId senderIdOf(final DirectBuffer buffer, final int offset, final int length)
+	{
+		validateHeader(buffer, offset, length, -1);
+		return senderIdOf(buffer, offset);
 	}
 
 	/**
@@ -152,12 +187,7 @@ final class AeronClusteredCacheMessageCodec
 	 */
 	static long sequenceOf(final DirectBuffer buffer, final int offset, final int length)
 	{
-		if (length < HEADER_LENGTH)
-		{
-			throw new IllegalArgumentException(
-				"Aeron clustered-cache frame of " + length + " bytes is shorter than its header");
-		}
-		return buffer.getLong(offset + SEQUENCE_OFFSET, ByteOrder.BIG_ENDIAN);
+		return validateHeader(buffer, offset, length, -1).sequence;
 	}
 
 	/**
@@ -173,10 +203,25 @@ final class AeronClusteredCacheMessageCodec
 	static byte[] decodePayload(final DirectBuffer buffer, final int offset, final int length,
 		final int maxPayloadBytes)
 	{
-		if (length < HEADER_LENGTH)
+		final Header header = validateHeader(buffer, offset, length, maxPayloadBytes);
+
+		final byte[] payload = new byte[header.payloadLength];
+		buffer.getBytes(offset + PAYLOAD_OFFSET, payload, 0, header.payloadLength);
+		return payload;
+	}
+
+	/** Validates all fixed framing fields once and returns the decoded lengths. */
+	private static Header validateHeader(
+		final DirectBuffer buffer,
+		final int offset,
+		final int length,
+		final int maxPayloadBytes
+	)
+	{
+		if (!validRange(buffer, offset, length))
 		{
 			throw new IllegalArgumentException(
-				"Aeron clustered-cache frame of " + length + " bytes is shorter than its header");
+				"Aeron clustered-cache frame range is outside the buffer or shorter than its header");
 		}
 		if (buffer.getInt(offset + MAGIC_OFFSET, ByteOrder.BIG_ENDIAN) != MAGIC)
 		{
@@ -186,8 +231,13 @@ final class AeronClusteredCacheMessageCodec
 		{
 			throw new IllegalArgumentException("unsupported Aeron clustered-cache frame version");
 		}
+		final long sequence = buffer.getLong(offset + SEQUENCE_OFFSET, ByteOrder.BIG_ENDIAN);
+		if (!validSequence(sequence))
+		{
+			throw new IllegalArgumentException("invalid Aeron clustered-cache frame sequence: " + sequence);
+		}
 		final int payloadLength = buffer.getInt(offset + PAYLOAD_LENGTH_OFFSET, ByteOrder.BIG_ENDIAN);
-		if (payloadLength < 0 || payloadLength > maxPayloadBytes)
+		if (payloadLength < 0 || (maxPayloadBytes >= 0 && payloadLength > maxPayloadBytes))
 		{
 			throw new IllegalArgumentException(
 				"Invalid Aeron clustered-cache payload length: " + payloadLength);
@@ -197,10 +247,29 @@ final class AeronClusteredCacheMessageCodec
 			throw new IllegalArgumentException(
 				"Aeron clustered-cache frame length does not match its payload");
 		}
+		return new Header(sequence, payloadLength);
+	}
 
-		final byte[] payload = new byte[payloadLength];
-		buffer.getBytes(offset + PAYLOAD_OFFSET, payload, 0, payloadLength);
-		return payload;
+	/** Decoded fixed header fields. */
+	private record Header(long sequence, int payloadLength)
+	{
+	}
+
+	/**
+     * Checks a frame range without allowing integer overflow or a DirectBuffer
+     * bounds exception to escape the polling callback. Aeron can deliver a
+     * truncated fragment when a publication is interrupted; the receiver treats
+     * that input as a terminal stream failure rather than applying later frames.
+	 */
+	private static boolean validRange(final DirectBuffer buffer, final int offset, final int length)
+	{
+		return buffer != null && offset >= 0 && length >= HEADER_LENGTH &&
+			offset <= buffer.capacity() - length;
+	}
+
+	private static boolean validSequence(final long sequence)
+	{
+		return sequence >= 0 && sequence < Long.MAX_VALUE;
 	}
 
 	/** Reads a big-endian long without allocating a buffer. */

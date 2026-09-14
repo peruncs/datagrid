@@ -37,11 +37,11 @@ public record TimestampsRegionUpdateMessage(String cacheName, String tableName, 
 	 */
 	public TimestampsRegionUpdateMessage
 	{
-		if (cacheName == null || cacheName.isBlank())
+        if (cacheName == null || cacheName.isBlank() || cacheName.indexOf('\0') >= 0)
 		{
 			throw new IllegalArgumentException("cacheName must not be blank");
 		}
-		if (tableName == null || tableName.isBlank())
+        if (tableName == null || tableName.isBlank() || tableName.indexOf('\0') >= 0)
 		{
 			throw new IllegalArgumentException("tableName must not be blank");
 		}

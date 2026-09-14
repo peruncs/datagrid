@@ -2,7 +2,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.kafka;
 
 import org.apache.kafka.common.TopicPartition;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
-import org.eclipse.datagrid.cluster.nodelibrary.types.MessageInfo;
+import org.eclipse.datagrid.cluster.nodelibrary.types.ReplicationCursor;
 import org.eclipse.serializer.collections.EqHashTable;
 import org.eclipse.serializer.collections.types.XImmutableMap;
 import org.junit.jupiter.api.Test;
@@ -32,9 +32,9 @@ class KafkaCursorCodecTest
 	{
 		final EqHashTable<TopicPartition, Long> offsets = EqHashTable.New();
 		offsets.put(new TopicPartition("events", 0), 42L);
-		final MessageInfo info = MessageInfo.New(7L, "kafka", null, KafkaCursorCodec.encode(offsets.immure()));
+		final ReplicationCursor cursor = new ReplicationCursor("kafka", null, 7L, KafkaCursorCodec.encode(offsets.immure()));
 
-		final XImmutableMap<TopicPartition, Long> decoded = KafkaCursorCodec.decode(info, "events");
+		final XImmutableMap<TopicPartition, Long> decoded = KafkaCursorCodec.decode(cursor, "events");
 
 		assertEquals(1, decoded.size());
 		decoded.forEach(entry ->
@@ -61,7 +61,8 @@ class KafkaCursorCodecTest
 
 	private static void assertRejected(final String cursor, final String expectedTopic)
 	{
-		final MessageInfo info = MessageInfo.New(0L, "kafka", null, cursor.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-		assertThrows(NodelibraryException.class, () -> KafkaCursorCodec.decode(info, expectedTopic));
+		final ReplicationCursor replicationCursor = new ReplicationCursor(
+			"kafka", null, 0L, cursor.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+		assertThrows(NodelibraryException.class, () -> KafkaCursorCodec.decode(replicationCursor, expectedTopic));
 	}
 }

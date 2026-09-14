@@ -17,6 +17,7 @@ package org.eclipse.datagrid.storage.distributed.aeron.wire;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -61,7 +62,7 @@ class AeronReplicationEnvelopeTest
 		);
 		encoded[AeronReplicationEnvelope.HEADER_LENGTH] = 8;
 
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, encoded.length
 		));
 	}
@@ -74,7 +75,7 @@ class AeronReplicationEnvelopeTest
 			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
 			1, 0, 1, 0, AeronReplicationEnvelope.crc32c(new byte[] {7}), new byte[0]);
 		encoded[6] = 4;
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, encoded.length));
 	}
 
@@ -82,7 +83,7 @@ class AeronReplicationEnvelopeTest
 	@Test
 	void rejectsTruncatedAndUnknownVersion()
 	{
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(new byte[AeronReplicationEnvelope.HEADER_LENGTH - 1]),
 			0,
 			AeronReplicationEnvelope.HEADER_LENGTH - 1
@@ -93,7 +94,7 @@ class AeronReplicationEnvelopeTest
 			0, 0, 1, 0, 0, new byte[0]
 		);
 		encoded[5] = 3;
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, encoded.length
 		));
 	}
@@ -115,11 +116,11 @@ class AeronReplicationEnvelopeTest
 			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
 			0, 0, 1, 0, 0, new byte[0]
 		);
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 1, encoded.length
 		));
 		encoded[7] = 1;
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, encoded.length
 		));
 	}
@@ -164,7 +165,7 @@ class AeronReplicationEnvelopeTest
 			1, 0, 1, 0, 0, new byte[] {7}
 		);
 		java.nio.ByteBuffer.wrap(encoded).putInt(24, 0);
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, encoded.length
 		));
 
@@ -172,7 +173,7 @@ class AeronReplicationEnvelopeTest
 			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[0]
 		);
 		reserved[7] = 1;
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(reserved), 0, reserved.length
 		));
 	}
@@ -186,7 +187,7 @@ class AeronReplicationEnvelopeTest
 			1, 0, 1, 0, 0, new byte[] {7}
 		);
 		java.nio.ByteBuffer.wrap(encoded).putInt(24, 10);
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, encoded.length - 1
 		));
 	}
@@ -205,7 +206,7 @@ class AeronReplicationEnvelopeTest
 			AeronReplicationEnvelope.decode(new UnsafeBuffer(framed), 3, encoded.length));
 		assertEquals(8, result.sequence());
 		assertArrayEquals(new byte[] {3, 4, 5}, result.payload());
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(framed), 3, encoded.length + 1
 		));
 	}
@@ -217,7 +218,7 @@ class AeronReplicationEnvelopeTest
 		final byte[] encoded = AeronReplicationEnvelope.encode(
 			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
 			0, 0, 1, 0, 0, new byte[0]);
-		assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.decode(
+		assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
 			new UnsafeBuffer(encoded), 0, Integer.MAX_VALUE));
 	}
 
@@ -233,5 +234,40 @@ class AeronReplicationEnvelopeTest
 		final byte[] payload = envelope.payload();
 		payload[0] = 9;
 		assertArrayEquals(new byte[] {7}, envelope.payload());
+	}
+
+	/** Verifies CRC calculation across heap, sliced, and direct Agrona buffers. */
+	@Test
+	void crcSupportsAllByteBufferRepresentations()
+	{
+		final byte[] expected = { 4, 8, 15, 16, 23, 42 };
+		final int expectedCrc = AeronReplicationEnvelope.crc32c(expected);
+
+		final byte[] heapBytes = new byte[expected.length + 4];
+		System.arraycopy(expected, 0, heapBytes, 2, expected.length);
+		assertEquals(expectedCrc,
+			AeronReplicationEnvelope.crc32c(new UnsafeBuffer(ByteBuffer.wrap(heapBytes)), 2, expected.length));
+
+		final ByteBuffer slicedBytes = ByteBuffer.wrap(new byte[] { 99, 4, 8, 15, 16, 23, 42, 100 }).slice();
+		assertEquals(expectedCrc,
+			AeronReplicationEnvelope.crc32c(new UnsafeBuffer(slicedBytes), 1, expected.length));
+
+		final ByteBuffer directBytes = ByteBuffer.allocateDirect(expected.length + 2);
+		directBytes.position(1);
+		directBytes.put(expected).flip();
+		assertEquals(expectedCrc,
+			AeronReplicationEnvelope.crc32c(new UnsafeBuffer(directBytes), 1, expected.length));
+	}
+
+	/** Verifies the owned form rejects impossible public field combinations. */
+	@Test
+	void ownedEnvelopeValidatesItsPublicFields()
+	{
+		assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
+			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
+			1, 0, 1, 0, 0, new byte[] {7}));
+		assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
+			CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+			1, 0, 1, 1, 0, new byte[] {7, 8}));
 	}
 }

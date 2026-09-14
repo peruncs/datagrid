@@ -13,17 +13,19 @@
  */
 package org.eclipse.datagrid.storage.distributed.index;
 
+import org.eclipse.serializer.typing.KeyValue;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
 import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.jvector.Vectorizer;
-import org.eclipse.store.gigamap.lucene.DocumentPopulator;
 import org.eclipse.store.gigamap.lucene.AnalyzerCreator;
+import org.eclipse.store.gigamap.lucene.DocumentPopulator;
 import org.eclipse.store.gigamap.lucene.LuceneContext;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
 import org.eclipse.store.gigamap.types.GigaMap;
-import org.eclipse.serializer.typing.KeyValue;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -68,16 +70,25 @@ public final class ClusterStoreIndexes
 	 * @param <E> entity type
 	 * @param map target map
 	 * @param documentPopulator document mapping
-	 * @return the newly registered index, or {@code null} if the map already has one
+	 * @return the newly registered index
+	 * @throws IllegalStateException if the map already has a Lucene index
 	 */
+	@SuppressWarnings("unchecked") // Lucene's class token cannot retain its entity type.
 	public static <E> LuceneIndex<E> registerLucene(
 		final GigaMap<E> map,
 		final DocumentPopulator<E> documentPopulator
 	)
 	{
-		return Objects.requireNonNull(map, "map").index().register(
+		final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
+		if (checkedMap.index().get(LuceneIndex.class) != null)
+		{
+			throw new IllegalStateException("a clustered map already has a Lucene index");
+		}
+		final LuceneIndex<E> registered = checkedMap.index().register(
 			LuceneIndex.Category(embeddedLuceneContext(documentPopulator))
 		);
+		if (registered == null) throw new IllegalStateException("failed to register clustered Lucene index");
+		return registered;
 	}
 
 	/**
@@ -150,7 +161,9 @@ public final class ClusterStoreIndexes
 		{
 			return;
 		}
-		for (final KeyValue<String, ? extends VectorIndex<?>> entry : indices)
+		final List<KeyValue<String, ? extends VectorIndex<?>>> snapshot = new ArrayList<>();
+		for (final KeyValue<String, ? extends VectorIndex<?>> entry : indices) snapshot.add(entry);
+		for (final KeyValue<String, ? extends VectorIndex<?>> entry : snapshot)
 		{
 			validateVectorConfiguration(entry.value().configuration());
 		}

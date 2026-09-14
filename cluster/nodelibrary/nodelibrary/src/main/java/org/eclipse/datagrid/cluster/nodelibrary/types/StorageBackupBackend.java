@@ -18,11 +18,12 @@ import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
-import static org.eclipse.serializer.math.XMath.positive;
+import static org.eclipse.serializer.math.XMath.notNegative;
 
 /**
  * This backend stores and retrieves the durable files that make up a backup.
@@ -45,12 +46,12 @@ public interface StorageBackupBackend
 	 */
 	void downloadLatestBackup(Path targetRootPath) throws NodelibraryException;
 
-	/** Reads message information from an earlier backup.
-	 * @param skip number of newest backups to skip
-	 * @return stored message information, when present
+	/** Reads the replication cursor from an earlier backup.
+	 * @param skip number of newest backups to skip; zero selects the newest
+	 * @return stored replication cursor, when present
 	 * @throws NodelibraryException if reading fails
 	 */
-	Optional<MessageInfo> getMessageInfoFromPreviousBackup(int skip) throws NodelibraryException;
+	Optional<ReplicationCursor> getCursorFromPreviousBackup(int skip) throws NodelibraryException;
 
 	/** Reports whether at least one backup exists.
 	 * @return {@code true} when a backup exists
@@ -76,15 +77,20 @@ public interface StorageBackupBackend
 	}
 
 	/** Returns a backup counted from newest to oldest.
-	 * @param skip number of newest backups to skip
+	 * @param skip number of newest backups to skip; zero selects the newest
 	 * @return selected backup, when present
 	 * @throws NodelibraryException if listing fails
 	 */
 	default Optional<BackupMetadata> getLastBackup(final int skip) throws NodelibraryException
 	{
-		positive(skip);
+		/* Zero selects the newest backup; larger values skip that many newer
+		 * complete backups.  Negative values are never meaningful. */
+		notNegative(skip);
 
-		final var backups = this.listBackups();
+		/* Implementations are allowed to return an immutable snapshot (the
+		 * network backend does so).  Sorting the result in place would therefore
+		 * make this default method fail only for that backend. */
+		final var backups = new ArrayList<>(this.listBackups());
 
 		if (backups.size() <= skip)
 		{
@@ -105,11 +111,11 @@ public interface StorageBackupBackend
 
 	/** Creates and uploads one backup.
 	 * @param connection storage connection
-	 * @param messageInfo message information to store
+	 * @param cursor replication cursor to store
 	 * @param backup backup metadata
 	 * @throws NodelibraryException if creation or upload fails
 	 */
-	void createAndUploadBackup(StorageConnection connection, final MessageInfo messageInfo, BackupMetadata backup)
+	void createAndUploadBackup(StorageConnection connection, final ReplicationCursor cursor, BackupMetadata backup)
 		throws NodelibraryException;
 
 	/** Downloads one backup.

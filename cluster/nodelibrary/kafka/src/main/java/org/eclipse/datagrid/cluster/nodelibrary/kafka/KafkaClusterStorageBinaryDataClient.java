@@ -16,19 +16,19 @@ package org.eclipse.datagrid.cluster.nodelibrary.kafka;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.InvalidOffsetException;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.eclipse.datagrid.cluster.nodelibrary.types.*;
+import org.eclipse.datagrid.storage.distributed.types.Crc32c;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage;
+import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
 import org.eclipse.datagrid.storage.distributed.types.StorageBinaryDataPacket;
 import org.eclipse.serializer.collections.EqHashTable;
-import org.eclipse.serializer.concurrency.XThreads;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -56,10 +56,10 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 	 * @param packetAcceptor packet destination
 	 * @param topicName Kafka topic
 	 * @param groupId consumer group id
-	 * @param offsetChangedListener applied-message listener
-	 * @param startingMessageInfo starting message information
+	 * @param offsetChangedListener listener invoked after a message is applied
+	 * @param startingCursor starting replication cursor
 	 * @param kafkaPropertiesProvider Kafka properties provider
-	 * @param doCommitOffset whether to commit offsets
+	 * @param doCommitOffset whether Kafka offsets are committed after successful application
 	 * @return Kafka storage-data client
 	 */
 	public static ClusterStorageBinaryDataClient New(
@@ -67,7 +67,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
         final String topicName,
         final String groupId,
         final AfterDataMessageConsumedListener offsetChangedListener,
-        final MessageInfo startingMessageInfo,
+        final ReplicationCursor startingCursor,
         final KafkaPropertiesProvider kafkaPropertiesProvider,
         final boolean doCommitOffset
     )
@@ -77,25 +77,28 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
             notNull(topicName),
             notNull(groupId),
             notNull(offsetChangedListener),
-            notNull(startingMessageInfo),
+            notNull(startingCursor),
             notNull(kafkaPropertiesProvider),
             doCommitOffset
         );
     }
 
-    private static final Logger LOG = LoggerFactory.getLogger(KafkaClusterStorageBinaryDataClient.class);
-        private static final long PARTITION_ASSIGNMENT_TIMEOUT_MS = Duration.ofSeconds(60L).toMillis();
-        private static final Duration POLL_TIMEOUT = Duration.ofSeconds(5L);
-	private static final int MAX_MESSAGE_BYTES = 1 << 30;
+    private static final System.Logger LOG =
+		System.getLogger(KafkaClusterStorageBinaryDataClient.class.getName());
+	private static final Duration POLL_TIMEOUT = Duration.ofSeconds(5L);
+	private static final Duration OFFSET_LOOKUP_TIMEOUT = Duration.ofSeconds(30L);
+	private static final int MAX_MESSAGE_BYTES = StorageBinaryDataMessage.MAX_MESSAGE_LENGTH;
 	private static final int MAX_PACKET_COUNT =
-		(MAX_MESSAGE_BYTES + ClusterStorageBinaryDistributedKafka.maxPacketSize() - 1) /
-			ClusterStorageBinaryDistributedKafka.maxPacketSize();
+		(MAX_MESSAGE_BYTES + KafkaHeaderCodec.maxPacketSize() - 1) /
+			KafkaHeaderCodec.maxPacketSize();
+	private static final int MAX_CACHED_PACKETS = StorageBinaryDataMessage.MAX_PACKET_COUNT;
+	private static final long INCOMPLETE_MESSAGE_TIMEOUT_NANOS = Duration.ofMinutes(5L).toNanos();
 
         /**
          * List of packets that have been polled but not yet consumed as they are still
          * missing some packets to complete the set
          */
-    private final Queue<ClusterStorageBinaryDataPacket> cachedPackets = new LinkedList<>();
+    private final Queue<CachedPacket> cachedPackets = new LinkedList<>();
 
     private final ClusterStorageBinaryDataPacketAcceptor packetAcceptor;
         private final String topicName;
@@ -104,8 +107,13 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
         private final KafkaPropertiesProvider kafkaPropertiesProvider;
         private final boolean doCommitOffset;
 
-        private final AtomicReference<MessageInfo> messageInfo;
-	private long cachedMessageIndex;
+		private final AtomicReference<ReplicationCursor> cursor;
+	private long cachedSequence;
+	/* Exact broker offset of the last packet included in a materialized message.
+	 * Subtracting queue size from consumer.position() is incorrect when polls
+	 * contain partial messages or offsets have gaps. */
+	private long lastAppliedOffset = -1L;
+	private long incompleteMessageSinceNanos = -1L;
 	private int discardedPackets;
         private final AtomicBoolean stopAtLatestMessage = new AtomicBoolean();
         private final AtomicBoolean requestStop = new AtomicBoolean();
@@ -115,7 +123,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 	private volatile KafkaConsumer<String, byte[]> consumer;
 	private volatile boolean disposed;
 	private volatile boolean disposeRequested;
-	private volatile RuntimeException failure;
+	private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
 	private boolean packetAcceptorDisposed;
 	private boolean offsetListenerClosed;
 
@@ -124,7 +132,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
             final String topicName,
             final String groupId,
             final AfterDataMessageConsumedListener offsetChangedListener,
-            final MessageInfo startingMessageInfo,
+            final ReplicationCursor startingCursor,
             final KafkaPropertiesProvider kafkaPropertiesProvider,
             final boolean doCommitOffset
         )
@@ -133,8 +141,8 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
             this.topicName = topicName;
             this.groupId = groupId;
             this.offsetChangedListener = offsetChangedListener;
-            this.messageInfo = new AtomicReference<>(startingMessageInfo);
-            this.cachedMessageIndex = startingMessageInfo.messageIndex();
+            this.cursor = new AtomicReference<>(startingCursor);
+			this.cachedSequence = startingCursor.logicalSequence();
             this.kafkaPropertiesProvider = kafkaPropertiesProvider;
             this.doCommitOffset = doCommitOffset;
     }
@@ -146,30 +154,37 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
         }
 
         @Override
-        public MessageInfo messageInfo()
+        public ReplicationCursor cursor()
         {
-            return this.messageInfo.get();
+            return this.cursor.get();
         }
 
         @Override
 	public synchronized void start()
 	{
 		if (this.disposed || this.disposeRequested) throw new IllegalStateException("Kafka data client is disposed or stopping");
-		if (this.failure != null) throw new IllegalStateException("Kafka data client has failed", this.failure);
+		if (this.failure.get() != null) throw new IllegalStateException("Kafka data client has failed", this.failure.get());
 		final Thread existing = this.runner;
 		if (this.running.get()) return;
 		if (existing != null && existing.isAlive())
 		{
 			throw new IllegalStateException("Kafka data client is still stopping");
 		}
-			if (LOG.isInfoEnabled())
+			LOG.log(System.Logger.Level.INFO,
+				"Starting Kafka data client at sequence " + this.cursor.get().logicalSequence());
+		this.running.set(true);
+			try
 			{
-				LOG.info("Starting kafka data client at message index {}", this.messageInfo.get().messageIndex());
+				this.runner = new Thread(this::tryRun, "datagrid-kafka-cluster-reader");
+				this.runner.setDaemon(true);
+				this.runner.start();
 			}
-			this.running.set(true);
-			this.runner = new Thread(this::tryRun, "datagrid-kafka-cluster-reader");
-            this.runner.setDaemon(true);
-            this.runner.start();
+			catch (final RuntimeException | Error failure)
+			{
+				this.running.set(false);
+				this.runner = null;
+				throw failure;
+			}
         }
 
         private void tryRun()
@@ -184,10 +199,11 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 			this.running.set(false);
 			if (!this.disposed && !this.requestStop.get())
 			{
-				this.failure = t instanceof RuntimeException runtime
+				this.failure.compareAndSet(null, t instanceof RuntimeException runtime
 					? runtime
-					: new IllegalStateException("Kafka data client stopped unexpectedly", t);
-				LOG.error("Kafka data client stopped unexpectedly", t);
+					: new IllegalStateException("Kafka data client stopped unexpectedly", t));
+				LOG.log(System.Logger.Level.ERROR, "Kafka data client stopped unexpectedly", t);
+				if (t instanceof Error error) throw error;
 			}
 		}
 	}
@@ -195,7 +211,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 	@Override
 	public RuntimeException failure()
 	{
-		return this.failure;
+		return this.failure.get();
 	}
 
 		private void run()
@@ -205,52 +221,47 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
             properties.setProperty(KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
             properties.setProperty(VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
             properties.setProperty(ENABLE_AUTO_COMMIT_CONFIG, "false");
-            properties.setProperty(AUTO_OFFSET_RESET_CONFIG, "none"); // required so we can detect out-of-date consumers
+			properties.setProperty(AUTO_OFFSET_RESET_CONFIG, "earliest");
             properties.setProperty(ISOLATION_LEVEL_CONFIG, READ_COMMITTED.toString().toLowerCase(Locale.ROOT));
+            properties.setProperty(ALLOW_AUTO_CREATE_TOPICS_CONFIG, "false");
 
 	try (final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(properties))
 	{
 		this.consumer = consumer;
-		final int partitionCount = consumer.partitionsFor(this.topicName).size();
-		if (partitionCount != 1)
+		final var partitions = consumer.partitionsFor(this.topicName, Duration.ofSeconds(30L));
+		if (partitions.size() != 1)
 		{
 			throw new IllegalStateException(
-				"Kafka replication topic must have exactly one partition; found " + partitionCount
+				"Kafka replication topic must have exactly one partition; found " + partitions.size()
 			);
 		}
-		consumer.subscribe(Collections.singletonList(this.topicName));
+		/* The topology is deliberately one partition. Explicit assignment avoids
+		 * group rebalances while Store materialization blocks the polling thread;
+		 * offsets are still committed to the configured group after application. */
+		consumer.assign(Collections.singletonList(new TopicPartition(this.topicName, partitions.get(0).partition())));
 
-                // Wait for assignment
-                LOG.trace("Waiting for partition assignment");
-                final long startMs = System.currentTimeMillis();
-                final long endMs = startMs + PARTITION_ASSIGNMENT_TIMEOUT_MS;
-                while (consumer.assignment().isEmpty())
-                {
-                    if (System.currentTimeMillis() > endMs)
-                    {
-                        throw new RuntimeException("Timed out waiting for topic partition assignment");
-                    }
-                    consumer.seekToBeginning(Collections.emptyList());
-                    try
-                    {
-                        consumer.poll(POLL_TIMEOUT);
-                    }
-                    catch (final InvalidOffsetException ignored)
-                    {
-                        // ignored for partition assignment
-                        LOG.trace("Ignoring invalid offset in partition assignment loop");
-                        XThreads.sleep(1000);
-                    }
-                }
-
-                // Seek to correct offsets
-                final var cachedMessageInfo = this.messageInfo.get();
-				final var startingOffsets = KafkaCursorCodec.decode(cachedMessageInfo, this.topicName);
-                for (final var entry : startingOffsets)
-                {
-                    final var partition = entry.key();
-                    final long offset = entry.value();
-                    LOG.debug("Seeking partition {} to offset {}", partition, offset);
+				// Seek to the persisted offsets; a fresh client starts at the log beginning.
+				final var startingCursor = this.cursor.get();
+				final var startingOffsets = KafkaCursorCodec.decode(startingCursor, this.topicName);
+				if (startingOffsets.isEmpty() && startingCursor.logicalSequence() >= 0L)
+				{
+					throw new IllegalStateException(
+						"RESEED_REQUIRED: Kafka cursor has an applied sequence but no partition offset"
+					);
+				}
+				final var beginningOffsets = consumer.beginningOffsets(consumer.assignment(), OFFSET_LOOKUP_TIMEOUT);
+				for (final var entry : startingOffsets)
+				{
+					final var partition = entry.key();
+					final long offset = entry.value();
+					final Long beginning = beginningOffsets.get(partition);
+					if (beginning == null || offset < beginning)
+					{
+						throw new IllegalStateException(
+							"RESEED_REQUIRED: Kafka cursor points to records that retention has removed"
+						);
+					}
+					LOG.log(System.Logger.Level.DEBUG, "Seeking partition " + partition + " to offset " + offset);
                     consumer.seek(partition, offset);
                 }
                 final var missingPartitions = consumer.assignment()
@@ -259,26 +270,25 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                     .toList();
                 if (!missingPartitions.isEmpty())
                 {
-                    LOG.debug(
-                        "Resetting offsets for the following partitions missing in the starting offsets: {}",
-                        missingPartitions
-                    );
+                    LOG.log(System.Logger.Level.DEBUG,
+                        "Resetting offsets for partitions missing in the starting offsets: " + missingPartitions);
                     consumer.seekToBeginning(missingPartitions);
                 }
 
                 boolean run = true;
                 while (run && !this.requestStop.get())
                 {
+					boolean progressed = false;
                     if (!this.stopAtLatestMessage.get())
                     {
-                        this.pollAndConsume(consumer);
+						progressed = this.pollAndConsume(consumer);
                     }
                     else
                     {
-                        LOG.info("Data client is now stopping at latest message.");
+                        LOG.log(System.Logger.Level.INFO, "Data client is now stopping at latest message.");
                         final long stopAt;
                         try (
-                            final var offsetProvider = KafkaMessageInfoProvider.New(
+	                            final var offsetProvider = KafkaCursorProvider.New(
                                 this.topicName,
                                 this.groupId + "-offsetgetter",
                                 this.kafkaPropertiesProvider
@@ -286,23 +296,24 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                         )
                         {
                             offsetProvider.init();
-                            stopAt = offsetProvider.provideLatestMessageIndex();
+	                            stopAt = offsetProvider.provideLatestSequence();
                         }
-                        LOG.info("Stopping at message index {}", stopAt);
+                        LOG.log(System.Logger.Level.INFO, "Stopping at message index " + stopAt);
 
-                        while (this.cachedMessageIndex < stopAt && !this.requestStop.get())
+						while (this.cachedSequence < stopAt && !this.requestStop.get())
                         {
-                            this.pollAndConsume(consumer);
+							progressed |= this.pollAndConsume(consumer);
                         }
-                        LOG.info("Data client is now at latest offset ({})", this.cachedMessageIndex);
+						LOG.log(System.Logger.Level.INFO,
+							"Data client is now at latest sequence (" + this.cachedSequence + ")");
 
                         this.stopAtLatestMessage.set(false);
                         run = false;
                     }
 
-					if (this.doCommitOffset)
+					if (this.doCommitOffset && progressed)
 					{
-						consumer.commitSync();
+						consumer.commitSync(Duration.ofSeconds(30L));
 					}
 				}
 			}
@@ -315,57 +326,98 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 			{
 				this.requestStop.set(false);
 			}
-            LOG.info("DataClient run finished");
+            LOG.log(System.Logger.Level.INFO, "DataClient run finished");
         }
 
-        private MessageInfo updateOffsets(final KafkaConsumer<String, byte[]> consumer)
+        private ReplicationCursor createCursor(
+			final KafkaConsumer<String, byte[]> consumer,
+			final long sequence
+		)
         {
-            if (LOG.isDebugEnabled() && this.cachedMessageIndex % 10_000 == 0)
-            {
-                LOG.debug("Polling and updating message info for message index {}", this.cachedMessageIndex);
+			if (sequence % 10_000 == 0)
+			{
+				LOG.log(System.Logger.Level.DEBUG,
+					"Polling and creating replication cursor at sequence " + sequence);
             }
             final EqHashTable<TopicPartition, Long> map = EqHashTable.New();
             for (final var partition : consumer.assignment())
             {
-                // since we don't know the exact offset for each partition we just subtract the amount of
-                // missing cached packets to ensure that we read them again after the backup node restarts
-                long offset = consumer.position(partition);
-                offset = Math.max(offset - this.cachedPackets.size(), 0);
+				long offset = consumer.position(partition);
+				final CachedPacket pending = this.cachedPackets.peek();
+				if (pending != null)
+				{
+					/* The first incomplete packet is the earliest record that must be
+					 * replayed after restart. */
+					offset = pending.offset();
+				}
+				else if (this.lastAppliedOffset >= 0)
+				{
+					offset = Math.min(offset, Math.addExact(this.lastAppliedOffset, 1L));
+				}
                 map.put(partition, offset);
             }
-            final var info = MessageInfo.New(
-                this.cachedMessageIndex,
-                "kafka",
-                this.messageInfo.get().storeGeneration(),
-                KafkaCursorCodec.encode(map.immure())
-            );
-            this.messageInfo.set(info);
-            return info;
+			final var cursor = new ReplicationCursor(
+				"kafka", this.cursor.get().storeGeneration(), sequence,
+				KafkaCursorCodec.encode(map.immure())
+			);
+			return cursor;
         }
 
+		private void updateOffsets(final KafkaConsumer<String, byte[]> consumer)
+		{
+			final ReplicationCursor newCursor = this.createCursor(consumer, this.cachedSequence);
+			this.offsetChangedListener.onApplied(newCursor);
+			this.cursor.set(newCursor);
+		}
+
         /**
-         * Polls the kafka consumer and consumes fully completed messages. Invalid
-         * packets are skipped and incomplete messages will be cached.
+         * Polls the Kafka consumer and consumes fully completed messages. Invalid
+         * packets fail closed; incomplete messages remain cached until the next poll.
          */
-		private void pollAndConsume(final KafkaConsumer<String, byte[]> consumer)
+		private boolean pollAndConsume(final KafkaConsumer<String, byte[]> consumer)
 		{
             // only consume complete messages, to do this we need to look ahead to see if all packets
             // are here yet. If not read more, if it starts at 0 again then we know that something went
             // wrong on the writer side and that we should just skip all the packets in that series
 
-            this.cachedPackets.addAll(this.createPackets(consumer.poll(Duration.ofSeconds(5))));
+			final ConsumerRecords<String, byte[]> records;
+			try
+			{
+				records = consumer.poll(POLL_TIMEOUT);
+			}
+			catch (final OffsetOutOfRangeException failure)
+			{
+				throw new IllegalStateException(
+					"RESEED_REQUIRED: Kafka cursor points to records that retention has removed", failure);
+			}
+			final long previousSequence = this.cachedSequence;
+			this.cachedPackets.addAll(this.createPackets(records));
+			if (this.cachedPackets.size() > MAX_CACHED_PACKETS)
+			{
+				throw new IllegalStateException("Kafka replication packet cache exceeded " + MAX_CACHED_PACKETS);
+			}
+			if (!this.cachedPackets.isEmpty() && this.incompleteMessageSinceNanos == -1L)
+			{
+				this.incompleteMessageSinceNanos = System.nanoTime();
+			}
 
             if (this.cachedPackets.isEmpty())
             {
-                return;
+				if (!records.isEmpty())
+				{
+						this.updateOffsets(consumer);
+					return true;
+				}
+				return false;
             }
 
-            final var packets = new ArrayList<ClusterStorageBinaryDataPacket>(this.cachedPackets.size());
+			final var packets = new ArrayList<CachedPacket>(this.cachedPackets.size());
 
 			outer:
 			while (!this.cachedPackets.isEmpty())
             {
-                final var rootPacket = this.cachedPackets.peek();
+				final CachedPacket root = this.cachedPackets.peek();
+				final var rootPacket = root == null ? null : root.packet();
                 if (rootPacket == null)
                 {
                     break;
@@ -373,21 +425,20 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 
 				if (rootPacket.packetIndex() != 0)
                 {
-					LOG.error("First packet has index {}, expected 0 skipping packet...", rootPacket.packetIndex());
-					this.cachedPackets.remove();
-					this.recordDiscardedPacket();
+					LOG.log(System.Logger.Level.WARNING,
+						"First packet has index " + rootPacket.packetIndex() + ", expected 0; skipping packet");
+					this.discard(this.cachedPackets.remove());
 					continue;
 				}
 					if (rootPacket.packetCount() <= 0)
 				{
-					LOG.error("Invalid packet count {}", rootPacket.packetCount());
-					this.cachedPackets.remove();
-					this.recordDiscardedPacket();
+					LOG.log(System.Logger.Level.WARNING, "Invalid packet count " + rootPacket.packetCount());
+					this.discard(this.cachedPackets.remove());
 						continue;
 					}
 					final int expectedPacketCount = (rootPacket.messageLength() +
-						ClusterStorageBinaryDistributedKafka.maxPacketSize() - 1) /
-						ClusterStorageBinaryDistributedKafka.maxPacketSize();
+						KafkaHeaderCodec.maxPacketSize() - 1) /
+						KafkaHeaderCodec.maxPacketSize();
 					if (rootPacket.messageLength() <= 0 || rootPacket.messageLength() > MAX_MESSAGE_BYTES ||
 						rootPacket.packetCount() > MAX_PACKET_COUNT || rootPacket.packetCount() != expectedPacketCount)
 					{
@@ -401,52 +452,69 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
                     break;
                 }
 
-                final var newMessagePackets = new ArrayList<ClusterStorageBinaryDataPacket>(rootPacket.packetCount());
+				final var newMessagePackets = new ArrayList<CachedPacket>(rootPacket.packetCount());
 
                 for (int i = 0; i < rootPacket.packetCount(); i++)
                 {
-                    final var packet = this.cachedPackets.peek();
-                    if (packet == null)
-                    {
-                        break outer;
-                    }
+					final CachedPacket cached = this.cachedPackets.peek();
+					if (cached == null)
+					{
+						break outer;
+					}
+					final var packet = cached.packet();
 
 				if (packet.packetIndex() != i)
 				{
-					LOG.error(
-						"Unexpected Packet Index {}, expected {} skipping packet...",
-						packet.packetIndex(), i
-					);
-					this.cachedPackets.remove();
-					this.recordDiscardedPacket();
+					LOG.log(System.Logger.Level.WARNING,
+						"Unexpected packet index " + packet.packetIndex() + ", expected " + i + "; skipping packet");
+					this.discard(this.cachedPackets.remove());
 					continue outer;
                     }
 
 				if (packet.packetCount() != rootPacket.packetCount())
                     {
-                        LOG.error(
-                            "Unexpected Packet Count {} of Packet at Index {}, expected {} skipping packet...",
-                            packet.packetCount(),
-                            packet.packetIndex(),
-                            rootPacket.packetCount()
-                        );
-					this.cachedPackets.remove();
-					this.recordDiscardedPacket();
+						LOG.log(System.Logger.Level.WARNING,
+							"Unexpected packet count " + packet.packetCount() + " at index " +
+							packet.packetIndex() + ", expected " + rootPacket.packetCount() + "; skipping packet");
+					this.discard(this.cachedPackets.remove());
 					continue outer;
                     }
 
-                    newMessagePackets.add(this.cachedPackets.remove());
+					newMessagePackets.add(this.cachedPackets.remove());
                 }
+				this.validateChecksum(newMessagePackets);
 
                 packets.addAll(newMessagePackets);
             }
 
-		final long previousMessageIndex = this.cachedMessageIndex;
 		this.consumeFullMessage(packets, consumer);
-		if (this.cachedMessageIndex > previousMessageIndex)
+		if (this.cachedPackets.isEmpty())
+		{
+			this.incompleteMessageSinceNanos = -1L;
+		}
+		else if (this.incompleteMessageSinceNanos != -1L &&
+			System.nanoTime() - this.incompleteMessageSinceNanos > INCOMPLETE_MESSAGE_TIMEOUT_NANOS)
+		{
+			throw new IllegalStateException("Kafka replication message remained incomplete for five minutes");
+		}
+		if (this.cachedSequence > previousSequence)
 		{
 			this.discardedPackets = 0;
 		}
+		if (this.cachedSequence <= previousSequence && this.cachedPackets.isEmpty() && !records.isEmpty())
+		{
+			/* Tombstones, discarded records, and already applied messages still advance
+			 * the durable Kafka offset even when the Store sequence is unchanged. */
+			this.updateOffsets(consumer);
+			return true;
+		}
+		return this.cachedSequence > previousSequence;
+		}
+
+		private void discard(final CachedPacket packet)
+		{
+			this.lastAppliedOffset = Math.max(this.lastAppliedOffset, packet.offset());
+			this.recordDiscardedPacket();
 		}
 
 		private void recordDiscardedPacket()
@@ -459,59 +527,78 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 			}
 		}
 
-        private List<ClusterStorageBinaryDataPacket> createPackets(final ConsumerRecords<String, byte[]> records)
-        {
-            final var list = new ArrayList<ClusterStorageBinaryDataPacket>();
-            for (final var record : records)
-            {
-                if (record.serializedValueSize() > 0)
-                {
-                    list.add(this.createDataPacket(record, record.headers()));
-                }
-                else
-                {
-                    LOG.warn("Encountered record with serialized value size 0");
-                }
-            }
-            return list;
+		private List<CachedPacket> createPackets(final ConsumerRecords<String, byte[]> records)
+		{
+			final var list = new ArrayList<CachedPacket>();
+			for (final var record : records)
+			{
+				if (record.value() == null)
+				{
+					/* Tombstones have no replication payload, but their offsets still
+					 * belong to the cursor. */
+					this.lastAppliedOffset = Math.max(this.lastAppliedOffset, record.offset());
+					continue;
+				}
+				if (record.value().length == 0)
+				{
+					throw new IllegalStateException(
+						"empty Kafka replication record is not a tombstone or packet");
+				}
+				if (record.value().length > KafkaHeaderCodec.maxPacketSize())
+					throw new IllegalStateException("Kafka replication packet exceeds maximum payload size");
+				list.add(this.createDataPacket(record, record.headers()));
+			}
+			return list;
         }
 
-        private void consumeFullMessage(
-            final Collection<ClusterStorageBinaryDataPacket> packets,
+		private void consumeFullMessage(
+			final Collection<CachedPacket> packets,
             final KafkaConsumer<String, byte[]> consumer
         )
         {
             final List<StorageBinaryDataPacket> newPackets = new ArrayList<>(packets.size());
+			long lastNewSequence = this.cachedSequence;
 
-            for (final var packet : packets)
-            {
-                if (this.cachedMessageIndex >= packet.messageIndex())
-
-                {
-                    LOG.warn(
-                        "Skipping packet with offset {} (current: {})",
-                        packet.messageIndex(),
-                        this.cachedMessageIndex
-                    );
-                    continue;
-                }
-
-                this.cachedMessageIndex = packet.messageIndex();
-
-                if (LOG.isTraceEnabled() && this.cachedMessageIndex % 10_000 == 0)
-                {
-                    LOG.trace("Consuming packet with offset {}", this.cachedMessageIndex);
-                }
-
-                newPackets.add(packet);
-
-            }
+			final List<CachedPacket> orderedPackets = new ArrayList<>(packets);
+			for (int start = 0; start < orderedPackets.size();)
+			{
+				final long sequence = orderedPackets.get(start).packet().messageIndex();
+				int end = start + 1;
+				while (end < orderedPackets.size() &&
+					orderedPackets.get(end).packet().messageIndex() == sequence) end++;
+				if (sequence <= this.cachedSequence)
+				{
+					for (int index = start; index < end; index++)
+					{
+						this.lastAppliedOffset = Math.max(this.lastAppliedOffset, orderedPackets.get(index).offset());
+					}
+					LOG.log(System.Logger.Level.DEBUG,
+						"Skipping already applied Kafka message index " + sequence);
+				}
+				else
+				{
+					if (sequence != lastNewSequence + 1L)
+					{
+						throw new IllegalStateException(
+							"Kafka replication sequence gap: expected " + (lastNewSequence + 1L) +
+							", received " + sequence);
+					}
+					lastNewSequence = sequence;
+					for (int index = start; index < end; index++)
+					{
+						final CachedPacket cached = orderedPackets.get(index);
+						this.lastAppliedOffset = Math.max(this.lastAppliedOffset, cached.offset());
+						newPackets.add(cached.packet());
+					}
+				}
+				start = end;
+			}
 
             if (!newPackets.isEmpty())
             {
-                if (LOG.isDebugEnabled() && this.cachedMessageIndex % 10_000 == 0)
+ 				if (lastNewSequence % 10_000 == 0)
                 {
-                    LOG.debug("Applying packets at offset {}", this.cachedMessageIndex);
+					LOG.log(System.Logger.Level.DEBUG, "Applying packets at message index " + lastNewSequence);
 				}
 				acceptAndAwait(this.packetAcceptor, newPackets);
 				final RuntimeException mergerFailure = this.packetAcceptor.failure();
@@ -519,8 +606,10 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 				{
 					throw new IllegalStateException("Kafka reader merger has failed", mergerFailure);
 				}
-				final var newInfo = this.updateOffsets(consumer);
-                this.offsetChangedListener.onChange(newInfo);
+				final var newInfo = this.createCursor(consumer, lastNewSequence);
+				this.offsetChangedListener.onApplied(newInfo);
+				this.cursor.set(newInfo);
+				this.cachedSequence = lastNewSequence;
             }
         }
 
@@ -541,29 +630,70 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 			packetAcceptor.awaitApplied();
 		}
 
-        private ClusterStorageBinaryDataPacket createDataPacket(
+		private CachedPacket createDataPacket(
             final ConsumerRecord<String, byte[]> record,
             final Headers headers
         )
         {
-            return ClusterStorageBinaryDataPacket.New(
-                ClusterStorageBinaryDistributedKafka.messageType(headers),
-                ClusterStorageBinaryDistributedKafka.messageLength(headers),
-                ClusterStorageBinaryDistributedKafka.packetIndex(headers),
-                ClusterStorageBinaryDistributedKafka.packetCount(headers),
-                ClusterStorageBinaryDistributedKafka.messageIndex(headers),
-                ByteBuffer.wrap(record.value())
-            );
-        }
+			final MessageType messageType = KafkaHeaderCodec.messageType(headers);
+			final int messageLength = KafkaHeaderCodec.messageLength(headers);
+			final int packetIndex = KafkaHeaderCodec.packetIndex(headers);
+			final int packetCount = KafkaHeaderCodec.packetCount(headers);
+			final long messageIndex = KafkaHeaderCodec.messageIndex(headers);
+			final int messageCrc32c = KafkaHeaderCodec.messageCrc32c(headers);
+			KafkaHeaderCodec.validateMetadata(messageLength, packetIndex, packetCount, messageIndex);
+			return new CachedPacket(
+				ClusterStorageBinaryDataPacket.New(
+					messageType, messageLength, packetIndex, packetCount, messageIndex,
+					ByteBuffer.wrap(record.value())
+				), messageCrc32c, record.offset());
+		}
+
+		private void validateChecksum(final List<CachedPacket> packets)
+		{
+			final ClusterStorageBinaryDataPacket first = packets.get(0).packet();
+			final int expected = packets.get(0).messageCrc32c();
+			int totalLength = 0;
+			final var checksum = Crc32c.accumulator();
+			for (final CachedPacket cached : packets)
+			{
+				final ClusterStorageBinaryDataPacket packet = cached.packet();
+				if (packet.messageType() != first.messageType() ||
+					packet.messageLength() != first.messageLength() ||
+					packet.packetCount() != first.packetCount() ||
+					packet.messageIndex() != first.messageIndex())
+				{
+					throw new IllegalStateException("Kafka replication message metadata changed within a message");
+				}
+				if (cached.messageCrc32c() != expected)
+				{
+					throw new IllegalStateException("Kafka replication checksum header changed within a message");
+				}
+				final ByteBuffer payload = packet.buffer().duplicate();
+				totalLength = Math.addExact(totalLength, payload.remaining());
+				checksum.update(payload);
+			}
+			if (totalLength != first.messageLength())
+				throw new IllegalStateException("Kafka replication message length mismatch");
+			if ((int)checksum.getValue() != expected)
+			{
+				throw new IllegalStateException("Kafka replication message checksum mismatch");
+			}
+		}
+
+	/** Packet plus its Kafka offset, retained until the complete message is applied. */
+	private record CachedPacket(ClusterStorageBinaryDataPacket packet, int messageCrc32c, long offset)
+	{
+	}
 
         /**
-         * Stop collecting updates after the last available offset in kafka has been
-         * reached.
+         * Stops collecting updates after the latest complete message sequence in
+         * Kafka has been applied.
          */
         @Override
         public void stopAtLatestMessage()
         {
-            LOG.info("DataClient will stop at latest offset");
+            LOG.log(System.Logger.Level.INFO, "DataClient will stop at latest offset");
             this.stopAtLatestMessage.set(true);
         }
 
@@ -594,7 +724,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 			if (this.disposed && this.packetAcceptorDisposed && this.offsetListenerClosed) return;
 			this.disposed = true;
 			this.disposeRequested = true;
-			LOG.trace("Disposing data client");
+			LOG.log(System.Logger.Level.DEBUG, "Disposing data client");
 				this.requestStop.set(true);
 			RuntimeException failure = null;
 			final Thread current = this.runner;
@@ -617,7 +747,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 				current.interrupt();
                 try
                 {
-                    LOG.trace("Waiting for runner to stop");
+                    LOG.log(System.Logger.Level.DEBUG, "Waiting for runner to stop");
                     current.join(5_000L);
                 }
 				catch (final InterruptedException e)

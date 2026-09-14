@@ -30,7 +30,9 @@ import javax.cache.event.CacheEntryListener;
  *
  * <p>The sender is also disposable because it owns the transport resource used
  * to publish those changes. The cache configuration releases it when the
- * cache is closed.</p>
+ * cache is closed. Disposal may fail when an in-flight synchronous publish does
+ * not quiesce before the transport timeout; callers must retry disposal and
+ * must not close the owning cache manager underneath the sender.</p>
  *
  * @param <K> cache key type
  * @param <V> cache value type

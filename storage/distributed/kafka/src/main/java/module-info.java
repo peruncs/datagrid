@@ -12,24 +12,20 @@
  * #L%
  */
 /**
- * This module carries neutral Store replication packets over Kafka.
+ * Kafka transport for the neutral Store replication contracts.
  *
- * <p>The distributed-storage module owns packet identity, transaction order,
- * and binary ownership. This module owns the Kafka producer and consumer
- * adapters that transport those packets. It does not define cluster lifecycle
- * or cache semantics.</p>
- *
- * <p>Applications configure the Kafka adapter and close it after producers and
- * consumers have stopped. The exported package is the adapter boundary.</p>
+ * <p>This module is the legacy storage-level adapter. New cluster integrations
+ * should use the cluster nodelibrary Kafka adapter, while this module remains
+ * useful for applications that consume the neutral storage API directly.</p>
  *
  * @since 1.0
  */
 module org.eclipse.datagrid.storage.distributed.kafka
 {
-	requires org.eclipse.datagrid.storage.distributed;
-	requires org.eclipse.serializer.base;
-	requires org.eclipse.serializer.persistence.binary;
-	requires kafka.clients;
+    requires org.eclipse.datagrid.storage.distributed;
+    requires org.eclipse.serializer.base;
+    requires org.eclipse.serializer.persistence.binary;
+    requires kafka.clients;
 
-	exports org.eclipse.datagrid.storage.distributed.kafka.types;
+    exports org.eclipse.datagrid.storage.distributed.kafka.types;
 }

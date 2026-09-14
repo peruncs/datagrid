@@ -22,5 +22,7 @@
  * <p>Lucene uses an embedded GraphDirectory with manual commit at the
  * {@code GigaMap.store()} boundary. JVector uses its persisted vector store;
  * its transient search graph is rebuilt locally by each reader.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.storage.distributed.index;

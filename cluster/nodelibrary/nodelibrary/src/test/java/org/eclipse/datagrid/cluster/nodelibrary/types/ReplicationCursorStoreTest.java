@@ -14,9 +14,12 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * #L%
  */
 
+import org.eclipse.datagrid.storage.distributed.types.Crc32c;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
+import java.util.Arrays;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,6 +48,23 @@ class ReplicationCursorStoreTest
 		final byte[] bytes = Files.readAllBytes(path);
 		bytes[10] ^= 1;
 		Files.write(path, bytes);
+		assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.read(path));
+		Files.deleteIfExists(path);
+	}
+
+	/** Verifies that a valid checksum cannot hide an appended cursor payload. */
+	@Test
+	void rejectsTrailingCursorBytes() throws Exception
+	{
+		final var path = Files.createTempFile("datagrid-replication", ".cursor");
+		ReplicationCursorStore.write(path, new ReplicationCursor("kafka", null, 3, new byte[] { 1 }));
+		final byte[] original = Files.readAllBytes(path);
+		final byte[] extended = Arrays.copyOf(original, original.length + 1);
+		System.arraycopy(original, 0, extended, 0, original.length - Integer.BYTES);
+		final int crc = Crc32c.compute(extended, 0, extended.length - Integer.BYTES);
+		ByteBuffer.wrap(extended).putInt(extended.length - Integer.BYTES, crc);
+		Files.write(path, extended);
+
 		assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.read(path));
 		Files.deleteIfExists(path);
 	}

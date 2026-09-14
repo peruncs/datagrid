@@ -7,12 +7,14 @@ inspector, reader-process cells, and the external-Archive process cell are
 implemented. A provider cell is green only when the controller captures a
 CRC-validated milestone, kills the child, restarts the same directories, and
 verifies the restart policy plus checkpoint and Store-fixture evidence. The
-current provider matrix contains twenty-two embedded-Archive writer cells
-(nineteen RESEED_REQUIRED cells and three CONTINUE cells), including three
-ENQUEUE_THEN_ARCHIVE cells, one deterministic double-crash recovery cell, and
-two external-Archive cells.
+current provider matrix contains twenty-two deterministic embedded-Archive
+writer cells (nineteen `RESEED_REQUIRED` cells and three `CONTINUE` cells),
+including three `ENQUEUE_THEN_ARCHIVE` cells. It also runs one seeded soak and
+one deterministic double-crash recovery test. `ExternalArchiveCrashIT` adds
+two separate Tier-B external-Archive tests; those are not included in the
+twenty-two-cell writer count.
 Version-checked catalog/recording-corruption cells, final-frame truncation,
-stale-active-catalog refusal, and atomic production MessageInfo replacement
+stale-active-catalog refusal, and atomic production cursor replacement
 are implemented. The provider subscriber currently acts only as a transport
 sink; a full writer-child/reader-child orphan-tail observation is deferred and
 must not be described as a green end-to-end cell. A seeded process-kill soak is
@@ -144,7 +146,7 @@ storage/distributed/aeron/src/test/java/
     AeronReaderCrashMatrixIT.java    // production Archive-reader process cells
 
 cluster/nodelibrary/aeron/src/test/java/
-  org/eclipse/datagrid/cluster/nodelibrary/types/crashtest/
+  org/eclipse/datagrid/cluster/nodelibrary/aeron/crashtest/
     DirectoryLayout.java             // isolated roots and reserved ports
     StoreFixture.java                // CRC-protected Store oracle
     DiagnosticCollector.java         // failure artifact collector
@@ -164,9 +166,9 @@ the fixed milestone, restart outcome, checkpoint fields emitted by the child,
 and the CRC-protected Store fixture. `RecordingInspector` is exercised by
 `AeronArchiveReplicationIT`; `StoreFixture`, `DirectoryLayout`, and
 `DiagnosticCollector` are used by the provider process matrix. Neither child
-widens production visibility:
-the provider child installs package-private Aeron hooks reflectively from the
-test class path. Tier-1 tests run under Surefire; real provider process tests
+widens production visibility: the provider child installs package-private
+Aeron hooks through a direct test-only bridge from the test class path. Tier-1
+tests run under Surefire; real provider process tests
 run under Failsafe with the dedicated `crashmatrix` Maven profile and are not
 part of ordinary CI.
 
@@ -211,9 +213,10 @@ sets `forkedProcessExitTimeoutInSeconds=5`, sets `<parallel>none</parallel>`,
 and passes the five `crash.*` system properties listed below. Do not move these
 tests into Surefire or enable parallel forks without first giving every child a
 fully isolated Media Driver, Archive, checkpoint, Store, and port allocation.
-The child JVM inherits the test class path and the profile's `argLine`; it is
-not launched as a JPMS module because `cluster/nodelibrary/aeron` has no
-`module-info.java`.
+The child JVM inherits the test class path and the profile's `argLine`. The
+provider now has a JPMS descriptor for production classes, but the forked child
+intentionally uses the test class path because its child main and crash
+fixtures are test-only classes.
 
 `-Dcrash.matrix.seed`, `-Dcrash.budget.startup`,
 `-Dcrash.budget.milestone`, `-Dcrash.budget.archiveStop`, and
@@ -309,7 +312,7 @@ coder does not chase failing cells. "Blocked by" names a feature from the
 | Reader import failure (`DURING_STORE_IMPORT_FAILURE`) | the injected import fails after the uncertainty marker is durable; cursor does not advance and restart refuses to guess | `RESEED_REQUIRED` | implemented in reader process child |
 | Archive killed during commit wait | `ExternalArchiveCrashIT` kills the separate Archive after the commit offer; writer fails closed and recovery opens a fresh catalog | `RESEED_REQUIRED` | implemented |
 
-The four reader rows above are now backed by `AeronReaderCrashMatrixIT`; the
+The reader rows in this table are now backed by `AeronReaderCrashMatrixIT`; the
 test deliberately expects `RESEED_REQUIRED` rather than claiming idempotent
 Store replay. The external Archive row is backed by `ExternalArchiveCrashIT`.
 The independent catalog/recording mutation rows are backed by the storage
@@ -332,10 +335,11 @@ Modules:
 - `cluster/nodelibrary/aeron/src/test/java/.../crashtest/` — provider restart,
   checkpoint/cursor identity, `ensureWriter`/`loadWriterCheckpoint` behavior.
 
-The Tier-1 enum is shared with Tier 2, but the checked-in tests cover a focused
-subset: prepared-tail abort, ambiguous commit, enqueue fencing, and
-recorded-before-checkpoint uncertainty. The remaining publisher/coordinator/
-checkpoint/assembler points are explicit expansion work. The barrier runs in
+The Tier-1 enum is shared with Tier 2, and the checked-in tests cover publisher,
+coordinator, checkpoint, assembler, and reader windows including prepared-tail
+abort, ambiguous commit, enqueue fencing, and recorded-before-checkpoint
+uncertainty. Additional full reader-child orphan-tail scenarios remain explicit
+topology work. The barrier runs in
 `THROW` mode
 (throws the dedicated `CrashBarrier.SimulatedCrash` runtime exception), and the test asserts the resulting
 state transition and cleanup: `failed`/`terminal` flags, no orphan artifacts,
@@ -354,14 +358,12 @@ named `*CrashTest` for the windows above.
 - Parent (controller): `ProviderCrashMatrixIT`.
 - Child main (test sources of the same module, launched via
   `System.getProperty("java.class.path")`):
-  `org.eclipse.datagrid.cluster.nodelibrary.types.crashtest.ProviderCrashChildMain`.
+  `org.eclipse.datagrid.cluster.nodelibrary.aeron.crashtest.ProviderCrashChildMain`.
 
-`cluster/nodelibrary/aeron` is currently an unnamed/class-path Maven artifact;
-it has no `module-info.java`. The provider child must therefore be launched
-with the test class path, as shown above, not with `--module-path`. The Aeron
-storage artifact is the named module; its exports do not imply that the
-provider artifact is modular. Adding a provider module descriptor is a
-separate migration and is not a prerequisite for this harness.
+`cluster/nodelibrary/aeron` is a named module for production classes. The
+provider child must still be launched with the test class path, as shown
+above, because its child main and crash fixtures are test-only classes and the
+test harness is deliberately not a module-path launch.
 
 Child launch (per cell, two invocations):
 
@@ -372,7 +374,7 @@ Child launch (per cell, two invocations):
   -Ddg.crash.mode=<phase1|phase2> \
   -Ddg.crash.role=<writer|reader> \
   -Ddg.crash.base=<workDir> \
-  org.eclipse.datagrid.cluster.nodelibrary.types.crashtest.ProviderCrashChildMain
+  org.eclipse.datagrid.cluster.nodelibrary.aeron.crashtest.ProviderCrashChildMain
 ```
 
 Child lifecycle:
@@ -425,7 +427,8 @@ the controller kills the child if necessary, collects evidence, and fails with
 the last milestone and artifact directory in the assertion message. The
 provider child intentionally reports only the structural Store proof; the
 independent frame scanner runs in the storage Archive IT because the provider
-artifact is not a named module and does not export the wire package.
+child is test-only and the wire package is intentionally not exported from the
+production module.
 
 ## Determinism
 
@@ -492,8 +495,8 @@ retain artifacts on failure; remove the work directory only after success
 
 The checked-in provider controller implements the phase-1/phase-2 process
 sequence and the child implements the ready, barrier, release, and outcome
-files. The child installs package-private `BiConsumer<String,Long>` hooks by
-reflection. The writer seams, provider recovery seam, and checkpoint file seam
+files. The child installs package-private `BiConsumer<String,Long>` hooks through
+a direct test-only bridge. The writer seams, provider recovery seam, and checkpoint file seam
 delegate to package-private,
 thread-confined `CrashHook` registry; hooks are never inherited by another
 thread and are explicitly cleared by the child. This keeps fault injection out
@@ -611,9 +614,8 @@ the normal path. The writer seams are:
  * `TransactionAssembler.Delivery.run`: before import, during import, and
   after import before cursor advancement.
 
-`AtomicFileStore` is shared by writer checkpoints and the neutral
-`ReplicationCursorStore` utility, but not by the production
-`StoredMessageInfoManager` MessageInfo path. It provides a
+`AtomicFileStore` is shared by writer checkpoints and the production
+`ReplicationCursorStore` utility. It provides a
 `write(Path, Encoder, String)` overload that accepts a phase name
 (`"CHECKPOINT"` or `"CURSOR"`), which selects the corresponding hook
 names (`BEFORE_CHECKPOINT_TEMP_WRITE`, `DURING_CHECKPOINT_FILE_WRITE`,
@@ -730,7 +732,7 @@ final class CrashHook
 Production additions are limited to `CrashHook.invoke(P, seq)` at each hook
 site; with no callback this is a thread-local null lookup and has no I/O or
 allocation. Tier-1 tests install a throwing callback. The provider child
-installs the milestone/park callback reflectively, while the Aeron-module
+installs the milestone/park callback through the direct test-only bridge, while the Aeron-module
 child uses the same file protocol directly. If an end-to-end provider cell
 needs an Aeron micro-window, the crash profile runs on the class path with an
 explicit test-only `--add-exports java.base/jdk.internal.misc=ALL-UNNAMED`
@@ -755,12 +757,12 @@ Notes:
 - The checkpoint store and the neutral cursor store share the same
   atomic-write phase contract; the milestone's sequence plus target path
   identify which store was writing. Production
-  `StoredMessageInfoManager.NewAtomic` uses the generic phase because the file
-  stores neutral MessageInfo rather than an Aeron cursor. The reader child also has a deliberately small
+  `StoredReplicationCursorManager.NewAtomic` uses the generic phase because the file
+  stores the neutral cursor rather than an Aeron-specific cursor. The reader child also has a deliberately small
   fixture cursor for process-level replay tests; those fixture barriers do not
-  by themselves prove production MessageInfo persistence.
+  by themselves prove production cursor persistence.
   The provider child deliberately ignores generic atomic-file phases, so a
-  MessageInfo write cannot be mistaken for a terminal writer-checkpoint cell.
+  cursor write cannot be mistaken for a terminal writer-checkpoint cell.
 - `DURING_CHECKPOINT_FILE_WRITE` and `DURING_CURSOR_FILE_WRITE` are Tier-1
   synthetic partial-write tests. The temp file must never replace the previous
   valid file. Rename-before-directory-sync is retained as a power-loss tier,
@@ -781,12 +783,9 @@ partially replaced destination) rather than a specific instruction interleave.
 
 The Aeron module and provider module each own their package-private hook
 adapter. In the current implementation the provider child reaches the Aeron
-writer hooks only through reflective test-classpath access; this is test-only
-and is not a module export. The preferred end state is a package-private
-adapter in each production package, with the same callback shape and no
-reflection in the child. Publisher/assembler micro-windows are tested by the
-Aeron child, while provider restart/health windows are tested by the provider
-child.
+writer hooks through a direct test-classpath bridge; this is test-only and is
+not a module export. Publisher/assembler micro-windows are tested by the Aeron
+child, while provider restart/health windows are tested by the provider child.
 
 Barrier rules are normative:
 
@@ -992,15 +991,15 @@ Additional writer cells required before claiming the matrix complete:
 Reader cells run txn #1 on the writer, then crash the reader at the listed
 point while the writer stays healthy, then restart the reader. Cursor-write
 cells must run the backup-reader path with `commitPosition` enabled: the
-durable cursor is the neutral MessageInfo/offset file written by the caller's
-`transactionResolved -> cursorListener.onChange -> StoredMessageInfoManager`
-path. `StoredMessageInfoManager.NewAtomic` now writes that file through
+durable cursor is the neutral ReplicationCursor/offset file written by the caller's
+`transactionResolved -> cursorListener.onApplied -> StoredReplicationCursorManager`
+path. `StoredReplicationCursorManager.NewAtomic` now writes that file through
 `AtomicFileStore`; the checked-in reader process also uses a CRC-protected
 fixture to validate the uncertainty protocol. The Aeron provider itself owns only the
 `.reader-inflight` uncertainty marker; it does not secretly create a second
 cursor store. `AeronReplicationCursor` is the cross-module value object; when
 durable cursor persistence is enabled it is persisted through the neutral
-MessageInfo/`ReplicationCursorStore` boundary, not by an Aeron-specific store.
+`ReplicationCursorStore` boundary, not by an Aeron-specific store.
 A plain live reader does not create a cursor file and cannot exercise cursor
 atomicity.
 
@@ -1109,7 +1108,7 @@ hand-edited directories:
   construct a valid `ReplicationCursor` whose logical sequence/recording
   position exceeds the recovered stop and pass it through `client(...)`.
   Production cursor persistence is now atomic through
-  `StoredMessageInfoManager.NewAtomic`; the fabricator still must not pretend
+  `StoredReplicationCursorManager.NewAtomic`; the fabricator still must not pretend
   to seed a production cursor file.
 * `ArchiveArtifactMutator.segment` locates the sole recording segment through
   the Archive catalog, validates the `<recordingId>-<segment>.rec` layout, and
@@ -1216,7 +1215,7 @@ For every cell, after phase2, verify:
 - the imported Store binary on the reader is a valid `ChunksWrapper` (child
   proof line `STORE_VALID=<bool>`);
 - cursor identity matches cluster, node, generation, epoch, and recording
-  (parse the neutral MessageInfo/StoredMessageInfoManager provider-position
+  (parse the neutral ReplicationCursor/StoredReplicationCursorManager provider-position
   record; there is no Aeron-specific cursor-store class);
 - no sequence is silently skipped or republished with different data
   (compare txn #2's payload CRC from pre-crash milestones against the replayed
@@ -1297,11 +1296,13 @@ provider recovery result.
    `COMMITTING_UNCERTAIN`, and failed-prepare ABORT boundary. The same profile
    also runs the deterministic double-crash recovery cell and the separate
    external-Archive loss cell.
-5. Add the synthetic Archive/catalog/cursor fabricators, including
-   `DURING_STORE_IMPORT_FAILURE` and poison-pill tests. The four reader
-   process cells are implemented; their policy is fail-closed, not exactly-once.
+5. The synthetic Archive/catalog/cursor fabricators remain optional expansion
+   work. `DURING_STORE_IMPORT_FAILURE`, poison-pill handling, and the four
+   reader process cells are implemented; their policy is fail-closed, not
+   exactly-once. Do not describe the optional fabricators as a prerequisite for
+   the deterministic provider matrix.
 6. Extend F3 coverage with the reader process marker and the tracking importer;
-   the production MessageInfo path now uses `AtomicFileStore`, while the
+   the production ReplicationCursor path now uses `AtomicFileStore`, while the
    reader uncertainty marker remains the explicit recovery fence.
 7. Keep the live-reader orphan-tail check green. It asserts the current
    fail-closed policy and must be upgraded only when tail abort/reseed
@@ -1430,9 +1431,9 @@ These are Tier-1 tests and do not require a process crash:
   assert a length/CRC validation failure;
 - flip a checkpoint byte and assert CRC rejection;
 - repeat the truncation/bit-flip checks for the CRC-protected reader cursor
-  fixture used by `ReaderCrashChildMain`; the production MessageInfo file now
+  fixture used by `ReaderCrashChildMain`; the production cursor file now
   uses the same forced replacement primitive through
-  `StoredMessageInfoManager.NewAtomic`;
+  `StoredReplicationCursorManager.NewAtomic`;
 - inject a partial `AtomicFileStore` temp write and assert the previous valid
   file remains selected;
 - truncate the catalog through the implemented version-aware
@@ -1587,7 +1588,7 @@ changes them:
    The current provider implementation performs the stop-position boundary
    check only; `RecordingInspector` frame scanning remains the follow-up needed
    before any tail can be considered replayable.
-8. The backup reader owns the durable MessageInfo/cursor file. A live reader
+8. The backup reader owns the durable ReplicationCursor file. A live reader
    without `commitPosition` is tested only for in-memory delivery and restart,
    not cursor atomicity.
 9. A live reader that observes an orphaned writer tail is expected to fail
@@ -1631,7 +1632,7 @@ extensions, not implicit green coverage:
 | Item | Required deliverable | Green criterion |
 |---|---|---|
 | Live-reader overlap | assembler-boundary orphan-tail cell; full child overlap is optional topology coverage | live reader reports the concrete gap/interleaving failure and never delivers the orphan payload |
-| Production MessageInfo cursor atomicity | `StoredMessageInfoManager.NewAtomic` backed by `AtomicFileStore` plus round-trip test | a replacement is either the previous complete record or the next complete record; no temp file is selected |
+| Production ReplicationCursor atomicity | `StoredReplicationCursorManager.NewAtomic` backed by `AtomicFileStore` plus round-trip test | a replacement is either the previous complete record or the next complete record; no temp file is selected |
 | Reader exactly-once | explicit uncertainty marker and fail-closed restart policy | import-before-cursor crash leaves `.reader-inflight`; restart reports `RESEED_REQUIRED`; transparent duplicate-free continuation is not claimed |
 | Random-kill soak | seeded selection, retained diagnostics, shared safe-outcome oracle | every selected cell satisfies the same safe-outcome oracle; smoke profile is green and nightly count is configurable |
 

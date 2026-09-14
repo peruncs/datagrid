@@ -70,6 +70,7 @@ public final class ClusteredCacheTestSupport
 	}
 
 	/** Delivers one event to the sender through its JCache listener path. */
+	@SuppressWarnings("unchecked") // The transport sender is selected as both JCache listener kinds by the provider.
 	public static void publish(final ClusteredCacheMessageSender<Object, Object> sender, final EventType eventType,
 		final String cacheName, final String tableName, final long timestamp)
 	{

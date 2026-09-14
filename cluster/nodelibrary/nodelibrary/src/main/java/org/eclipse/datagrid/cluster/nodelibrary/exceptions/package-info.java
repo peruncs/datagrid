@@ -18,5 +18,7 @@
  * can build a response without knowing internal implementation classes. The
  * remaining exceptions preserve the original cause and are intended for the
  * node-level error handler.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.cluster.nodelibrary.exceptions;

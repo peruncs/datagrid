@@ -314,6 +314,89 @@ class AeronReplicationWriteCoordinatorTest
 		coordinator.dispose();
 	}
 
+	/** A post-acceptance failure retains the enqueue fence instead of fabricating an abort. */
+	@Test
+	void enqueuePostAcceptanceFailureLeavesUncertainFence()
+	{
+		final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
+			.durabilityMode(org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
+			.build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> states.add(state));
+		final PersistenceTarget<Binary> local = new PersistenceTarget<>()
+		{
+			@Override public void write(final Binary data) { }
+			@Override public boolean isWritable() { return true; }
+		};
+		final IllegalStateException failure = new IllegalStateException("post-acceptance failure");
+		try
+		{
+			CrashHook.install((name, ignored) ->
+			{
+				if ("AFTER_ENQUEUE_BEFORE_PREPARE".equals(name)) throw failure;
+			});
+			assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryTargetDistributing(local, coordinator)
+				.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 1 }))));
+				assertEquals(List.of(AeronReplicationCheckpoint.State.ENQUEUED,
+					AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
+				assertEquals(1L, coordinator.nextSequence(), "the accepted sequence must remain consumed");
+				assertFalse(publisher.hasSequenceReservation(),
+					"an uncertainty fence must consume the reservation even when preparation never started");
+		}
+		finally
+		{
+			CrashHook.clear();
+			coordinator.dispose();
+		}
+	}
+
+	/** A post-acceptance archive-first failure retains uncertainty and emits no contradictory abort. */
+	@Test
+	void archivePostAcceptanceFailureLeavesUncertainWithoutAbort()
+	{
+		final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
+		final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) ->
+			{
+				kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
+				return length;
+			}, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+			publisher, (state, sequence, length, chunks, crc, position) -> states.add(state));
+		final PersistenceTarget<Binary> local = new PersistenceTarget<>()
+		{
+			@Override public void write(final Binary data) { }
+			@Override public boolean isWritable() { return true; }
+		};
+		final IllegalStateException failure = new IllegalStateException("post-acceptance failure");
+		try
+		{
+			CrashHook.install((name, ignored) ->
+			{
+				if ("AFTER_LOCAL_WRITE_BEFORE_COMMIT".equals(name)) throw failure;
+			});
+			assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryTargetDistributing(local, coordinator)
+				.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] { 2 }))));
+			assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
+				AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
+			assertEquals(List.of(AeronReplicationEnvelope.Kind.STORE_BINARY), kinds,
+				"an accepted local write must not be followed by an archive ABORT");
+		}
+		finally
+		{
+			CrashHook.clear();
+			coordinator.dispose();
+		}
+	}
+
 	/** Verifies a failed fence cleanup still releases its reserved sequence. */
 	@Test
 	void enqueueFenceCleanupReleasesSequenceWhenCheckpointCleanupFails()
@@ -374,21 +457,6 @@ class AeronReplicationWriteCoordinatorTest
 		assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
 			AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
 		coordinator.dispose();
-	}
-
-	/** Verifies local durable first is rejected until store exposes durability callback. */
-	@Test
-	void localDurableFirstIsRejectedUntilStoreExposesDurabilityCallback()
-	{
-		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
-			.durabilityMode(org.eclipse.datagrid.storage.distributed.types.ReplicationDurabilityMode.LOCAL_DURABLE_FIRST)
-			.build();
-		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
-			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
-			UUID.randomUUID(), 1, 0);
-		assertThrows(IllegalArgumentException.class, () -> new AeronReplicationWriteCoordinator(
-			publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> { }));
-		publisher.close();
 	}
 
 	/** Verifies persistence target consumes dictionary from shared distributor. */
@@ -545,5 +613,38 @@ class AeronReplicationWriteCoordinatorTest
 				ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {1}))));
 		assertEquals(-1, committed.get(), "uncertain commit must not advance the local index");
 		coordinator.dispose();
+	}
+
+	/** A fatal JVM error never triggers a second checkpoint write from cleanup. */
+	@Test
+	void fatalCommitErrorDoesNotWriteAnUncertaintyMarker()
+	{
+		final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
+		final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+			.termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
+		final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+			(buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+			UUID.randomUUID(), 1, 0);
+		final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+			publisher, (state, sequence, length, chunks, crc, position) -> states.add(state));
+		final AssertionError fatal = new AssertionError("fatal commit failure");
+		try
+		{
+			CrashHook.install((name, ignored) ->
+			{
+				if ("AFTER_COMMIT_OFFER".equals(name)) throw fatal;
+			});
+			final AssertionError thrown = assertThrows(AssertionError.class,
+				() -> coordinator.distributeData(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[] {1}))));
+			assertSame(fatal, thrown);
+			assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING), states,
+				"fatal errors must leave the existing fence unresolved rather than writing a marker");
+			assertTrue(publisher.isFailed());
+		}
+		finally
+		{
+			CrashHook.clear();
+			coordinator.dispose();
+		}
 	}
 }

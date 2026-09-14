@@ -28,8 +28,7 @@ final class AeronArchiveCapacity
 	private final long minimumFreeBytes;
 	private final int segmentFileLength;
 	private final LongSupplier usableSpace;
-	private volatile long checkedNanos;
-	private volatile long cachedUsableSpace = Long.MIN_VALUE;
+	private volatile CapacitySnapshot capacity = new CapacitySnapshot(0L, Long.MIN_VALUE);
 
 	AeronArchiveCapacity(final AeronSettings settings)
 	{
@@ -50,13 +49,13 @@ final class AeronArchiveCapacity
 
 	boolean available()
 	{
-		return this.minimumFreeBytes == 0 || this.externalArchive || this.usableSpace() >= this.minimumFreeBytes;
+		return this.available(0L);
 	}
 
 	boolean available(final long transactionBytes)
 	{
 		if (transactionBytes < 0) return false;
-		if (this.externalArchive) return true;
+		if (this.minimumFreeBytes == 0 || this.externalArchive) return true;
 		final long reserve = Math.max(transactionBytes, this.segmentFileLength);
 		final long required;
 		try
@@ -77,18 +76,23 @@ final class AeronArchiveCapacity
 
 	void invalidate()
 	{
-		this.checkedNanos = 0L;
+		final CapacitySnapshot current = this.capacity;
+		this.capacity = new CapacitySnapshot(0L, current.usableSpace());
 	}
 
 	private long usableSpace()
 	{
 		final long now = System.nanoTime();
-		final long checked = this.checkedNanos;
-		if (checked != 0L && now - checked < CACHE_NANOS) return this.cachedUsableSpace;
+		final CapacitySnapshot current = this.capacity;
+		if (current.checkedNanos() != 0L && now - current.checkedNanos() < CACHE_NANOS)
+			return current.usableSpace();
 		final long usable = this.usableSpace.getAsLong();
-		this.cachedUsableSpace = usable;
-		this.checkedNanos = now;
+		this.capacity = new CapacitySnapshot(now, usable);
 		return usable;
+	}
+
+	private record CapacitySnapshot(long checkedNanos, long usableSpace)
+	{
 	}
 
 	private static long queryUsableSpace(final Path archiveDirectory)
@@ -97,7 +101,7 @@ final class AeronArchiveCapacity
 		{
 			return Files.getFileStore(archiveDirectory).getUsableSpace();
 		}
-		catch (final IOException failure)
+		catch (final IOException | RuntimeException failure)
 		{
 			/* Unknown capacity must not admit a write when a threshold is configured. */
 			return -1L;

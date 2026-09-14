@@ -20,6 +20,7 @@ import javax.cache.configuration.CacheEntryListenerConfiguration;
 import javax.cache.configuration.Factory;
 import javax.cache.event.CacheEntryEventFilter;
 import javax.cache.event.CacheEntryListener;
+import java.util.Objects;
 
 /**
  * This configuration connects cache events to a clustered message sender.
@@ -41,7 +42,8 @@ public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposabl
 	 */
 	public ClusteredCacheEntryListenerConfiguration(final ClusteredCacheMessageSender<K, V> updateTimestampsSender)
     {
-        this.updateTimestamps = new CacheEntryListenerConfig(updateTimestampsSender);
+        this.updateTimestamps = new CacheEntryListenerConfig<>(
+            Objects.requireNonNull(updateTimestampsSender, "updateTimestampsSender"));
     }
 
 	/**
@@ -69,23 +71,21 @@ public class ClusteredCacheEntryListenerConfiguration<K, V> implements Disposabl
         {
             return;
         }
-        this.disposed = true;
         /* The sender's own dispose is idempotent; the reference stays valid for
          * the listener factory until this configuration is garbage. */
         this.updateTimestamps.sender.dispose();
+        this.disposed = true;
     }
 
-    /** JCache view that exposes the sender as a listener factory. */
-	private static final class CacheEntryListenerConfig<K, V> implements CacheEntryListenerConfiguration<K, V>
+	/** The JCache configuration view backed by one sender instance.
+	 *
+	 * @param <K> cache key type
+	 * @param <V> cache value type
+	 * @param sender sender exposed by the listener factory
+	 */
+	private record CacheEntryListenerConfig<K, V>(ClusteredCacheMessageSender<K, V> sender)
+		implements CacheEntryListenerConfiguration<K, V>
 	{
-		/** Sender shared by the listener factory and the enclosing owner. */
-		private final ClusteredCacheMessageSender<K, V> sender;
-
-        private CacheEntryListenerConfig(final ClusteredCacheMessageSender<K, V> sender)
-        {
-            this.sender = sender;
-        }
-
         @Override
         public Factory<CacheEntryListener<? super K, ? super V>> getCacheEntryListenerFactory()
         {

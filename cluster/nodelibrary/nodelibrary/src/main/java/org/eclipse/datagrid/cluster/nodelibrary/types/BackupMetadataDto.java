@@ -9,66 +9,27 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  * This program and the accompanying materials are made
  * available under the terms of the Eclipse Public License 2.0
  * which is available at https://www.eclipse.org/legal/epl-2.0/
- * 
+ *
  * SPDX-License-Identifier: EPL-2.0
  * #L%
  */
 
-/** Metadata returned by the remote backup service. */
-public class BackupMetadataDto
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+/** Immutable metadata returned by the remote backup service.
+ *
+ * @param name remote object name
+ * @param size remote object size in bytes
+ */
+public record BackupMetadataDto(
+	@JsonProperty("name") String name,
+	@JsonProperty("size") long size
+)
 {
-	private String name;
-	private long size;
-
-	/** Creates empty metadata for a JSON mapper. */
-	public BackupMetadataDto()
+	/** Creates metadata from the JSON properties returned by the backup service. */
+	@JsonCreator
+	public BackupMetadataDto
 	{
-	}
-
-	/** Creates metadata for one backup.
-	 *
-	 * @param name backup name
-	 * @param size backup size in bytes
-	 */
-	public BackupMetadataDto(final String name, final long size)
-	{
-		this.name = name;
-		this.size = size;
-	}
-
-	/** Returns the backup name.
-	 *
-	 * @return backup name
-	 */
-	public String getName()
-	{
-		return this.name;
-	}
-
-	/** Sets the backup name.
-	 *
-	 * @param name backup name
-	 */
-	public void setName(final String name)
-	{
-		this.name = name;
-	}
-
-	/** Returns the backup size in bytes.
-	 *
-	 * @return backup size
-	 */
-	public long getSize()
-	{
-		return this.size;
-	}
-
-	/** Sets the backup size in bytes.
-	 *
-	 * @param size backup size
-	 */
-	public void setSize(final long size)
-	{
-		this.size = size;
 	}
 }

@@ -24,5 +24,7 @@
  * <p>Choose the provider with
  * {@code ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron}. Keep the Aeron
  * settings consistent for every member that shares a stream.</p>
+ *
+ * @since 1.0
  */
 package org.eclipse.datagrid.cluster.nodelibrary.aeron;

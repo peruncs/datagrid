@@ -15,10 +15,16 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 
+import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Handles an unrecoverable application error and terminates the process. */
+/** Reports an unrecoverable node error without terminating the hosting JVM.
+ *
+ * <p>A nodelibrary is embedded in an application and must not call
+ * {@code System.exit}.  The application supervisor decides whether a fatal
+ * node error warrants process termination.</p>
+ */
 public final class GlobalErrorHandling
 {
 	private static final Logger LOG = LoggerFactory.getLogger(GlobalErrorHandling.class);
@@ -26,6 +32,8 @@ public final class GlobalErrorHandling
 	/** Handles an error that makes the node unsafe to continue.
 	 *
 	 * @param t fatal error
+	 * <p>This method never returns. It rethrows errors and runtime exceptions and
+	 * wraps checked failures in a {@link NodelibraryException}.</p>
 	 */
 	public static void handleFatalError(final Throwable t)
 	{
@@ -38,7 +46,15 @@ public final class GlobalErrorHandling
 			// ignore any failures here
 		}
 
-		System.exit(1);
+		if (t instanceof Error error)
+		{
+			throw error;
+		}
+		if (t instanceof RuntimeException runtime)
+		{
+			throw runtime;
+		}
+		throw new NodelibraryException("Fatal node error", t);
 	}
 
 	private GlobalErrorHandling()

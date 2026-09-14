@@ -15,6 +15,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.types;
  */
 
 import org.eclipse.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
+import org.eclipse.datagrid.storage.distributed.types.ReplicationRetry;
 import org.eclipse.serializer.concurrency.XThreads;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
@@ -24,6 +25,7 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import static org.eclipse.serializer.math.XMath.positive;
@@ -32,9 +34,9 @@ import static org.eclipse.serializer.util.X.notNull;
 /**
  * This manager creates, lists, downloads, and deletes storage backups.
  *
- * <p>Creating a backup is synchronized because it temporarily stops the
- * replication reader and captures the current message position. The manager
- * uses that position when a later node resumes from the backup.</p>
+	 * <p>Backup creation is single-flight because it temporarily stops the
+	 * replication reader and captures the current message position. Read-only
+	 * listing and download operations do not wait for that lock.</p>
  */
 public interface StorageBackupManager
 {
@@ -55,20 +57,6 @@ public interface StorageBackupManager
 	 * @throws NodelibraryException if listing fails
 	 */
     List<BackupMetadata> listBackups() throws NodelibraryException;
-
-	/** Returns the newest backup allowed by the slot policy.
-	 * @param ignoreManualSlot whether to ignore the manual slot
-	 * @return newest backup, or {@code null}
-	 * @throws NodelibraryException if listing fails
-	 */
-    default BackupMetadata latestBackup(final boolean ignoreManualSlot) throws NodelibraryException
-    {
-        return this.listBackups()
-            .stream()
-            .filter(b -> !ignoreManualSlot || !b.manualSlot())
-            .max(Comparator.comparingLong(BackupMetadata::timestamp))
-            .orElse(null);
-    }
 
 	/** Deletes one backup.
 	 * @param backup backup to delete
@@ -105,7 +93,7 @@ public interface StorageBackupManager
 	 * @param storageConnection Store connection
 	 * @param maxBackupCount maximum backup count
 	 * @param storageBackupBackend backup backend
-	 * @param messageInfoSupplier message information supplier
+	 * @param cursorSupplier replication cursor supplier
 	 * @param dataClient replication client
 	 * @param retention log retention policy
 	 * @return backup manager
@@ -114,7 +102,7 @@ public interface StorageBackupManager
         final StorageConnection storageConnection,
         final int maxBackupCount,
         final StorageBackupBackend storageBackupBackend,
-        final Supplier<MessageInfo> messageInfoSupplier,
+        final Supplier<ReplicationCursor> cursorSupplier,
         final ClusterStorageBinaryDataClient dataClient,
         final ReplicationLogRetention retention
     )
@@ -123,7 +111,7 @@ public interface StorageBackupManager
             notNull(storageConnection),
             positive(maxBackupCount),
             notNull(storageBackupBackend),
-            notNull(messageInfoSupplier),
+            notNull(cursorSupplier),
             notNull(dataClient),
             notNull(retention)
         );
@@ -134,19 +122,22 @@ public interface StorageBackupManager
     {
 		private static final Logger LOG = LoggerFactory.getLogger(StorageBackupManager.class);
 		private static final long STOP_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(1);
+		private static final int RETENTION_RETRY_ATTEMPTS = 3;
+		private static final long RETENTION_RETRY_DELAY_MILLIS = 100L;
 
         private final StorageConnection storageConnection;
         private final int maxBackupCount;
         private final StorageBackupBackend backend;
-        private final Supplier<MessageInfo> messageInfoSupplier;
-        private final ClusterStorageBinaryDataClient dataClient;
-        private final ReplicationLogRetention retention;
+		private final Supplier<ReplicationCursor> cursorSupplier;
+		private final ClusterStorageBinaryDataClient dataClient;
+		private final ReplicationLogRetention retention;
+		private final ReentrantLock backupLock = new ReentrantLock();
 
         private Default(
             final StorageConnection storageConnection,
             final int maxBackupCount,
             final StorageBackupBackend backupBackend,
-            final Supplier<MessageInfo> messageInfoSupplier,
+            final Supplier<ReplicationCursor> cursorSupplier,
             final ClusterStorageBinaryDataClient dataClient,
             final ReplicationLogRetention retention
         )
@@ -154,18 +145,22 @@ public interface StorageBackupManager
             this.storageConnection = storageConnection;
             this.maxBackupCount = maxBackupCount;
             this.backend = backupBackend;
-            this.messageInfoSupplier = messageInfoSupplier;
+            this.cursorSupplier = cursorSupplier;
             this.dataClient = dataClient;
             this.retention = retention;
         }
 
         @Override
-        public synchronized void createStorageBackup(final boolean useManualSlot) throws NodelibraryException
-        {
-            LOG.trace("Creating new storage backup");
+		public void createStorageBackup(final boolean useManualSlot) throws NodelibraryException
+		{
+			this.backupLock.lock();
+			try
+			{
+			LOG.trace("Creating new storage backup");
 
-			final var newBackup = new BackupMetadata(System.currentTimeMillis(), useManualSlot);
 			final List<BackupMetadata> backups = this.listBackups();
+			final long timestamp = this.nextBackupTimestamp(backups, useManualSlot);
+			final var newBackup = new BackupMetadata(timestamp, useManualSlot);
 			final RuntimeException readerFailure = this.dataClient.failure();
 			if (readerFailure != null)
 			{
@@ -197,7 +192,7 @@ public interface StorageBackupManager
 			Throwable operationFailure = null;
 			try
 			{
-				this.backend.createAndUploadBackup(this.storageConnection, this.messageInfoSupplier.get(), newBackup);
+				this.backend.createAndUploadBackup(this.storageConnection, this.cursorSupplier.get(), newBackup);
 
 				/* Prune only after the new backup is durable.  If upload fails, every
 				 * previously recoverable backup remains available for recovery. */
@@ -229,10 +224,19 @@ public interface StorageBackupManager
 					// delete up to the previous backup to save on Kafka log storage
 					if (this.retention.isSupported())
 					{
-						this.backend.getMessageInfoFromPreviousBackup(1)
-							.ifPresent(info -> this.retention.deleteThrough(new ReplicationCursor(
-								info.transport(), info.storeGeneration(), info.messageIndex(), info.providerPosition()
-							)));
+						this.backend.getCursorFromPreviousBackup(1)
+							.ifPresent(info ->
+							{
+					final ReplicationLogRetention.MaintenanceResult result =
+						this.deleteThroughWithReplayRetry(info);
+								switch (result.status())
+								{
+									case DELETED -> LOG.debug("Replication retention deleted Archive history through {}", result.position());
+									case NOTHING_TO_DELETE -> LOG.debug("Replication retention found no complete Archive segment to delete");
+									case DEFERRED_ACTIVE_REPLAY -> LOG.warn(
+										"Replication retention deferred because an Archive replay is active at {}", result.position());
+								}
+							});
 					}
 					else
 					{
@@ -267,12 +271,34 @@ public interface StorageBackupManager
 					}
 				}
 			}
+			}
+			finally
+			{
+				this.backupLock.unlock();
+			}
+		}
+
+		private long nextBackupTimestamp(final List<BackupMetadata> backups, final boolean manualSlot)
+		{
+			long timestamp = System.currentTimeMillis();
+			for (final BackupMetadata backup : backups)
+			{
+				if (backup.manualSlot() == manualSlot && backup.timestamp() >= timestamp)
+				{
+					timestamp = backup.timestamp() == Long.MAX_VALUE ? Long.MAX_VALUE : backup.timestamp() + 1L;
+				}
+			}
+			if (timestamp == Long.MAX_VALUE)
+			{
+				throw new NodelibraryException("No unique timestamp is available for a new backup");
+			}
+			return timestamp;
 		}
 
         @Override
-        public synchronized void downloadLatestBackup(final Path targetRootPath)
+        public void downloadLatestBackup(final Path targetRootPath)
         {
-            final var backup = this.latestBackup(false);
+            final var backup = this.backend.latestBackup(false);
             if (backup == null)
             {
                 throw new NodelibraryException("No backups are available to download");
@@ -281,39 +307,39 @@ public interface StorageBackupManager
         }
 
         @Override
-        public synchronized void deleteBackup(final BackupMetadata backup) throws NodelibraryException
+        public void deleteBackup(final BackupMetadata backup) throws NodelibraryException
         {
             this.backend.deleteBackup(backup);
         }
 
         @Override
-        public synchronized void deleteUserUploadedStorage() throws NodelibraryException
+        public void deleteUserUploadedStorage() throws NodelibraryException
         {
             this.backend.deleteUserUploadedStorage();
         }
 
         @Override
-        public void downloadBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
+			public void downloadBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
             throws NodelibraryException
         {
             this.backend.downloadBackup(storageDestinationParentPath, backup);
         }
 
         @Override
-        public synchronized void downloadUserUploadedStorage(final Path storageDestinationParentPath)
+        public void downloadUserUploadedStorage(final Path storageDestinationParentPath)
             throws NodelibraryException
         {
             this.backend.downloadUserUploadedStorage(storageDestinationParentPath);
         }
 
         @Override
-        public synchronized boolean hasUserUploadedStorage() throws NodelibraryException
+        public boolean hasUserUploadedStorage() throws NodelibraryException
         {
             return this.backend.hasUserUploadedStorage();
         }
 
         @Override
-        public synchronized List<BackupMetadata> listBackups() throws NodelibraryException
+        public List<BackupMetadata> listBackups() throws NodelibraryException
         {
             return this.backend.listBackups();
         }
@@ -322,7 +348,7 @@ public interface StorageBackupManager
 		{
 			LOG.trace("Waiting for data client to stop reading");
 			this.dataClient.stopAtLatestMessage();
-			final long deadline = System.nanoTime() + STOP_TIMEOUT_NANOS;
+			final long deadline = ReplicationRetry.deadlineNanos(STOP_TIMEOUT_NANOS);
 			while (true)
 			{
 				final ClusterStorageBinaryDataClient.StopResult result = this.dataClient.stopResult();
@@ -341,14 +367,34 @@ public interface StorageBackupManager
 				{
 					throw new IllegalStateException("Cannot create backup after replication reader stop " + outcome);
 				}
-				if (System.nanoTime() >= deadline)
+				if (ReplicationRetry.expired(deadline))
 				{
 					throw new IllegalStateException("Timed out waiting for replication reader boundary at " +
-						this.dataClient.messageInfo() + " (last resolved sequence=" + result.sequence() +
+						this.dataClient.cursor() + " (last resolved sequence=" + result.sequence() +
 						", position=" + result.position() + ")");
 				}
 				XThreads.sleep(100);
 			}
 		}
-    }
+
+		/**
+		 * Retries a purge that is temporarily blocked by an active Archive replay.
+		 * Replay ownership is intentionally not interrupted: the retention provider
+		 * returns a deferred result, the bounded retry gives a short-lived replay a
+		 * chance to finish, and a still-active replay is retained for the next backup
+		 * cycle with an explicit warning.
+		 */
+		private ReplicationLogRetention.MaintenanceResult deleteThroughWithReplayRetry(
+			final ReplicationCursor cursor)
+		{
+			ReplicationLogRetention.MaintenanceResult result = this.retention.deleteThrough(cursor);
+			for (int attempt = 1; result.status() == ReplicationLogRetention.MaintenanceResult.Status.DEFERRED_ACTIVE_REPLAY &&
+				attempt < RETENTION_RETRY_ATTEMPTS; attempt++)
+			{
+				XThreads.sleep(RETENTION_RETRY_DELAY_MILLIS);
+				result = this.retention.deleteThrough(cursor);
+			}
+			return result;
+		}
+	}
 }

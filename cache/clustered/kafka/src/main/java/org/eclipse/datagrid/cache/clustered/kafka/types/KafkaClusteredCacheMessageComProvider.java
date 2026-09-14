@@ -17,13 +17,14 @@ package org.eclipse.datagrid.cache.clustered.kafka.types;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
-import org.apache.kafka.common.serialization.VoidSerializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.eclipse.datagrid.cache.clustered.types.*;
 import org.eclipse.serializer.Serializer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.UUID;
 
@@ -34,24 +35,40 @@ import static org.eclipse.datagrid.cache.clustered.kafka.types.KafkaClusteredCon
  * This provider builds the Kafka sender and receiver for clustered cache
  * invalidation.
  *
- * <p>It creates one producer and one generated client id for the provider
- * instance. Producer and consumer settings are read from their separate
- * configuration prefixes so the two clients cannot accidentally share a
- * role-specific setting.</p>
+ * <p>It creates one producer, one sender, and one generated client id for the
+ * provider instance. Producer and consumer settings are read from their
+ * separate configuration prefixes so the two clients cannot accidentally
+ * share a role-specific setting. An explicit {@code group-id} is used as-is.
+ * Otherwise the group contains a stable node identity and a provider-instance
+ * identity. Configure {@code provider-id} when the group must remain stable
+ * across provider recreation or when one node hosts more than one provider;
+ * without it, each provider instance gets its own group and therefore cannot
+ * steal another provider's invalidations.</p>
  *
- * <p>Failure latency differs from the Aeron adapter: the sender waits for
- * Kafka's {@code delivery.timeout.ms} (default 120 s) for a send to complete,
- * while the Aeron sender waits a configurable offer timeout (default 5 s).
- * Both fail the local cache operation, but after different delays.</p>
+ * <p>Failure latency differs from the Aeron adapter: the sender waits at most
+ * the configured send timeout for each Kafka send to complete, while the Aeron
+ * sender waits a configurable offer timeout. Both fail the local cache
+ * operation, but after different delays.</p>
  */
 public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMessageComProvider
 {
-    private static final Logger logger = LoggerFactory.getLogger(KafkaClusteredCacheMessageComProvider.class);
+    private static final System.Logger LOGGER =
+        System.getLogger(KafkaClusteredCacheMessageComProvider.class.getName());
     private static final int DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20;
-
+    private static final long DEFAULT_SEND_TIMEOUT_MILLIS = 30_000L;
     private String clientId;
+    private final String providerInstanceId = UUID.randomUUID().toString();
     private String configuredTopic;
     private KafkaProducer<String, byte[]> producer;
+    private ClusteredCacheMessageSender<Object, Object> sender;
+    private Serializer<byte[]> senderSerializer;
+    private int senderMaxPayloadBytes;
+    private long senderSendTimeoutMillis;
+    private ClusteredCacheMessageReceiver receiver;
+    private Serializer<byte[]> receiverSerializer;
+    private ClusteredCacheMessageAcceptor receiverAcceptor;
+    private String receiverGroupId;
+    private int receiverMaxPayloadBytes;
 
     /** Creates a provider with no Kafka clients yet.
      *
@@ -67,10 +84,52 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
         final Serializer<byte[]> serializer
     )
     {
-        final var producer = this.ensureProducer(properties);
+        Objects.requireNonNull(properties, "properties");
+        Objects.requireNonNull(serializer, "serializer");
         final var topicName = this.getTopicName(properties);
+        if (this.sender != null)
+        {
+            if (this.sender instanceof final KafkaClusteredCacheMessageSender kafkaSender && kafkaSender.isDisposed())
+            {
+                throw new IllegalStateException(
+                    "Kafka clustered-cache sender is single-use and has been disposed; create a new provider");
+            }
+            final int maxPayloadBytes = this.maxPayloadBytes(properties);
+            final long sendTimeoutMillis = this.sendTimeoutMillis(properties);
+            if (this.senderSerializer != serializer || this.senderMaxPayloadBytes != maxPayloadBytes ||
+                this.senderSendTimeoutMillis != sendTimeoutMillis)
+            {
+                throw new IllegalArgumentException(
+                    "Kafka clustered-cache provider already owns a sender with a different serializer");
+            }
+            return this.sender;
+        }
+        final var producer = this.ensureProducer(properties);
         final var clientId = this.ensureClientId();
-        return KafkaClusteredCacheMessageSender.UpdateTimestamps(producer, topicName, clientId, serializer);
+        final int maxPayloadBytes = this.maxPayloadBytes(properties);
+        final long sendTimeoutMillis = this.sendTimeoutMillis(properties);
+        try
+        {
+            this.sender = KafkaClusteredCacheMessageSender.UpdateTimestamps(
+                producer, topicName, clientId, serializer, maxPayloadBytes, sendTimeoutMillis);
+        }
+        catch (final RuntimeException | Error failure)
+        {
+            try
+            {
+                producer.close();
+                this.producer = null;
+            }
+            catch (final RuntimeException | Error closeFailure)
+            {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+        this.senderSerializer = serializer;
+        this.senderMaxPayloadBytes = maxPayloadBytes;
+        this.senderSendTimeoutMillis = sendTimeoutMillis;
+        return this.sender;
     }
 
     @Override
@@ -80,29 +139,57 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
         final ClusteredCacheMessageAcceptor messageAcceptor
     )
     {
-        final var kafkaProperties = this.readKafkaConfigProperties(
-            properties,
-            KAFKA_CONSUMER_CONFIG_PREFIX
-        );
+        Objects.requireNonNull(properties, "properties");
+        Objects.requireNonNull(serializer, "serializer");
+        Objects.requireNonNull(messageAcceptor, "messageAcceptor");
         final var topicName = this.getTopicName(properties);
         final var clientId = this.ensureClientId();
-        final var groupId = ClusteredCachePropertyParsers.stringProperty(properties,
-            KafkaClusteredConfigurationPropertyNames.GROUP_ID, clientId);
-        return new KafkaClusteredCacheMessageReceiver(
+        final var groupId = this.groupId(properties, topicName);
+        final int maxPayloadBytes = this.maxPayloadBytes(properties);
+        if (this.receiver != null)
+        {
+            if (this.receiver instanceof final KafkaClusteredCacheMessageReceiver kafkaReceiver && kafkaReceiver.isDisposed())
+            {
+                throw new IllegalStateException(
+                    "Kafka clustered-cache receiver is single-use and has been disposed; create a new provider");
+            }
+            if (this.receiverSerializer != serializer || this.receiverAcceptor != messageAcceptor ||
+                !this.receiverGroupId.equals(groupId) || this.receiverMaxPayloadBytes != maxPayloadBytes)
+            {
+                throw new IllegalArgumentException(
+                    "Kafka clustered-cache provider already owns a receiver with different configuration");
+            }
+            return this.receiver;
+        }
+        final var kafkaProperties = this.readKafkaConfigProperties(properties, KAFKA_CONSUMER_CONFIG_PREFIX);
+        final ClusteredCacheMessageReceiver created = new KafkaClusteredCacheMessageReceiver(
             kafkaProperties,
             topicName,
             groupId,
             clientId,
             messageAcceptor,
             serializer,
-            this.maxPayloadBytes(properties)
+            maxPayloadBytes
         );
+        this.receiverSerializer = serializer;
+        this.receiverAcceptor = messageAcceptor;
+        this.receiverGroupId = groupId;
+        this.receiverMaxPayloadBytes = maxPayloadBytes;
+        this.receiver = created;
+        return created;
     }
 
     private int maxPayloadBytes(@SuppressWarnings("rawtypes") final Map properties)
     {
         return ClusteredCachePropertyParsers.intProperty(properties,
             KafkaClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES, DEFAULT_MAX_PAYLOAD_BYTES, 1);
+    }
+
+    private long sendTimeoutMillis(@SuppressWarnings("rawtypes") final Map properties)
+    {
+        return ClusteredCachePropertyParsers.longProperty(
+            properties, KafkaClusteredConfigurationPropertyNames.SEND_TIMEOUT_MILLIS,
+            DEFAULT_SEND_TIMEOUT_MILLIS, 1L);
     }
 
     private String ensureClientId()
@@ -114,6 +201,56 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
         return this.clientId;
     }
 
+    /**
+     * Resolves a consumer group that remains stable for one node across cache
+     * provider instances and JVM restarts when an explicit group id or stable
+     * provider id is configured. An explicit group id always wins; otherwise
+     * the configured node id, Kubernetes pod name, or hostname is used. The
+     * provider identity is always part of an inferred group so two provider
+     * instances on one node cannot consume one another's invalidations.
+     */
+    String groupId(@SuppressWarnings("rawtypes") final Map properties, final String topicName)
+    {
+        final String configured = ClusteredCachePropertyParsers.stringProperty(
+            properties, KafkaClusteredConfigurationPropertyNames.GROUP_ID, null);
+        if (configured != null && !configured.isBlank())
+        {
+            return configured;
+        }
+        final String configuredNode = ClusteredCachePropertyParsers.stringProperty(
+            properties, KafkaClusteredConfigurationPropertyNames.NODE_ID, null);
+        final String node = configuredNode == null || configuredNode.isBlank()
+            ? stableNodeIdentity() : configuredNode.trim();
+        final String provider = ClusteredCachePropertyParsers.stringProperty(
+            properties, KafkaClusteredConfigurationPropertyNames.PROVIDER_ID, null);
+        if (provider != null && !provider.isBlank())
+        {
+            return "eclipse-datagrid-cache-" + topicName + "-" + node + "-" + provider.trim();
+        }
+        return "eclipse-datagrid-cache-" + topicName + "-" + node + "-" + this.providerInstanceId;
+    }
+
+    private static String stableNodeIdentity()
+    {
+        final String pod = System.getenv("MY_POD_NAME");
+        if (pod != null && !pod.isBlank()) return pod.trim();
+        final String configured = System.getProperty("eclipse.datagrid.node-id");
+        if (configured != null && !configured.isBlank()) return configured.trim();
+        try
+        {
+            final String host = InetAddress.getLocalHost().getHostName();
+            if (host != null && !host.isBlank()) return host.trim();
+        }
+        catch (final UnknownHostException | SecurityException failure)
+        {
+            LOGGER.log(System.Logger.Level.WARNING,
+                "Unable to resolve a stable host name for the Kafka cache group id", failure);
+        }
+        throw new IllegalArgumentException("No stable Kafka cache node identity found; configure " +
+            KafkaClusteredConfigurationPropertyNames.GROUP_ID + " or " +
+            KafkaClusteredConfigurationPropertyNames.NODE_ID);
+    }
+
     private KafkaProducer<String, byte[]> ensureProducer(@SuppressWarnings("rawtypes") final Map properties)
     {
         if (this.producer == null)
@@ -122,12 +259,28 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
                 properties,
                 KAFKA_PRODUCER_CONFIG_PREFIX
             );
-            kafkaProperties.setProperty(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, VoidSerializer.class.getName());
+            /* A deterministic key keeps all updates for one timestamp table in
+             * one partition.  Null keys use Kafka's round-robin partitioner and
+             * can reorder successive invalidations for the same table. */
+            kafkaProperties.setProperty(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
             kafkaProperties.setProperty(
                 ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
                 ByteArraySerializer.class.getName()
             );
-            this.producer = new KafkaProducer<>(kafkaProperties);
+            kafkaProperties.setProperty(ProducerConfig.ACKS_CONFIG, "all");
+            kafkaProperties.setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
+            kafkaProperties.setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "5");
+            final KafkaProducer<String, byte[]> created;
+            try
+            {
+                created = new KafkaProducer<>(kafkaProperties);
+            }
+            catch (final RuntimeException | Error failure)
+            {
+                this.producer = null;
+                throw failure;
+            }
+            this.producer = created;
         }
         return this.producer;
     }
@@ -136,6 +289,11 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
     {
         final String topicName = ClusteredCachePropertyParsers.stringProperty(properties,
             KafkaClusteredConfigurationPropertyNames.TOPIC, "es-cache-invalidation");
+        if (topicName.indexOf('\0') >= 0)
+        {
+            throw new IllegalArgumentException(
+                KafkaClusteredConfigurationPropertyNames.TOPIC + " must not contain the NUL separator: " + topicName);
+        }
         if (this.configuredTopic == null)
         {
             this.configuredTopic = topicName;
@@ -165,7 +323,8 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
                     || specificPrefix.equals(KAFKA_PRODUCER_CONFIG_PREFIX)
                     && prefixedKey.startsWith(KAFKA_CONSUMER_CONFIG_PREFIX))
                 {
-                    logger.trace("Ignoring Kafka config with key={}", prefixedKey);
+                    LOGGER.log(System.Logger.Level.TRACE,
+                        "Ignoring Kafka config with key=" + prefixedKey);
                     continue;
                 }
 
@@ -173,7 +332,8 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
                 if (key != null)
                 {
                     final var value = rawProperties.get(rawKey);
-                    logger.trace("Found Kafka config with key={}, value={}", key, value);
+                    LOGGER.log(System.Logger.Level.TRACE,
+                        "Found Kafka config with key=" + key + ", value=" + value);
                     kafkaProperties.put(key, value);
                 }
             }

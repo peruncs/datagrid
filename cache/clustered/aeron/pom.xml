@@ -45,10 +45,6 @@
             <version>${aeron.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
-        </dependency>
-        <dependency>
             <!-- Satisfies the java.persistence requirement of the published
                  cache-hibernate module descriptor used on the JPMS module path. -->
             <groupId>javax.persistence</groupId>

@@ -14,7 +14,7 @@ package org.eclipse.datagrid.cluster.nodelibrary.aeron;
  * #L%
  */
 
-import org.eclipse.datagrid.storage.distributed.aeron.writer.AeronCrashHookSupport;
+import org.eclipse.datagrid.storage.distributed.aeron.writer.CrashHook;
 
 import java.util.function.BiConsumer;
 
@@ -29,14 +29,14 @@ public final class AeronCrashHooks
 	 */
 	public static void install(final BiConsumer<String, Long> hook)
 	{
-		AeronCrashHookSupport.install(hook);
+		CrashHook.install(hook);
 		AeronClusterReplicationTransportProvider.setCrashHook(hook);
 	}
 
 	/** Clears all writer and provider hooks on the calling test thread. */
 	public static void clear()
 	{
-		AeronCrashHookSupport.clear();
+		CrashHook.clear();
 		AeronClusterReplicationTransportProvider.clearCrashHook();
 	}
 

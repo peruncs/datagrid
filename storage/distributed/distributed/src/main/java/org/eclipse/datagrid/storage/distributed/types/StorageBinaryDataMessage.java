@@ -29,10 +29,12 @@ import static org.eclipse.serializer.util.X.notNull;
  * complete message can be consumed and then disposed; callers must not retain
  * its buffer after disposal.</p>
  */
-public interface StorageBinaryDataMessage extends Disposable
+public interface StorageBinaryDataMessage extends Disposable, AutoCloseable
 {
-	/** Defensive upper bound for a single network message before a transport-specific limit is supplied. */
-	int MAX_MESSAGE_LENGTH = 256 * 1024 * 1024;
+	/** Defensive upper bound for a single network message. */
+	int MAX_MESSAGE_LENGTH = ReplicationLimits.MAX_MESSAGE_BYTES;
+	/** Defensive upper bound for packet metadata in one message. */
+	int MAX_PACKET_COUNT = ReplicationLimits.MAX_PACKET_COUNT;
 	/** Identifies whether the assembled bytes describe types or Store data. */
 	enum MessageType
 	{
@@ -86,13 +88,15 @@ public interface StorageBinaryDataMessage extends Disposable
 		 */
 	static StorageBinaryDataMessage New(final StorageBinaryDataPacket initialPacket)
 	{
-		return new StorageBinaryDataMessage.Default(
+		return new StorageBinaryDataMessageDefault(
 			notNull(initialPacket)
 		);
 	}
 
-	/** Owns the direct buffer and validates packet order and dimensions. */
-	class Default implements StorageBinaryDataMessage
+}
+
+/** Package-private implementation that owns the direct buffer. */
+final class StorageBinaryDataMessageDefault implements StorageBinaryDataMessage
 	{
 		private final MessageType type;
 		private final int length;
@@ -100,7 +104,7 @@ public interface StorageBinaryDataMessage extends Disposable
 		private int receivedPackets = 0;
 		private ByteBuffer buffer;
 
-		Default(final StorageBinaryDataPacket initialPacket)
+		StorageBinaryDataMessageDefault(final StorageBinaryDataPacket initialPacket)
 		{
 			super();
 			this.type = initialPacket.messageType();
@@ -108,13 +112,21 @@ public interface StorageBinaryDataMessage extends Disposable
 			this.packetCount = initialPacket.packetCount();
 			if (this.length > MAX_MESSAGE_LENGTH)
 			{
-				throw new IllegalArgumentException("Data message exceeds maximum length " + MAX_MESSAGE_LENGTH);
+				throw new StorageBinaryDataException("Data message exceeds maximum length " + MAX_MESSAGE_LENGTH);
 			}
-			if (this.length < 0 || this.packetCount <= 0)
+			if (this.length < 0 || this.packetCount <= 0 || this.packetCount > MAX_PACKET_COUNT)
 			{
-				throw new IllegalArgumentException("invalid data message dimensions");
+				throw new StorageBinaryDataException("invalid data message dimensions");
 			}
-			this.buffer = XMemory.allocateDirectNative(this.length);
+			/* Do not trust the declared length as an allocation request. A malformed
+			 * first packet may claim the full limit while carrying only a few bytes. */
+			final ByteBuffer firstBuffer = initialPacket.buffer();
+			if (firstBuffer == null)
+			{
+				throw new StorageBinaryDataException("Initial packet has no payload buffer");
+			}
+			this.buffer = XMemory.allocateDirectNative(Math.max(1,
+				Math.min(this.length, firstBuffer.remaining())));
 			try
 			{
 				this.addPacket(initialPacket);
@@ -128,17 +140,19 @@ public interface StorageBinaryDataMessage extends Disposable
 
 		private void validateForAddition(final StorageBinaryDataPacket packet)
 		{
+			if (this.buffer == null)
+			{
+				throw new StorageBinaryDataException("Data message already disposed");
+			}
 			if (this.isComplete())
 			{
-				// TODO typed exception
-				throw new RuntimeException("Data message already complete");
+				throw new StorageBinaryDataException("Data message already complete");
 			}
 
 			final MessageType expectedMessageType = this.type;
 			if (packet.messageType() != expectedMessageType)
 			{
-				// TODO typed exception
-				throw new RuntimeException(
+				throw new StorageBinaryDataException(
 					"Invalid packet type, received " + packet.messageType() + ", expected " + expectedMessageType
 				);
 			}
@@ -146,25 +160,42 @@ public interface StorageBinaryDataMessage extends Disposable
 			final int expectedPacketIndex = this.receivedPackets;
 			if (packet.packetIndex() != expectedPacketIndex)
 			{
-				// TODO typed exception
-				throw new RuntimeException(
+				throw new StorageBinaryDataException(
 					"Invalid packet index, received " + packet.packetIndex() + ", expected " + expectedPacketIndex
 				);
 			}
 			if (packet.messageLength() != this.length || packet.packetCount() != this.packetCount)
 			{
-				throw new IllegalArgumentException("packet dimensions changed within a message");
+				throw new StorageBinaryDataException("packet dimensions changed within a message");
 			}
 			final ByteBuffer packetBuffer = packet.buffer();
-			if (packetBuffer == null || packetBuffer.remaining() > this.buffer.remaining())
+			if (packetBuffer == null || packetBuffer.remaining() > this.length - this.buffer.position())
 			{
-				throw new IllegalArgumentException("packet payload exceeds declared message length");
+				throw new StorageBinaryDataException("packet payload exceeds declared message length");
 			}
+		}
+
+		private void ensureCapacity(final int required)
+		{
+			if (required <= this.buffer.capacity()) return;
+			int newCapacity = Math.max(1, this.buffer.capacity());
+			while (newCapacity < required)
+			{
+				final int doubled = newCapacity << 1;
+				newCapacity = doubled > 0 ? Math.min(this.length, doubled) : required;
+				if (newCapacity == this.length) break;
+			}
+			final ByteBuffer replacement = XMemory.allocateDirectNative(newCapacity);
+			this.buffer.flip();
+			replacement.put(this.buffer);
+			XMemory.deallocateDirectByteBuffer(this.buffer);
+			this.buffer = replacement;
 		}
 
 		private void internalAddPacket(final StorageBinaryDataPacket packet)
 		{
 			final ByteBuffer source = packet.buffer().duplicate();
+			this.ensureCapacity(this.buffer.position() + source.remaining());
 			this.buffer.put(source);
 
 			this.receivedPackets++;
@@ -173,7 +204,7 @@ public interface StorageBinaryDataMessage extends Disposable
 			{
 				if (this.buffer.position() != this.length)
 				{
-					throw new IllegalArgumentException("packet payload does not fill declared message length");
+					throw new StorageBinaryDataException("packet payload does not fill declared message length");
 				}
 				this.buffer.flip();
 			}
@@ -198,7 +229,7 @@ public interface StorageBinaryDataMessage extends Disposable
 		}
 
 		@Override
-		public synchronized StorageBinaryDataMessage addPacket(final StorageBinaryDataPacket packet)
+		public StorageBinaryDataMessage addPacket(final StorageBinaryDataPacket packet)
 		{
 			this.validateForAddition(packet);
 			this.internalAddPacket(packet);
@@ -207,37 +238,39 @@ public interface StorageBinaryDataMessage extends Disposable
 		}
 
 		@Override
-		public synchronized boolean isComplete()
+		public boolean isComplete()
 		{
 			return this.receivedPackets == this.packetCount;
 		}
 
 		@Override
-		public synchronized ByteBuffer data()
+		public ByteBuffer data()
 		{
 			if (!this.isComplete())
 			{
-				// TODO typed exception
-				throw new RuntimeException("Data message not complete yet");
+				throw new StorageBinaryDataException("Data message not complete yet");
 			}
 
 			if (this.buffer == null)
 			{
-				// TODO typed exception
-				throw new RuntimeException("Data message already disposed");
+				throw new StorageBinaryDataException("Data message already disposed");
 			}
 
-			return this.buffer;
+			return this.buffer.asReadOnlyBuffer();
 		}
 
 		@Override
-		public synchronized void dispose()
+		public void dispose()
 		{
 			final ByteBuffer value = this.buffer;
 			this.buffer = null;
 			if (value != null) XMemory.deallocateDirectByteBuffer(value);
 		}
 
-	}
+		@Override
+		public void close()
+		{
+			this.dispose();
+		}
 
-}
+	}

@@ -6,6 +6,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -32,6 +34,8 @@ class KafkaPropertiesProviderTest
 	{
 		Files.writeString(directory.resolve("10-base.properties"), "bootstrap.servers=first\nacks=1\n");
 		Files.writeString(directory.resolve("20-override.properties"), "bootstrap.servers=second\n");
+		setOwnerOnlyPermissions(directory.resolve("10-base.properties"));
+		setOwnerOnlyPermissions(directory.resolve("20-override.properties"));
 
 		final KafkaPropertiesProvider provider = KafkaPropertiesProvider.ConfigDirectory(directory);
 		provider.init();
@@ -46,5 +50,26 @@ class KafkaPropertiesProviderTest
 		final KafkaPropertiesProvider provider = KafkaPropertiesProvider.ConfigDirectory(directory);
 
 		assertThrows(NodelibraryException.class, provider::init);
+	}
+
+	@Test
+	void requiresStableReaderIdentityInProduction()
+	{
+		assertThrows(IllegalArgumentException.class,
+			() -> KafkaClusterReplicationTransportProvider.readerIdentity(null, null, true));
+		assertEquals("node-7",
+			KafkaClusterReplicationTransportProvider.readerIdentity(" ", " node-7 ", true));
+	}
+
+	private static void setOwnerOnlyPermissions(final Path path) throws Exception
+	{
+		try
+		{
+			Files.setPosixFilePermissions(path, Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+		}
+		catch (final UnsupportedOperationException ignored)
+		{
+			/* Non-POSIX file systems do not expose these permissions. */
+		}
 	}
 }

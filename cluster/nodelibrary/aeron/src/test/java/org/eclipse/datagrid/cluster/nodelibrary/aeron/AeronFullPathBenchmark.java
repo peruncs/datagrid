@@ -78,6 +78,7 @@ public final class AeronFullPathBenchmark
 			AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation,
 				"writer", -1L, controlPort, livePort, watermarkPort)))
 		{
+			writerTransport.positionProvider("store").init();
 			final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
 			final AeronStoreIntegrationIT.Root initial = new AeronStoreIntegrationIT.Root();
 			final EmbeddedStorageFoundation<?> seedFoundation = AeronStoreIntegrationIT.foundation(writerPath);
@@ -99,8 +100,8 @@ public final class AeronFullPathBenchmark
 			try (ClusterReplicationTransport readerTransport = new AeronClusterReplicationTransportProvider().create(
 				AeronStoreIntegrationIT.properties(readerRoot, clusterId, UUID.randomUUID(), generation, "reader",
 					-1L, controlPort, livePort, watermarkPort));
-				StoredMessageInfoManager cursorManager = StoredMessageInfoManager.NewAtomic(
-					readerRoot.resolve("cursor"), MessageInfoParser.New()))
+				StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(
+					readerRoot.resolve("cursor")))
 			{
 				final EmbeddedStorageFoundation<?> readerFoundation = AeronStoreIntegrationIT.foundation(readerPath);
 				final EmbeddedStorageManager reader = readerFoundation.start();
@@ -112,10 +113,10 @@ public final class AeronFullPathBenchmark
 				final ClusterStorageBinaryDataClient client = readerTransport.client(acceptor, "store",
 					new AfterDataMessageConsumedListener()
 					{
-						@Override public void onChange(final MessageInfo info)
+						@Override public void onApplied(final ReplicationCursor cursor)
 						{
-							cursorManager.set(info);
-							resolved.set(info.messageIndex());
+							cursorManager.set(cursor);
+							resolved.set(cursor.logicalSequence());
 						}
 						@Override public void close() { }
 					}, baseline, false);
@@ -123,8 +124,12 @@ public final class AeronFullPathBenchmark
 				{
 					client.start();
 					awaitLive(client);
+					/* Reuse one application payload during warmup and measurement. A new
+					 * byte[] per transaction would make the benchmark mostly measure its
+					 * own fixture allocation rather than Store/Aeron transport work. */
+					final byte[] payload = new byte[payloadBytes];
 					for (int i = 0; i < warmup; i++) publishAndAwait(
-						writer, writerRoot, payloadBytes, i, writerTransport, resolved);
+						writer, writerRoot, payload, i, writerTransport, resolved);
 					final AllocationSnapshot allocation = AllocationSnapshot.capture();
 					final long directBefore = poolBytes("direct");
 					final long mappedBefore = poolBytes("mapped");
@@ -133,7 +138,7 @@ public final class AeronFullPathBenchmark
 					for (int i = 0; i < iterations; i++)
 					{
 						final long transactionStart = System.nanoTime();
-						publishAndAwait(writer, writerRoot, payloadBytes, warmup + i, writerTransport, resolved);
+						publishAndAwait(writer, writerRoot, payload, warmup + i, writerTransport, resolved);
 						latencies[i] = System.nanoTime() - transactionStart;
 					}
 					final long elapsed = System.nanoTime() - started;
@@ -163,11 +168,11 @@ public final class AeronFullPathBenchmark
 	}
 
 	private static void publishAndAwait(final EmbeddedStorageManager writer,
-		final AeronStoreIntegrationIT.Root root, final int payloadBytes, final int iteration,
+		final AeronStoreIntegrationIT.Root root, final byte[] payload, final int iteration,
 		final ClusterReplicationTransport transport, final AtomicLong resolved)
 	{
-		root.payload = new byte[payloadBytes];
-		Arrays.fill(root.payload, (byte)iteration);
+		Arrays.fill(payload, (byte)iteration);
+		root.payload = payload;
 		writer.store(root);
 		final long target = transport.positionProvider("store").latestSequence();
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);

@@ -45,7 +45,10 @@ import java.util.function.UnaryOperator;
 	)
 	{
 		final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
-		connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(distributor));
+		connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(
+			distributor,
+			delegate -> StorageBinaryTargetDistributing.New(delegate, distributor)
+		));
 		return foundation;
 	}
 
@@ -63,7 +66,8 @@ import java.util.function.UnaryOperator;
 	)
 	{
 		final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
-		connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(distributor, targetFactory));
+		connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(
+			distributor, targetFactory));
 		return foundation;
 	}
 
