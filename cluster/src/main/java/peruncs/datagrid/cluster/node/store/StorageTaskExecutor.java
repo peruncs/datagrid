@@ -1,9 +1,6 @@
 package peruncs.datagrid.cluster.node.store;
 
-
 import org.eclipse.store.storage.types.StorageConnection;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -41,7 +38,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
 
         /// Implements the single-flight storage-check state machine.
     class Abstract implements StorageTaskExecutor {
-        private static final Logger LOG = LoggerFactory.getLogger(Abstract.class);
+        private static final System.Logger LOGGER = System.getLogger(Abstract.class.getName());
         private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
         private final StorageConnection connection;
         private final ExecutorService executor;
@@ -66,7 +63,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
         public synchronized void runChecks() {
             if (this.closed) throw new IllegalStateException("Storage task executor is closed");
             if (this.checksTask == null || this.checksTask.isDone()) {
-                LOG.debug("Issuing new storage checks");
+                LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage checks");
                 this.checksTask = this.executor.submit(this::runChecksTask);
             }
         }
@@ -103,7 +100,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
                 this.connection.issueFullCacheCheck();
                 this.connection.issueFullFileCheck();
             } catch (final Throwable failure) {
-                LOG.error("Storage checks failed", failure);
+                LOGGER.log(System.Logger.Level.ERROR, "Storage checks failed", failure);
             }
         }
     }

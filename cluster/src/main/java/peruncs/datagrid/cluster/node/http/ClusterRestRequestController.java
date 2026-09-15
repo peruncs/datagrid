@@ -1,8 +1,5 @@
 package peruncs.datagrid.cluster.node.http;
 
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.backup.BackupNodeManager;
 import peruncs.datagrid.cluster.node.exceptions.BadRequestException;
 import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
@@ -139,7 +136,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         /// Shares validation, error mapping, and common monitoring requests.
     abstract class Abstract implements ClusterRestRequestController {
-        private static final Logger LOG = LoggerFactory.getLogger(ClusterRestRequestController.class);
+        private static final System.Logger LOGGER = System.getLogger(ClusterRestRequestController.class.getName());
 
         private final ClusterNodeManager nodeManager;
         private final NodelibraryPropertiesProvider properties;
@@ -163,13 +160,13 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         @Override
         public void postGc() throws HttpResponseException {
-            LOG.trace("Handling postDataGridGc request");
+            LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridGc request");
             this.handleRequest(this.nodeManager::startStorageChecks);
         }
 
         @Override
         public boolean getGc() throws HttpResponseException {
-            LOG.trace("Handling getDataGridGc request");
+            LOGGER.log(System.Logger.Level.TRACE, "Handling getDataGridGc request");
             return this.handleRequest(this.nodeManager::isRunningStorageChecks);
         }
 
@@ -294,7 +291,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
                     throw e;
                 }
 
-                LOG.error("Failed to handle request", e);
+                LOGGER.log(System.Logger.Level.ERROR, "Failed to handle request", e);
                 throw new InternalServerErrorException();
             }
         }
@@ -314,7 +311,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
                     throw e;
                 }
 
-                LOG.error("Failed to handle request", e);
+                LOGGER.log(System.Logger.Level.ERROR, "Failed to handle request", e);
                 throw new InternalServerErrorException();
             }
         }
@@ -322,7 +319,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         /// Serves requests for a node that can become the distributor.
     final class StorageNode extends Abstract {
-        private static final Logger LOG = LoggerFactory.getLogger(StorageNode.class);
+        private static final System.Logger LOGGER = System.getLogger(StorageNode.class.getName());
         private final StorageNodeManager storageNodeManager;
 
         private StorageNode(final StorageNodeManager storageNodeManager, final NodelibraryPropertiesProvider properties) {
@@ -342,7 +339,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         @Override
         public void postActivateDistributorStart() throws HttpResponseException {
-            LOG.trace("Handling postDataGridActivateDistributorStart request");
+            LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridActivateDistributorStart request");
             this.handleRequest(() ->
             {
                 if (!this.storageNodeManager.isDistributor()) {
@@ -359,7 +356,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         /// Serves requests for a node that reads from a backup.
     final class BackupNode extends Abstract {
-        private static final Logger LOG = LoggerFactory.getLogger(BackupNode.class);
+        private static final System.Logger LOGGER = System.getLogger(BackupNode.class.getName());
         private final BackupNodeManager backupNodeManager;
 
         private BackupNode(final BackupNodeManager backupNodeManager, final NodelibraryPropertiesProvider properties) {
@@ -369,7 +366,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         @Override
         public void postBackup(PostBackup.Body body) throws HttpResponseException {
-            LOG.trace("Handling postDataGridBackup request");
+            LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridBackup request");
             this.handleRequest(() -> this.backupNodeManager.createStorageBackup(unbox(body.getUseManualSlot())));
         }
 
@@ -381,7 +378,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         @Override
         public void postUpdates() throws HttpResponseException {
-            LOG.trace("Handling postDataGridUpdates request");
+            LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridUpdates request");
             this.handleRequest(this.backupNodeManager::stopReadingAtLatestMessage);
         }
 
@@ -396,7 +393,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         @Override
         public void postResumeUpdates() throws HttpResponseException {
-            LOG.trace("Handling postDataGridResumeUpdates request");
+            LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridResumeUpdates request");
             this.handleRequest(this.backupNodeManager::resumeReading);
         }
 

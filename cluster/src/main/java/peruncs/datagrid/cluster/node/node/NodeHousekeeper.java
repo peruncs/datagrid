@@ -1,7 +1,5 @@
 package peruncs.datagrid.cluster.node.node;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.backup.StorageBackupTaskExecutor;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageLimitGate;
@@ -23,7 +21,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// next run instead of overlapping it. A failing task is logged and the
 /// remaining tasks keep running.
 public final class NodeHousekeeper implements AutoCloseable {
-    private static final Logger LOG = LoggerFactory.getLogger(NodeHousekeeper.class);
+    private static final System.Logger LOGGER = System.getLogger(NodeHousekeeper.class.getName());
     private static final int THREADS = 2;
     private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
 
@@ -52,12 +50,12 @@ public final class NodeHousekeeper implements AutoCloseable {
     }
 
     private static void runGuarded(final ScheduledTask scheduled) {
-        LOG.info("Running housekeeper task '{}'", scheduled.name());
+        LOGGER.log(System.Logger.Level.INFO, "Running housekeeper task '%s'".formatted(scheduled.name()));
         try {
             scheduled.task().run();
-            LOG.debug("Finished housekeeper task '{}'", scheduled.name());
+            LOGGER.log(System.Logger.Level.DEBUG, "Finished housekeeper task '%s'".formatted(scheduled.name()));
         } catch (final Throwable failure) {
-            LOG.error("Housekeeper task '{}' failed", scheduled.name(), failure);
+            LOGGER.log(System.Logger.Level.ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
         }
     }
 
@@ -73,12 +71,12 @@ public final class NodeHousekeeper implements AutoCloseable {
         notNull(backupExecutor);
         return () ->
         {
-            LOG.info("Issuing full backup");
+            LOGGER.log(System.Logger.Level.INFO, "Issuing full backup");
             try {
                 backupExecutor.runBackup(false);
             } catch (final IllegalStateException busy) {
                 if (backupExecutor.isRunningBackup()) {
-                    LOG.info("Skipping scheduled backup because one is already running");
+                    LOGGER.log(System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
                     return;
                 }
                 throw busy;
@@ -102,12 +100,12 @@ public final class NodeHousekeeper implements AutoCloseable {
         notNull(limitGate);
         return () ->
         {
-            LOG.trace("Executing storage limit checker task");
+            LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
             final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
             final long usedGb = usedBytes / 1_000_000_000L;
-            LOG.info("Storage Size: {}gb/{}gb ({} bytes)", usedGb, limitGate.limitGb(), usedBytes);
+            LOGGER.log(System.Logger.Level.INFO, "Storage Size: %sgb/%sgb (%s bytes)".formatted(usedGb, limitGate.limitGb(), usedBytes));
             if (usedBytes >= limitGate.limitBytes()) {
-                LOG.warn("Storage limit reached! No more data will be stored!");
+                LOGGER.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
             }
             limitGate.updateUsage(usedBytes);
         };
@@ -132,7 +130,7 @@ public final class NodeHousekeeper implements AutoCloseable {
         if (interval == null || interval.isZero() || interval.isNegative()) {
             throw new IllegalArgumentException("Housekeeper task '%s' interval must be positive".formatted(name));
         }
-        LOG.info("Scheduling housekeeper task '{}' every {}", name, interval);
+        LOGGER.log(System.Logger.Level.INFO, "Scheduling housekeeper task '%s' every %s".formatted(name, interval));
         this.pending.add(new ScheduledTask(name, task, interval));
     }
 
@@ -154,7 +152,7 @@ public final class NodeHousekeeper implements AutoCloseable {
                     TimeUnit.MILLISECONDS
             );
         }
-        LOG.info("Started node housekeeper with {} task(s)", this.pending.size());
+        LOGGER.log(System.Logger.Level.INFO, "Started node housekeeper with %s task(s)".formatted(this.pending.size()));
     }
 
         /// Stops future runs and releases the threads. A running task is interrupted.
@@ -164,15 +162,15 @@ public final class NodeHousekeeper implements AutoCloseable {
             return;
         }
         this.closed = true;
-        LOG.info("Shutting down node housekeeper");
+        LOGGER.log(System.Logger.Level.INFO, "Shutting down node housekeeper");
         this.scheduler.shutdownNow();
         try {
             if (!this.scheduler.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                LOG.warn("Node housekeeper did not stop within {} ms", CLOSE_TIMEOUT_MILLIS);
+                LOGGER.log(System.Logger.Level.WARNING, "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            LOG.warn("Interrupted while stopping node housekeeper", interrupted);
+            LOGGER.log(System.Logger.Level.WARNING, "Interrupted while stopping node housekeeper", interrupted);
         }
     }
 

@@ -1,6 +1,5 @@
 package peruncs.datagrid.cluster.node.store;
 
-
 import org.eclipse.serializer.afs.types.AFile;
 import org.eclipse.serializer.collections.Set_long;
 import org.eclipse.serializer.collections.types.XGettingEnum;
@@ -9,8 +8,6 @@ import org.eclipse.serializer.persistence.types.*;
 import org.eclipse.serializer.persistence.types.PersistenceStorer.Creator;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.store.storage.types.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
 
@@ -120,7 +117,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
     ///
     /// @param <T> root type
     class Wrapper<T> implements ClusterStorageManager<T> {
-        private static final Logger LOG = LoggerFactory.getLogger(Wrapper.class);
+        private static final System.Logger LOGGER = System.getLogger(Wrapper.class.getName());
 
         private final StorageManager delegate;
         private final ShutdownCallback shutdownCallback;
@@ -142,7 +139,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public boolean shutdown() {
-            LOG.info("Shutting down ClusterStorageManager");
+            LOGGER.log(System.Logger.Level.INFO, "Shutting down ClusterStorageManager");
             return ClusterStorageManager.shutdownWithCallback(this.delegate, this.shutdownCallback);
         }
 
@@ -330,7 +327,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
     ///
     /// @param <T> root type
     class Default<T> implements ClusterStorageManager<T> {
-        private static final Logger LOG = LoggerFactory.getLogger(Default.class);
+        private static final System.Logger LOGGER = System.getLogger(Default.class.getName());
         private final StorageSizeValidation storageSizeValidation;
         private final StorageManager delegate;
         private final ShutdownCallback shutdownCallback;
@@ -499,7 +496,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public boolean shutdown() {
-            LOG.info("Shutting down ClusterStorageManager");
+            LOGGER.log(System.Logger.Level.INFO, "Shutting down ClusterStorageManager");
             return ClusterStorageManager.shutdownWithCallback(this.delegate, this.shutdownCallback);
         }
 

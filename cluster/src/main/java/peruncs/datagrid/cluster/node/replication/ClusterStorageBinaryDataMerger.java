@@ -10,9 +10,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDescription;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.serializer.util.X;
-import org.eclipse.serializer.util.logging.Logging;
 import org.eclipse.store.storage.types.StorageConnection;
-import org.slf4j.Logger;
 import peruncs.datagrid.cluster.node.exceptions.IncompatibleTypeDictionaryException;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.storage.types.*;
@@ -80,7 +78,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 
         /// Applies imported data on one bounded worker and reports failures.
     class Default implements ClusterStorageBinaryDataMerger {
-        private static final Logger LOG = Logging.getLogger(ClusterStorageBinaryDataMerger.class);
+        private static final System.Logger LOGGER = System.getLogger(ClusterStorageBinaryDataMerger.class.getName());
         private static final long MAX_CACHED_BYTES = 1L << 30;
         private static final long APPLY_TIMEOUT_SECONDS = 60L;
         private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable ->
@@ -301,7 +299,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
                 final RuntimeException normalized = t instanceof RuntimeException runtime
                         ? runtime : new IllegalStateException("Storage binary merger failed", t);
                 this.failure.compareAndSet(null, normalized);
-                LOG.error("Storage binary merger failed", this.failure.get());
+                LOGGER.log(System.Logger.Level.ERROR, "Storage binary merger failed", this.failure.get());
                 this.releaseCachedData();
                 if (t instanceof Error error) throw error;
                 throw normalized;
@@ -448,7 +446,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
                 {
                     final PersistenceTypeDefinition localType = localTypeDictionary.lookupTypeById(remoteType.typeId());
                     if (localType == null) {
-                        LOG.debug("New type: {}", remoteType.typeName());
+                        LOGGER.log(System.Logger.Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
                         this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
 
                     } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
@@ -495,7 +493,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
                 // grace period and then kill the process. But any other case we will await the task orderly like this.
                 terminated = this.executor.awaitTermination(30, TimeUnit.SECONDS);
                 if (!terminated) {
-                    LOG.warn("Timed out waiting for storage graph updates; interrupting remaining work");
+                    LOGGER.log(System.Logger.Level.WARNING, "Timed out waiting for storage graph updates; interrupting remaining work");
                     this.executor.shutdownNow();
                     terminated = this.executor.awaitTermination(5, TimeUnit.SECONDS);
                     if (!terminated) {

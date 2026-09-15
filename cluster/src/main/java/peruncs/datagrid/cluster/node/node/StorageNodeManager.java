@@ -1,8 +1,5 @@
 package peruncs.datagrid.cluster.node.node;
 
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.node.exceptions.NotADistributorException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
@@ -76,7 +73,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
 
         /// Implements the reader-to-distributor role transition.
     final class Default implements StorageNodeManager {
-        private static final Logger LOG = LoggerFactory.getLogger(StorageNodeManager.class);
+        private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
         private final ClusterStorageBinaryDataDistributor dataDistributor;
         private final StorageTaskExecutor storageTaskExecutor;
@@ -176,7 +173,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 throw new IllegalStateException("Cannot promote a failed replication reader",
                         this.dataClient.failure());
             }
-            LOG.info("Turning on distribution.");
+            LOGGER.log(System.Logger.Level.INFO, "Turning on distribution.");
             this.isSwitchingToDistributor = true;
             try {
                 this.dataClient.stopAtLatestMessage();
@@ -269,7 +266,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 /* Reader roles cannot infer the writer boundary from an applied cursor.
                  * Expose unknown as -1 to monitoring rather than turning a metrics scrape
                  * into a node failure. */
-                LOG.debug("Latest replication position is unavailable for this node role", unavailable);
+                LOGGER.log(System.Logger.Level.DEBUG, "Latest replication position is unavailable for this node role", unavailable);
                 return -1L;
             } catch (final NodelibraryException failure) {
                 throw new IllegalStateException("Failed to read latest replication position", failure);
@@ -310,7 +307,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// aggregating every failure. Idempotent.
         @Override
         public synchronized void close() {
-            LOG.info("Closing StorageNodeManager");
+            LOGGER.log(System.Logger.Level.INFO, "Closing StorageNodeManager");
             if (this.closed) {
                 return;
             }

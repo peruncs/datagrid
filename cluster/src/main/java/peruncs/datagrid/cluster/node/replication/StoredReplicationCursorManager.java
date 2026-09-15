@@ -1,7 +1,5 @@
 package peruncs.datagrid.cluster.node.replication;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 
 import java.io.IOException;
@@ -45,7 +43,7 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
 
         /// Persists replication cursors with one forced binary backend.
     final class Default implements StoredReplicationCursorManager {
-        private static final Logger LOG = LoggerFactory.getLogger(StoredReplicationCursorManager.class);
+        private static final System.Logger LOGGER = System.getLogger(StoredReplicationCursorManager.class.getName());
 
         private final Path path;
 
@@ -73,8 +71,8 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
             try {
                 ReplicationCursorStore.write(this.path, cursor);
                 final long written = cursor.providerPosition().length;
-                if (LOG.isDebugEnabled() && cursor.logicalSequence() % 10_000 == 0) {
-                    LOG.debug("Stored replication sequence {}, written {} bytes", cursor.logicalSequence(), written);
+                if (LOGGER.isLoggable(System.Logger.Level.DEBUG) && cursor.logicalSequence() % 10_000 == 0) {
+                    LOGGER.log(System.Logger.Level.DEBUG, "Stored replication sequence %s, written %s bytes".formatted(cursor.logicalSequence(), written));
                 }
             } catch (final IOException | RuntimeException e) {
                 throw new NodelibraryException("Failed to write replication cursor file", e);
@@ -89,14 +87,14 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
                 return;
             }
 
-            LOG.info("Initializing StoredReplicationCursorManager");
+            LOGGER.log(System.Logger.Level.INFO, "Initializing StoredReplicationCursorManager");
 
             try {
-                LOG.debug("Reading existing replication cursor file.");
+                LOGGER.log(System.Logger.Level.DEBUG, "Reading existing replication cursor file.");
                 this.cursor = ReplicationCursorStore.read(this.path);
-                LOG.debug("Read previous replication sequence at {}", this.cursor.logicalSequence());
+                LOGGER.log(System.Logger.Level.DEBUG, "Read previous replication sequence at %s".formatted(this.cursor.logicalSequence()));
             } catch (final NoSuchFileException missing) {
-                LOG.debug("New replication cursor file has been created.");
+                LOGGER.log(System.Logger.Level.DEBUG, "New replication cursor file has been created.");
                 this.cursor = new ReplicationCursor("none", null, -1, new byte[0]);
             } catch (final IOException failure) {
                 throw new NodelibraryException("Failed to read binary replication cursor %s".formatted(this.path), failure);
@@ -116,7 +114,7 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
             if (this.closed) {
                 return;
             }
-            LOG.trace("Closing StoredReplicationCursorManager");
+            LOGGER.log(System.Logger.Level.TRACE, "Closing StoredReplicationCursorManager");
             this.closed = true;
         }
     }

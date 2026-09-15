@@ -7,8 +7,6 @@ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream;
 import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConnection;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
@@ -46,7 +44,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
 
         /// Implements backup export, upload, download, and cleanup.
     final class Default implements NetworkArchiveBackupBackend {
-        private static final Logger LOG = LoggerFactory.getLogger(NetworkArchiveBackupBackend.class);
+        private static final System.Logger LOGGER = System.getLogger(NetworkArchiveBackupBackend.class.getName());
         private static final String USER_UPLOADED_STORAGE_S3_KEY = BackupFileNames.USER_UPLOADED_STORAGE + ".tar.xz";
         private static final Pattern BACKUP_NAME = Pattern.compile("^(\\d+)(\\.manual)?\\.tar\\.xz$");
         private static final int MAX_ARCHIVE_ENTRIES = 1_000_000;
@@ -135,7 +133,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         /// @return decoded cursor, or empty when there is no earlier backup
         @Override
         public Optional<ReplicationCursor> getCursorFromPreviousBackup(final int skip) throws NodelibraryException {
-            LOG.trace("Getting backup metadata info of latest-{}", skip);
+            LOGGER.log(System.Logger.Level.TRACE, "Getting backup metadata info of latest-%s".formatted(skip));
 
             final var previousBackupMetadata = this.getLastBackup(skip).orElse(null);
             if (previousBackupMetadata == null) {
@@ -157,7 +155,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                 try {
                     StorageFileOperations.deleteDirectory(scratchSpacePath);
                 } catch (final NodelibraryException e) {
-                    LOG.warn("Failed to clean up cursor scratch storage at {}.", scratchSpacePath, e);
+                    LOGGER.log(System.Logger.Level.WARNING, "Failed to clean up cursor scratch storage at %s.".formatted(scratchSpacePath), e);
                 }
             }
 
@@ -223,7 +221,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                 try {
                     this.deleteFile(archiveFilePath);
                 } catch (final NodelibraryException e) {
-                    LOG.warn("Failed to clean up exported storage at {}", archiveFilePath, e);
+                    LOGGER.log(System.Logger.Level.WARNING, "Failed to clean up exported storage at %s".formatted(archiveFilePath), e);
                 }
                 try {
                     /* The archive is the remote visibility boundary.  Remove the exported
@@ -231,8 +229,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                      * entire backup between requests and could mix files after a crash. */
                     this.clearScratchSpace();
                 } catch (final NodelibraryException e) {
-                    LOG.warn("Failed to clean up exported backup scratch space at {}",
-                            this.storageExportScratchSpacePath, e);
+                    LOGGER.log(System.Logger.Level.WARNING, "Failed to clean up exported backup scratch space at %s".formatted(this.storageExportScratchSpacePath), e);
                 }
             }
         }
@@ -323,7 +320,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         }
 
         private void compressStorage(final Path workingDir, final Path archiveFilePath) throws NodelibraryException {
-            LOG.trace("Compressing storage");
+            LOGGER.log(System.Logger.Level.TRACE, "Compressing storage");
             try (OutputStream file = Files.newOutputStream(archiveFilePath);
                  XZCompressorOutputStream xz = new XZCompressorOutputStream(file);
                  TarArchiveOutputStream tar = new TarArchiveOutputStream(xz)) {
@@ -345,7 +342,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         }
 
         private void deleteFile(final Path path) throws NodelibraryException {
-            LOG.trace("Deleting file {}", path);
+            LOGGER.log(System.Logger.Level.TRACE, "Deleting file %s".formatted(path));
             try {
                 Files.deleteIfExists(path);
             } catch (final IOException e) {
@@ -494,7 +491,6 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
             }
         }
 
-
         private void validateExtractedArchive(final Path root, final boolean requireBackupMetadata)
                 throws NodelibraryException {
             try (final var paths = Files.walk(root)) {
@@ -516,7 +512,6 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                 throw new NodelibraryException("Failed to validate extracted backup archive", failure);
             }
         }
-
 
         private String toArchiveFileName(final BackupMetadata backup) {
             return "%s.tar.xz".formatted(backup.timestamp() + (backup.manualSlot() ? ".manual" : ""));

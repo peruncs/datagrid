@@ -9,8 +9,6 @@ import org.eclipse.store.afs.nio.types.NioFileSystem;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.exceptions.StorageException;
 import org.eclipse.store.storage.types.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
 import peruncs.datagrid.cluster.node.backup.*;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
@@ -321,7 +319,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
     /// @param <F> fluent implementation type
     class Default<F extends Default<?>> extends InstanceDispatcher.Default
             implements ClusterFoundation<F>, Unpersistable {
-        private static final Logger LOG = LoggerFactory.getLogger(ClusterFoundation.class);
+        private static final System.Logger LOGGER = System.getLogger(ClusterFoundation.class.getName());
 
         private StorageBackupBackend backupBackend;
         private BackupProxyHttpClient backupProxyHttpClient;
@@ -536,7 +534,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
         /// @return stored replication-cursor manager
         protected StoredReplicationCursorManager ensureStoredReplicationCursorManager() {
             final var cursorPath = this.storageParentPath().resolve("offset");
-            LOG.trace("Creating StoredReplicationCursorManager for offset file at {}", cursorPath);
+            LOGGER.log(System.Logger.Level.TRACE, "Creating StoredReplicationCursorManager for offset file at %s".formatted(cursorPath));
             return StoredReplicationCursorManager.NewAtomic(cursorPath);
         }
 
@@ -571,10 +569,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
                     this.delegate.close();
                 }
             };
-            LOG.trace(
-                    "Created AfterDataMessageConsumedListener->StoredReplicationCursorManager delegate. WillRun={}",
-                    props.isBackupNode() || !"writer".equalsIgnoreCase(props.replicationRole())
-            );
+            LOGGER.log(System.Logger.Level.TRACE, "Created AfterDataMessageConsumedListener->StoredReplicationCursorManager delegate. WillRun=%s".formatted(props.isBackupNode() || !"writer".equalsIgnoreCase(props.replicationRole())));
             return storedCursorUpdater;
         }
 
@@ -1148,7 +1143,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
         ///
         /// @throws NodelibraryException if startup fails
         protected void startBackupNode() throws NodelibraryException {
-            LOG.info("Starting backup cluster node");
+            LOGGER.log(System.Logger.Level.INFO, "Starting backup cluster node");
 
             this.getReplicationPositionProvider().init();
 
@@ -1171,7 +1166,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
             // user uploaded a new storage
             if (backend.hasUserUploadedStorage()) {
-                LOG.info("Downloading user uploaded storage");
+                LOGGER.log(System.Logger.Level.INFO, "Downloading user uploaded storage");
 
                 useLatestCursor = true;
                 // since the storage is now different from before,
@@ -1181,9 +1176,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
                 backend.downloadUserUploadedStorage(storageParentPath);
                 backend.deleteUserUploadedStorage();
             } else if (this.restoreLatestBackupIfRequired(storageRootPath, backend)) {
-                LOG.info("Restored the newest compatible storage backup");
+                LOGGER.log(System.Logger.Level.INFO, "Restored the newest compatible storage backup");
             } else {
-                LOG.info("Starting with local storage");
+                LOGGER.log(System.Logger.Level.INFO, "Starting with local storage");
             }
 
             if (useLatestCursor) {
@@ -1195,11 +1190,11 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
                             "Cannot bootstrap uploaded storage: replication transport does not expose a writer latest position",
                             failure);
                 }
-                LOG.debug("Set starting replication cursor to: {}", cursor);
+                LOGGER.log(System.Logger.Level.DEBUG, "Set starting replication cursor to: %s".formatted(cursor));
                 this.getStoredReplicationCursorManager().set(cursor);
             }
 
-            LOG.info("Creating node cluster controller");
+            LOGGER.log(System.Logger.Level.INFO, "Creating node cluster controller");
 
             final var embeddedStorageManager = this.prepareEmbeddedStorage(storageRootPath).start();
             this.initializeRoot(embeddedStorageManager);
@@ -1222,7 +1217,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->
             {
-                LOG.info("Issuing GC and CC");
+                LOGGER.log(System.Logger.Level.INFO, "Issuing GC and CC");
                 gcConnection.issueFullCacheCheck();
                 gcConnection.issueFullGarbageCollection();
             }, this.backupNodeGcInterval());
@@ -1234,7 +1229,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
             // storage nodes need an initial backup to start from
             if (requiresStorageUpload) {
-                LOG.info("Uploading starter backup for storage nodes");
+                LOGGER.log(System.Logger.Level.INFO, "Uploading starter backup for storage nodes");
                 /* This is a bootstrap barrier.  The storage nodes must not observe the
                  * uploaded-storage state until the archive is durable. */
                 this.getStorageBackupManager().createStorageBackup(false);
@@ -1247,7 +1242,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
         ///
         /// @throws NodelibraryException if startup fails
         protected void startStorageNode() throws NodelibraryException {
-            LOG.info("Starting storage cluster node");
+            LOGGER.log(System.Logger.Level.INFO, "Starting storage cluster node");
 
             final var storageParentPath = this.storageParentPath();
             final var storageRootPath = storageParentPath.resolve("storage");
@@ -1261,9 +1256,9 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
              */
 
             if (this.restoreLatestBackupIfRequired(storageRootPath, backend)) {
-                LOG.info("Restored the newest compatible storage backup");
+                LOGGER.log(System.Logger.Level.INFO, "Restored the newest compatible storage backup");
             } else {
-                LOG.info(Files.exists(storageRootPath)
+                LOGGER.log(System.Logger.Level.INFO, Files.exists(storageRootPath)
                         ? "Resuming existing local storage and cursor"
                         : "Starting with local storage");
             }
@@ -1310,7 +1305,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->
             {
-                LOG.info("Issuing GC and CC");
+                LOGGER.log(System.Logger.Level.INFO, "Issuing GC and CC");
                 gcConnection.issueFullCacheCheck();
                 gcConnection.issueFullGarbageCollection();
             }, this.storageNodeGcInterval());
@@ -1364,7 +1359,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
 
         private void initializeRoot(final StorageManager storage) {
             if (storage.root() == null) {
-                LOG.debug("Setting and storing new root from root supplier");
+                LOGGER.log(System.Logger.Level.DEBUG, "Setting and storing new root from root supplier");
                 final Object root = this.getRootSupplier().get();
                 storage.setRoot(root instanceof Lazy ? root : Lazy.Reference(root));
                 storage.storeRoot();
@@ -1375,7 +1370,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
         ///
         /// @throws NodelibraryException if startup fails
         protected void startDevNode() throws NodelibraryException {
-            LOG.info("Starting dev cluster node");
+            LOGGER.log(System.Logger.Level.INFO, "Starting dev cluster node");
             final var storage = this.getEmbeddedStorageFoundation().start();
             if (storage.root() == null) {
                 final var root = this.getRootSupplier().get();
@@ -1399,7 +1394,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
                 return;
             }
 
-            LOG.info("Deleting files at {}", path);
+            LOGGER.log(System.Logger.Level.INFO, "Deleting files at %s".formatted(path));
             StorageFileOperations.deleteDirectory(path);
         }
 
@@ -1441,10 +1436,7 @@ public interface ClusterFoundation<F extends ClusterFoundation<?>> extends Insta
                 return false;
             }
 
-            LOG.warn(
-                    "Replacing local storage with the newest compatible backup (local cursor={}, backup cursor={}, identityMismatch={}, localBehind={}, equalSequencePositionMismatch={})",
-                    local.logicalSequence(), backup.logicalSequence(), identityMismatch, localBehind,
-                    equalSequencePositionMismatch);
+            LOGGER.log(System.Logger.Level.WARNING, "Replacing local storage with the newest compatible backup (local cursor=%s, backup cursor=%s, identityMismatch=%s, localBehind=%s, equalSequencePositionMismatch=%s)".formatted(local.logicalSequence(), backup.logicalSequence(), identityMismatch, localBehind, equalSequencePositionMismatch));
             this.closeStoredReplicationCursorManager();
             this.deleteDirectory(storageRootPath);
             this.deleteOffsetFile();

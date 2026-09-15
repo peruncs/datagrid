@@ -1,9 +1,6 @@
 package peruncs.datagrid.cluster.node.store;
 
-
 import org.eclipse.serializer.afs.types.ADirectory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -30,7 +27,7 @@ public interface StorageDiskSpaceReader {
 
         /// Recursively measures the configured Store directory.
     class Default implements StorageDiskSpaceReader {
-        private static final Logger LOG = LoggerFactory.getLogger(StorageDiskSpaceReader.class);
+        private static final System.Logger LOGGER = System.getLogger(StorageDiskSpaceReader.class.getName());
         private static final long CACHE_NANOS = 5_000_000_000L;
         private final ADirectory storageDir;
         private final AtomicLong lastLog = new AtomicLong(System.currentTimeMillis());
@@ -62,9 +59,9 @@ public interface StorageDiskSpaceReader {
             }
             final long nowMillis = System.currentTimeMillis();
             final long previousLog = this.lastLog.get();
-            if (LOG.isTraceEnabled() && nowMillis - previousLog > 600_000L &&
+            if (LOGGER.isLoggable(System.Logger.Level.TRACE) && nowMillis - previousLog > 600_000L &&
                 this.lastLog.compareAndSet(previousLog, nowMillis)) {
-                LOG.trace("Read current storage disk space ({})", sizeBytes);
+                LOGGER.log(System.Logger.Level.TRACE, "Read current storage disk space (%s)".formatted(sizeBytes));
             }
             return sizeBytes;
         }
@@ -80,10 +77,10 @@ public interface StorageDiskSpaceReader {
                         total[0] = Math.addExact(total[0], f.size());
                     } catch (final ArithmeticException overflow) {
                         total[0] = Long.MAX_VALUE;
-                        LOG.warn("Storage size overflow while measuring {}", f);
+                        LOGGER.log(System.Logger.Level.WARNING, "Storage size overflow while measuring %s".formatted(f));
                     }
                 } catch (final RuntimeException e) {
-                    LOG.debug("Could not measure storage file {}; it may have been removed", f, e);
+                    LOGGER.log(System.Logger.Level.DEBUG, "Could not measure storage file %s; it may have been removed".formatted(f), e);
                 }
             });
             try {
@@ -97,7 +94,7 @@ public interface StorageDiskSpaceReader {
                     }
                 });
             } catch (final RuntimeException failure) {
-                LOG.debug("Could not measure a storage directory; it may have been removed", failure);
+                LOGGER.log(System.Logger.Level.DEBUG, "Could not measure a storage directory; it may have been removed", failure);
             }
             return total[0];
         }

@@ -1,9 +1,6 @@
 package peruncs.datagrid.cluster.node.backup;
 
-
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 
 import java.io.ByteArrayOutputStream;
@@ -87,7 +84,7 @@ public interface BackupProxyHttpClient {
 
         /// Implements backup transfers with the JDK HTTP client.
     final class Default implements BackupProxyHttpClient {
-        private static final Logger LOG = LoggerFactory.getLogger(BackupProxyHttpClient.class);
+        private static final System.Logger LOGGER = System.getLogger(BackupProxyHttpClient.class.getName());
         private static final int MAX_METADATA_RESPONSE_BYTES = 1 << 20;
         private static final Pattern SAFE_OBJECT_KEY = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]*");
         private static final long MAX_RETRY_AFTER_SECONDS = 300L;
@@ -169,7 +166,7 @@ public interface BackupProxyHttpClient {
 
         @Override
         public void upload(final String s3Key, final Path filePath) throws NodelibraryException {
-            LOG.trace("Uploading compressed storage archive");
+            LOGGER.log(System.Logger.Level.TRACE, "Uploading compressed storage archive");
 
             final HttpResponse<Void> res;
             try {
@@ -208,7 +205,7 @@ public interface BackupProxyHttpClient {
         /// @return absolute destination path
         @Override
         public Path download(final String s3Key, final Path destinationFilePath) throws NodelibraryException {
-            LOG.trace("Downloading storage archive");
+            LOGGER.log(System.Logger.Level.TRACE, "Downloading storage archive");
 
             try {
                 final Path parent = destinationFilePath.toAbsolutePath().getParent();
@@ -241,7 +238,7 @@ public interface BackupProxyHttpClient {
                     try {
                         Files.deleteIfExists(temporary);
                     } catch (final IOException cleanupFailure) {
-                        LOG.warn("Failed to remove partial backup download {}", temporary, cleanupFailure);
+                        LOGGER.log(System.Logger.Level.WARNING, "Failed to remove partial backup download %s".formatted(temporary), cleanupFailure);
                     }
                 }
             }

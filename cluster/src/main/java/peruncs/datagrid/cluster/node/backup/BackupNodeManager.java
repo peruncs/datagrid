@@ -1,9 +1,6 @@
 package peruncs.datagrid.cluster.node.backup;
 
-
 import org.eclipse.store.storage.types.StorageController;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.node.node.ClusterNodeManager;
 import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
@@ -64,7 +61,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
 
         /// Coordinates backup work with the replication reader and storage controller.
     final class Default implements BackupNodeManager {
-        private static final Logger LOG = LoggerFactory.getLogger(BackupNodeManager.class);
+        private static final System.Logger LOGGER = System.getLogger(BackupNodeManager.class.getName());
 
         private final StorageBackupTaskExecutor tasks;
         private final ClusterStorageBinaryDataClient dataClient;
@@ -135,7 +132,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
 
         @Override
         public void close() {
-            LOG.info("Closing BackupNodeManager.");
+            LOGGER.log(System.Logger.Level.INFO, "Closing BackupNodeManager.");
             try {
                 this.dataClient.dispose();
             } finally {

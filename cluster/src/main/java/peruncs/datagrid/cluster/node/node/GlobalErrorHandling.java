@@ -1,8 +1,5 @@
 package peruncs.datagrid.cluster.node.node;
 
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 
 /// Reports an unrecoverable node error without terminating the hosting JVM.
@@ -11,7 +8,7 @@ import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 /// `System.exit`.  The application supervisor decides whether a fatal
 /// node error warrants process termination.
 public final class GlobalErrorHandling {
-    private static final Logger LOG = LoggerFactory.getLogger(GlobalErrorHandling.class);
+    private static final System.Logger LOGGER = System.getLogger(GlobalErrorHandling.class.getName());
 
     private GlobalErrorHandling() {
     }
@@ -24,7 +21,7 @@ public final class GlobalErrorHandling {
     ///          wraps checked failures in a [NodelibraryException].
     public static void handleFatalError(final Throwable t) {
         try {
-            LOG.error("Shutting down application due to fatal error", t);
+            LOGGER.log(System.Logger.Level.ERROR, "Shutting down application due to fatal error", t);
         } catch (final Throwable ignored) {
             // ignore any failures here
         }

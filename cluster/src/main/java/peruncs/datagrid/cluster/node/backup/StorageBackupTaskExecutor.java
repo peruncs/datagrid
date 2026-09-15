@@ -1,9 +1,6 @@
 package peruncs.datagrid.cluster.node.backup;
 
-
 import org.eclipse.store.storage.types.StorageConnection;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
 
 import java.util.concurrent.ExecutorService;
@@ -40,7 +37,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
 
         /// Provides one backup thread and the inherited storage-check thread.
     final class Default extends StorageTaskExecutor.Abstract implements StorageBackupTaskExecutor {
-        private static final Logger LOG = LoggerFactory.getLogger(StorageBackupTaskExecutor.class);
+        private static final System.Logger LOGGER = System.getLogger(StorageBackupTaskExecutor.class.getName());
         private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
         private final StorageBackupManager backupManager;
         private final ExecutorService backupExecutor;
@@ -65,13 +62,13 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             if (this.backupTask != null && !this.backupTask.isDone()) {
                 throw new IllegalStateException("Storage backup is already running");
             }
-            LOG.debug("Issuing new storage backup");
+            LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage backup");
             this.backupTask = this.backupExecutor.submit(() ->
             {
                 try {
                     this.backupManager.createStorageBackup(useManualSlot);
                 } catch (final Throwable failure) {
-                    LOG.error("Storage backup failed", failure);
+                    LOGGER.log(System.Logger.Level.ERROR, "Storage backup failed", failure);
                 }
             });
         }

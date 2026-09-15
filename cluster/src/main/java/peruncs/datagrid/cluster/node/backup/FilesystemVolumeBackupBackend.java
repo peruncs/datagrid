@@ -2,8 +2,6 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConnection;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
@@ -39,7 +37,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
 
         /// Implements the filesystem backup marker and copy protocol.
     class Default implements FilesystemVolumeBackupBackend {
-        private static final Logger LOG = LoggerFactory.getLogger(FilesystemVolumeBackupBackend.class);
+        private static final System.Logger LOGGER = System.getLogger(FilesystemVolumeBackupBackend.class.getName());
 
         private final Path backupVolumePath;
         private final Path userUploadedStorageFolderPath;
@@ -51,7 +49,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
 
         @Override
         public Optional<ReplicationCursor> getCursorFromPreviousBackup(final int skip) throws NodelibraryException {
-            LOG.trace("Getting backup metadata info of latest-{}", skip);
+            LOGGER.log(System.Logger.Level.TRACE, "Getting backup metadata info of latest-%s".formatted(skip));
 
             final var previousBackupMetadata = this.getLastBackup(skip).orElse(null);
             if (previousBackupMetadata == null) {

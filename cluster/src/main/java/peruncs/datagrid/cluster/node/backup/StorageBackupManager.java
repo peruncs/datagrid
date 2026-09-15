@@ -2,8 +2,6 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.serializer.concurrency.XThreads;
 import org.eclipse.store.storage.types.StorageConnection;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
@@ -110,7 +108,7 @@ public interface StorageBackupManager {
 
         /// Implements the stop, backup, retention, and resume sequence.
     class Default implements StorageBackupManager {
-        private static final Logger LOG = LoggerFactory.getLogger(StorageBackupManager.class);
+        private static final System.Logger LOGGER = System.getLogger(StorageBackupManager.class.getName());
         private static final long STOP_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(1);
         private static final int RETENTION_RETRY_ATTEMPTS = 3;
         private static final long RETENTION_RETRY_DELAY_MILLIS = 100L;
@@ -143,7 +141,7 @@ public interface StorageBackupManager {
         public void createStorageBackup(final boolean useManualSlot) throws NodelibraryException {
             this.backupLock.lock();
             try {
-                LOG.trace("Creating new storage backup");
+                LOGGER.log(System.Logger.Level.TRACE, "Creating new storage backup");
 
                 final List<BackupMetadata> backups = this.listBackups();
                 final long timestamp = this.nextBackupTimestamp(backups, useManualSlot);
@@ -184,7 +182,7 @@ public interface StorageBackupManager {
                             // just in case there are multiple backups too many
                             final int toDeleteCount = (int) backups.stream().filter(b -> !b.manualSlot()).count()
                                                       - this.maxBackupCount + 1;
-                            LOG.debug("Deleting {} oldest backup(s)", toDeleteCount);
+                            LOGGER.log(System.Logger.Level.DEBUG, "Deleting %s oldest backup(s)".formatted(toDeleteCount));
                             final List<BackupMetadata> nonManual = backups.stream()
                                     .filter(b -> !b.manualSlot())
                                     .sorted(Comparator.comparingLong(BackupMetadata::timestamp))
@@ -204,14 +202,13 @@ public interface StorageBackupManager {
                                         final ReplicationLogRetention.MaintenanceResult result =
                                                 this.deleteThroughWithReplayRetry(info);
                                         switch (result.status()) {
-                                            case DELETED -> LOG.debug("Replication retention deleted Archive history through {}", result.position());
-                                            case NOTHING_TO_DELETE -> LOG.debug("Replication retention found no complete Archive segment to delete");
-                                            case DEFERRED_ACTIVE_REPLAY -> LOG.warn(
-                                                    "Replication retention deferred because an Archive replay is active at {}", result.position());
+                                            case DELETED -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention deleted Archive history through %s".formatted(result.position()));
+                                            case NOTHING_TO_DELETE -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention found no complete Archive segment to delete");
+                                            case DEFERRED_ACTIVE_REPLAY -> LOGGER.log(System.Logger.Level.WARNING, "Replication retention deferred because an Archive replay is active at %s".formatted(result.position()));
                                         }
                                     });
                         } else {
-                            LOG.warn("Replication retention is unsupported; preserving Archive history");
+                            LOGGER.log(System.Logger.Level.WARNING, "Replication retention is unsupported; preserving Archive history");
                         }
                     }
                 } catch (final RuntimeException | Error failure) {
@@ -294,7 +291,7 @@ public interface StorageBackupManager {
         }
 
         private void stopDataClient() {
-            LOG.trace("Waiting for data client to stop reading");
+            LOGGER.log(System.Logger.Level.TRACE, "Waiting for data client to stop reading");
             this.dataClient.stopAtLatestMessage();
             final long deadline = ReplicationRetry.deadlineNanos(STOP_TIMEOUT_NANOS);
             while (true) {
