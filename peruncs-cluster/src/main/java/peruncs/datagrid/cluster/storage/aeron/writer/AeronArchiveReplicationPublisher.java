@@ -294,6 +294,18 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         return recordingId[0];
     }
 
+        /// Builds the archive-await idle strategy from the configured retry policy.
+    ///
+    /// The recording start/stop/recorded awaits previously used Aeron defaults
+    /// while the offer path used the configured policy; one construction keeps
+    /// them consistent.
+    private static BackoffIdleStrategy idleStrategy(final AeronReplicationConfiguration configuration) {
+        final var policy = configuration.retryPolicy();
+        return new BackoffIdleStrategy(
+                policy.idleMaxSpins(), policy.idleMaxYields(),
+                policy.idleMinParkNanos(), policy.idleMaxParkNanos());
+    }
+
     private static long awaitRecorded(
             final AeronArchive archive,
             final ExclusivePublication publication,
@@ -303,7 +315,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     ) {
         final CountersReader counters = archive.context().aeron().countersReader();
         final long deadline = ReplicationRetry.deadlineNanos(configuration.recordedPositionTimeoutNanos());
-        final BackoffIdleStrategy idle = new BackoffIdleStrategy();
+        final BackoffIdleStrategy idle = idleStrategy(configuration);
         long lastRecordedPosition = Aeron.NULL_VALUE;
         boolean lastActive = false;
         int counterId = -1;
@@ -340,7 +352,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                 if (archivePosition >= commitPosition) {
                     return archivePosition;
                 }
-                nextArchiveProbe = System.nanoTime() + 10_000_000L;
+                nextArchiveProbe = System.nanoTime() + configuration.retryPolicy().archiveProbeDelayNanos();
             }
             /* The local counter is checked first, so an ordinary successful commit
              * returns without touching the control subscription. While the recording
@@ -365,9 +377,9 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     ) {
         final CountersReader counters = archive.context().aeron().countersReader();
         final long deadline = ReplicationRetry.deadlineNanos(configuration.recordingStartTimeoutNanos());
-        final BackoffIdleStrategy idle = new BackoffIdleStrategy();
+        final BackoffIdleStrategy idle = idleStrategy(configuration);
         long nextCatalogProbe = 0L;
-        long catalogProbeDelayNanos = 1_000_000L;
+        long catalogProbeDelayNanos = configuration.retryPolicy().catalogProbeInitialDelayNanos();
         while (true) {
             checkInterrupted("waiting for Aeron Archive recording start");
             final String archiveError = pollForErrorResponse(archive);
@@ -401,7 +413,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                 }
                 if (recordingIdHint < 0) {
                     nextCatalogProbe = System.nanoTime() + catalogProbeDelayNanos;
-                    catalogProbeDelayNanos = Math.min(100_000_000L, catalogProbeDelayNanos * 2L);
+                    catalogProbeDelayNanos = Math.min(
+                            configuration.retryPolicy().catalogProbeMaxDelayNanos(), catalogProbeDelayNanos * 2L);
                 }
             }
             if (ReplicationRetry.expired(deadline)) {
@@ -512,14 +525,14 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final AeronReplicationConfiguration configuration
     ) {
         final long deadline = ReplicationRetry.deadlineNanos(configuration.recordingStopTimeoutNanos());
-        final BackoffIdleStrategy idle = new BackoffIdleStrategy();
+        final BackoffIdleStrategy idle = idleStrategy(configuration);
         long nextStopProbe = 0L;
         while (true) {
             checkInterrupted("waiting for Aeron Archive recording stop");
             final long now = System.nanoTime();
             if (now >= nextStopProbe) {
                 if (getStopPosition(archive, recordingId) >= 0) return;
-                nextStopProbe = now + 10_000_000L;
+                nextStopProbe = now + configuration.retryPolicy().archiveProbeDelayNanos();
             }
             final String archiveError = pollForErrorResponse(archive);
             if (archiveError != null) throw new IllegalStateException("Aeron archive error: %s".formatted(archiveError));

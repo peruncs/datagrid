@@ -8,9 +8,13 @@ import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
 
 import java.io.OutputStream;
+import java.net.URI;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -101,7 +105,8 @@ class FilesystemVolumeBackupBackendTest {
         final Path archive = backupVolume.resolve("11.zip");
         assertTrue(Files.isRegularFile(archive));
         assertEquals(List.of(metadata), backend.listBackups());
-        assertEquals(CURSOR, ReplicationCursorStore.decode(BackupArchive.readManifest(archive)));
+        assertEquals(CURSOR, ReplicationCursorStore.decode(
+                BackupArchive.readManifest(archive, BackupArchiveLimits.Default().maxExtractedBytes())));
     }
 
     @Test
@@ -143,6 +148,18 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals("user", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
         backend.deleteUserUploadedStorage();
         assertFalse(backend.hasUserUploadedStorage());
+    }
+
+    @Test
+    void tempDirectoryAttributesFallBackWithoutAPosixView(@TempDir final Path root) throws Exception {
+        assertEquals(1, FilesystemVolumeBackupBackend.Default
+                .privateDirectoryAttributes(root).length);
+        final Path zip = root.resolve("fs.zip");
+        final URI uri = URI.create("jar:" + zip.toUri());
+        try (final FileSystem zipfs = FileSystems.newFileSystem(uri, Map.of("create", "true"))) {
+            assertEquals(0, FilesystemVolumeBackupBackend.Default
+                    .privateDirectoryAttributes(zipfs.getPath("/")).length);
+        }
     }
 
     @Test

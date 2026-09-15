@@ -12,6 +12,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -110,6 +115,57 @@ class ClusterStoreIndexesTest {
         ClusterStoreIndexes.registerLucene(map, new ArticlePopulator());
         assertThrows(IllegalStateException.class,
                 () -> ClusterStoreIndexes.registerLucene(map, new ArticlePopulator()));
+    }
+
+    @Test
+    void concurrentVectorRegistrationsAllSurvive() throws Exception {
+        final GigaMap<Article> map = GigaMap.New();
+        final int registrations = 8;
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final List<Future<VectorIndex<Article>>> futures = new ArrayList<>();
+            for (int i = 0; i < registrations; i++) {
+                final String name = "vectors-" + i;
+                futures.add(executor.submit(() -> ClusterStoreIndexes.registerVector(
+                        map, name, vectorConfiguration(), new ArticleVectorizer())));
+            }
+            for (final Future<VectorIndex<Article>> future : futures) {
+                assertNotNull(future.get(1, TimeUnit.MINUTES));
+            }
+        }
+
+        final VectorIndices<Article> indices = map.index().get(VectorIndices.Category());
+        assertNotNull(indices, "the index group must exist after registration");
+        for (int i = 0; i < registrations; i++) {
+            assertNotNull(indices.get("vectors-" + i), "concurrent registration lost vectors-" + i);
+        }
+    }
+
+    @Test
+    void concurrentDuplicateVectorRegistrationLeavesASingleIndex() throws Exception {
+        final GigaMap<Article> map = GigaMap.New();
+        final int attempts = 8;
+        final AtomicInteger successes = new AtomicInteger();
+        final AtomicInteger duplicates = new AtomicInteger();
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < attempts; i++) {
+                futures.add(executor.submit(() ->
+                {
+                    try {
+                        ClusterStoreIndexes.registerVector(
+                                map, "vectors", vectorConfiguration(), new ArticleVectorizer());
+                        successes.incrementAndGet();
+                    } catch (final IllegalStateException expected) {
+                        duplicates.incrementAndGet();
+                    }
+                }));
+            }
+            for (final Future<?> future : futures) future.get(1, TimeUnit.MINUTES);
+        }
+
+        assertEquals(1, successes.get(), "exactly one duplicate registration must win");
+        assertEquals(attempts - 1, duplicates.get());
+        assertNotNull(map.index().get(VectorIndices.Category()).get("vectors"));
     }
 
     private static final class Article {

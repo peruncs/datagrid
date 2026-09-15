@@ -8,7 +8,12 @@ import java.nio.ByteBuffer;
 import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
 
 /// Applies imported native Store binary buffers to the object graph.
-public final class StorageBinaryDataMaterializer {
+final class StorageBinaryDataMaterializer {
+    /* The default iterator keeps no per-batch state (all iteration state is
+     * local), so one instance serves every batch. The ObjectMaterializer below
+     * stays per-batch: upstream requires one PersistenceLoader per operation. */
+    private static final BinaryEntityRawDataIterator ITERATOR = BinaryEntityRawDataIterator.New();
+
     private StorageBinaryDataMaterializer() {
     }
 
@@ -19,14 +24,13 @@ public final class StorageBinaryDataMaterializer {
     public static void materialize(final StorageConnection storage, final ByteBuffer[] buffers) {
         if (storage == null || buffers == null) throw new NullPointerException("storage and buffers");
         final ObjectMaterializer materializer = new ObjectMaterializer(storage.persistenceManager());
-        final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
         for (final ByteBuffer buffer : buffers) {
             if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
                 throw new StorageBinaryDataException("materializer requires direct buffers at position zero");
             }
             if (buffer.limit() == 0) continue;
             final long address = getDirectByteBufferAddress(buffer);
-            iterator.iterateEntityRawData(address, address + buffer.limit(), materializer);
+            ITERATOR.iterateEntityRawData(address, address + buffer.limit(), materializer);
         }
         materializer.materialize();
     }

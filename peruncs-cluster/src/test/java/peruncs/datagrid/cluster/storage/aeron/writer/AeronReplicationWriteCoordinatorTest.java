@@ -657,4 +657,28 @@ class AeronReplicationWriteCoordinatorTest {
             coordinator.dispose();
         }
     }
+
+        /// A fenced commit must restore the entry hold count so later writers proceed.
+    @Test
+    void fencedCommitReleasesWriteLockForOtherThreads() throws InterruptedException {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
+        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, (state, sequence, length, chunks, crc, position) -> {
+        });
+        try {
+            coordinator.distributeData(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+            final var admitted = new AtomicBoolean();
+            final Thread writer = Thread.ofPlatform().start(() ->
+                    coordinator.executeWriteAtomically(() -> admitted.set(true)));
+            writer.join(5_000);
+            assertFalse(writer.isAlive(), "commit leaked a write-lock hold; second writer blocked");
+            assertTrue(admitted.get());
+        } finally {
+            coordinator.dispose();
+        }
+    }
 }

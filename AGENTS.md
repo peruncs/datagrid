@@ -13,7 +13,7 @@ Review @peruncs-cache/README.md, @peruncs-cluster/README.md and their module-inf
 8. Single-use methods that could be inlined. Java entities with 1-2 static methods that should be folded into stronger entities.
 9. Proper use of AutoClosable with try/catch resources managemnt in Java. Exceptiong handlig in genral, sallowed exceptions.
 10. Minimal Java entinties and methods visibility surface (do not use "public" without reason)
-11. Proper package structure - do not throw everything in one big package.
+11. Proper package structure with package-info.java javadocs - do not throw everything in one big package.
 12. Avoid Java reflection unless absolutely necessary.
 13. Any security gaps.
 14. Any performance issues.
@@ -29,6 +29,8 @@ Review @peruncs-cache/README.md, @peruncs-cluster/README.md and their module-inf
     to avoid allocating objects (even temporary) on the JVM heap.
 24. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
 25. Javadocs at all levels - module, package and individual Java entities. Use simple narrative suitable for humans, less jargon, first sentence is the most important. 
+26. Avoid using fully qualified names 9FQN) where sesnible imports can make the code more compact and better to read.
+
 
 ### If asked for review only
 
@@ -63,4 +65,3 @@ Here are the reference source code directories to borrow from:
 `$GITHUB_ROOT/eclipse-serializer`
 `$GITHUB_ROOT/bhf/aeron-cache`
 
-Use xberg to navigate the code and the documentation!

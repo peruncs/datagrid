@@ -16,7 +16,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// threads. Tasks run with a fixed delay, so a slow run postpones its own
 /// next run instead of overlapping it. A failing task is logged and the
 /// remaining tasks keep running.
-public final class NodeHousekeeper implements AutoCloseable {
+final class NodeHousekeeper implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(NodeHousekeeper.class.getName());
     private static final int THREADS = 2;
     private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;

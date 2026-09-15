@@ -18,4 +18,21 @@ class ReplicationRetryTest {
         assertTrue(ReplicationRetry.remainingNanos(Long.MIN_VALUE) >= 0L);
         assertTrue(ReplicationRetry.expired(System.nanoTime() - 1_000_000L));
     }
+
+        /// A manual clock makes deadline arithmetic deterministic.
+    @Test
+    void manualClockBoundsDeadlineAndExpiry() {
+        final var now = new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+
+        final long deadline = ReplicationRetry.deadlineNanos(500L, now::get);
+        assertEquals(1_000_500L, deadline);
+        assertEquals(500L, ReplicationRetry.remainingNanos(deadline, now::get));
+        assertFalse(ReplicationRetry.expired(deadline, now::get));
+
+        now.set(1_000_500L);
+        assertEquals(0L, ReplicationRetry.remainingNanos(deadline, now::get));
+        assertTrue(ReplicationRetry.expired(deadline, now::get));
+
+        assertThrows(IllegalArgumentException.class, () -> ReplicationRetry.deadlineNanos(0L, now::get));
+    }
 }

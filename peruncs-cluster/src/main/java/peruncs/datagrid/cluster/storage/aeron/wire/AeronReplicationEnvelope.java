@@ -3,7 +3,6 @@ package peruncs.datagrid.cluster.storage.aeron.wire;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage;
 
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -27,6 +26,10 @@ public final class AeronReplicationEnvelope {
     public static final short VERSION = 2;
         /// Header bytes, including the final header CRC32C at offset 64.
     public static final int HEADER_LENGTH = 68;
+        /// Largest logical transaction payload accepted on the wire.
+    public static final int MAX_MESSAGE_LENGTH = 64 * 1024 * 1024;
+        /// Largest chunk count accepted for one logical payload.
+    public static final int MAX_PACKET_COUNT = 1_000_000;
     private static final int CRC_SCRATCH_BYTES = 16 * 1024;
     /* A checksum context is explicitly owned by a decode or encode operation and
      * is carried through nested codec calls with ScopedValue. It is never retained
@@ -216,8 +219,8 @@ public final class AeronReplicationEnvelope {
         if (clusterId == null || kind == null || payload == null)
             throw new NullPointerException("clusterId, kind, and payload are required");
         if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
-            payloadLength > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
-            chunkCount <= 0 || chunkCount > StorageBinaryDataMessage.MAX_PACKET_COUNT ||
+            payloadLength > MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
+            chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
             payloadOffset > payload.capacity() - chunkLength) {
             throw new IllegalArgumentException("invalid envelope field");
@@ -317,8 +320,8 @@ public final class AeronReplicationEnvelope {
         final int chunkCount = source.getInt(offset + 32, ByteOrder.BIG_ENDIAN);
         final int chunkOffset = source.getInt(offset + 36, ByteOrder.BIG_ENDIAN);
         if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
-            payloadLength > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
-            chunkCount <= 0 || chunkCount > StorageBinaryDataMessage.MAX_PACKET_COUNT ||
+            payloadLength > MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
+            chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 ||
             (kind != Kind.COMMIT && kind != Kind.ABORT &&
              (length - HEADER_LENGTH > payloadLength ||
@@ -358,15 +361,6 @@ public final class AeronReplicationEnvelope {
         /// Computes the checksum used to detect damaged chunks and commits.
     public static int crc32c(final byte[] payload) {
         return Crc32c.compute(payload);
-    }
-
-        /// Computes the same checksum reusing caller-owned CRC state.
-    ///
-    /// Hot paths must use this overload or the direct-buffer form instead of
-    /// allocating a fresh accumulator per call.
-    public static int crc32c(final byte[] payload, final CRC32C reuse) {
-        if (payload == null) throw new IllegalArgumentException("payload must not be null");
-        return Crc32c.compute(payload, 0, payload.length, reuse);
     }
 
         /// Computes the same checksum directly from an Agrona buffer range.
@@ -559,8 +553,8 @@ public final class AeronReplicationEnvelope {
                 throw new NullPointerException("envelope identity, kind, and payload are required");
             }
             payload = payload.clone();
-            if (payloadLength < 0 || payloadLength > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH ||
-                chunkIndex < 0 || chunkCount <= 0 || chunkCount > StorageBinaryDataMessage.MAX_PACKET_COUNT ||
+            if (payloadLength < 0 || payloadLength > MAX_MESSAGE_LENGTH ||
+                chunkIndex < 0 || chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
                 chunkIndex >= chunkCount || chunkOffset < 0) {
                 throw new ReplicationWireException("invalid owned envelope bounds");
             }

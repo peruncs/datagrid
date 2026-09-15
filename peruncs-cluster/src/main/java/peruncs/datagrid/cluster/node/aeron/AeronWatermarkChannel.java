@@ -13,6 +13,7 @@ import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -79,7 +80,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
 
     static AeronWatermarkChannel writer(
             final Aeron aeron, final String channel, final int streamId, final Receiver receiver) {
-        return writer(aeron, channel, streamId, receiver, java.util.concurrent.TimeUnit.SECONDS.toNanos(5));
+        return writer(aeron, channel, streamId, receiver, TimeUnit.SECONDS.toNanos(5));
     }
 
     static AeronWatermarkChannel reader(
@@ -100,7 +101,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
     }
 
     static AeronWatermarkChannel reader(final Aeron aeron, final String channel, final int streamId) {
-        return reader(aeron, channel, streamId, java.util.concurrent.TimeUnit.SECONDS.toNanos(5));
+        return reader(aeron, channel, streamId, TimeUnit.SECONDS.toNanos(5));
     }
 
     private static RuntimeException append(final RuntimeException current, final RuntimeException additional) {
@@ -271,7 +272,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
             try {
                 final long remainingNanos = ReplicationRetry.remainingNanos(deadline);
                 final long remainingMillis = Math.max(1L,
-                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remainingNanos));
+                        TimeUnit.NANOSECONDS.toMillis(remainingNanos));
                 this.worker.join(remainingMillis);
             } catch (final InterruptedException failure) {
                 Thread.currentThread().interrupt();

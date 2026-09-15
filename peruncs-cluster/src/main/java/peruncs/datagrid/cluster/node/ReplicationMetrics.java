@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.node.http;
+package peruncs.datagrid.cluster.node;
 
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 
@@ -10,9 +10,9 @@ import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 public record ReplicationMetrics(
         /// Last committed sequence applied locally.
         long currentSequence,
-        /// Latest writer sequence observed.
+        /// Latest writer sequence observed, or -1 when unknown.
         long latestSequence,
-        /// Transactions behind latest, clamped at zero.
+        /// Transactions behind latest, or -1 when the writer boundary is unknown.
         long lagTransactions,
         /// Replication transport id, unescaped.
         String transport,

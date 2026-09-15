@@ -93,6 +93,7 @@ public final class ClusterStoreIndexes {
     /// @param configuration vector configuration
     /// @param vectorizer    entity-to-vector mapping
     /// @return the new vector index
+    /// @throws IllegalStateException if an index with the same name is already registered
     public static <E> VectorIndex<E> addVector(
             final VectorIndices<E> indices,
             final String name,
@@ -100,11 +101,10 @@ public final class ClusterStoreIndexes {
             final Vectorizer<? super E> vectorizer
     ) {
         validateVectorConfiguration(configuration);
-        return Objects.requireNonNull(indices, "indices").add(
-                Objects.requireNonNull(name, "name"),
-                configuration,
-                Objects.requireNonNull(vectorizer, "vectorizer")
-        );
+        final VectorIndices<E> checkedIndices = Objects.requireNonNull(indices, "indices");
+        final String checkedName = Objects.requireNonNull(name, "name");
+        final Vectorizer<? super E> checkedVectorizer = Objects.requireNonNull(vectorizer, "vectorizer");
+        return REGISTRATION.write(() -> addVectorLocked(checkedIndices, checkedName, configuration, checkedVectorizer));
     }
 
         /// Registers an in-graph vector index on a map, creating its index group once.
@@ -115,6 +115,7 @@ public final class ClusterStoreIndexes {
     /// @param configuration vector configuration
     /// @param vectorizer    entity-to-vector mapping
     /// @return the new vector index
+    /// @throws IllegalStateException if an index with the same name is already registered
     public static <E> VectorIndex<E> registerVector(
             final GigaMap<E> map,
             final String name,
@@ -122,14 +123,40 @@ public final class ClusterStoreIndexes {
             final Vectorizer<? super E> vectorizer
     ) {
         final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
+        validateVectorConfiguration(configuration);
+        final String checkedName = Objects.requireNonNull(name, "name");
+        final Vectorizer<? super E> checkedVectorizer = Objects.requireNonNull(vectorizer, "vectorizer");
         return REGISTRATION.write(() ->
         {
             VectorIndices<E> indices = checkedMap.index().get(VectorIndices.Category());
             if (indices == null) {
                 indices = checkedMap.index().register(VectorIndices.Category());
             }
-            return addVector(indices, name, configuration, vectorizer);
+            return addVectorLocked(indices, checkedName, configuration, checkedVectorizer);
         });
+    }
+
+    private static <E> VectorIndex<E> addVectorLocked(
+            final VectorIndices<E> indices,
+            final String name,
+            final VectorIndexConfiguration configuration,
+            final Vectorizer<? super E> vectorizer
+    ) {
+        if (indices.get(name) != null) {
+            throw new IllegalStateException("a vector index named \"" + name + "\" is already registered");
+        }
+        try {
+            return indices.add(name, configuration, vectorizer);
+        } catch (final RuntimeException raced) {
+            /* A foreign registration slipped in between the check and the add.
+             * Normalize to the documented duplicate failure instead of leaking
+             * the upstream error type. */
+            if (indices.get(name) != null) {
+                throw new IllegalStateException(
+                        "a vector index named \"" + name + "\" is already registered", raced);
+            }
+            throw raced;
+        }
     }
 
         /// Rejects any JVector configuration that uses an external directory.

@@ -342,6 +342,10 @@ public interface ClusterStorageManager<T> extends StorageManager {
             this.shutdownCallback = shutdownCallback;
         }
 
+        /* The limit gates only the write entry points (store, storeAll,
+         * storeRoot, and Storer.commit). Reads, maintenance, registration,
+         * and restore must keep working on a full disk so the node can
+         * drain, back up, or recover instead of failing every operation. */
         private void validateState() throws StorageLimitReachedException {
             if (this.storageSizeValidation.isStorageLimitReached()) {
                 throw new StorageLimitReachedException(
@@ -390,13 +394,11 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public void importData(final XGettingEnum<ByteBuffer> importData) {
-            this.validateState();
             this.delegate.importData(importData);
         }
 
         @Override
         public void importFiles(final XGettingEnum<AFile> importFiles) {
-            this.validateState();
             this.delegate.importFiles(importFiles);
         }
 
@@ -481,7 +483,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
         @Override
         @SuppressWarnings("unchecked")
         public Object setRoot(final Object newRoot) {
-            this.validateState();
             return this.delegate.setRoot(newRoot);
         }
 
@@ -592,7 +593,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public long ensureObjectId(final Object object) {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.ensureObjectId(object);
             }
 
@@ -602,7 +602,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
                     final PersistenceObjectIdRequestor<Binary> objectIdRequestor,
                     final PersistenceTypeHandler<Binary, U> optionalHandler
             ) {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.ensureObjectId(object, objectIdRequestor, optionalHandler);
             }
 
@@ -612,25 +611,21 @@ public interface ClusterStorageManager<T> extends StorageManager {
                     final PersistenceObjectIdRequestor<Binary> objectIdRequestor,
                     final PersistenceTypeHandler<Binary, U> optionalHandler
             ) {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.ensureObjectIdGuaranteedRegister(object, objectIdRequestor, optionalHandler);
             }
 
             @Override
             public void consolidate() {
-                ClusterStorageManager.Default.this.validateState();
                 this.delegate.consolidate();
             }
 
             @Override
             public boolean registerLocalRegistry(final PersistenceLocalObjectIdRegistry<Binary> localRegistry) {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.registerLocalRegistry(localRegistry);
             }
 
             @Override
             public void mergeEntries(final PersistenceLocalObjectIdRegistry<Binary> localRegistry) {
-                ClusterStorageManager.Default.this.validateState();
                 this.delegate.mergeEntries(localRegistry);
             }
 
@@ -723,7 +718,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
                     final long highestTypeId,
                     final long highestObjectId
             ) {
-                ClusterStorageManager.Default.this.validateState();
                 this.delegate.updateMetadata(typeDictionary, highestTypeId, highestObjectId);
             }
 
@@ -783,19 +777,16 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public <U> long apply(final U instance) {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.apply(instance);
             }
 
             @Override
             public long register(final Object instance) {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.register(instance);
             }
 
             @Override
             public long[] registerAll(final Object... instances) {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.registerAll(instances);
             }
         }

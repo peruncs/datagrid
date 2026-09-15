@@ -19,6 +19,10 @@ public record ReplicationCursor(
         UUID storeGeneration,
         long logicalSequence,
         String providerPosition) {
+    /* Shared codec: HexFormat is immutable and thread-safe. A single instance
+     * serves every cursor instead of allocating one per format and parse. */
+    private static final HexFormat HEX = HexFormat.of();
+
         /// Validates the cursor fields.
     ///
     /// @param transport        selected provider id
@@ -33,12 +37,14 @@ public record ReplicationCursor(
             throw new IllegalArgumentException("logicalSequence must be >= -1");
         }
         if (providerPosition == null) providerPosition = "";
-        if (!providerPosition.isEmpty()) {
-            try {
-                HexFormat.of().parseHex(providerPosition);
-            } catch (final IllegalArgumentException notHex) {
-                throw new IllegalArgumentException("providerPosition must be even-length lowercase hex", notHex);
-            }
+        /* Allocation-free validity scan. The per-message path builds cursors
+         * from freshly encoded bytes whose hex is valid by construction; fully
+         * decoding it here just to throw the bytes away would allocate on
+         * every applied message. Uppercase is accepted exactly as HexFormat
+         * parsing accepts it; producers still emit lowercase so identical
+         * positions compare equal as strings. */
+        if (!providerPosition.isEmpty() && !isHex(providerPosition)) {
+            throw new IllegalArgumentException("providerPosition must be even-length hex");
         }
     }
 
@@ -56,7 +62,23 @@ public record ReplicationCursor(
             final byte[] providerPosition
     ) {
         return new ReplicationCursor(transport, storeGeneration, logicalSequence,
-                providerPosition == null ? "" : HexFormat.of().formatHex(providerPosition));
+                providerPosition == null ? "" : HEX.formatHex(providerPosition));
+    }
+
+        /// Reports whether the text is even-length hexadecimal.
+    ///
+    /// @param value candidate hex text
+    /// @return `true` for even-length hex, including uppercase
+    private static boolean isHex(final String value) {
+        if ((value.length() & 1) != 0) return false;
+        for (int index = 0; index < value.length(); index++) {
+            final char current = value.charAt(index);
+            final boolean digit = current >= '0' && current <= '9';
+            final boolean lower = current >= 'a' && current <= 'f';
+            final boolean upper = current >= 'A' && current <= 'F';
+            if (!digit && !lower && !upper) return false;
+        }
+        return true;
     }
 
         /// Reports whether the cursor carries provider state.
@@ -72,6 +94,6 @@ public record ReplicationCursor(
     public byte[] providerPositionBytes() {
         return this.providerPosition.isEmpty()
                 ? new byte[0]
-                : HexFormat.of().parseHex(this.providerPosition);
+                : HEX.parseHex(this.providerPosition);
     }
 }

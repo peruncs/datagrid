@@ -2,7 +2,9 @@ package peruncs.datagrid.cluster.node.http;
 
 import peruncs.datagrid.cluster.node.ClusterNodeManager;
 import peruncs.datagrid.cluster.node.PromotableStorageNodeManager;
+import peruncs.datagrid.cluster.node.ReplicationMetrics;
 import peruncs.datagrid.cluster.node.StorageNodeManager;
+import peruncs.datagrid.cluster.node.backup.BackupBusyException;
 import peruncs.datagrid.cluster.node.backup.BackupNodeManager;
 import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
 import peruncs.datagrid.cluster.node.http.StorageNodeRestRouteConfigurations.PostBackup;
@@ -76,9 +78,9 @@ public interface ClusterRestRequestController extends AutoCloseable {
     /// @throws HttpResponseException if the request fails
     long getStorageBytes() throws HttpResponseException;
 
-        /// Returns Prometheus metrics including provider id, state, sequence, and lag.
+        /// Returns the raw replication observability values for this node.
     ///
-    /// @return metrics text
+    /// @return raw replication metrics
     /// @throws HttpResponseException if the request fails
     ReplicationMetrics getReplicationMetrics() throws HttpResponseException;
 
@@ -176,29 +178,15 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         /// Reads the replication observability values for this node.
         ///
-        /// Lag is clamped at zero and unknown positions report -1, so a
-        /// scrape never fails just because the writer boundary is currently
-        /// unknowable. The embedding application renders the wire format.
+        /// The values are produced by the node manager; unknown positions
+        /// report -1, so a scrape never fails just because the writer
+        /// boundary is currently unknowable. The embedding application
+        /// renders the wire format.
         ///
         /// @return raw replication metrics
         @Override
         public ReplicationMetrics getReplicationMetrics() throws HttpResponseException {
-            return this.handleRequest(() -> {
-                final long current = this.nodeManager.getCurrentMessageIndex();
-                final long latest = this.nodeManager.getLatestMessageIndex();
-                return new ReplicationMetrics(
-                        current,
-                        latest,
-                        Math.max(0, latest - current),
-                        this.nodeManager.getReplicationTransport(),
-                        this.nodeManager.getReplicationState(),
-                        this.nodeManager.isReady(),
-                        this.nodeManager.isHealthy(),
-                        this.nodeManager.getArchiveUsableSpaceBytes(),
-                        this.nodeManager.getWriterDurablePosition(),
-                        this.nodeManager.getWriterDurableSequence(),
-                        this.nodeManager.getAppliedSequence());
-            });
+            return this.handleRequest(this.nodeManager::replicationMetrics);
         }
 
         @Override
@@ -346,7 +334,14 @@ public interface ClusterRestRequestController extends AutoCloseable {
             if (body == null || body.useManualSlot() == null) {
                 throw HttpResponseException.badRequest("backup request must specify useManualSlot");
             }
-            this.handleRequest(() -> this.backupNodeManager.createStorageBackup(unbox(body.useManualSlot())));
+            this.handleRequest(() ->
+            {
+                try {
+                    this.backupNodeManager.createStorageBackup(unbox(body.useManualSlot()));
+                } catch (final BackupBusyException busy) {
+                    throw HttpResponseException.conflict("Storage backup is already running", busy);
+                }
+            });
         }
 
         @Override

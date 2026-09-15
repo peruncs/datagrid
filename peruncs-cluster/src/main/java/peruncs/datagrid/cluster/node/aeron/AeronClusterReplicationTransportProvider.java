@@ -507,7 +507,7 @@ public final class AeronClusterReplicationTransportProvider {
                         try {
                             final AeronReplicationCheckpoint checkpoint = new AeronReplicationCheckpoint(
                                     AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                                    AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                                    ReplicationDurabilityMode.ARCHIVE_FIRST,
                                     AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                                     settings.clusterId(), settings.nodeId(), settings.storeGeneration(), readerRecordingId.get(),
                                     settings.epoch(), sequence, position, dataLength, dataChunkCount, crc32c);
@@ -539,7 +539,7 @@ public final class AeronClusterReplicationTransportProvider {
             this.ensureOpen();
             this.claimStream(streamName);
             if (this.positionProvider == null) {
-                this.positionProvider = new peruncs.datagrid.cluster.node.aeron.AeronPositionProvider(
+                this.positionProvider = new AeronPositionProvider(
                         () -> "writer".equals(this.settings.role()),
                         () -> this.writer != null && !this.writerRecoveryInProgress && !this.closed,
                         this::ensureWriter,
@@ -630,7 +630,8 @@ public final class AeronClusterReplicationTransportProvider {
                     this.settings::archiveSegmentFileLength,
                     () -> this.watermarkChannel != null && this.watermarkChannel.available(),
                     this.settings.checkpointPath().resolveSibling(
-                            "%s.retention".formatted(this.settings.checkpointPath().getFileName())));
+                            "%s.retention".formatted(this.settings.checkpointPath().getFileName())),
+                    AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
         }
 
         private void publishReaderWatermark(final CursorSnapshot snapshot, final long recordingId) {
@@ -737,7 +738,7 @@ public final class AeronClusterReplicationTransportProvider {
             this.ensureOpen();
             if (this.health == null || !this.health.matches(storage, client)) {
                 if (this.health != null) this.health.close();
-                this.health = new peruncs.datagrid.cluster.node.aeron.AeronHealth(
+                this.health = new AeronHealth(
                         storage,
                         client,
                         () -> this.closed,
@@ -968,13 +969,8 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         private void validateWriterCheckpointIdentity(final AeronReplicationCheckpoint checkpoint) {
-            final AeronReplicationCheckpoint.DurabilityMode expectedMode = switch (
-                    this.settings.replication().durabilityMode()) {
-                case ARCHIVE_FIRST -> AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST;
-                case ENQUEUE_THEN_ARCHIVE -> AeronReplicationCheckpoint.DurabilityMode.ENQUEUE_THEN_ARCHIVE;
-            };
             if (checkpoint.recordType() != AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT ||
-                checkpoint.durabilityMode() != expectedMode ||
+                checkpoint.durabilityMode() != this.settings.replication().durabilityMode() ||
                 !checkpoint.clusterId().equals(this.settings.clusterId()) ||
                 !checkpoint.nodeId().equals(this.settings.nodeId()) ||
                 !checkpoint.storeGeneration().equals(this.settings.storeGeneration()) ||
@@ -1088,13 +1084,9 @@ public final class AeronClusterReplicationTransportProvider {
             if (discoveredRecordingId >= 0) this.writerRecordingId.set(discoveredRecordingId);
             final long writerRecordingId = this.writerRecordingId.get();
             final long recordingId = writerRecordingId >= 0 ? writerRecordingId : this.settings.recordingId();
-            final AeronReplicationCheckpoint.DurabilityMode checkpointMode = switch (this.settings.replication().durabilityMode()) {
-                case ARCHIVE_FIRST -> AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST;
-                case ENQUEUE_THEN_ARCHIVE -> AeronReplicationCheckpoint.DurabilityMode.ENQUEUE_THEN_ARCHIVE;
-            };
             return new AeronReplicationCheckpoint(
                     AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                    checkpointMode,
+                    this.settings.replication().durabilityMode(),
                     state, this.settings.clusterId(), this.settings.nodeId(), this.settings.storeGeneration(),
                     recordingId, this.settings.epoch(), sequence, position, dataLength, dataChunkCount, dataCrc32c);
         }

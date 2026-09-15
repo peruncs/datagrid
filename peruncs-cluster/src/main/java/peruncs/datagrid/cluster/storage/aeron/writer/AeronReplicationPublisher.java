@@ -36,7 +36,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private final Cleaner.Cleanable cleanable;
     private final AeronReplicationEnvelope.ChecksumContext envelopeChecksum =
             new AeronReplicationEnvelope.ChecksumContext();
-    private final byte[] crcScratch = new byte[16 * 1024];
+
     /* Publisher methods are synchronized, so one reusable CRC instance is enough
      * and avoids retaining checksum state on every caller thread. */
     private final CRC32C dataCrc = new CRC32C();
@@ -424,13 +424,14 @@ final class AeronReplicationPublisher implements AutoCloseable {
                     source = sources[sourceIndex];
                     sourcePosition = source.position();
                 }
-                final int amount = Math.min(this.crcScratch.length,
-                        Math.min(source.limit() - sourcePosition, chunkLength - copied));
-                source.get(sourcePosition, this.crcScratch, 0, amount);
-                crc.update(this.crcScratch, 0, amount);
-                this.chunkCrc.update(this.crcScratch, 0, amount);
+                /* CRC and envelope fill read the source segment directly:
+                 * no heap staging copy between the caller buffers and the
+                 * off-heap envelope. */
+                final int amount = Math.min(source.limit() - sourcePosition, chunkLength - copied);
+                updateCrc(crc, source, sourcePosition, amount);
+                updateCrc(this.chunkCrc, source, sourcePosition, amount);
                 this.envelopeBuffer.putBytes(AeronReplicationEnvelope.HEADER_LENGTH + copied,
-                        this.crcScratch, 0, amount);
+                        source, sourcePosition, amount);
                 sourcePosition += amount;
                 copied += amount;
             }
@@ -458,15 +459,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return (int) crc.getValue();
     }
 
-        /// Updates CRC32C using absolute reads without mutating caller state.
-    private void updateCrc(final CRC32C crc, final ByteBuffer source,
-                           final int offset, final int length) {
-        for (int copied = 0; copied < length; ) {
-            final int amount = Math.min(this.crcScratch.length, length - copied);
-            source.get(offset + copied, this.crcScratch, 0, amount);
-            crc.update(this.crcScratch, 0, amount);
-            copied += amount;
-        }
+        /// Updates CRC32C from a source range without copying or mutating caller state.
+    private static void updateCrc(final CRC32C crc, final ByteBuffer source,
+                                  final int offset, final int length) {
+        final ByteBuffer view = source.duplicate();
+        view.position(offset).limit(offset + length);
+        crc.update(view);
     }
 
         /// Publishes the commit marker and waits for the configured durability boundary.

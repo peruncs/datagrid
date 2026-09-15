@@ -1,8 +1,6 @@
 package peruncs.datagrid.cluster.node.exceptions;
 
 
-import peruncs.datagrid.cluster.node.http.HttpResponseHeader;
-
 import java.util.Collection;
 import java.util.List;
 
@@ -44,6 +42,16 @@ public final class HttpResponseException extends NodeLibraryException {
     public static HttpResponseException notADistributor(final String message) {
         return new HttpResponseException(message, null, 400, List.of(
                 new HttpResponseHeader("StorageNode-NAD", Boolean.TRUE.toString())));
+    }
+
+        /// Creates a conflict response for a request that cannot run concurrently.
+    public static HttpResponseException conflict(final String message) {
+        return conflict(message, null);
+    }
+
+        /// Creates a conflict response for a request that cannot run concurrently.
+    public static HttpResponseException conflict(final String message, final Throwable cause) {
+        return new HttpResponseException(message, cause, 409, List.of());
     }
 
         /// Creates an internal-server-error response.

@@ -1,57 +1,76 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import org.eclipse.serializer.typing.Disposable;
 import org.junit.jupiter.api.Test;
 
-import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage.MessageType.DATA;
+import static org.junit.jupiter.api.Assertions.*;
 
-/// Verifies the packet boundary used by the logical-message commit policy.
+/// The acceptor seam forwards complete-binary delivery to one receiver.
 class StorageBinaryDataPacketAcceptorTest {
-    private static StorageBinaryDataPacket packet(final int index, final int count, final byte[] bytes) {
-        return StorageBinaryDataPacket.New(DATA, 2, index, count, ByteBuffer.wrap(bytes));
+    @Test
+    void forwardsCompleteBinaryDeliveryToReceiver() {
+        final StubReceiver receiver = new StubReceiver();
+        final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(receiver);
+        final Binary binary = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1, 2, 3}));
+
+        acceptor.acceptData(binary);
+        assertEquals(List.of("data"), receiver.calls);
+
+        receiver.owned = true;
+        assertTrue(acceptor.acceptDataOwned(binary));
+        assertEquals(List.of("data", "owned"), receiver.calls);
+
+        acceptor.acceptTypeDictionary("dictionary");
+        assertEquals(List.of("data", "owned", "dictionary"), receiver.calls);
+
+        acceptor.awaitApplied();
+        assertEquals(List.of("data", "owned", "dictionary", "applied"), receiver.calls);
+
+        assertNull(acceptor.failure());
+        acceptor.dispose();
+        assertTrue(receiver.disposed);
     }
 
-    @Test
-    void reportsIncompleteMessageUntilItsLastPacketIsAccepted() {
-        final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(
-                new StorageBinaryDataReceiver() {
-                    @Override
-                    public void receiveData(final org.eclipse.serializer.persistence.binary.types.Binary data) {
-                    }
+    private static final class StubReceiver implements StorageBinaryDataReceiver, Disposable {
+        private final List<String> calls = new ArrayList<>();
+        private boolean owned;
+        private boolean disposed;
 
-                    @Override
-                    public void receiveTypeDictionary(final String data) {
-                    }
-                });
+        @Override
+        public void receiveData(final Binary data) {
+            this.calls.add("data");
+        }
 
-        assertTrue(acceptor.isAtMessageBoundary());
-        acceptor.accept(List.of(packet(0, 2, new byte[]{1})));
-        assertFalse(acceptor.isAtMessageBoundary());
-        acceptor.accept(List.of(packet(1, 2, new byte[]{2})));
-        assertTrue(acceptor.isAtMessageBoundary());
-    }
+        @Override
+        public boolean receiveDataOwned(final Binary data) {
+            this.calls.add("owned");
+            return this.owned;
+        }
 
-    @Test
-    void disposeDiscardsRetainedMessage() {
-        final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(
-                new StorageBinaryDataReceiver() {
-                    @Override
-                    public void receiveData(final org.eclipse.serializer.persistence.binary.types.Binary data) {
-                    }
+        @Override
+        public boolean canReceiveDataOwned() {
+            return this.owned;
+        }
 
-                    @Override
-                    public void receiveTypeDictionary(final String data) {
-                    }
-                });
+        @Override
+        public void receiveTypeDictionary(final String typeDictionaryData) {
+            this.calls.add("dictionary");
+        }
 
-        acceptor.accept(List.of(packet(0, 2, new byte[]{1})));
-        assertFalse(acceptor.isAtMessageBoundary());
-        acceptor.dispose();
-        assertTrue(acceptor.isAtMessageBoundary());
-        acceptor.dispose();
+        @Override
+        public void awaitApplied() {
+            this.calls.add("applied");
+        }
+
+        @Override
+        public void dispose() {
+            this.disposed = true;
+        }
     }
 }

@@ -273,14 +273,12 @@ final class TransactionAssembler {
     }
 
     private void commit(final AeronReplicationEnvelope.EnvelopeView envelope, final long position) {
+        /* The writer always precedes a commit with at least one data envelope,
+         * even for an empty binary, so a bare commit marker is a protocol
+         * violation rather than an empty transaction. Fail closed instead of
+         * inventing data the log never carried. */
         if (this.transaction == null) {
-            if (envelope.payloadLength() != 0 || envelope.chunkCount() != 0 || envelope.commitCrc32c() != 0) {
-                throw new IllegalStateException("commit without data chunks");
-            }
-            this.nextExpectedSequence = envelope.sequence() + 1;
-            this.delivery.prepare(null, null, null, envelope.sequence(), position, 0, 0,
-                    0, AeronReplicationEnvelope.Kind.COMMIT);
-            return;
+            throw new IllegalStateException("commit without data chunks");
         }
         if (this.transaction.dataLength != envelope.payloadLength() ||
             this.transaction.dataChunkCount != envelope.chunkCount() ||

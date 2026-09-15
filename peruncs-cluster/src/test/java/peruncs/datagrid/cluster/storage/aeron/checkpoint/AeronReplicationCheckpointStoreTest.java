@@ -1,8 +1,9 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
+import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -19,7 +20,7 @@ class AeronReplicationCheckpointStoreTest {
     private static AeronReplicationCheckpoint checkpoint() {
         return new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 7, 13, 4096, 12, 1, 99
         );
@@ -99,22 +100,22 @@ class AeronReplicationCheckpointStoreTest {
     void rejectsInvalidCheckpointFieldsAtConstruction() {
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.PREPARING,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -2, 0, -1, -1, 0, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 7, 1024, 1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -1, 0, 7, -1, 1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, Long.MAX_VALUE, 1024, 1, 1, 0));
     }
@@ -146,11 +147,11 @@ class AeronReplicationCheckpointStoreTest {
         final ArrayList<String> phases = new ArrayList<>();
         final AeronReplicationCheckpoint readerCursor = new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 7, 4096, 0, 0, 0);
         try {
-            AtomicFileStoreCrashHook.callWithHook((phase, ignored) -> phases.add(phase), () -> {
+            FileStoreCrashHooks.callWithHook((phase, ignored) -> phases.add(phase), () -> {
                 AeronReplicationCheckpointStore.write(path, readerCursor);
                 return null;
             });

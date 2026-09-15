@@ -11,6 +11,7 @@ import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfigurati
 import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
 import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeronArchive;
 import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.io.IOException;
@@ -256,7 +257,7 @@ public final class ReaderCrashChildMain {
             try {
                 AeronReplicationCheckpointStore.write(this.uncertainty, new AeronReplicationCheckpoint(
                         AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                        AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                        ReplicationDurabilityMode.ARCHIVE_FIRST,
                         AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                         CLUSTER_ID, java.util.UUID.nameUUIDFromBytes("reader-crash-node".getBytes(StandardCharsets.UTF_8)),
                         java.util.UUID.nameUUIDFromBytes("reader-crash-generation".getBytes(StandardCharsets.UTF_8)),

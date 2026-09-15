@@ -1,5 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
+import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+
 import java.util.UUID;
 
 /// The restart record for one writer or reader.
@@ -29,7 +31,7 @@ import java.util.UUID;
 ///                            payload CRC
 public record AeronReplicationCheckpoint(
         RecordType recordType,
-        DurabilityMode durabilityMode,
+        ReplicationDurabilityMode durabilityMode,
         State state,
         UUID clusterId,
         UUID nodeId,
@@ -79,7 +81,7 @@ public record AeronReplicationCheckpoint(
     }
 
     int durabilityModeCode() {
-        return this.durabilityMode.code;
+        return this.durabilityMode.code();
     }
 
     int stateCode() {
@@ -103,27 +105,6 @@ public record AeronReplicationCheckpoint(
                 case 1 -> WRITER_CHECKPOINT;
                 case 2 -> READER_CURSOR;
                 default -> throw new IllegalArgumentException("unknown checkpoint record type: %s".formatted(code));
-            };
-        }
-    }
-
-        /// Describes how the writer waits for replication durability.
-    public enum DurabilityMode {
-                /// Publish the Archive transaction before accepting it locally.
-        ARCHIVE_FIRST(1),
-                /// Accept locally first; an uncertain result requires reseeding.
-        ENQUEUE_THEN_ARCHIVE(2);
-        private final int code;
-
-        DurabilityMode(final int code) {
-            this.code = code;
-        }
-
-        static DurabilityMode from(final int code) {
-            return switch (code) {
-                case 1 -> ARCHIVE_FIRST;
-                case 2 -> ENQUEUE_THEN_ARCHIVE;
-                default -> throw new IllegalArgumentException("unknown checkpoint durability mode: %s".formatted(code));
             };
         }
     }

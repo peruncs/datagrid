@@ -213,4 +213,46 @@ class AeronClusteredCacheMessageCodecTest {
         assertThrows(IllegalArgumentException.class,
                 () -> AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 1L, new byte[0]));
     }
+
+    @Test
+    void singleValidationCoversForeignFrame() {
+        final byte[] payload = {1, 2, 3, 4, 5};
+        final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
+        final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 7L, payload);
+
+        final AeronClusteredCacheMessageCodec.ValidatedFrame frame =
+                AeronClusteredCacheMessageCodec.validate(buffer, 0, length, 1024, uuidBytes(UUID.randomUUID()));
+        assertFalse(frame.self());
+        assertEquals(7L, frame.sequence());
+        assertEquals(readLong(SENDER_ID, 0), frame.sender().mostSignificantBits());
+        assertEquals(readLong(SENDER_ID, Long.BYTES), frame.sender().leastSignificantBits());
+        assertEquals(payload.length, frame.payloadLength());
+        assertArrayEquals(payload, AeronClusteredCacheMessageCodec.payloadOf(buffer, 0, frame.payloadLength()));
+    }
+
+    @Test
+    void singleValidationFlagsSelfFrameWithoutDecoding() {
+        final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
+        final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 7L, new byte[]{9});
+
+        final AeronClusteredCacheMessageCodec.ValidatedFrame frame =
+                AeronClusteredCacheMessageCodec.validate(buffer, 0, length, 1024, SENDER_ID);
+        assertTrue(frame.self());
+        assertEquals(7L, frame.sequence());
+    }
+
+    @Test
+    void singleValidationRejectsCorruptionAndTruncation() {
+        final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
+        final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 1L, new byte[]{1, 2, 3});
+        buffer.putByte(AeronClusteredCacheMessageCodec.HEADER_LENGTH, (byte) 9);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> AeronClusteredCacheMessageCodec.validate(buffer, 0, length, 1024, SENDER_ID));
+        assertThrows(IllegalArgumentException.class,
+                () -> AeronClusteredCacheMessageCodec.validate(
+                        buffer, 0, AeronClusteredCacheMessageCodec.HEADER_LENGTH - 1, 1024, SENDER_ID));
+        assertThrows(IllegalArgumentException.class,
+                () -> AeronClusteredCacheMessageCodec.validate(buffer, 0, length, 2, SENDER_ID));
+    }
 }

@@ -55,10 +55,10 @@ public interface StorageNodeManager extends ClusterNodeManager {
     boolean isDistributor();
 
         /// Returns the last applied or published logical replication sequence, or `-1`.
-    long getCurrentMessageIndex();
+    long getCurrentSequence();
 
         /// Returns the latest known writer logical sequence, or `-1` when unavailable.
-    long getLatestMessageIndex();
+    long getLatestSequence();
 
         /// Returns the selected transport id for monitoring (for example `aeron`).
     String getReplicationTransport();
@@ -86,7 +86,6 @@ public interface StorageNodeManager extends ClusterNodeManager {
         protected final String replicationTransport;
 
         private volatile boolean closed;
-        private volatile boolean positionProviderClosed;
 
                 /// Creates a manager with the selected transport label.
         ///
@@ -147,7 +146,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
         public abstract boolean isDistributor();
 
         @Override
-        public long getCurrentMessageIndex() {
+        public long getCurrentSequence() {
             if (this.isDistributor()) {
                 return this.dataDistributor.messageIndex();
             } else {
@@ -156,7 +155,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
         }
 
         @Override
-        public long getLatestMessageIndex() {
+        public long getLatestSequence() {
             try {
                 return this.positionProvider.latestSequence();
             } catch (final ReplicationPositionUnavailableException unavailable) {
@@ -201,33 +200,39 @@ public interface StorageNodeManager extends ClusterNodeManager {
         }
 
         /// Closes distributor, reader, health check, and position provider,
-        /// aggregating every failure. Idempotent.
+        /// aggregating every failure. Idempotent: every resource is attempted
+        /// exactly once even when a previous attempt failed, so a retry never
+        /// re-disposes an already released resource.
         @Override
         public synchronized void close() {
             LOGGER.log(System.Logger.Level.INFO, "Closing StorageNodeManager");
             if (this.closed) {
                 return;
             }
+            this.closed = true;
+            final boolean readerResourcesReleased = this.readerResourcesReleased();
             Throwable failure = null;
             try {
                 this.dataDistributor.dispose();
             } catch (final RuntimeException | Error closeFailure) {
                 failure = closeFailure;
             }
-            try {
-                this.dataClient.dispose();
-            } catch (final RuntimeException | Error closeFailure) {
-                if (failure == null) failure = closeFailure;
-                else failure.addSuppressed(closeFailure);
+            if (!readerResourcesReleased) {
+                try {
+                    this.dataClient.dispose();
+                } catch (final RuntimeException | Error closeFailure) {
+                    if (failure == null) failure = closeFailure;
+                    else failure.addSuppressed(closeFailure);
+                }
+                try {
+                    this.healthCheck.close();
+                } catch (final RuntimeException | Error closeFailure) {
+                    if (failure == null) failure = closeFailure;
+                    else failure.addSuppressed(closeFailure);
+                }
             }
             try {
-                this.healthCheck.close();
-            } catch (final RuntimeException | Error closeFailure) {
-                if (failure == null) failure = closeFailure;
-                else failure.addSuppressed(closeFailure);
-            }
-            try {
-                this.closePositionProvider();
+                this.positionProvider.close();
             } catch (final RuntimeException | Error closeFailure) {
                 if (failure == null) failure = closeFailure;
                 else failure.addSuppressed(closeFailure);
@@ -236,19 +241,17 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 if (failure instanceof Error error) throw error;
                 throw new NodeLibraryException("failed to close storage node resources", failure);
             }
-            this.closed = true;
         }
 
-        private void closePositionProvider() {
-            if (this.positionProviderClosed) {
-                return;
-            }
-            this.positionProvider.close();
-            /* Mark ownership released only after close succeeds.  A provider can
-             * legitimately fail during a bounded shutdown (for example while its
-             * Archive control session is stopping); the enclosing close() is retryable
-             * and must not turn that first failure into a silent resource leak. */
-            this.positionProviderClosed = true;
+        /// Reports whether promotion already released the reader resources.
+        ///
+        /// A promoted node closed its health check and data client during the
+        /// role transition; closing them again would double-dispose. The base
+        /// implementation never promotes and always releases them here.
+        ///
+        /// @return `true` when [PromotableStorageNodeManager] promotion released them
+        protected boolean readerResourcesReleased() {
+            return false;
         }
     }
 

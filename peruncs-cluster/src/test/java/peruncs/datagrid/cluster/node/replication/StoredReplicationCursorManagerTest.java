@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
+import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,7 +55,7 @@ class StoredReplicationCursorManagerTest {
         final Path path = directory.resolve("offset");
         final AtomicReference<String> phase = new AtomicReference<>();
         try {
-            AtomicFileStoreCrashHook.runWithHook((name, ignored) -> phase.compareAndSet(null, name), () -> {
+            FileStoreCrashHooks.runWithHook((name, ignored) -> phase.compareAndSet(null, name), () -> {
                 try (StoredReplicationCursorManager manager = StoredReplicationCursorManager.NewAtomic(path)) {
                     manager.set(new ReplicationCursor("aeron", UUID.randomUUID(), 1L, "04"));
                 }

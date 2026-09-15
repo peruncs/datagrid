@@ -7,11 +7,13 @@ import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.serializer.util.InstanceDispatcher;
 import org.eclipse.store.afs.nio.types.NioFileSystem;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.exceptions.StorageException;
 import org.eclipse.store.storage.types.*;
 import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
 import peruncs.datagrid.cluster.node.backup.*;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.http.ClusterRestRequestController;
 import peruncs.datagrid.cluster.node.replication.*;
 import peruncs.datagrid.cluster.node.store.*;
@@ -478,13 +480,6 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             );
         }
 
-                /// Reads the last replication cursor from stored information.
-        ///
-        /// @return stored replication cursor
-        private ReplicationCursor getReplicationCursorFromStoredInfo() {
-            return this.getStoredReplicationCursorManager().get();
-        }
-
                 /// Creates the replication data client.
         ///
         /// @return replication data client
@@ -495,7 +490,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     this.getStorageBinaryDataPacketAcceptor(),
                     props.replicationStreamName(),
                     this.getAfterDataMessageConsumedListener(),
-                    this.getReplicationCursorFromStoredInfo(),
+                    this.getStoredReplicationCursorManager().get(),
                     commitPosition
             );
         }
@@ -843,7 +838,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 final ReplicationCursor cursor;
                 try {
                     cursor = this.getReplicationPositionProvider().latest();
-                } catch (final peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException failure) {
+                } catch (final ReplicationPositionUnavailableException failure) {
                     throw new NodeLibraryException(
                             "Cannot bootstrap uploaded storage: replication transport does not expose a writer latest position",
                             failure);
@@ -977,7 +972,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 /// Queues the complete persisted dictionary for the first post-restart
         /// transaction. This covers types introduced by a rejected transaction whose
         /// incremental export was consumed before the writer crashed.
-        private void queueWriterDictionary(final org.eclipse.store.storage.embedded.types.EmbeddedStorageManager storage) {
+        private void queueWriterDictionary(final EmbeddedStorageManager storage) {
             final NodeLibraryPropertiesProvider props = this.getNodeLibraryPropertiesProvider();
             if (!"writer".equalsIgnoreCase(props.replicationRole())) {
                 return;
@@ -1184,21 +1179,34 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             final boolean storageManagerOwnsNodeResources = this.clusterStorageManager != null;
             final boolean requestControllerOwnsBackupResources =
                     this.clusterRequestController instanceof ClusterRestRequestController.BackupNode;
+            final boolean nodeManagerClosedByController =
+                    this.clusterRequestController instanceof ClusterRestRequestController.StorageNode;
             if (this.clusterRequestController != null) {
                 failure = closeResource(failure, this.clusterRequestController::close);
             }
             if (this.clusterStorageManager != null) {
                 failure = closeResource(failure, this.clusterStorageManager::close);
             }
-            /* A foundation can be closed after dependency creation but before the
-             * node-specific controllers are installed. Release those partially-built
-             * resources as well. The concrete implementations are idempotent. */
-            if (!requestControllerOwnsBackupResources) {
-                failure = closeInitialized(failure, this.dataClient, () -> this.dataClient.get().dispose());
+            if (nodeManagerClosedByController) {
+                /* The StorageNode controller closed the node manager above, and the
+                 * manager owns the client, distributor, and health check. Disposing
+                 * them again here would double-dispose after promotion. */
+            } else if (this.storageNodeManager.isInitialized()) {
+                /* No controller took ownership: close the manager itself so its
+                 * resources are still disposed exactly once. */
+                failure = closeInitialized(
+                        failure, this.storageNodeManager, () -> this.storageNodeManager.get().close());
+            } else {
+                /* A foundation can be closed after dependency creation but before the
+                 * node-specific controllers are installed. Release those partially-built
+                 * resources as well. The concrete implementations are idempotent. */
+                if (!requestControllerOwnsBackupResources) {
+                    failure = closeInitialized(failure, this.dataClient, () -> this.dataClient.get().dispose());
+                }
+                failure = closeInitialized(
+                        failure, this.dataDistributor, () -> this.dataDistributor.get().dispose());
+                failure = closeInitialized(failure, this.healthCheck, () -> this.healthCheck.get().close());
             }
-            failure = closeInitialized(
-                    failure, this.dataDistributor, () -> this.dataDistributor.get().dispose());
-            failure = closeInitialized(failure, this.healthCheck, () -> this.healthCheck.get().close());
             if (!requestControllerOwnsBackupResources) {
                 failure = closeInitialized(
                         failure, this.storageBackupTaskExecutor, () -> this.storageBackupTaskExecutor.get().close());

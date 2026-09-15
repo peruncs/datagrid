@@ -4,9 +4,8 @@ package peruncs.datagrid.cluster.storage.types;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.typing.Disposable;
 
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.eclipse.serializer.util.X.notNull;
 
 /// Cluster-aware extension of the binary distributor.
 ///
@@ -65,7 +64,7 @@ public interface StorageBinaryDataDistributor extends Disposable {
     /// @param delegate destination distributor
     /// @return caching distributor
     static StorageBinaryDataDistributor Caching(final StorageBinaryDataDistributor delegate) {
-        return new Caching(notNull(delegate));
+        return new Caching(Objects.requireNonNull(delegate, "delegate"));
     }
 
         /// Sets the next message index when the transport supports indexed distribution.
@@ -101,9 +100,11 @@ public interface StorageBinaryDataDistributor extends Disposable {
         return null;
     }
 
-        /// Queues a complete dictionary for the next data transaction, regardless of
-    /// which Store thread performs that transaction. This is used after writer
-    /// restart to re-establish the reader schema before new binaries arrive.
+        /// Queues a complete dictionary for the next data transaction. This is used
+    /// after writer restart to re-establish the reader schema before new binaries
+    /// arrive. The queued snapshot is authoritative: it replaces any staged
+    /// incremental dictionary, and later incrementals are dropped until the
+    /// snapshot is consumed.
     ///
     /// @param typeDictionaryData assembled type dictionary
     default void queueTypeDictionaryForNextTransaction(final String typeDictionaryData) {
@@ -111,12 +112,16 @@ public interface StorageBinaryDataDistributor extends Disposable {
     }
 
         /// Keeps dictionary data adjacent to the transaction that needs it.
+    /// One staged slot is enough: cluster storage has one writer, so a queued
+    /// restart snapshot and later incremental exports never need separate slots.
     final class Caching implements StorageBinaryDataDistributor {
         private final StorageBinaryDataDistributor delegate;
-        /* Cluster storage has one writer. Keep the pending dictionary in an explicit
-         * atomic slot instead of attaching it to a platform or virtual thread. */
-        private final AtomicReference<String> typeDictionaryData = new AtomicReference<>();
-        private final AtomicReference<String> queuedTypeDictionary = new AtomicReference<>();
+        /* The single staged dictionary: an incremental export or a restart snapshot. */
+        private final AtomicReference<String> pendingDictionary = new AtomicReference<>();
+        /* A queued restart snapshot is authoritative: it already contains every
+         * type registered so far, so incremental exports arriving afterwards are
+         * stale startup-disabled accumulations and must not overwrite it. */
+        private volatile boolean snapshotStaged;
 
         private Caching(final StorageBinaryDataDistributor delegate) {
             this.delegate = delegate;
@@ -124,7 +129,8 @@ public interface StorageBinaryDataDistributor extends Disposable {
 
         @Override
         public void distributeData(final Binary data) {
-            final String dictionary = this.typeDictionaryData.getAndSet(null);
+            final String dictionary = this.pendingDictionary.getAndSet(null);
+            this.snapshotStaged = false;
             if (dictionary != null) {
                 this.delegate.distributeTypeDictionary(dictionary);
             }
@@ -134,33 +140,27 @@ public interface StorageBinaryDataDistributor extends Disposable {
         @Override
         public void distributeTypeDictionary(final String typeDictionaryData) {
             if (typeDictionaryData == null) {
-                this.typeDictionaryData.set(null);
-            } else {
-                this.typeDictionaryData.set(typeDictionaryData);
+                this.pendingDictionary.set(null);
+                this.snapshotStaged = false;
+            } else if (!this.snapshotStaged) {
+                this.pendingDictionary.set(typeDictionaryData);
             }
         }
 
         @Override
         public void queueTypeDictionaryForNextTransaction(final String typeDictionaryData) {
             /* A node may have accumulated an incremental dictionary while startup
-             * distribution was disabled.  The restart snapshot is authoritative and
-             * must replace that stale thread-bound value, otherwise consumeTypeDictionary
-             * would return the incremental fragment and the queued full dictionary would
-             * never reach the next replicated transaction. */
-            this.typeDictionaryData.set(null);
-            this.queuedTypeDictionary.set(typeDictionaryData);
+             * distribution was disabled. The restart snapshot is authoritative and
+             * replaces that stale value; the flag keeps later stale incrementals
+             * from overwriting the snapshot before the next transaction consumes it. */
+            this.pendingDictionary.set(typeDictionaryData);
+            this.snapshotStaged = typeDictionaryData != null;
         }
 
         @Override
         public String consumeTypeDictionary() {
-            final String queued = this.queuedTypeDictionary.getAndSet(null);
-            if (queued != null) {
-                /* A full restart snapshot supersedes any incremental dictionary staged
-                 * on the calling thread while startup distribution was disabled. */
-                this.typeDictionaryData.set(null);
-                return queued;
-            }
-            return this.typeDictionaryData.getAndSet(null);
+            this.snapshotStaged = false;
+            return this.pendingDictionary.getAndSet(null);
         }
 
         @Override
@@ -190,8 +190,8 @@ public interface StorageBinaryDataDistributor extends Disposable {
 
         @Override
         public void dispose() {
-            this.typeDictionaryData.set(null);
-            this.queuedTypeDictionary.set(null);
+            this.pendingDictionary.set(null);
+            this.snapshotStaged = false;
             this.delegate.dispose();
         }
     }

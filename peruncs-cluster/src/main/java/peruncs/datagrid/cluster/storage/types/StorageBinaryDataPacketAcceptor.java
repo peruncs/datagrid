@@ -1,20 +1,20 @@
 package peruncs.datagrid.cluster.storage.types;
 
 
-import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.typing.Disposable;
-import java.nio.ByteBuffer;
-import java.util.List;
-import java.util.function.Consumer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/// Reassembles ordered packets and forwards complete messages to a receiver.
-public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBinaryDataPacket>>, Disposable {
+/// Forwards complete Store binaries to a receiver without packet reassembly.
+///
+/// Transports deliver complete binaries, so this acceptor is a thin decorator:
+/// it forwards delivery calls to one receiver and owns the receiver lifecycle
+/// on dispose.
+public interface StorageBinaryDataPacketAcceptor extends Disposable {
         /// Creates an acceptor for one receiver.
     ///
-    /// @param receiver destination for complete messages
+    /// @param receiver destination for complete binaries
     /// @return packet acceptor
     static StorageBinaryDataPacketAcceptor New(final StorageBinaryDataReceiver receiver) {
         return new StorageBinaryDataPacketAcceptor.Default(
@@ -57,79 +57,23 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
         throw new UnsupportedOperationException("decoded dictionary delivery is not supported");
     }
 
-        /// Reports whether no partial message is currently retained.
-    ///
-    /// Consumers use this boundary to commit transport offsets only after a
-    /// complete message has been accepted. Implementations that do not retain
-    /// state may keep the default.
-    ///
-    /// @return `true` when the next packet starts a new message
-    default boolean isAtMessageBoundary() {
-        return true;
-    }
-
-        /// Forwards a packet batch to the reassembler.
-    ///
-    /// @param packet packet batch
-    @Override
-    void accept(final List<StorageBinaryDataPacket> packet);
-
-        /// Releases a retained partial message, if any.
-    ///
-    /// The default implementation retains nothing.
-    default void dispose() {
-    }
-
-        /// Reassembles packets and forwards complete messages to a receiver.
+        /// Forwards complete binaries to a receiver and owns its disposal.
     class Default implements StorageBinaryDataPacketAcceptor {
-        private final LockedExecutor state = LockedExecutor.New();
         private final StorageBinaryDataReceiver receiver;
-        private StorageBinaryDataMessage message;
 
                 /// Creates an acceptor for one receiver.
         ///
-        /// @param receiver destination for complete messages
+        /// @param receiver destination for complete binaries
         protected Default(final StorageBinaryDataReceiver receiver) {
             super();
             this.receiver = receiver;
         }
 
         @Override
-        public void accept(final List<StorageBinaryDataPacket> packets) {
-            this.state.write(() ->
-            {
-                final StorageBinaryDataPacketAssembler.Result result;
-                try {
-                    result = StorageBinaryDataPacketAssembler.collect(this.message, packets);
-                    this.message = result.pending();
-                } catch (final RuntimeException | Error failure) {
-                    this.message = null;
-                    throw failure;
-                }
-                if (!result.completed().isEmpty()) {
-                    this.handleCompleteMessages(result.completed());
-                }
-            });
-        }
-
-        @Override
-        public boolean isAtMessageBoundary() {
-            return this.state.read(() -> this.message == null);
-        }
-
-        @Override
         public void dispose() {
-            this.state.write(() ->
-            {
-                final StorageBinaryDataMessage pending = this.message;
-                this.message = null;
-                if (pending != null) {
-                    pending.dispose();
-                }
-                if (this.receiver instanceof Disposable disposable) {
-                    disposable.dispose();
-                }
-            });
+            if (this.receiver instanceof Disposable disposable) {
+                disposable.dispose();
+            }
         }
 
         @Override
@@ -161,32 +105,5 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
         public void acceptTypeDictionary(final String dictionary) {
             this.receiver.receiveTypeDictionary(dictionary);
         }
-
-        private void handleCompleteMessages(final List<StorageBinaryDataMessage> messages) {
-            // Join similar messages and hand over to receiver
-            try {
-                StorageBinaryDataPacketAssembler.dispatch(messages, this::send);
-            } finally {
-                messages.forEach(StorageBinaryDataMessage::dispose);
-            }
-        }
-
-        private void send(final StorageBinaryDataMessage last, final List<ByteBuffer> buffers) {
-            switch (last.type()) {
-                case DATA -> {
-                    // join all buffers of previous data messages
-                    this.receiver.receiveData(
-                            StorageBinaryDataChunker.wrap(buffers)
-                    );
-                }
-
-                case TYPE_DICTIONARY -> {
-                    // type dictionary is always sent completely, so only the last one is relevant
-                    this.receiver.receiveTypeDictionary(StorageBinaryDataPacketAssembler.decodeTypeDictionary(last.data()));
-                }
-            }
-        }
-
     }
-
 }

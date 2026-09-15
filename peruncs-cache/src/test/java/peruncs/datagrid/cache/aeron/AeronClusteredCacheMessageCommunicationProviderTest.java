@@ -6,11 +6,14 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.eclipse.store.cache.types.CachingProvider;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cache.types.ClusteredCacheEntryListenerConfiguration;
 import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
 
+import javax.cache.configuration.MutableConfiguration;
 import javax.cache.event.CacheEntryListenerException;
 import javax.cache.event.EventType;
 import java.nio.ByteBuffer;
@@ -21,6 +24,7 @@ import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.net.URI;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -1091,6 +1095,70 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 () -> provideSender(withChannel(valid,
                         "aeron:udp?endpoint=localhost:40123|control-mode=dynamic")),
                 "loopback UDP outside an embedded driver must be rejected");
+    }
+
+    @Test
+    void receivedInvalidationIsNotRebroadcast(@TempDir final Path root) throws Exception {
+        try (MediaDriver driver = launchDriver(root)) {
+            final AeronClusteredCacheConfiguration base = configuration(root.resolve("driver"));
+            final AeronClusteredCacheConfiguration firstNode = withNodeId(base, UUID.randomUUID());
+            final AeronClusteredCacheConfiguration secondNode = withNodeId(base, UUID.randomUUID());
+            final var provider = new CachingProvider();
+            try {
+                final var firstManager = provider.getCacheManager(new URI("eclipsestore-aeron-first"), null);
+                final var secondManager = provider
+                        .getCacheManager(new URI("eclipsestore-aeron-second"), null);
+                final var firstCache = firstManager.createCache("timestamps",
+                        new MutableConfiguration<>().setTypes(Object.class, Object.class));
+                final var secondCache = secondManager.createCache("timestamps",
+                        new MutableConfiguration<>().setTypes(Object.class, Object.class));
+                final var firstSenderProvider = new AeronClusteredCacheMessageCommunicationProvider();
+                final var secondSenderProvider = new AeronClusteredCacheMessageCommunicationProvider();
+                /* Each node keeps one serializer for both bindings, as the API requires. */
+                final var firstSerializer = serializer();
+                final var secondSerializer = serializer();
+                final AeronClusteredCacheMessageSender firstSender = firstSenderProvider
+                        .provideUpdateTimestampsCacheMessageSender(firstNode, firstSerializer);
+                final AeronClusteredCacheMessageSender secondSender = secondSenderProvider
+                        .provideUpdateTimestampsCacheMessageSender(secondNode, secondSerializer);
+                final AeronClusteredCacheMessageReceiver firstReceiver = firstSenderProvider
+                        .provideMessageReceiver(firstNode, firstSerializer,
+                                new ClusteredCacheMessageAcceptor(firstManager));
+                final AeronClusteredCacheMessageReceiver secondReceiver = secondSenderProvider
+                        .provideMessageReceiver(secondNode, secondSerializer,
+                                new ClusteredCacheMessageAcceptor(secondManager));
+                firstCache.registerCacheEntryListener(new ClusteredCacheEntryListenerConfiguration(
+                        firstSender).getUpdateTimestampsCacheEntryListenerConfiguration());
+                secondCache.registerCacheEntryListener(new ClusteredCacheEntryListenerConfiguration(
+                        secondSender).getUpdateTimestampsCacheEntryListenerConfiguration());
+                try {
+                    firstReceiver.start();
+                    secondReceiver.start();
+
+                    firstCache.put("table", 7L);
+                    assertEquals(1, firstSender.published(), "the local write must broadcast once");
+
+                    final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (!Long.valueOf(7L).equals(secondCache.get("table"))
+                            && System.nanoTime() < deadline) {
+                        LockSupport.parkNanos(10_000L);
+                    }
+                    assertEquals(7L, secondCache.get("table"), "the second node did not apply the invalidation");
+                    /* A rebroadcasting receiver would have published by now: the
+                     * listener fires inline on apply, so settling briefly is enough. */
+                    Thread.sleep(1_000L);
+                    assertEquals(0, secondSender.published(),
+                            "a received invalidation must not be rebroadcast");
+                } finally {
+                    firstReceiver.dispose();
+                    secondReceiver.dispose();
+                    firstSender.dispose();
+                    secondSender.dispose();
+                }
+            } finally {
+                provider.close();
+            }
+        }
     }
 
     @Test

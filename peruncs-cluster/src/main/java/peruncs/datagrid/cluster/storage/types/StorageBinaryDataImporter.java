@@ -8,7 +8,7 @@ import java.nio.ByteBuffer;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Copies incoming Store binary buffers into owned native memory and imports them.
-public final class StorageBinaryDataImporter {
+final class StorageBinaryDataImporter {
     private static final ByteBuffer EMPTY_DIRECT_BUFFER = ByteBuffer.allocateDirect(0);
 
     private StorageBinaryDataImporter() {

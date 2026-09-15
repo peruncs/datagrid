@@ -2,7 +2,10 @@ package peruncs.datagrid.cluster.node.http;
 
 /// This class keeps the node REST paths and media types in one place.
 ///
-/// These constants define the route table. The request controller remains
+/// These constants define the route table. The node ships no HTTP server; the
+/// embedding application mounts these paths on its own stack and delegates to
+/// the request controller, so every route here is public API even though this
+/// repository never reads most of them. The request controller remains
 /// responsible for the behavior behind each route.
 public final class StorageNodeRestRouteConfigurations {
         /// Root path shared by all node endpoints.

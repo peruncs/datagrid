@@ -11,7 +11,7 @@ import org.eclipse.serializer.persistence.types.*;
 /// Root objects are left untouched because each node owns its local roots.
 /// Repeated object ids are collected once, which matters when one transaction
 /// contains several versions of an object.
-public class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
+class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
     private final PersistenceTypeDictionary persistenceTypeDictionary;
     private final PersistenceObjectRegistry objectRegistry;
     private final PersistenceLoader loader;

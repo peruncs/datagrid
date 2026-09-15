@@ -77,15 +77,6 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         super(cacheKeysFactory);
     }
 
-    private static ClusteredCacheEntryListenerConfiguration createEntryListenerConfiguration(
-            final AeronClusteredCacheMessageCommunicationProvider comProvider,
-            final AeronClusteredCacheConfiguration configuration,
-            final Serializer<byte[]> serializer
-    ) {
-        return new ClusteredCacheEntryListenerConfiguration(
-                comProvider.provideUpdateTimestampsCacheMessageSender(configuration, serializer));
-    }
-
         /// Translates the Hibernate setting map into the injected Aeron
     /// configuration. Absent or blank values use the record defaults; malformed
     /// values fail before any Aeron resource is opened.
@@ -184,21 +175,22 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
             final var configuration = clusteredCacheConfiguration(properties);
 
             this.cacheMessageReceiver = comProvider.provideMessageReceiver(configuration, serializer, messageAcceptor);
-            this.cacheEntryListenerConfiguration =
-                    createEntryListenerConfiguration(comProvider, configuration, serializer);
+            this.cacheEntryListenerConfiguration = new ClusteredCacheEntryListenerConfiguration(
+                    comProvider.provideUpdateTimestampsCacheMessageSender(configuration, serializer));
             this.cacheMessageReceiver.start();
         } catch (final RuntimeException | Error failure) {
+            /* The CacheManager was acquired by super.prepareForUse above, so it
+             * must be released on every failure path, not only when no
+             * clustered resource was created yet. */
             try {
                 this.disposeClusteredResources();
             } catch (final Throwable cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
             }
-            if (this.cacheEntryListenerConfiguration == null && this.cacheMessageReceiver == null) {
-                try {
-                    super.releaseFromUse();
-                } catch (final Throwable releaseFailure) {
-                    failure.addSuppressed(releaseFailure);
-                }
+            try {
+                super.releaseFromUse();
+            } catch (final Throwable releaseFailure) {
+                failure.addSuppressed(releaseFailure);
             }
             throw failure;
         }

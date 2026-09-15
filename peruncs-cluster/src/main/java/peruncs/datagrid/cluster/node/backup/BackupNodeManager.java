@@ -98,7 +98,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
         @Override
         public void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException {
             if (this.tasks.runBackup(useManualSlot) == StorageBackupTaskExecutor.BackupStartResult.BUSY) {
-                throw new IllegalStateException("Storage backup is already running");
+                throw new BackupBusyException("Storage backup is already running");
             }
         }
 

@@ -6,7 +6,9 @@ import org.agrona.concurrent.BackoffIdleStrategy;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
+import java.util.Objects;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.LongSupplier;
 
 /// The bounded retry policy used by the writer's Aeron publications.
 ///
@@ -15,10 +17,26 @@ import java.util.concurrent.locks.LockSupport;
 final class AeronOfferRetryer {
     private final Offerer offerer;
     private final AeronReplicationConfiguration configuration;
-    private final BackoffIdleStrategy idle = new BackoffIdleStrategy(1, 10, 1, 1_000_000);
+    private final LongSupplier clock;
+    private final BackoffIdleStrategy idle;
+
     AeronOfferRetryer(final Offerer offerer, final AeronReplicationConfiguration configuration) {
-        this.offerer = java.util.Objects.requireNonNull(offerer, "offerer");
-        this.configuration = java.util.Objects.requireNonNull(configuration, "configuration");
+        this(offerer, configuration, System::nanoTime);
+    }
+
+        /// Creates a retryer with an explicit monotonic clock for deterministic tests.
+    AeronOfferRetryer(
+            final Offerer offerer,
+            final AeronReplicationConfiguration configuration,
+            final LongSupplier clock
+    ) {
+        this.offerer = Objects.requireNonNull(offerer, "offerer");
+        this.configuration = Objects.requireNonNull(configuration, "configuration");
+        this.clock = Objects.requireNonNull(clock, "clock");
+        final var policy = this.configuration.retryPolicy();
+        this.idle = new BackoffIdleStrategy(
+                policy.idleMaxSpins(), policy.idleMaxYields(),
+                policy.idleMinParkNanos(), policy.idleMaxParkNanos());
     }
 
         /// Offers the first `length` bytes of a buffer until Aeron accepts them
@@ -44,7 +62,7 @@ final class AeronOfferRetryer {
 
     private long offerLoop(final DirectBuffer source, final int length) {
         this.idle.reset();
-        final long deadline = ReplicationRetry.deadlineNanos(this.configuration.offerTimeoutNanos());
+        final long deadline = ReplicationRetry.deadlineNanos(this.configuration.offerTimeoutNanos(), this.clock);
         long backPressured = 0;
         long notConnected = 0;
         long adminActions = 0;
@@ -67,7 +85,7 @@ final class AeronOfferRetryer {
                  * hide a protocol/API change behind a misleading timeout. */
                 throw new IllegalStateException("unknown Aeron publication result: %s".formatted(position));
             }
-            if (ReplicationRetry.expired(deadline)) {
+            if (ReplicationRetry.expired(deadline, this.clock)) {
                 final String reason;
                 if (position == Publication.BACK_PRESSURED) {
                     reason = "BACK_PRESSURED retries=%s".formatted(backPressured);
@@ -83,8 +101,9 @@ final class AeronOfferRetryer {
              * strategy still governs the tight spin; this park only desynchronizes
              * successive attempts within the per-operation deadline above. */
             attempt++;
+            final var policy = this.configuration.retryPolicy();
             LockSupport.parkNanos(
-                    ReplicationRetry.fullJitterDelayNanos(attempt, 1_000L, 1_000_000L));
+                    ReplicationRetry.fullJitterDelayNanos(attempt, policy.jitterBaseNanos(), policy.jitterCapNanos()));
             this.idle.idle();
         }
     }

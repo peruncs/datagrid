@@ -596,16 +596,18 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         } catch (final RuntimeException | Error failure) {
             /* The marker offer itself failed before any terminal state was
              * recorded. Clear the guard so commitOrMarkUncertain can mark the
-             * transaction uncertain instead of wedging the coordinator. */
-            this.writeLock.lock();
+             * transaction uncertain instead of wedging the coordinator. The
+             * lock may already be held when the failure came from the
+             * post-commit section after reacquiring; only lock when free so
+             * every exit path restores exactly the entry hold count. */
+            final boolean commitLockHeld = this.writeLock.isHeldByCurrentThread();
+            if (!commitLockHeld) this.writeLock.lock();
             try {
                 this.commitInProgress = false;
             } finally {
                 if (!writeLockHeld) this.writeLock.unlock();
             }
             throw failure;
-        } finally {
-            if (writeLockHeld) this.writeLock.lock();
         }
     }
 

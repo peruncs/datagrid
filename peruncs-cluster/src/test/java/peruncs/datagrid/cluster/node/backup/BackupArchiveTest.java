@@ -40,7 +40,8 @@ class BackupArchiveTest {
         writeArchive(archive, new Entry("../escaped", "bad"));
 
         assertThrows(NodeLibraryException.class,
-                () -> BackupArchive.extractArchive(root.resolve("extracted"), archive, true));
+                () -> BackupArchive.extractArchive(
+                        root.resolve("extracted"), archive, true, BackupArchiveLimits.Default()));
         assertFalse(Files.exists(root.resolve("escaped")));
     }
 
@@ -53,7 +54,8 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
 
-        BackupArchive.extractArchive(root.resolve("extracted"), archive, true);
+        BackupArchive.extractArchive(
+                root.resolve("extracted"), archive, true, BackupArchiveLimits.Default());
 
         assertEquals("payload", Files.readString(root.resolve("extracted").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
@@ -67,7 +69,8 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.MANIFEST_ENTRY, ReplicationCursorStore.encode(expected)),
                 new Entry(StorageBackupBackend.READY_ENTRY, (String) null));
 
-        assertEquals(expected, ReplicationCursorStore.decode(BackupArchive.readManifest(archive)));
+        assertEquals(expected, ReplicationCursorStore.decode(
+                BackupArchive.readManifest(archive, BackupArchiveLimits.Default().maxExtractedBytes())));
         assertFalse(Files.exists(root.resolve("extracted")));
     }
 
@@ -78,7 +81,8 @@ class BackupArchiveTest {
 
         final Path extracted = root.resolve("extracted");
         assertThrows(NodeLibraryException.class,
-                () -> BackupArchive.extractArchive(extracted, archive, true));
+                () -> BackupArchive.extractArchive(
+                        extracted, archive, true, BackupArchiveLimits.Default()));
         StorageFileOperations.cleanup(extracted, null);
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
@@ -88,7 +92,8 @@ class BackupArchiveTest {
         final Path archive = root.resolve("missing-manifest.zip");
         writeArchive(archive, new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null));
 
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive));
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
+                archive, BackupArchiveLimits.Default().maxExtractedBytes()));
     }
 
     @Test
@@ -96,7 +101,8 @@ class BackupArchiveTest {
         final Path archive = root.resolve("large-manifest.zip");
         writeArchive(archive, new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[(1 << 20) + 1]));
 
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive));
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
+                archive, BackupArchiveLimits.Default().maxExtractedBytes()));
     }
 
     @Test
@@ -104,6 +110,70 @@ class BackupArchiveTest {
         assertFalse(BackupArchive.isBackupFileName("123.evil.zip"));
         assertThrows(NodeLibraryException.class,
                 () -> BackupArchive.parseMetadata("123.evil.zip", Path.of("backups")));
+    }
+
+    @Test
+    void acceptsCaseInsensitiveBackupFilename() {
+        assertTrue(BackupArchive.isBackupFileName("123.MANUAL.ZIP"));
+    }
+
+    @Test
+    void rejectsArchiveDeclaringMoreThanBudget(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("lying.zip");
+        writeRawStoredArchive(archive,
+                new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "tiny", 2_000_000_000L),
+                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", 8L),
+                new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
+
+        final Path extracted = root.resolve("extracted");
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+                extracted, archive, true, new BackupArchiveLimits(1024L)));
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive, 1024L));
+        assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+    }
+
+    @Test
+    void rejectsEntryDataBeyondDeclaredSize(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("overrun.zip");
+        writeRawStoredArchive(archive,
+                new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "hello", 2L),
+                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", 8L),
+                new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
+
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+                root.resolve("extracted"), archive, true, BackupArchiveLimits.Default()));
+    }
+
+    @Test
+    void extractionBudgetComesFromLimits(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("budgeted.zip");
+        writeArchive(archive,
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload"),
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
+                new Entry(StorageBackupBackend.READY_ENTRY, ""));
+
+        final Path tight = root.resolve("tight");
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+                tight, archive, true, new BackupArchiveLimits(8L)));
+        BackupArchive.extractArchive(
+                root.resolve("roomy"), archive, true, BackupArchiveLimits.Default());
+        assertEquals("payload", Files.readString(
+                root.resolve("roomy").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+    }
+
+    @Test
+    void reportsStoragePayloadPresence(@TempDir final Path root) throws Exception {
+        final Path full = root.resolve("full.zip");
+        writeArchive(full,
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
+                new Entry(StorageBackupBackend.READY_ENTRY, ""));
+        assertTrue(BackupArchive.containsStoragePayload(full));
+
+        final Path manifestOnly = root.resolve("manifest-only.zip");
+        writeArchive(manifestOnly, new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"));
+        assertFalse(BackupArchive.containsStoragePayload(manifestOnly));
     }
 
     private static void writeDuplicateArchive(final Path archive) throws IOException {
@@ -134,6 +204,70 @@ class BackupArchiveTest {
         writeLeInt(bytes, centralDirectoryOffset);
         writeLeShort(bytes, 0);
         Files.write(archive, bytes.toByteArray());
+    }
+
+    /// Writes STORED entries whose central-directory declared sizes may lie about the data.
+    private static void writeRawStoredArchive(final Path archive, final RawEntry... entries) throws IOException {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        final int[] offsets = new int[entries.length];
+        for (int index = 0; index < entries.length; index++) {
+            offsets[index] = bytes.size();
+            writeRawLocalEntry(bytes, entries[index]);
+        }
+        final int centralDirectoryOffset = bytes.size();
+        for (int index = 0; index < entries.length; index++) {
+            writeRawCentralEntry(bytes, entries[index], offsets[index]);
+        }
+        final int centralDirectoryLength = bytes.size() - centralDirectoryOffset;
+        writeLeInt(bytes, 0x06054b50);
+        writeLeShort(bytes, 0);
+        writeLeShort(bytes, 0);
+        writeLeShort(bytes, entries.length);
+        writeLeShort(bytes, entries.length);
+        writeLeInt(bytes, centralDirectoryLength);
+        writeLeInt(bytes, centralDirectoryOffset);
+        writeLeShort(bytes, 0);
+        Files.write(archive, bytes.toByteArray());
+    }
+
+    private static void writeRawLocalEntry(final OutputStream output, final RawEntry entry) throws IOException {
+        final byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        writeLeInt(output, 0x04034b50);
+        writeLeShort(output, 20);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeInt(output, crc32(entry.data()));
+        writeLeInt(output, entry.data().length);
+        writeLeInt(output, (int) entry.declaredSize());
+        writeLeShort(output, name.length);
+        writeLeShort(output, 0);
+        output.write(name);
+        output.write(entry.data());
+    }
+
+    private static void writeRawCentralEntry(final OutputStream output, final RawEntry entry, final int offset)
+            throws IOException {
+        final byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        writeLeInt(output, 0x02014b50);
+        writeLeShort(output, 20);
+        writeLeShort(output, 20);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeInt(output, crc32(entry.data()));
+        writeLeInt(output, entry.data().length);
+        writeLeInt(output, (int) entry.declaredSize());
+        writeLeShort(output, name.length);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeInt(output, 0);
+        writeLeInt(output, offset);
+        output.write(name);
     }
 
     private static void writeLocalEntry(final OutputStream output, final Entry entry) throws IOException {
@@ -192,6 +326,12 @@ class BackupArchiveTest {
     private static void writeLeInt(final OutputStream output, final int value) throws IOException {
         writeLeShort(output, value);
         writeLeShort(output, value >>> 16);
+    }
+
+    private record RawEntry(String name, byte[] data, long declaredSize) {
+        private RawEntry(final String name, final String data, final long declaredSize) {
+            this(name, data.getBytes(StandardCharsets.UTF_8), declaredSize);
+        }
     }
 
     private record Entry(String name, byte[] data) {

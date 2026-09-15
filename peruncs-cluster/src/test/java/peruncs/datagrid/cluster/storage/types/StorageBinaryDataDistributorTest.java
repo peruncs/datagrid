@@ -64,4 +64,40 @@ class StorageBinaryDataDistributorTest {
         assertEquals(1, dictionaryCalls.get());
         assertNull(caching.consumeTypeDictionary());
     }
+
+        /// A stale incremental arriving after a restart snapshot is dropped.
+    @Test
+    void incrementalAfterQueuedSnapshotIsDropped() {
+        final StorageBinaryDataDistributor caching =
+                StorageBinaryDataDistributor.Caching(StorageBinaryDataDistributor.NoOp());
+        caching.queueTypeDictionaryForNextTransaction("full-restart-dictionary");
+        caching.distributeTypeDictionary("stale-incremental");
+        assertEquals("full-restart-dictionary", caching.consumeTypeDictionary());
+        assertNull(caching.consumeTypeDictionary());
+    }
+
+        /// A queued snapshot travels with the next data transaction, not stranded.
+    @Test
+    void queuedSnapshotIsForwardedWithData() {
+        final List<String> dictionaries = new ArrayList<>();
+        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
+            @Override
+            public void distributeData(final Binary ignored) {
+            }
+
+            @Override
+            public void distributeTypeDictionary(final String value) {
+                dictionaries.add(value);
+            }
+
+            @Override
+            public void dispose() {
+            }
+        };
+        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
+        caching.queueTypeDictionaryForNextTransaction("full-restart-dictionary");
+        caching.distributeData(null);
+        assertEquals(List.of("full-restart-dictionary"), dictionaries);
+        assertNull(caching.consumeTypeDictionary());
+    }
 }

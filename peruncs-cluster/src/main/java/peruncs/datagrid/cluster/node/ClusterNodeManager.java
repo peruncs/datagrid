@@ -40,16 +40,40 @@ public interface ClusterNodeManager extends AutoCloseable {
 
         /// Monitoring hook; nodes without a replication stream return `-1`.
     ///
-    /// @return current message index
-    default long getCurrentMessageIndex() {
+    /// @return current applied sequence
+    default long getCurrentSequence() {
         return -1;
     }
 
         /// Monitoring hook; nodes without a replication stream return `-1`.
     ///
-    /// @return latest message index
-    default long getLatestMessageIndex() {
+    /// @return latest writer sequence
+    default long getLatestSequence() {
         return -1;
+    }
+
+        /// Assembles the point-in-time replication observability values.
+    ///
+    /// Lag is reported as `-1` while the writer boundary is unknown so an
+    /// unknowable boundary never renders as a healthy zero lag.
+    ///
+    /// @return raw replication metrics
+    default ReplicationMetrics replicationMetrics() {
+        final long current = this.getCurrentSequence();
+        final long latest = this.getLatestSequence();
+        final long lag = current < 0L || latest < 0L ? -1L : Math.max(0L, latest - current);
+        return new ReplicationMetrics(
+                current,
+                latest,
+                lag,
+                this.getReplicationTransport(),
+                this.getReplicationState(),
+                this.isReady(),
+                this.isHealthy(),
+                this.getArchiveUsableSpaceBytes(),
+                this.getWriterDurablePosition(),
+                this.getWriterDurableSequence(),
+                this.getAppliedSequence());
     }
 
         /// Monitoring hook for the selected provider.

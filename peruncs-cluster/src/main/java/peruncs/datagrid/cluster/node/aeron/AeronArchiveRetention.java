@@ -60,6 +60,15 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             .name("datagrid-retention-agent", 0L)
             .factory());
     private final ThreadLocal<Boolean> onAgentThread = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final System.Logger LOGGER = System.getLogger(AeronArchiveRetention.class.getName());
+
+        /// Default bound for one queued retention command, in milliseconds.
+    /// Archive segment purges run under the writer-paused fence and can take
+    /// a while on large histories; callers wait at most this long before the
+    /// wait itself fails.
+    public static final long DEFAULT_OPERATION_TIMEOUT_MILLIS = 60_000L;
+
+    private final long operationTimeoutMillis;
 
     AeronArchiveRetention(
             final byte[] secret,
@@ -75,7 +84,8 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             final IntSupplier termLength,
             final IntSupplier segmentLength,
             final BooleanSupplier watermarkDeliveryAvailable,
-            final Path statePath
+            final Path statePath,
+            final long operationTimeoutMillis
     ) {
         Objects.requireNonNull(secret, "secret");
         Objects.requireNonNull(readers, "readers");
@@ -104,13 +114,20 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         this.segmentLength = segmentLength;
         this.watermarkDeliveryAvailable = watermarkDeliveryAvailable;
         this.statePath = statePath;
+        if (operationTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("operationTimeoutMillis must be positive");
+        }
+        this.operationTimeoutMillis = operationTimeoutMillis;
     }
 
         /// Runs one retention command on the single agent thread.
     ///
     /// Calls already on the agent thread (nested retention calls) run
     /// directly; every other caller queues behind ongoing Archive work and
-    /// waits for its outcome. Failures keep their original type so policy
+    /// waits at most the configured operation timeout for its outcome. A timed
+    /// out wait cancels the queued command and fails; the command itself may
+    /// still complete on the agent thread when the underlying Archive call
+    /// ignores interruption. Failures keep their original type so policy
     /// rejections stay distinguishable from transport faults.
     private <T> T onAgent(final Producer<T> operation) {
         if (Boolean.TRUE.equals(this.onAgentThread.get())) return operation.produce();
@@ -128,7 +145,12 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             throw new IllegalStateException("Aeron retention is closed", rejected);
         }
         try {
-            return submitted.get();
+            return submitted.get(this.operationTimeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (final TimeoutException timeout) {
+            submitted.cancel(true);
+            throw new IllegalStateException(
+                    "Timed out waiting for Aeron retention after %s ms".formatted(this.operationTimeoutMillis),
+                    timeout);
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting for Aeron retention", interrupted);
@@ -247,7 +269,9 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         }
     }
 
-    @Override
+        /// Permanently retires a reader, deleting its quorum entry and state.
+    ///
+    /// @param readerId permanently retired reader identity
     public void retireReader(final UUID readerId) {
         this.onAgent(() -> this.retireReaderOnAgent(readerId));
     }
@@ -366,7 +390,10 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         try {
             if (!this.agent.awaitTermination(30, TimeUnit.SECONDS)) {
                 this.agent.shutdownNow();
-                this.agent.awaitTermination(5, TimeUnit.SECONDS);
+                if (!this.agent.awaitTermination(5, TimeUnit.SECONDS)) {
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Aeron retention agent did not terminate after shutdown");
+                }
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();

@@ -225,31 +225,29 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         if (!this.running || this.disposed || this.agentFailure.get() != null) {
             return;
         }
-        if (AeronClusteredCacheMessageCodec.senderIdMatches(buffer, offset, length, this.senderId)) {
-            this.selfSkipped.increment();
-            return;
-        }
-
-        final long sequence;
-        final AeronClusteredCacheMessageCodec.SenderId sender;
+        /* One validation covers the header, the sender identity, the sequence,
+         * and the payload bounds; the CRC is computed once, not per accessor. */
+        final AeronClusteredCacheMessageCodec.ValidatedFrame frame;
         try {
-            /* Validate the length before reading the sender id so a truncated
-             * foreign fragment cannot read past the frame. */
-            sequence = AeronClusteredCacheMessageCodec.sequenceOf(buffer, offset, length);
-            sender = AeronClusteredCacheMessageCodec.senderIdOf(buffer, offset, length);
-            if (!this.acceptSequence(sender, sequence)) {
-                return;
-            }
+            frame = AeronClusteredCacheMessageCodec.validate(
+                    buffer, offset, length, this.maxPayloadBytes, this.senderId);
         } catch (final RuntimeException failure) {
             this.malformed.increment();
             this.failClosed("Malformed Aeron clustered-cache frame of %s bytes".formatted(length), failure);
             return;
         }
+        if (frame.self()) {
+            this.selfSkipped.increment();
+            return;
+        }
+        if (!this.acceptSequence(frame.sender(), frame.sequence())) {
+            return;
+        }
 
         final TimestampsRegionUpdateMessage message;
         try {
-            final byte[] payload = AeronClusteredCacheMessageCodec.decodePayload(
-                    buffer, offset, length, this.maxPayloadBytes);
+            final byte[] payload = AeronClusteredCacheMessageCodec.payloadOf(
+                    buffer, offset, frame.payloadLength());
             message = AeronClusteredCachePayloadCodec.decode(payload);
         } catch (final RuntimeException failure) {
             this.malformed.increment();

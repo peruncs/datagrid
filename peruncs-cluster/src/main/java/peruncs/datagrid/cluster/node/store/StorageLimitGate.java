@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /// the limit is reached, a ten-percent hysteresis band prevents usage near the
 /// boundary from oscillating between writable and read-only.
 public final class StorageLimitGate {
+    private static final System.Logger LOGGER = System.getLogger(StorageLimitGate.class.getName());
     private static final long BYTES_PER_GIGABYTE = 1_000_000_000L;
 
     private final AtomicBoolean limitReached = new AtomicBoolean(false);
@@ -78,14 +79,13 @@ public final class StorageLimitGate {
         if (diskSpaceReader == null) throw new NullPointerException("diskSpaceReader");
         return () ->
         {
-            final System.Logger logger = System.getLogger(StorageLimitGate.class.getName());
-            logger.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
+            LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
             final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
-            final long usedGb = usedBytes / 1_000_000_000L;
-            logger.log(System.Logger.Level.INFO,
+            final long usedGb = usedBytes / BYTES_PER_GIGABYTE;
+            LOGGER.log(System.Logger.Level.INFO,
                     "Storage Size: %sgb/%sgb (%s bytes)".formatted(usedGb, this.limitGb(), usedBytes));
             if (usedBytes >= this.limitBytes()) {
-                logger.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
+                LOGGER.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
             }
             this.updateUsage(usedBytes);
         };

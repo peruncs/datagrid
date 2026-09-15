@@ -11,77 +11,11 @@ import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Tests storage binary data chunker behavior.
 class StorageBinaryDataChunkerTest {
-        /// Verifies chunks across source buffers without changing their positions.
-    @Test
-    void chunksAcrossSourceBuffersWithoutChangingTheirPositions() {
-        final ByteBuffer first = XMemory.toDirectByteBuffer(new byte[]{1, 2});
-        final ByteBuffer second = XMemory.toDirectByteBuffer(new byte[]{3, 4, 5});
-        final var binary = ChunksWrapper.New(first, second);
-
-        final var chunks = StorageBinaryDataChunker.chunk(binary, 2);
-
-        assertEquals(3, chunks.size());
-        assertArrayEquals(new byte[]{1, 2}, chunks.get(0).bytes());
-        assertArrayEquals(new byte[]{3, 4}, chunks.get(1).bytes());
-        assertArrayEquals(new byte[]{5}, chunks.get(2).bytes());
-        assertEquals(0, first.position());
-        assertEquals(0, second.position());
-        assertEquals(3, chunks.get(0).count());
-        assertEquals(5, chunks.get(0).messageLength());
-    }
-
-        /// Verifies empty binary produces no packets.
-    @Test
-    void emptyBinaryProducesNoPackets() {
-        final var binary = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[0]));
-        assertEquals(0, StorageBinaryDataChunker.chunk(binary, 128).size());
-    }
-
-        /// Verifies that streaming iteration does not materialize a second chunk list.
-    @Test
-    void streamingForEachDoesNotMaterializeASecondChunkList() {
-        final ByteBuffer source = XMemory.toDirectByteBuffer(new byte[]{1, 2, 3});
-        final var binary = ChunksWrapper.New(source);
-        final var chunks = new ArrayList<StorageBinaryDataChunker.Chunk>();
-        StorageBinaryDataChunker.forEach(binary, 2, chunks::add);
-        assertEquals(2, chunks.size());
-        assertArrayEquals(new byte[]{1, 2}, chunks.get(0).bytes());
-        assertArrayEquals(new byte[]{3}, chunks.get(1).bytes());
-        assertEquals(0, source.position());
-    }
-
-        /// Verifies channel-partitioned Store binaries are flattened in channel order.
-    @Test
-    void chunksAllSerializerChannelsInOrder() {
-        final ChunksBuffer[] channels = new ChunksBuffer[2];
-        final var bufferSize = BufferSizeProviderIncremental.New(32);
-        channels[0] = ChunksBuffer.New(channels, bufferSize);
-        channels[1] = ChunksBuffer.New(channels, bufferSize);
-        channels[0].store_bytes(1L, 1L, new byte[]{1, 2});
-        channels[1].store_bytes(1L, 2L, new byte[]{3, 4});
-        channels[0].complete();
-        channels[1].complete();
-        try {
-            final var chunks = StorageBinaryDataChunker.chunk(channels[0], 3);
-            final var expected = new ArrayList<Byte>(channels[0].buffers()[0].remaining()
-                                                     + channels[1].buffers()[0].remaining());
-            for (final ChunksBuffer channel : channels) {
-                final ByteBuffer buffer = channel.buffers()[0].duplicate();
-                while (buffer.hasRemaining()) expected.add(buffer.get());
-            }
-            final var actual = new ArrayList<Byte>();
-            for (final var chunk : chunks)
-                for (final byte value : chunk.bytes()) actual.add(value);
-            assertEquals(expected, actual);
-        } finally {
-            channels[0].clear();
-            channels[1].clear();
-        }
-    }
-
         /// The receiver fast path must collect exactly one array without a list copy.
     @Test
     void bufferArrayPreservesAllChannelBuffers() {
@@ -111,5 +45,52 @@ class StorageBinaryDataChunkerTest {
         } finally {
             XMemory.deallocateDirectByteBuffer(source);
         }
+    }
+
+        /// Owned import returns the original buffers normalized in place.
+    @Test
+    void ownedArrayReturnsOriginalsNormalized() {
+        final ByteBuffer source = XMemory.allocateDirectNative(8);
+        try {
+            source.put(new byte[]{1, 2, 3});
+            final var binary = ChunksWrapper.New(source);
+            final ByteBuffer[] owned = StorageBinaryDataChunker.ownedArray(binary);
+            assertEquals(1, owned.length);
+            assertSame(source, owned[0]);
+            assertEquals(0, owned[0].position());
+            assertEquals(3, owned[0].limit());
+        } finally {
+            XMemory.deallocateDirectByteBuffer(source);
+        }
+    }
+
+        /// Owned import preserves channel order with per-buffer logical lengths.
+    @Test
+    void ownedArrayPreservesChannelOrderWithPerBufferLengths() {
+        final ByteBuffer first = XMemory.allocateDirectNative(8);
+        final ByteBuffer second = XMemory.allocateDirectNative(8);
+        try {
+            first.put(new byte[]{1, 2, 3});
+            second.put(new byte[]{4, 5});
+            final var binary = ChunksWrapper.New(first, second);
+            final ByteBuffer[] owned = StorageBinaryDataChunker.ownedArray(binary);
+            assertEquals(2, owned.length);
+            assertSame(first, owned[0]);
+            assertSame(second, owned[1]);
+            assertEquals(0, owned[0].position());
+            assertEquals(3, owned[0].limit());
+            assertEquals(0, owned[1].position());
+            assertEquals(2, owned[1].limit());
+        } finally {
+            XMemory.deallocateDirectByteBuffer(first);
+            XMemory.deallocateDirectByteBuffer(second);
+        }
+    }
+
+        /// Owned import rejects a missing binary instead of failing mid-iteration.
+    @Test
+    void ownedArrayRejectsNullBinary() {
+        assertThrows(NullPointerException.class,
+                () -> StorageBinaryDataChunker.ownedArray(null));
     }
 }

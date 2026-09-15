@@ -10,7 +10,7 @@ import peruncs.datagrid.cluster.node.aeron.AeronCrashHooks;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
+import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
@@ -335,7 +335,7 @@ public final class ProviderCrashChildMain {
 
         private void start() {
             AeronCrashHooks.runWithHook(this.crashHook, () ->
-                    AtomicFileStoreCrashHook.runWithHook(this.atomicFileHook, this::startInternal));
+                    FileStoreCrashHooks.runWithHook(this.atomicFileHook, this::startInternal));
         }
 
         private void startInternal() {
@@ -432,7 +432,7 @@ public final class ProviderCrashChildMain {
 
         private void write(final byte[] payload) {
             AeronCrashHooks.runWithHook(this.crashHook, () ->
-                    AtomicFileStoreCrashHook.runWithHook(this.atomicFileHook, () -> this.writeInternal(payload)));
+                    FileStoreCrashHooks.runWithHook(this.atomicFileHook, () -> this.writeInternal(payload)));
         }
 
         private void writeInternal(final byte[] payload) {

@@ -27,7 +27,11 @@ public interface ObjectGraphUpdateHandler {
     ///
     /// The child is joined before this method returns, so imported direct
     /// buffers cannot outlive the graph update that consumes them. The scope
-    /// also inherits any scoped values established by the caller.
+    /// also inherits any scoped values established by the caller. The timeout
+    /// bounds the wait for the result: on expiry the scope cancels the child
+    /// and joining throws, but closing still waits for the cancelled child,
+    /// so an update that ignores interruption can delay return past the
+    /// timeout. Callers must treat expiry as terminal regardless.
     ///
     /// @param handler update handler
     /// @param updater update to run

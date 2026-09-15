@@ -221,6 +221,12 @@ public final class AtomicFileStore {
         }
     }
 
+        /// Reports the macOS system symlinks (`/tmp`, `/var`, `/etc`) that point
+    /// into `/private`. Only a root-level link whose target is the matching
+    /// self-named `/private` entry qualifies; creating such a link requires
+    /// privileges outside the threat model, and everything else still fails
+    /// closed. The shape mirrors the OS convention instead of a fixed name
+    /// list so future system aliases keep working.
     private static boolean isSystemPrivateAlias(final Path path) {
         final Path root = path.getRoot();
         if (root == null || !root.equals(path.getParent())) return false;

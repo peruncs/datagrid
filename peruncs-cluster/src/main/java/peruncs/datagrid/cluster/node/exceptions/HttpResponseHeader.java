@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.node.http;
+package peruncs.datagrid.cluster.node.exceptions;
 
 /// A response header carried across the HTTP boundary.
 ///

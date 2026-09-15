@@ -12,7 +12,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -40,7 +44,7 @@ class AeronArchiveRetentionTest {
         return new AeronArchiveRetention(SECRET, Set.of(READER), ensureWriter, unavailableRecording(), () -> 17,
                 () -> new AeronWriterBoundary(4, 17, 8_192), ignored -> 0L,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
-                () -> watermarkDeliveryAvailable, state);
+                () -> watermarkDeliveryAvailable, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
     private static AeronArchiveRetention retention(final Set<UUID> readers, final Path state) {
@@ -53,7 +57,7 @@ class AeronArchiveRetentionTest {
         return new AeronArchiveRetention(SECRET, readers, ensureWriter, unavailableRecording(), () -> 17,
                 () -> new AeronWriterBoundary(4, 17, 8_192), ignored -> 0L,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
-                () -> true, state);
+                () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
     private static AeronArchiveRetention.RecordingPositions unavailableRecording() {
@@ -75,7 +79,7 @@ class AeronArchiveRetentionTest {
                 new AeronArchiveRetention.RecordingPositions(
                         ignored -> 0L, ignored -> 16L * 1_024 * 1_024, ignored -> -1L), () -> 17,
                 () -> new AeronWriterBoundary(4, 17, 16L * 1_024 * 1_024), purger,
-                CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, null);
+                CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, null, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
     private static ReplicationCursor deletionCursor(final long position) {
@@ -307,7 +311,7 @@ class AeronArchiveRetentionTest {
                     () -> {
                     }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
                     ignored -> 0L,
-                    CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state);
+                    CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             first.retireReader(secondReader);
             first.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4,
                     AeronAuthenticatedWatermark.sign(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET).encode()));
@@ -318,7 +322,7 @@ class AeronArchiveRetentionTest {
                     () -> {
                     }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
                     ignored -> 0L,
-                    CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state);
+                    CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             assertTrue(restarted.isSupported());
             assertThrows(SecurityException.class, () -> restarted.recordReaderWatermark(ReplicationCursor.of(
                     "aeron", GENERATION, 4, AeronAuthenticatedWatermark.sign(
@@ -416,6 +420,51 @@ class AeronArchiveRetentionTest {
         } finally {
             Files.deleteIfExists(state);
             Files.deleteIfExists(directory);
+        }
+    }
+
+    @Test
+    void queuedCommandWaitIsBoundedWhenTheAgentIsStuck() throws Exception {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        try (final AeronArchiveRetention retention = new AeronArchiveRetention(SECRET, Set.of(READER), () -> {
+            entered.countDown();
+            try {
+                assertTrue(release.await(30, TimeUnit.SECONDS), "ensureWriter was never released");
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("ensureWriter interrupted", interrupted);
+            }
+        },
+                unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
+                ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
+                () -> true, null, 300L)) {
+            final AtomicReference<Throwable> background = new AtomicReference<>();
+            final Thread stuck = Thread.ofVirtual().start(() -> {
+                try {
+                    retention.recordReaderWatermark(cursor(READER));
+                } catch (final Throwable failure) {
+                    background.set(failure);
+                }
+            });
+            try {
+                assertTrue(entered.await(30, TimeUnit.SECONDS), "agent did not start the blocking command");
+                final long start = System.nanoTime();
+                final IllegalStateException failure =
+                        assertThrows(IllegalStateException.class, retention::isSupported);
+                final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                assertTrue(failure.getCause() instanceof TimeoutException,
+                        "expected a TimeoutException cause, got " + failure.getCause());
+                assertTrue(elapsedMillis < 10_000L,
+                        "retention wait was not bounded: %s ms".formatted(elapsedMillis));
+            } finally {
+                release.countDown();
+                stuck.join(30_000L);
+                assertFalse(stuck.isAlive(), "background command did not finish after release");
+            }
+            final Throwable backgroundFailure = background.get();
+            assertTrue(backgroundFailure == null || backgroundFailure instanceof IllegalStateException,
+                    "unexpected background failure " + backgroundFailure);
         }
     }
 

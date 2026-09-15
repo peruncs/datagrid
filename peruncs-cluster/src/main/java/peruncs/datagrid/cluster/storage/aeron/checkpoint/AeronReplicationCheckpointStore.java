@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -87,7 +88,7 @@ public final class AeronReplicationCheckpointStore {
                 throw new IOException("unknown Aeron checkpoint format");
             }
             final var recordType = AeronReplicationCheckpoint.RecordType.from(Byte.toUnsignedInt(buffer.get()));
-            final var mode = AeronReplicationCheckpoint.DurabilityMode.from(Byte.toUnsignedInt(buffer.get()));
+            final var mode = ReplicationDurabilityMode.fromCode(Byte.toUnsignedInt(buffer.get()));
             final var state = AeronReplicationCheckpoint.State.from(Byte.toUnsignedInt(buffer.get()));
             if (buffer.getShort() != 0 || buffer.get() != 0) {
                 throw new IOException("unsupported Aeron checkpoint reserved fields");

@@ -10,21 +10,21 @@ import java.io.OutputStream;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 /// Encodes and validates the ZIP format used by filesystem backups.
 final class BackupArchive {
-    private static final LazyConstant<Pattern> BACKUP_NAME =
-            LazyConstant.of(() -> Pattern.compile("^(\\d+)(\\.manual)?\\.zip$"));
+    private static final LazyConstant<Pattern> BACKUP_NAME = LazyConstant.of(
+            () -> Pattern.compile("^(\\d+)(\\.manual)?\\.zip$", Pattern.CASE_INSENSITIVE));
     private static final int MAX_ARCHIVE_ENTRIES = 1_000_000;
-    private static final long MAX_EXTRACTED_BYTES = 1L << 30;
     private static final int MAX_MANIFEST_BYTES = 1 << 20;
 
     private BackupArchive() {
@@ -75,119 +75,200 @@ final class BackupArchive {
     }
 
     /// Extracts only archives with safe relative, non-link entries.
+    ///
+    /// The extraction budget is derived from the archive's declared entry
+    /// sizes when all are known and falls back to the configured absolute
+    /// ceiling otherwise, so legitimate large stores restore while
+    /// decompression bombs still fail fast.
     static void extractArchive(
             final Path destination,
             final Path archive,
-            final boolean requireBackupMetadata
+            final boolean requireBackupMetadata,
+            final BackupArchiveLimits limits
     ) throws NodeLibraryException {
+        if (limits == null) throw new NullPointerException("limits");
         final Path root = destination.toAbsolutePath().normalize();
         try {
             StorageFileOperations.ensureNoSymbolicLinks(root);
             Files.createDirectories(root);
-            final Set<String> names = new HashSet<>();
-            final byte[] transferBuffer = new byte[8192];
-            int entryCount = 0;
-            long extractedBytes = 0L;
-            try (var archiveChannel = StorageFileOperations.openRegularFile(archive);
-                 InputStream file = Channels.newInputStream(archiveChannel);
-                 ZipInputStream zip = new ZipInputStream(file)) {
-                ZipEntry entry;
-                while ((entry = zip.getNextEntry()) != null) {
-                    final String name = entry.getName();
-                    if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(name)) {
-                        throw new NodeLibraryException("Backup archive contains too many or duplicate entries");
-                    }
-                    if (!safeArchiveName(name)) {
-                        throw new NodeLibraryException("Backup archive contains an unsafe entry: %s".formatted(name));
-                    }
-                    final Path target = root.resolve(name).normalize();
-                    if (!target.startsWith(root)) {
-                        throw new NodeLibraryException("Backup archive entry escapes extraction root");
-                    }
-                    ensureNoSymlinkParent(root, target.getParent());
-                    StorageFileOperations.ensureNoSymbolicLinks(target);
-                    if (entry.isDirectory()) {
-                        Files.createDirectories(target);
-                        StorageFileOperations.ensureNoSymbolicLinks(target);
-                    } else {
-                        final Path parent = target.getParent();
-                        if (parent != null) {
-                            Files.createDirectories(parent);
-                            StorageFileOperations.ensureNoSymbolicLinks(parent);
-                        }
-                        try (OutputStream output = Files.newOutputStream(target,
-                                StandardOpenOption.CREATE_NEW,
-                                StandardOpenOption.WRITE,
-                                LinkOption.NOFOLLOW_LINKS)) {
-                            extractedBytes = transferBounded(
-                                    zip, output, extractedBytes, MAX_EXTRACTED_BYTES, transferBuffer);
-                        }
-                    }
-                    zip.closeEntry();
+            try (ZipFile zip = openArchive(archive)) {
+                final List<ZipEntry> entries = listEntries(zip);
+                final long budget = extractionBudget(entries, limits.maxExtractedBytes());
+                final byte[] transferBuffer = new byte[8192];
+                long extractedBytes = 0L;
+                for (final ZipEntry entry : entries) {
+                    extractedBytes = extractEntry(zip, root, entry, extractedBytes, budget, transferBuffer);
                 }
             }
+        } catch (final NodeLibraryException failure) {
+            throw failure;
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to extract storage", failure);
         }
         validateExtractedArchive(root, requireBackupMetadata);
     }
 
-    static byte[] readManifest(final Path archive) throws NodeLibraryException {
-        final Set<String> names = new HashSet<>();
-        int entryCount = 0;
-        long declaredBytes = 0L;
-        byte[] manifest = null;
-        final byte[] transferBuffer = new byte[8192];
-        try (var archiveChannel = StorageFileOperations.openRegularFile(archive);
-             InputStream file = Channels.newInputStream(archiveChannel);
-             ZipInputStream zip = new ZipInputStream(file)) {
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                final String name = entry.getName();
-                if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(name)) {
-                    throw new NodeLibraryException("Backup archive contains too many or duplicate entries");
-                }
-                if (!safeArchiveName(name)) {
-                    throw new NodeLibraryException("Backup archive contains an unsafe entry: %s".formatted(name));
-                }
-                if (!entry.isDirectory() && entry.getSize() >= 0L) {
-                    if (entry.getSize() > MAX_EXTRACTED_BYTES - declaredBytes) {
-                        throw new NodeLibraryException("Backup archive is too large");
-                    }
-                    declaredBytes += entry.getSize();
-                }
-                if (StorageBackupBackend.MANIFEST_ENTRY.equals(name)) {
+    static byte[] readManifest(final Path archive, final long maxDeclaredBytes) throws NodeLibraryException {
+        if (maxDeclaredBytes <= 0L) throw new IllegalArgumentException("maxDeclaredBytes must be positive");
+        try (ZipFile zip = openArchive(archive)) {
+            final List<ZipEntry> entries = listEntries(zip);
+            /* A bomb that honestly declares petabytes dies here without
+             * inflating a single byte. */
+            if (declaredTotalBytes(entries) > maxDeclaredBytes) {
+                throw new NodeLibraryException("Backup archive is too large");
+            }
+            ZipEntry manifest = null;
+            for (final ZipEntry entry : entries) {
+                if (StorageBackupBackend.MANIFEST_ENTRY.equals(entry.getName())) {
                     if (entry.isDirectory()) {
                         throw new NodeLibraryException("Backup manifest is missing or too large");
                     }
-                    final int initialCapacity = (int) Math.min(
-                            MAX_MANIFEST_BYTES, Math.max(0L, entry.getSize()));
-                    final ByteArrayOutputStream output = new ByteArrayOutputStream(initialCapacity);
-                    try {
-                        transferBounded(zip, output, 0L, MAX_MANIFEST_BYTES, transferBuffer);
-                    } catch (final IOException truncated) {
-                        /* transferBounded fails on oversize input and on corrupt
-                         * streams alike. Only a full buffer means oversize;
-                         * anything else is a corrupt archive. */
-                        if (output.size() >= MAX_MANIFEST_BYTES) {
-                            throw new NodeLibraryException("Backup manifest is missing or too large", truncated);
-                        }
-                        throw truncated;
-                    }
-                    if (output.size() > MAX_MANIFEST_BYTES) {
-                        throw new NodeLibraryException("Backup manifest is missing or too large");
-                    }
-                    manifest = output.toByteArray();
+                    manifest = entry;
+                    break;
                 }
-                zip.closeEntry();
             }
+            if (manifest == null) throw new NodeLibraryException("Backup archive is missing manifest");
+            final long declared = manifest.getSize();
+            final byte[] transferBuffer = new byte[8192];
+            final int initialCapacity = (int) Math.min(MAX_MANIFEST_BYTES, Math.max(0L, declared));
+            final ByteArrayOutputStream output = new ByteArrayOutputStream(initialCapacity);
+            try (InputStream data = zip.getInputStream(manifest)) {
+                try {
+                    transferBounded(data, output, 0L, MAX_MANIFEST_BYTES, transferBuffer);
+                } catch (final IOException truncated) {
+                    /* transferBounded fails on oversize input and on corrupt
+                     * streams alike. Only a full buffer means oversize;
+                     * anything else is a corrupt archive. */
+                    if (output.size() >= MAX_MANIFEST_BYTES) {
+                        throw new NodeLibraryException("Backup manifest is missing or too large", truncated);
+                    }
+                    throw truncated;
+                }
+            }
+            if (output.size() > MAX_MANIFEST_BYTES) {
+                throw new NodeLibraryException("Backup manifest is missing or too large");
+            }
+            if (declared >= 0L && output.size() > declared) {
+                throw new NodeLibraryException("Backup manifest exceeds its declared size");
+            }
+            return output.toByteArray();
         } catch (final NodeLibraryException failure) {
             throw failure;
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to read backup manifest from %s".formatted(archive), failure);
         }
-        if (manifest == null) throw new NodeLibraryException("Backup archive is missing manifest");
-        return manifest;
+    }
+
+    /// Reports whether the archive carries the storage payload, not just a manifest.
+    ///
+    /// A truncated archive with an intact manifest is not a complete backup.
+    static boolean containsStoragePayload(final Path archive) throws NodeLibraryException {
+        try (ZipFile zip = openArchive(archive)) {
+            for (final ZipEntry entry : listEntries(zip)) {
+                final String name = entry.getName();
+                if (StorageBackupBackend.STORAGE_ENTRY.equals(name) ||
+                    name.startsWith(StorageBackupBackend.STORAGE_ENTRY + "/")) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (final NodeLibraryException failure) {
+            throw failure;
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Failed to inspect backup archive %s".formatted(archive), failure);
+        }
+    }
+
+    private static ZipFile openArchive(final Path archive) throws NodeLibraryException {
+        try {
+            StorageFileOperations.ensureNoSymbolicLinks(archive);
+            return new ZipFile(archive.toFile());
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Failed to open backup archive %s".formatted(archive), failure);
+        }
+    }
+
+    /// Lists central-directory entries after count, duplicate, and name checks.
+    ///
+    /// Reading the central directory inflates nothing, so hostile declared
+    /// sizes are visible before any entry data is decompressed.
+    private static List<ZipEntry> listEntries(final ZipFile zip) throws NodeLibraryException {
+        final List<ZipEntry> entries = new ArrayList<>();
+        final Set<String> names = new HashSet<>();
+        for (final var iterator = zip.entries().asIterator(); iterator.hasNext(); ) {
+            final ZipEntry entry = iterator.next();
+            if (entries.size() >= MAX_ARCHIVE_ENTRIES || !names.add(entry.getName())) {
+                throw new NodeLibraryException("Backup archive contains too many or duplicate entries");
+            }
+            if (!safeArchiveName(entry.getName())) {
+                throw new NodeLibraryException("Backup archive contains an unsafe entry: %s".formatted(entry.getName()));
+            }
+            entries.add(entry);
+        }
+        return entries;
+    }
+
+    /// Sums declared entry sizes, or `-1` when any size is unknown.
+    private static long declaredTotalBytes(final List<ZipEntry> entries) throws NodeLibraryException {
+        long total = 0L;
+        for (final ZipEntry entry : entries) {
+            if (entry.isDirectory()) continue;
+            final long size = entry.getSize();
+            if (size < 0L) return -1L;
+            if (size > Long.MAX_VALUE - total) {
+                throw new NodeLibraryException("Backup archive declares more data than the extraction budget");
+            }
+            total += size;
+        }
+        return total;
+    }
+
+    private static long extractionBudget(final List<ZipEntry> entries, final long maximum)
+            throws NodeLibraryException {
+        final long declared = declaredTotalBytes(entries);
+        if (declared > maximum) {
+            throw new NodeLibraryException("Backup archive declares more data than the extraction budget");
+        }
+        return declared >= 0L ? declared : maximum;
+    }
+
+    private static long extractEntry(
+            final ZipFile zip,
+            final Path root,
+            final ZipEntry entry,
+            long extractedBytes,
+            final long budget,
+            final byte[] transferBuffer
+    ) throws IOException {
+        final Path target = root.resolve(entry.getName()).normalize();
+        if (!target.startsWith(root)) {
+            throw new NodeLibraryException("Backup archive entry escapes extraction root");
+        }
+        ensureNoSymlinkParent(root, target.getParent());
+        StorageFileOperations.ensureNoSymbolicLinks(target);
+        if (entry.isDirectory()) {
+            Files.createDirectories(target);
+            StorageFileOperations.ensureNoSymbolicLinks(target);
+            return extractedBytes;
+        }
+        final Path parent = target.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+            StorageFileOperations.ensureNoSymbolicLinks(parent);
+        }
+        /* A lying entry must not out-produce its declared size; unknown
+         * sizes fall back to the remaining overall budget. */
+        final long declared = entry.getSize();
+        final long entryBudget = declared >= 0L ? declared : budget - extractedBytes;
+        try (OutputStream output = Files.newOutputStream(target,
+                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE,
+                LinkOption.NOFOLLOW_LINKS);
+             InputStream data = zip.getInputStream(entry)) {
+            extractedBytes += transferBounded(data, output, 0L, entryBudget, transferBuffer);
+            if (extractedBytes > budget) throw new IOException("Backup archive exceeds extraction limit");
+            return extractedBytes;
+        }
     }
 
     private static long transferBounded(

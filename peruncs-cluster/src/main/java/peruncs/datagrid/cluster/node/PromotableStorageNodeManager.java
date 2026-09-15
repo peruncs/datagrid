@@ -65,6 +65,7 @@ public interface PromotableStorageNodeManager extends StorageNodeManager {
 
         private volatile boolean isDistributor;
         private volatile boolean isSwitchingToDistributor;
+        private volatile boolean readerResourcesReleased;
 
         private Default(
                 final StorageBinaryDataDistributor dataDistributor,
@@ -162,7 +163,15 @@ public interface PromotableStorageNodeManager extends StorageNodeManager {
 
             this.isDistributor = true;
             this.isSwitchingToDistributor = false;
+            /* The health check and data client are released now; a later close()
+             * must not dispose them again. */
+            this.readerResourcesReleased = true;
             return true;
+        }
+
+        @Override
+        protected boolean readerResourcesReleased() {
+            return this.readerResourcesReleased;
         }
     }
 }

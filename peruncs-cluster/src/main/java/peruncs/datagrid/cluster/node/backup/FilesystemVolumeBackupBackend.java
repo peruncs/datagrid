@@ -10,6 +10,7 @@ import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 
 import java.io.IOException;
 import java.nio.file.*;
+import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Comparator;
@@ -23,12 +24,22 @@ import static org.eclipse.serializer.util.X.notNull;
 /// The volume may be network-mounted. A backup is visible only after its
 /// complete archive has been atomically moved into the volume root.
 public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
-    /// Creates a filesystem backup backend.
+    /// Creates a filesystem backup backend with default restore limits.
     ///
     /// @param backupVolumePath backup volume path
     /// @return filesystem backup backend
     static FilesystemVolumeBackupBackend New(final Path backupVolumePath) {
-        return new Default(notNull(backupVolumePath).toAbsolutePath().normalize());
+        return New(backupVolumePath, BackupArchiveLimits.Default());
+    }
+
+    /// Creates a filesystem backup backend with explicit restore limits.
+    ///
+    /// @param backupVolumePath backup volume path
+    /// @param limits budgets bounding restore and manifest reads
+    /// @return filesystem backup backend
+    static FilesystemVolumeBackupBackend New(final Path backupVolumePath, final BackupArchiveLimits limits) {
+        return new Default(
+                notNull(backupVolumePath).toAbsolutePath().normalize(), notNull(limits));
     }
 
     /// Implements archive export, restore, and cleanup.
@@ -37,10 +48,12 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
 
         private final Path backupVolumePath;
         private final Path userUploadedStorageArchivePath;
+        private final BackupArchiveLimits limits;
 
-        private Default(final Path backupVolumePath) {
+        private Default(final Path backupVolumePath, final BackupArchiveLimits limits) {
             this.backupVolumePath = backupVolumePath;
             this.userUploadedStorageArchivePath = backupVolumePath.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE);
+            this.limits = limits;
         }
 
         @Override
@@ -51,7 +64,8 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
 
             final Path archive = this.toArchivePath(previousBackup);
             try {
-                return ReplicationCursorStore.decode(BackupArchive.readManifest(archive));
+                return ReplicationCursorStore.decode(
+                        BackupArchive.readManifest(archive, this.limits.maxExtractedBytes()));
             } catch (final IOException failure) {
                 throw new NodeLibraryException("Failed to decode backup manifest from %s".formatted(archive), failure);
             }
@@ -149,7 +163,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             Throwable primaryFailure = null;
             try {
                 BackupArchive.extractArchive(
-                        workingDirectory.resolve("extracted"), archive, requireBackupMetadata);
+                        workingDirectory.resolve("extracted"), archive, requireBackupMetadata, this.limits);
                 StorageFileOperations.installStorage(
                         workingDirectory.resolve("extracted").resolve(StorageBackupBackend.STORAGE_ENTRY),
                         storageDestinationParentPath.resolve(StorageBackupBackend.STORAGE_ENTRY));
@@ -205,8 +219,10 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                 final String name = destination.getFileName().toString();
                 if (!BackupArchive.isBackupFileName(name)) return false;
                 BackupArchive.parseMetadata(name, this.backupVolumePath);
-                BackupArchive.readManifest(destination);
-                return true;
+                BackupArchive.readManifest(destination, this.limits.maxExtractedBytes());
+                /* A truncated archive with an intact manifest must not count
+                 * as a durable backup. */
+                return BackupArchive.containsStoragePayload(destination);
             } catch (final RuntimeException incomplete) {
                 return false;
             }
@@ -241,16 +257,27 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             try {
                 StorageFileOperations.ensureNoSymbolicLinks(parent);
                 Files.createDirectories(parent);
-                final Path temporary = Files.createTempDirectory(
-                        parent, prefix, PosixFilePermissions.asFileAttribute(Set.of(
-                                PosixFilePermission.OWNER_READ,
-                                PosixFilePermission.OWNER_WRITE,
-                                PosixFilePermission.OWNER_EXECUTE)));
+                final Path temporary =
+                        Files.createTempDirectory(parent, prefix, privateDirectoryAttributes(parent));
                 StorageFileOperations.ensureNoSymbolicLinks(temporary);
                 return temporary;
-            } catch (final IOException failure) {
+            } catch (final IOException | UnsupportedOperationException | SecurityException failure) {
                 throw new NodeLibraryException("Failed to create backup workspace", failure);
             }
+        }
+
+        /// Owner-only permissions where the filesystem supports them, default
+        /// permissions otherwise. Passing POSIX attributes to a filesystem
+        /// without a POSIX view (Windows, archive filesystems) fails directory
+        /// creation outright instead of ignoring them.
+        static FileAttribute<?>[] privateDirectoryAttributes(final Path parent) {
+            if (parent.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+                return new FileAttribute<?>[]{PosixFilePermissions.asFileAttribute(Set.of(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.OWNER_EXECUTE))};
+            }
+            return new FileAttribute<?>[0];
         }
 
         private void ensureVolumeDirectory() throws NodeLibraryException {

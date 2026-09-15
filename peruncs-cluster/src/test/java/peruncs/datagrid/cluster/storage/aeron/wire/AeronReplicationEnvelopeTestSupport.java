@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.wire;
 
 import org.agrona.concurrent.UnsafeBuffer;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage;
 
 import java.util.UUID;
 
@@ -23,7 +22,7 @@ public final class AeronReplicationEnvelopeTestSupport {
             final byte[] payload
     ) {
         if (payload == null) throw new NullPointerException("payload");
-        if (payload.length > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH) {
+        if (payload.length > AeronReplicationEnvelope.MAX_MESSAGE_LENGTH) {
             throw new IllegalArgumentException("envelope payload exceeds replication message limit");
         }
         final byte[] encoded = new byte[Math.addExact(AeronReplicationEnvelope.HEADER_LENGTH, payload.length)];

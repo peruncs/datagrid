@@ -165,6 +165,45 @@ final class AeronClusteredCacheMessageCodec {
         return payload;
     }
 
+        /// Validates a frame once and returns everything the receiver needs.
+    ///
+    /// The polling hot path must not recompute the CRC per accessor: one
+    /// validation covers the header, the sender identity, the sequence, and
+    /// the payload bounds, and the payload is sliced without revalidating.
+    /// An oversized self frame fails instead of skipping: the local sender
+    /// can never emit one, so it is corrupt or spoofed either way.
+    ///
+    /// @param buffer           source buffer
+    /// @param offset           frame offset
+    /// @param length           frame length
+    /// @param maxPayloadBytes  maximum accepted payload size
+    /// @param expectedSenderId local sender identity for self-suppression
+    /// @return validated frame fields
+    /// @throws IllegalArgumentException when the frame is malformed or oversized
+    static ValidatedFrame validate(final DirectBuffer buffer, final int offset, final int length,
+                                   final int maxPayloadBytes, final byte[] expectedSenderId) {
+        final Header header = validateHeader(buffer, offset, length, maxPayloadBytes);
+        final SenderId sender = senderIdOf(buffer, offset);
+        final boolean self = expectedSenderId != null && expectedSenderId.length == Long.BYTES * 2 &&
+                             buffer.getLong(offset + SENDER_ID_OFFSET, ByteOrder.BIG_ENDIAN) ==
+                             readLong(expectedSenderId, 0) &&
+                             buffer.getLong(offset + SENDER_ID_OFFSET + Long.BYTES, ByteOrder.BIG_ENDIAN) ==
+                             readLong(expectedSenderId, Long.BYTES);
+        return new ValidatedFrame(sender, header.sequence, header.payloadLength, self);
+    }
+
+        /// Copies the payload of a frame validated by [#validate].
+    ///
+    /// @param buffer        source buffer
+    /// @param offset        frame offset
+    /// @param payloadLength payload length from the validated frame
+    /// @return copied payload bytes
+    static byte[] payloadOf(final DirectBuffer buffer, final int offset, final int payloadLength) {
+        final byte[] payload = new byte[payloadLength];
+        buffer.getBytes(offset + PAYLOAD_OFFSET, payload, 0, payloadLength);
+        return payload;
+    }
+
         /// Validates all fixed framing fields once and returns the decoded lengths.
     private static Header validateHeader(
             final DirectBuffer buffer,
@@ -217,8 +256,11 @@ final class AeronClusteredCacheMessageCodec {
         return buffer != null && offset >= 0 && offset <= buffer.capacity() - HEADER_LENGTH;
     }
 
+    private static final ThreadLocal<CRC32C> CHECKSUM = ThreadLocal.withInitial(CRC32C::new);
+
     private static int checksum(final DirectBuffer buffer, final int offset, final int length) {
-        final CRC32C crc = new CRC32C();
+        final CRC32C crc = CHECKSUM.get();
+        crc.reset();
         for (int index = 0; index < length; index++) {
             crc.update(buffer.getByte(offset + index));
         }
@@ -240,5 +282,14 @@ final class AeronClusteredCacheMessageCodec {
 
         /// Decoded fixed header fields.
     private record Header(long sequence, int payloadLength) {
+    }
+
+        /// One validation's worth of receiver inputs.
+    ///
+    /// @param sender        frame sender identity
+    /// @param sequence      per-sender monotonic sequence
+    /// @param payloadLength validated payload length
+    /// @param self          whether the frame carries the local sender identity
+    record ValidatedFrame(SenderId sender, long sequence, int payloadLength, boolean self) {
     }
 }

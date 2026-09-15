@@ -8,7 +8,15 @@ import javax.crypto.spec.SecretKeySpec;
 import java.nio.ByteOrder;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Supplier;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 
@@ -44,6 +52,7 @@ public record AeronAuthenticatedWatermark(
         /// Serialized watermark length in bytes.
     public static final int ENCODED_LENGTH = IDENTITY_LENGTH + AUTHENTICATION_LENGTH;
     private static final String ALGORITHM = "HmacSHA256";
+    private static final SecretKeySpec DUMMY_KEY = new SecretKeySpec(new byte[16], ALGORITHM);
     private static final UUID UUID_ZERO = new UUID(0L, 0L);
     private static final ScopedValue<Mac> MAC = ScopedValue.newInstance();
 
@@ -331,17 +340,36 @@ public record AeronAuthenticatedWatermark(
                                          final byte[] secret, final byte[] target, final int targetOffset) {
         if (secret == null || secret.length < 16)
             throw new IllegalArgumentException("watermark secret must contain at least 16 bytes");
+        final Mac mac = MAC.get();
         try {
-            final Mac mac = MAC.get();
             mac.init(new SecretKeySpec(secret, ALGORITHM));
             mac.update(value, 0, length);
             mac.doFinal(target, targetOffset);
         } catch (final GeneralSecurityException failure) {
             throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
+        } finally {
+            scrub(mac);
         }
     }
 
-    private static <T> T withMac(final java.util.function.Supplier<T> operation) {
+        /// Replaces the Mac's expanded key schedule with a fixed dummy key.
+    ///
+    /// The JDK exposes no wipe for a Mac's internal schedule, and the
+    /// [SecretKeySpec] copy of the real secret cannot be reached either. This
+    /// scrub is defense in depth only: it guarantees a retained Mac never
+    /// carries the real schedule beyond one call, but heap copies outside this
+    /// method's control still rely on garbage collection. Callers own erasing
+    /// their secret arrays.
+    private static void scrub(final Mac mac) {
+        try {
+            mac.init(DUMMY_KEY);
+        } catch (final GeneralSecurityException ignored) {
+            /* HmacSHA256 init with a valid fixed key cannot fail; a scrub
+             * failure must never mask the authentication result. */
+        }
+    }
+
+    private static <T> T withMac(final Supplier<T> operation) {
         if (MAC.isBound()) return operation.get();
         try {
             return ScopedValue.where(MAC, Mac.getInstance(ALGORITHM)).call(operation::get);
@@ -504,6 +532,10 @@ public record AeronAuthenticatedWatermark(
                     this.erased = true;
                 }
             });
+            /* A Mac bound to this thread was dummy-scrubbed after its last use,
+             * but re-scrub it anyway: clear runs outside authentication, so this
+             * is the last chance to evict any schedule the per-use scrub missed. */
+            if (MAC.isBound()) scrub(MAC.get());
         }
 
                 /// Erases the retained HMAC key.

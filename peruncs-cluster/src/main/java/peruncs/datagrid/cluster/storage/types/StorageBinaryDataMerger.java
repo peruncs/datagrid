@@ -2,7 +2,6 @@ package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.collections.types.XEnum;
 import org.eclipse.serializer.concurrency.LockedExecutor;
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistence;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundation;
@@ -14,6 +13,7 @@ import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -279,11 +279,19 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         /* The worker is signalled before this wait when it is still in its
                          * coalescing delay. Waiting on the future once avoids a timed polling
                          * loop that can spin after interruption and gives backpressure one
-                         * unambiguous completion point. */
-                        this.updateFuture.get();
+                         * unambiguous completion point. The wait is bounded: a hung
+                         * materializer must fail the merger instead of hanging the
+                         * delivery thread forever. */
+                        this.updateFuture.get(APPLY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                     } catch (final InterruptedException e) {
                         Thread.currentThread().interrupt();
                         throw new IllegalStateException("Interrupted while waiting for import data task", e);
+                    } catch (final TimeoutException e) {
+                        /* The batch is already queued, so the worker still owns it:
+                         * release nothing here. Latch the terminal failure so no
+                         * further batches are admitted; the worker drains or fails
+                         * on its own while dispose() still joins it. */
+                        throw this.fail("Timed out waiting for import data task", e);
                     } catch (final ExecutionException e) {
                         final RuntimeException mergerFailure = this.failure.get();
                         if (mergerFailure != null) {
@@ -348,10 +356,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 final AtomicBoolean released = new AtomicBoolean();
                 final Runnable release = () ->
                 {
+                    /* Empty binaries are duplicates of one shared static buffer;
+                     * only the guarded release knows to skip them. */
                     if (released.compareAndSet(false, true)) {
-                        for (final ByteBuffer buffer : data) {
-                            XMemory.deallocateDirectByteBuffer(buffer);
-                        }
+                        StorageBinaryDataImporter.release(data.toArray(ByteBuffer.class));
                     }
                 };
 
@@ -448,13 +456,17 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private void releaseCachedData() {
             this.queueLock.lock();
             try {
+                final var pending = new ArrayList<ByteBuffer>();
                 ByteBuffer buffer;
                 while ((buffer = this.cachedData.poll()) != null) {
                     this.cachedBufferCount.decrementAndGet();
-                    XMemory.deallocateDirectByteBuffer(buffer);
+                    pending.add(buffer);
                 }
                 this.cachedBufferCount.set(0L);
                 this.cachedBytes = 0L;
+                /* The guarded release skips zero-capacity duplicates of the
+                 * shared empty buffer instead of deallocating them. */
+                StorageBinaryDataImporter.release(pending.toArray(ByteBuffer[]::new));
             } finally {
                 this.queueLock.unlock();
             }
@@ -477,39 +489,49 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             if (this.disposed) {
                 throw new IllegalStateException("Storage binary merger is disposed");
             }
-            try {
-                final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
-                        .setClassLoaderProvider(this.foundation.getClassLoaderProvider())
-                        .setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
-                        .setTypeDictionaryLoader(() -> typeDictionaryData)
-                        .getTypeDictionaryProvider()
-                        .provideTypeDictionary();
-                final PersistenceTypeDictionary localTypeDictionary = this.storage.persistenceManager().typeDictionary();
+            /* Dictionary registration mutates the same type handlers the worker
+             * reads while materializing. Funnel the merge through the shared
+             * materialization mutual exclusion so a delivery-thread merge can
+             * never interleave with a worker batch. The worker never waits on
+             * the delivery thread, so this wait cannot deadlock. */
+            this.materialization.write(() ->
+            {
+                try {
+                    final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
+                            .setClassLoaderProvider(this.foundation.getClassLoaderProvider())
+                            .setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
+                            .setTypeDictionaryLoader(() -> typeDictionaryData)
+                            .getTypeDictionaryProvider()
+                            .provideTypeDictionary();
+                    final PersistenceTypeDictionary localTypeDictionary =
+                            this.storage.persistenceManager().typeDictionary();
 
-                remoteTypeDictionary.iterateAllTypeDefinitions(remoteType ->
-                {
-                    final PersistenceTypeDefinition localType = localTypeDictionary.lookupTypeById(remoteType.typeId());
-                    if (localType == null) {
-                        LOGGER.log(System.Logger.Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
-                        this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
+                    remoteTypeDictionary.iterateAllTypeDefinitions(remoteType ->
+                    {
+                        final PersistenceTypeDefinition localType =
+                                localTypeDictionary.lookupTypeById(remoteType.typeId());
+                        if (localType == null) {
+                            LOGGER.log(System.Logger.Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
+                            this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
 
-                    } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
-                        throw new StorageBinaryDataException(
-                                "Remote type definition conflicts with local definition: %s <> %s".formatted(localType, remoteType)
-                        );
-                    }
-                });
-                /* A reader may import data without performing a local Store operation.
-                 * Persist newly registered remote definitions now, before the transaction's
-                 * binary is imported, so a restart can resolve every imported type id. */
-                this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
-            } catch (final RuntimeException failure) {
-                this.fail("Store type dictionary update failed", failure);
-                throw failure;
-            } catch (final Error failure) {
-                this.fail("Store type dictionary update failed", failure);
-                throw failure;
-            }
+                        } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
+                            throw new StorageBinaryDataException(
+                                    "Remote type definition conflicts with local definition: %s <> %s"
+                                            .formatted(localType, remoteType));
+                        }
+                    });
+                    /* A reader may import data without performing a local Store operation.
+                     * Persist newly registered remote definitions now, before the transaction's
+                     * binary is imported, so a restart can resolve every imported type id. */
+                    this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
+                } catch (final RuntimeException failure) {
+                    this.fail("Store type dictionary update failed", failure);
+                    throw failure;
+                } catch (final Error failure) {
+                    this.fail("Store type dictionary update failed", failure);
+                    throw failure;
+                }
+            });
         }
 
         /// Shuts the materialization worker down, freeing native buffers only

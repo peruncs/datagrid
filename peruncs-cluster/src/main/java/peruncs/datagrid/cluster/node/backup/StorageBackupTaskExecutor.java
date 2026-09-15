@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
 
 import java.util.concurrent.ExecutorService;
@@ -40,13 +41,15 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     ///
     /// @return backup task for housekeeper scheduling
     default Runnable createScheduledWork() {
+        /* Looked up once when the task is created rather than on every run. The
+         * interface cannot hold static state, and the test double inherits
+         * this single implementation. */
+        final System.Logger logger = System.getLogger(StorageBackupTaskExecutor.class.getName());
         return () ->
         {
-            System.getLogger(StorageBackupTaskExecutor.class.getName())
-                    .log(System.Logger.Level.INFO, "Issuing full backup");
+            logger.log(System.Logger.Level.INFO, "Issuing full backup");
             if (this.runBackup(false) == BackupStartResult.BUSY) {
-                System.getLogger(StorageBackupTaskExecutor.class.getName()).log(
-                        System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
+                logger.log(System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
             }
         };
     }
@@ -187,9 +190,9 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                 else failure.addSuppressed(closeFailure);
             }
             if (failure != null) {
-                if (failure instanceof Error error)
-                    throw error;
-                throw (RuntimeException) failure;
+                if (failure instanceof Error error) throw error;
+                if (failure instanceof RuntimeException runtime) throw runtime;
+                throw new NodeLibraryException("Failed to stop storage backup", failure);
             }
         }
     }

@@ -228,6 +228,20 @@ class StorageBinaryDataClientAeronTest {
         assertEquals(0, assembler.lastResolvedSequence());
     }
 
+        /// Verifies a bare commit marker with no assembled transaction fails closed.
+    @Test
+    void bareCommitWithoutDataChunksIsRejected() {
+        final RecordingReceiver receiver = new RecordingReceiver();
+        final TransactionAssembler assembler = assembler(receiver, 1024);
+
+        assertThrows(IllegalStateException.class, () -> accept(assembler,
+                AeronReplicationEnvelopeTestSupport.encode(
+                        CLUSTER, EPOCH, 0, AeronReplicationEnvelope.Kind.COMMIT,
+                        0, 0, 1, 0, 0, new byte[0]
+                )));
+        assertEquals(0, receiver.dataCalls);
+    }
+
         /// Verifies an owned receiver may safely retain the native binary after delivery.
     @Test
     void ownedReceiverRetainsBinaryAfterAssemblerReturns() {
