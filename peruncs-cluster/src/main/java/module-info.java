@@ -78,7 +78,6 @@ module peruncs.datagrid.cluster
     requires com.fasterxml.jackson.core;
     requires com.fasterxml.jackson.databind;
     requires java.net.http;
-    requires org.apache.commons.compress;
     requires io.aeron.client;
     requires io.aeron.archive;
     requires io.aeron.driver;

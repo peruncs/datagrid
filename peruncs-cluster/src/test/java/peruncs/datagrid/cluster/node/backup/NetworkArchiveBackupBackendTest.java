@@ -1,8 +1,5 @@
 package peruncs.datagrid.cluster.node.backup;
 
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
-import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
@@ -15,27 +12,33 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class NetworkArchiveBackupBackendTest {
     private static void writeArchive(final Path archive, final Entry... entries) throws Exception {
         try (OutputStream file = Files.newOutputStream(archive);
-             XZCompressorOutputStream xz = new XZCompressorOutputStream(file);
-             TarArchiveOutputStream tar = new TarArchiveOutputStream(xz)) {
+             ZipOutputStream zip = new ZipOutputStream(file)) {
+            final java.lang.reflect.Field namesField = ZipOutputStream.class.getDeclaredField("names");
+            namesField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            final java.util.HashSet<String> names = (java.util.HashSet<String>) namesField.get(zip);
             for (final Entry source : entries) {
-                final TarArchiveEntry entry = new TarArchiveEntry(source.name());
+                final ZipEntry entry = new ZipEntry(source.name());
                 if (source.data() != null) entry.setSize(source.data().length);
-                tar.putArchiveEntry(entry);
-                if (source.data() != null) tar.write(source.data());
-                tar.closeArchiveEntry();
+                names.remove(entry.getName());
+                zip.putNextEntry(entry);
+                if (source.data() != null) zip.write(source.data());
+                zip.closeEntry();
             }
         }
     }
 
     @Test
     void rejectsTraversalArchiveBeforeInstallingStorage(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("unsafe.tar.xz");
+        final Path archive = root.resolve("unsafe.zip");
         writeArchive(archive, new Entry("../escaped", "bad"));
         final NetworkArchiveBackupBackend backend = NetworkArchiveBackupBackend.New(
                 root.resolve("scratch"), new FixedArchiveClient(archive));
@@ -49,7 +52,7 @@ class NetworkArchiveBackupBackendTest {
 
     @Test
     void extractsValidArchiveAndInstallsOnlyStorage(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("valid.tar.xz");
+        final Path archive = root.resolve("valid.zip");
         writeArchive(archive,
                 new Entry("storage/", (String) null),
                 new Entry("storage/data", "payload"),
@@ -69,7 +72,7 @@ class NetworkArchiveBackupBackendTest {
 
     @Test
     void readsCursorManifestWithoutInstallingTheArchive(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("cursor.tar.xz");
+        final Path archive = root.resolve("cursor.zip");
         final ReplicationCursor expected = new ReplicationCursor("test", null, 9L, new byte[]{4, 5});
         writeArchive(archive,
                 new Entry("storage/", (String) null),
@@ -78,7 +81,7 @@ class NetworkArchiveBackupBackendTest {
                 new Entry(BackupFileNames.READY, (String) null));
         final NetworkArchiveBackupBackend backend = NetworkArchiveBackupBackend.New(
                 root.resolve("scratch"), new FixedArchiveClient(archive,
-                        List.of(new BackupMetadataDto("10.tar.xz", Files.size(archive)))));
+                        List.of(new BackupMetadataDto("10.zip", Files.size(archive)))));
 
         assertEquals(expected, backend.getCursorFromPreviousBackup(0).orElseThrow());
         assertFalse(Files.exists(root.resolve("scratch").resolve(BackupFileNames.STORAGE)));
@@ -86,7 +89,7 @@ class NetworkArchiveBackupBackendTest {
 
     @Test
     void rejectsDuplicateArchiveEntries(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("duplicate.tar.xz");
+        final Path archive = root.resolve("duplicate.zip");
         writeArchive(archive,
                 new Entry("storage/", (String) null),
                 new Entry("storage/data", "first"),
@@ -103,7 +106,7 @@ class NetworkArchiveBackupBackendTest {
 
     @Test
     void downloadsUserStorageWithoutGeneratedBackupMetadata(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("user.tar.xz");
+        final Path archive = root.resolve("user.zip");
         writeArchive(archive, new Entry("storage/", (String) null), new Entry("storage/data", "user"));
         final NetworkArchiveBackupBackend backend = NetworkArchiveBackupBackend.New(
                 root.resolve("scratch"), new FixedArchiveClient(archive));
@@ -118,7 +121,7 @@ class NetworkArchiveBackupBackendTest {
     void rejectsMalformedRemoteBackupName(@TempDir final Path root) {
         final NetworkArchiveBackupBackend backend = NetworkArchiveBackupBackend.New(
                 root.resolve("scratch"), new FixedArchiveClient(root.resolve("archive"),
-                        List.of(new BackupMetadataDto("123.evil.tar.xz", 0L))));
+                        List.of(new BackupMetadataDto("123.evil.zip", 0L))));
 
         assertThrows(NodelibraryException.class, backend::listBackups);
     }

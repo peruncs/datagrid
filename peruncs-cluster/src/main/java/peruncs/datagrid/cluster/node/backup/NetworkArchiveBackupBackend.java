@@ -1,10 +1,5 @@
 package peruncs.datagrid.cluster.node.backup;
 
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
-import org.apache.commons.compress.compressors.xz.XZCompressorInputStream;
-import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
@@ -21,6 +16,9 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -45,8 +43,8 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         /// Implements backup export, upload, download, and cleanup.
     final class Default implements NetworkArchiveBackupBackend {
         private static final System.Logger LOGGER = System.getLogger(NetworkArchiveBackupBackend.class.getName());
-        private static final String USER_UPLOADED_STORAGE_S3_KEY = BackupFileNames.USER_UPLOADED_STORAGE + ".tar.xz";
-        private static final Pattern BACKUP_NAME = Pattern.compile("^(\\d+)(\\.manual)?\\.tar\\.xz$");
+        private static final String USER_UPLOADED_STORAGE_S3_KEY = BackupFileNames.USER_UPLOADED_STORAGE + ".zip";
+        private static final Pattern BACKUP_NAME = Pattern.compile("^(\\d+)(\\.manual)?\\.zip$");
         private static final int MAX_ARCHIVE_ENTRIES = 1_000_000;
         private static final long MAX_EXTRACTED_BYTES = 1L << 30;
         private static final int MAX_MANIFEST_BYTES = 1 << 20;
@@ -322,9 +320,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         private void compressStorage(final Path workingDir, final Path archiveFilePath) throws NodelibraryException {
             LOGGER.log(System.Logger.Level.TRACE, "Compressing storage");
             try (OutputStream file = Files.newOutputStream(archiveFilePath);
-                 XZCompressorOutputStream xz = new XZCompressorOutputStream(file);
-                 TarArchiveOutputStream tar = new TarArchiveOutputStream(xz)) {
-                tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
+                 ZipOutputStream zip = new ZipOutputStream(file)) {
                 for (final String rootName : List.of(BackupFileNames.STORAGE, BackupFileNames.MANIFEST, BackupFileNames.READY)) {
                     final Path root = workingDir.resolve(rootName).normalize();
                     if (!root.startsWith(workingDir.normalize()) || !Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
@@ -332,7 +328,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                     }
                     try (var paths = Files.walk(root)) {
                         for (final var iterator = paths.iterator(); iterator.hasNext(); ) {
-                            this.writeArchiveEntry(tar, workingDir, iterator.next());
+                            this.writeArchiveEntry(zip, workingDir, iterator.next());
                         }
                     }
                 }
@@ -388,18 +384,17 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                 int entryCount = 0;
                 long extractedBytes = 0L;
                 try (InputStream file = Files.newInputStream(archive);
-                     XZCompressorInputStream xz = new XZCompressorInputStream(file);
-                     TarArchiveInputStream tar = new TarArchiveInputStream(xz)) {
-                    TarArchiveEntry entry;
-                    while ((entry = tar.getNextEntry()) != null) {
-                        if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(entry.getName())) {
+                     ZipInputStream zip = new ZipInputStream(file)) {
+                    ZipEntry entry;
+                    while ((entry = zip.getNextEntry()) != null) {
+                        final String name = entry.getName();
+                        if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(name)) {
                             throw new IOException("Backup archive contains too many or duplicate entries");
                         }
-                        if (!safeArchiveName(entry.getName()) || entry.isSymbolicLink() || entry.isLink() ||
-                            (!entry.isDirectory() && !entry.isFile())) {
-                            throw new NodelibraryException("Backup archive contains an unsafe entry: %s".formatted(entry.getName()));
+                        if (!safeArchiveName(name)) {
+                            throw new NodelibraryException("Backup archive contains an unsafe entry: %s".formatted(name));
                         }
-                        final Path target = root.resolve(entry.getName()).normalize();
+                        final Path target = root.resolve(name).normalize();
                         if (!target.startsWith(root)) {
                             throw new NodelibraryException("Backup archive entry escapes extraction root");
                         }
@@ -417,9 +412,10 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                             try (OutputStream output = Files.newOutputStream(target,
                                     StandardOpenOption.CREATE_NEW,
                                     StandardOpenOption.WRITE)) {
-                                extractedBytes = transferBounded(tar, output, extractedBytes, MAX_EXTRACTED_BYTES);
+                                extractedBytes = transferBounded(zip, output, extractedBytes, MAX_EXTRACTED_BYTES);
                             }
                         }
+                        zip.closeEntry();
                     }
                 }
             } catch (final IOException failure) {
@@ -434,30 +430,34 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
             long declaredBytes = 0L;
             byte[] manifest = null;
             try (InputStream file = Files.newInputStream(archive);
-                 XZCompressorInputStream xz = new XZCompressorInputStream(file);
-                 TarArchiveInputStream tar = new TarArchiveInputStream(xz)) {
-                TarArchiveEntry entry;
-                while ((entry = tar.getNextEntry()) != null) {
-                    if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(entry.getName()) ||
-                        !safeArchiveName(entry.getName()) || entry.isSymbolicLink() || entry.isLink() ||
-                        (!entry.isDirectory() && !entry.isFile())) {
+                 ZipInputStream zip = new ZipInputStream(file)) {
+                ZipEntry entry;
+                while ((entry = zip.getNextEntry()) != null) {
+                    final String name = entry.getName();
+                    if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(name) ||
+                        !safeArchiveName(name)) {
                         throw new IOException("Backup archive contains an unsafe or duplicate entry");
                     }
-                    if (entry.isFile() && entry.getSize() >= 0L) {
+                    if (!entry.isDirectory() && entry.getSize() >= 0L) {
                         if (entry.getSize() > MAX_EXTRACTED_BYTES - declaredBytes) {
                             throw new IOException("Backup archive is too large");
                         }
                         declaredBytes += entry.getSize();
                     }
-                    if (BackupFileNames.MANIFEST.equals(entry.getName())) {
-                        if (!entry.isFile() || entry.getSize() > MAX_MANIFEST_BYTES) {
+                    if (BackupFileNames.MANIFEST.equals(name)) {
+                        if (entry.isDirectory()) {
                             throw new IOException("Backup manifest is missing or too large");
                         }
+                        // Size may be unknown (-1) for deflated entries; enforce via bounded read instead
                         final ByteArrayOutputStream output = new ByteArrayOutputStream(
-                                (int) Math.max(0L, entry.getSize()));
-                        transferBounded(tar, output, 0L, MAX_MANIFEST_BYTES);
+                                (int) Math.max(0L, entry.getSize() > 0 ? entry.getSize() : 0));
+                        transferBounded(zip, output, 0L, MAX_MANIFEST_BYTES);
+                        if (output.size() > MAX_MANIFEST_BYTES) {
+                            throw new IOException("Backup manifest is missing or too large");
+                        }
                         manifest = output.toByteArray();
                     }
+                    zip.closeEntry();
                 }
             }
             if (manifest == null) throw new IOException("Backup archive is missing manifest");
@@ -465,7 +465,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         }
 
         private void writeArchiveEntry(
-                final TarArchiveOutputStream tar,
+                final ZipOutputStream zip,
                 final Path workingDir,
                 final Path path
         ) throws IOException {
@@ -474,14 +474,20 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                 throw new IOException("Backup source contains an unsupported entry: %s".formatted(path));
             }
             final String name = workingDir.relativize(path).toString().replace(java.io.File.separatorChar, '/');
-            final TarArchiveEntry entry = new TarArchiveEntry(path, name, LinkOption.NOFOLLOW_LINKS);
-            tar.putArchiveEntry(entry);
-            if (entry.isFile()) {
+            if (name.isEmpty()) return;
+            final ZipEntry entry;
+            if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+                entry = new ZipEntry(name.endsWith("/") ? name : name + "/");
+            } else {
+                entry = new ZipEntry(name);
+            }
+            zip.putNextEntry(entry);
+            if (!entry.isDirectory()) {
                 try (InputStream input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
-                    input.transferTo(tar);
+                    input.transferTo(zip);
                 }
             }
-            tar.closeArchiveEntry();
+            zip.closeEntry();
         }
 
         private void ensureNoSymlinkParent(final Path root, final Path parent) throws IOException {
@@ -514,7 +520,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         }
 
         private String toArchiveFileName(final BackupMetadata backup) {
-            return "%s.tar.xz".formatted(backup.timestamp() + (backup.manualSlot() ? ".manual" : ""));
+            return "%s.zip".formatted(backup.timestamp() + (backup.manualSlot() ? ".manual" : ""));
         }
 
     }

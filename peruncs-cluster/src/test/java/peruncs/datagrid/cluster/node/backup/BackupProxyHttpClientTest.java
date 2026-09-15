@@ -78,9 +78,9 @@ class BackupProxyHttpClientTest {
                     Duration.ZERO,
                     Duration.ofSeconds(5L),
                     Duration.ofSeconds(1L));
-            final Path destination = root.resolve("archive.tar.xz");
+            final Path destination = root.resolve("archive.zip");
 
-            client.download("1.tar.xz", destination);
+            client.download("1.zip", destination);
 
             serverThread.join(5_000L);
             assertFalse(serverThread.isAlive(), "test server did not serve both attempts");
