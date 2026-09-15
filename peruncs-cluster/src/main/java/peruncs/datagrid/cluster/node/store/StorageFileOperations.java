@@ -6,11 +6,7 @@ import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.FileAttribute;
-import java.nio.file.attribute.PosixFilePermission;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Comparator;
-import java.util.Set;
 
 /// Shared filesystem operations used by backup backends and node setup.
 ///
@@ -91,6 +87,66 @@ public final class StorageFileOperations {
         }
     }
 
+    /// Atomically moves one file, verifying symlink-free paths and file identity
+    /// before and after the rename.
+    ///
+    /// The check-then-move window is closed the same way as
+    /// [#installStorage]: the source identity and the destination-parent
+    /// identity are pinned before the move and re-verified after it, so a
+    /// swapped directory or file between the checks fails instead of
+    /// installing into the wrong place.
+    ///
+    /// @param source      file to move
+    /// @param destination move target, which must not exist
+    /// @throws IOException if a path is unsafe, the move fails, or an identity changed
+    public static void moveFileAtomically(final Path source, final Path destination) throws IOException {
+        if (source == null || destination == null) throw new NullPointerException("source and destination are required");
+        final Path parent = destination.getParent();
+        if (parent == null) throw new IOException("Move destination has no parent directory: %s".formatted(destination));
+        ensureNoSymbolicLinks(source);
+        ensureNoSymbolicLinks(parent);
+        final Object sourceKey = stableFileKey(source);
+        final Object parentKey = stableFileKey(parent);
+        Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE);
+        ensureNoSymbolicLinks(parent);
+        ensureNoSymbolicLinks(destination);
+        if (!parentKey.equals(stableFileKey(parent))) {
+            throw new IOException("Destination directory changed while moving %s".formatted(destination));
+        }
+        if (!sourceKey.equals(stableFileKey(destination))) {
+            throw new IOException("Moved file does not match its source: %s".formatted(destination));
+        }
+    }
+
+    /// Deletes one regular file idempotently; a missing file is not an error.
+    ///
+    /// The path is verified as a non-link regular file with a pinned identity
+    /// before deletion, and the parent identity is re-verified after it.
+    ///
+    /// @param path file to delete
+    /// @return `true` when a file was deleted
+    /// @throws IOException if the path is unsafe or an identity changed
+    public static boolean deleteRegularFile(final Path path) throws IOException {
+        if (path == null) throw new NullPointerException("path is required");
+        ensureNoSymbolicLinks(path);
+        final BasicFileAttributes before;
+        try {
+            before = regularAttributes(path);
+        } catch (final NoSuchFileException missing) {
+            return false;
+        }
+        final Path parent = path.getParent();
+        final Object parentKey = parent == null ? null : stableFileKey(parent);
+        final boolean deleted = Files.deleteIfExists(path);
+        if (parentKey != null && !parentKey.equals(stableFileKey(parent))) {
+            throw new IOException("Parent directory changed while deleting %s".formatted(path));
+        }
+        if (deleted && Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("File reappeared while deleting %s".formatted(path));
+        }
+        return deleted;
+    }
+
     /// Opens an existing regular file and verifies that its identity did not
     /// change between the path check and the open.
     ///
@@ -131,16 +187,6 @@ public final class StorageFileOperations {
         } catch (final IOException failure) {
             return false;
         }
-    }
-
-    /// Returns directory attributes readable only by the owner.
-    ///
-    /// @return owner-only directory attributes
-    public static FileAttribute<Set<PosixFilePermission>> ownerOnlyDirectoryAttributes() {
-        return PosixFilePermissions.asFileAttribute(Set.of(
-                PosixFilePermission.OWNER_READ,
-                PosixFilePermission.OWNER_WRITE,
-                PosixFilePermission.OWNER_EXECUTE));
     }
 
     private static Object stableFileKey(final Path path) throws IOException {

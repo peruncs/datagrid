@@ -22,7 +22,8 @@ class AeronAuthenticatedWatermarkTest {
                 READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096, SECRET);
         final AeronAuthenticatedWatermark decoded = AeronAuthenticatedWatermark.decode(watermark.encode());
         assertTrue(decoded.verify(SECRET));
-        assertArrayEquals(watermark.authentication(), decoded.authentication());
+        assertEquals(watermark.authentication(), decoded.authentication());
+        assertEquals(watermark, decoded);
 
         final byte[] encoded = watermark.encode();
         encoded[encoded.length - 1] ^= 1;
@@ -68,11 +69,11 @@ class AeronAuthenticatedWatermarkTest {
     }
 
     @Test
-    void authenticationAccessorCannotMutateSignedWatermark() {
+    void authenticationComponentIsAnImmutableValue() {
         final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
                 READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096, SECRET);
-        final byte[] leaked = watermark.authentication();
-        leaked[0] ^= 1;
+        assertEquals(64, watermark.authentication().length());
+        assertEquals(watermark, AeronAuthenticatedWatermark.decode(watermark.encode()));
         assertTrue(watermark.verify(SECRET));
     }
 
@@ -96,7 +97,7 @@ class AeronAuthenticatedWatermarkTest {
     @Test
     void rejectsSequenceThatWouldOverflowNextReservation() {
         assertThrows(IllegalArgumentException.class, () -> new AeronAuthenticatedWatermark(
-                READER_ONE, CLUSTER, GENERATION, 3, 17, Long.MAX_VALUE, 100, new byte[32]));
+                READER_ONE, CLUSTER, GENERATION, 3, 17, Long.MAX_VALUE, 100, "00".repeat(32)));
     }
 
     @Test

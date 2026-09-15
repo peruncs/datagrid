@@ -21,7 +21,6 @@ import java.util.zip.ZipOutputStream;
 
 /// Encodes and validates the ZIP format used by filesystem backups.
 final class BackupArchive {
-    static final String USER_UPLOADED_STORAGE_ARCHIVE = StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE;
     private static final LazyConstant<Pattern> BACKUP_NAME =
             LazyConstant.of(() -> Pattern.compile("^(\\d+)(\\.manual)?\\.zip$"));
     private static final int MAX_ARCHIVE_ENTRIES = 1_000_000;
@@ -96,7 +95,7 @@ final class BackupArchive {
                 while ((entry = zip.getNextEntry()) != null) {
                     final String name = entry.getName();
                     if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(name)) {
-                        throw new IOException("Backup archive contains too many or duplicate entries");
+                        throw new NodeLibraryException("Backup archive contains too many or duplicate entries");
                     }
                     if (!safeArchiveName(name)) {
                         throw new NodeLibraryException("Backup archive contains an unsafe entry: %s".formatted(name));
@@ -133,7 +132,7 @@ final class BackupArchive {
         validateExtractedArchive(root, requireBackupMetadata);
     }
 
-    static byte[] readManifest(final Path archive) throws IOException {
+    static byte[] readManifest(final Path archive) throws NodeLibraryException {
         final Set<String> names = new HashSet<>();
         int entryCount = 0;
         long declaredBytes = 0L;
@@ -145,32 +144,49 @@ final class BackupArchive {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
                 final String name = entry.getName();
-                if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(name) || !safeArchiveName(name)) {
-                    throw new IOException("Backup archive contains an unsafe or duplicate entry");
+                if (++entryCount > MAX_ARCHIVE_ENTRIES || !names.add(name)) {
+                    throw new NodeLibraryException("Backup archive contains too many or duplicate entries");
+                }
+                if (!safeArchiveName(name)) {
+                    throw new NodeLibraryException("Backup archive contains an unsafe entry: %s".formatted(name));
                 }
                 if (!entry.isDirectory() && entry.getSize() >= 0L) {
                     if (entry.getSize() > MAX_EXTRACTED_BYTES - declaredBytes) {
-                        throw new IOException("Backup archive is too large");
+                        throw new NodeLibraryException("Backup archive is too large");
                     }
                     declaredBytes += entry.getSize();
                 }
                 if (StorageBackupBackend.MANIFEST_ENTRY.equals(name)) {
                     if (entry.isDirectory()) {
-                        throw new IOException("Backup manifest is missing or too large");
+                        throw new NodeLibraryException("Backup manifest is missing or too large");
                     }
                     final int initialCapacity = (int) Math.min(
                             MAX_MANIFEST_BYTES, Math.max(0L, entry.getSize()));
                     final ByteArrayOutputStream output = new ByteArrayOutputStream(initialCapacity);
-                    transferBounded(zip, output, 0L, MAX_MANIFEST_BYTES, transferBuffer);
+                    try {
+                        transferBounded(zip, output, 0L, MAX_MANIFEST_BYTES, transferBuffer);
+                    } catch (final IOException truncated) {
+                        /* transferBounded fails on oversize input and on corrupt
+                         * streams alike. Only a full buffer means oversize;
+                         * anything else is a corrupt archive. */
+                        if (output.size() >= MAX_MANIFEST_BYTES) {
+                            throw new NodeLibraryException("Backup manifest is missing or too large", truncated);
+                        }
+                        throw truncated;
+                    }
                     if (output.size() > MAX_MANIFEST_BYTES) {
-                        throw new IOException("Backup manifest is missing or too large");
+                        throw new NodeLibraryException("Backup manifest is missing or too large");
                     }
                     manifest = output.toByteArray();
                 }
                 zip.closeEntry();
             }
+        } catch (final NodeLibraryException failure) {
+            throw failure;
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Failed to read backup manifest from %s".formatted(archive), failure);
         }
-        if (manifest == null) throw new IOException("Backup archive is missing manifest");
+        if (manifest == null) throw new NodeLibraryException("Backup archive is missing manifest");
         return manifest;
     }
 
@@ -247,7 +263,9 @@ final class BackupArchive {
     private static void validateExtractedArchive(final Path root, final boolean requireBackupMetadata)
             throws NodeLibraryException {
         try (final var paths = Files.walk(root)) {
-            for (final Path path : paths.toList()) {
+            final var iterator = paths.iterator();
+            while (iterator.hasNext()) {
+                final Path path = iterator.next();
                 if (Files.isSymbolicLink(path) || (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
                                                    !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))) {
                     throw new NodeLibraryException("Backup archive contains an unsupported extracted entry: %s".formatted(path));

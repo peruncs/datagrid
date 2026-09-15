@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.types;
 
 
+import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.typing.Disposable;
 import java.nio.ByteBuffer;
@@ -81,6 +82,7 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
 
         /// Reassembles packets and forwards complete messages to a receiver.
     class Default implements StorageBinaryDataPacketAcceptor {
+        private final LockedExecutor state = LockedExecutor.New();
         private final StorageBinaryDataReceiver receiver;
         private StorageBinaryDataMessage message;
 
@@ -93,35 +95,41 @@ public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBi
         }
 
         @Override
-        public synchronized void accept(final List<StorageBinaryDataPacket> packets) {
-            final StorageBinaryDataPacketAssembler.Result result;
-            try {
-                result = StorageBinaryDataPacketAssembler.collect(this.message, packets);
-                this.message = result.pending();
-            } catch (final RuntimeException | Error failure) {
+        public void accept(final List<StorageBinaryDataPacket> packets) {
+            this.state.write(() ->
+            {
+                final StorageBinaryDataPacketAssembler.Result result;
+                try {
+                    result = StorageBinaryDataPacketAssembler.collect(this.message, packets);
+                    this.message = result.pending();
+                } catch (final RuntimeException | Error failure) {
+                    this.message = null;
+                    throw failure;
+                }
+                if (!result.completed().isEmpty()) {
+                    this.handleCompleteMessages(result.completed());
+                }
+            });
+        }
+
+        @Override
+        public boolean isAtMessageBoundary() {
+            return this.state.read(() -> this.message == null);
+        }
+
+        @Override
+        public void dispose() {
+            this.state.write(() ->
+            {
+                final StorageBinaryDataMessage pending = this.message;
                 this.message = null;
-                throw failure;
-            }
-            if (!result.completed().isEmpty()) {
-                this.handleCompleteMessages(result.completed());
-            }
-        }
-
-        @Override
-        public synchronized boolean isAtMessageBoundary() {
-            return this.message == null;
-        }
-
-        @Override
-        public synchronized void dispose() {
-            final StorageBinaryDataMessage pending = this.message;
-            this.message = null;
-            if (pending != null) {
-                pending.dispose();
-            }
-            if (this.receiver instanceof Disposable disposable) {
-                disposable.dispose();
-            }
+                if (pending != null) {
+                    pending.dispose();
+                }
+                if (this.receiver instanceof Disposable disposable) {
+                    disposable.dispose();
+                }
+            });
         }
 
         @Override

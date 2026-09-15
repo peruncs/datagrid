@@ -99,31 +99,6 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
         }
 
         @Override
-        public boolean isStoringEnabled() {
-            return this.target.isStoringEnabled();
-        }
-
-        @Override
-        public void validateIsWritable() {
-            this.target.validateIsWritable();
-        }
-
-        @Override
-        public void validateIsStoringEnabled() {
-            this.target.validateIsStoringEnabled();
-        }
-
-        @Override
-        public void prepareTarget() {
-            this.target.prepareTarget();
-        }
-
-        @Override
-        public void closeTarget() {
-            this.target.closeTarget();
-        }
-
-        @Override
         public void exportTypeDictionary(final org.eclipse.serializer.persistence.types.PersistenceTypeDictionary typeDictionary) {
             this.dictionaryExporter.exportTypeDictionary(typeDictionary);
         }

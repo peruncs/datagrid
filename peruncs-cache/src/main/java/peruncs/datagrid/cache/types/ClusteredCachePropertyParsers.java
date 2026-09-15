@@ -39,20 +39,11 @@ public final class ClusteredCachePropertyParsers {
     /// @throws IllegalArgumentException when the value is not an integer or is below the minimum
     @SuppressWarnings("rawtypes")
     public static int intProperty(final Map properties, final String name, final int fallback, final int minimum) {
-        final String configured = stringProperty(properties, name, null);
-        if (configured == null) {
-            return fallback;
+        final long value = longProperty(properties, name, fallback, minimum, "integer", Integer::parseInt);
+        if (value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("%s must be an integer: %s".formatted(name, value));
         }
-        final int value;
-        try {
-            value = Integer.parseInt(configured);
-        } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("%s must be an integer: %s".formatted(name, configured), failure);
-        }
-        if (value < minimum) {
-            throw new IllegalArgumentException("%s must be at least %s: %s".formatted(name, minimum, value));
-        }
-        return value;
+        return (int) value;
     }
 
         /// Returns a property as a long no smaller than `minimum`.
@@ -65,15 +56,31 @@ public final class ClusteredCachePropertyParsers {
     /// @throws IllegalArgumentException when the value is not a long or is below the minimum
     @SuppressWarnings("rawtypes")
     public static long longProperty(final Map properties, final String name, final long fallback, final long minimum) {
+        return longProperty(properties, name, fallback, minimum, "long", Long::parseLong);
+    }
+
+    private interface LongParser {
+        long parse(String value) throws NumberFormatException;
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static long longProperty(
+            final Map properties,
+            final String name,
+            final long fallback,
+            final long minimum,
+            final String kind,
+            final LongParser parser
+    ) {
         final String configured = stringProperty(properties, name, null);
         if (configured == null) {
             return fallback;
         }
         final long value;
         try {
-            value = Long.parseLong(configured);
+            value = parser.parse(configured);
         } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("%s must be a long: %s".formatted(name, configured), failure);
+            throw new IllegalArgumentException("%s must be a %s: %s".formatted(name, kind, configured), failure);
         }
         if (value < minimum) {
             throw new IllegalArgumentException("%s must be at least %s: %s".formatted(name, minimum, value));

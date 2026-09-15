@@ -335,12 +335,12 @@ public final class AeronClusterReplicationTransportProvider {
                     ? this.settings.recordingId() : this.discoverReaderRecordingId();
             this.rejectUncertainReaderImport(recordingId);
             final ReplicationCursor cursor = startingCursor == null
-                    ? new ReplicationCursor("aeron", null, -1, new byte[0]) : startingCursor;
+                    ? new ReplicationCursor("aeron", null, -1, "") : startingCursor;
             final boolean aeronCursor = "aeron".equalsIgnoreCase(cursor.transport());
             if (!aeronCursor && !"none".equalsIgnoreCase(cursor.transport())) {
                 throw new IllegalArgumentException("cursor belongs to transport %s".formatted(cursor.transport()));
             }
-            if (!aeronCursor && cursor.providerPosition().length != 0) {
+            if (!aeronCursor && cursor.hasProviderPosition()) {
                 throw new IllegalArgumentException("an uninitialized cursor cannot carry Aeron provider state");
             }
             if (aeronCursor && cursor.storeGeneration() != null &&
@@ -397,7 +397,7 @@ public final class AeronClusterReplicationTransportProvider {
                                     final byte[] position = new AeronReplicationCursor(
                                             this.settings.clusterId(), this.settings.nodeId(), this.settings.storeGeneration(),
                                             this.settings.epoch(), recordingId, snapshot.position(), snapshot.sequence()).encode();
-                                    this.runInDeliveryCallback(() -> cursorListener.onApplied(new ReplicationCursor(
+                                    this.runInDeliveryCallback(() -> cursorListener.onApplied(ReplicationCursor.of(
                                             "aeron", this.settings.storeGeneration(), snapshot.sequence(), position)));
                                 }
                                 /* Watermark delivery is independent from the optional neutral
@@ -429,7 +429,7 @@ public final class AeronClusterReplicationTransportProvider {
 
                 /// Decodes and validates the sole supported self-describing Aeron cursor.
         private long cursorPosition(final ReplicationCursor cursor, final long expectedRecordingId) {
-            final byte[] positionBytes = cursor.providerPosition();
+            final byte[] positionBytes = cursor.providerPositionBytes();
             if (positionBytes.length == 0) return -1L;
             try {
                 final AeronReplicationCursor aeron = AeronReplicationCursor.decode(positionBytes);
@@ -1445,7 +1445,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         public ReplicationCursor cursor() {
             final CursorSnapshot snapshot = this.delegate().cursorSnapshot();
-            return new ReplicationCursor("aeron", this.storeGeneration(), snapshot.sequence(),
+            return ReplicationCursor.of("aeron", this.storeGeneration(), snapshot.sequence(),
                     new AeronReplicationCursor(this.clusterId(), this.nodeId(), this.storeGeneration(),
                             this.epoch(), this.recordingId(), snapshot.position(), snapshot.sequence()).encode());
         }

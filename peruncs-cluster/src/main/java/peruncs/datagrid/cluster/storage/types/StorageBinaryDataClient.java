@@ -17,7 +17,7 @@ public interface StorageBinaryDataClient extends Disposable {
     /// @return neutral client
     static StorageBinaryDataClient NoOp(final ReplicationCursor startingCursor) {
         final ReplicationCursor cursor = startingCursor == null
-                ? new ReplicationCursor("none", null, -1, new byte[0])
+                ? new ReplicationCursor("none", null, -1, "")
                 : startingCursor;
         return new StorageBinaryDataClient() {
 

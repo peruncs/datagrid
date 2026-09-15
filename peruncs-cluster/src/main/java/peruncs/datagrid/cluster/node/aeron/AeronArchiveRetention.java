@@ -2,6 +2,8 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
+import org.eclipse.serializer.functional.Action;
+import org.eclipse.serializer.functional.Producer;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
@@ -14,6 +16,7 @@ import java.nio.ByteOrder;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.function.*;
 
 /// Writer-owned, authenticated Archive retention controller.
@@ -21,6 +24,11 @@ import java.util.function.*;
 /// This component deliberately owns no transport lifecycle. The provider
 /// supplies a small writer access view, so retention cannot accidentally close
 /// or replace the publication while validating a reader watermark.
+///
+/// All retention decisions run on one dedicated agent thread behind a command
+/// queue: callers submit their operation and wait for its outcome. Segment
+/// purges and recording restarts therefore never run concurrently on polling
+/// threads, and no caller lock is held across Archive calls.
 final class AeronArchiveRetention implements ReplicationLogRetention {
     /* Versions 1 and 2 were development-only layouts. There is no migration
      * contract, so the complete tombstone-aware layout starts at version 3. */
@@ -42,12 +50,16 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private final Path statePath;
     /* Replaced atomically when durable state is restored. Keeping the live quorum
      * immutable during parsing prevents a malformed state file from installing a
-     * partial retirement/acknowledgement set. All access is serialized by this
-     * controller's synchronized public methods. */
+     * partial retirement/acknowledgement set. All access runs on the single
+     * retention agent thread; closed is volatile so any thread observes shutdown. */
     private AeronAuthenticatedWatermark.Quorum quorum;
-    private boolean closed;
+    private volatile boolean closed;
     private boolean stateRestored;
     private AeronAuthenticatedWatermark persistedBoundary;
+    private final ExecutorService agent = Executors.newSingleThreadExecutor(Thread.ofVirtual()
+            .name("datagrid-retention-agent", 0L)
+            .factory());
+    private final ThreadLocal<Boolean> onAgentThread = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     AeronArchiveRetention(
             final byte[] secret,
@@ -94,11 +106,56 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         this.statePath = statePath;
     }
 
+        /// Runs one retention command on the single agent thread.
+    ///
+    /// Calls already on the agent thread (nested retention calls) run
+    /// directly; every other caller queues behind ongoing Archive work and
+    /// waits for its outcome. Failures keep their original type so policy
+    /// rejections stay distinguishable from transport faults.
+    private <T> T onAgent(final Producer<T> operation) {
+        if (Boolean.TRUE.equals(this.onAgentThread.get())) return operation.produce();
+        final Future<T> submitted;
+        try {
+            submitted = this.agent.submit(() -> {
+                this.onAgentThread.set(Boolean.TRUE);
+                try {
+                    return operation.produce();
+                } finally {
+                    this.onAgentThread.remove();
+                }
+            });
+        } catch (final RejectedExecutionException rejected) {
+            throw new IllegalStateException("Aeron retention is closed", rejected);
+        }
+        try {
+            return submitted.get();
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for Aeron retention", interrupted);
+        } catch (final ExecutionException failure) {
+            final Throwable cause = failure.getCause();
+            if (cause instanceof Error error) throw error;
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            throw new IllegalStateException("Aeron retention failed", cause);
+        }
+    }
+
+        /// Runs one void retention command on the single agent thread.
+    private void onAgent(final Action operation) {
+        this.<Void>onAgent(() -> {
+            operation.execute();
+            return null;
+        });
+    }
+
     @Override
-    public synchronized boolean isSupported() {
-        if (this.closed || !this.watermarkDeliveryAvailable.getAsBoolean()) return false;
-        this.ensureStateRestored();
-        return this.quorum.isComplete();
+    public boolean isSupported() {
+        if (this.closed) return false;
+        return this.onAgent(() -> {
+            if (this.closed || !this.watermarkDeliveryAvailable.getAsBoolean()) return false;
+            this.ensureStateRestored();
+            return this.quorum.isComplete();
+        });
     }
 
     /// Deletes Archive history through the requested cursor, gated by the reader quorum.
@@ -114,7 +171,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// @param cursor durable boundary to delete through
     /// @return deletion outcome with the boundary position
     @Override
-    public synchronized MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
+    public MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
+        return this.onAgent(() -> this.deleteThroughOnAgent(cursor));
+    }
+
+    private MaintenanceResult deleteThroughOnAgent(final ReplicationCursor cursor) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
         if (!this.watermarkDeliveryAvailable.getAsBoolean()) {
             throw new UnsupportedOperationException("Aeron retention requires a deployed reader-to-writer watermark channel");
@@ -187,7 +248,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     }
 
     @Override
-    public synchronized void retireReader(final UUID readerId) {
+    public void retireReader(final UUID readerId) {
+        this.onAgent(() -> this.retireReaderOnAgent(readerId));
+    }
+
+    private void retireReaderOnAgent(final UUID readerId) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
         if (!this.watermarkDeliveryAvailable.getAsBoolean()) {
             throw new UnsupportedOperationException(
@@ -214,7 +279,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     ///
     /// @param cursor reader cursor carrying the watermark
     @Override
-    public synchronized void recordReaderWatermark(final ReplicationCursor cursor) {
+    public void recordReaderWatermark(final ReplicationCursor cursor) {
+        this.onAgent(() -> this.recordReaderWatermarkOnAgent(cursor));
+    }
+
+    private void recordReaderWatermarkOnAgent(final ReplicationCursor cursor) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
         if (!this.watermarkDeliveryAvailable.getAsBoolean()) {
             throw new UnsupportedOperationException(
@@ -227,7 +296,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             throw new IllegalArgumentException("reader watermark must name a resolved sequence");
         final AeronAuthenticatedWatermark watermark;
         try {
-            watermark = AeronAuthenticatedWatermark.decode(cursor.providerPosition());
+            watermark = AeronAuthenticatedWatermark.decode(cursor.providerPositionBytes());
         } catch (final RuntimeException failure) {
             throw new IllegalArgumentException("reader cursor has no authenticated Aeron watermark", failure);
         }
@@ -239,7 +308,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     }
 
         /// Accepts a watermark already decoded by the Aeron control subscription.
-    synchronized void recordReaderWatermark(final AeronAuthenticatedWatermark watermark) {
+    void recordReaderWatermark(final AeronAuthenticatedWatermark watermark) {
+        this.onAgent(() -> this.recordReaderWatermarkOnAgent(watermark));
+    }
+
+    private void recordReaderWatermarkOnAgent(final AeronAuthenticatedWatermark watermark) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
         if (!this.watermarkDeliveryAvailable.getAsBoolean()) {
             throw new UnsupportedOperationException(
@@ -284,9 +357,21 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     }
 
     @Override
-    public synchronized void close() {
+    public void close() {
         if (this.closed) return;
         this.closed = true;
+        /* Queued commands drain first: shutdown() lets the running and queued
+         * retention work finish, so no purge is abandoned mid-decision. */
+        this.agent.shutdown();
+        try {
+            if (!this.agent.awaitTermination(30, TimeUnit.SECONDS)) {
+                this.agent.shutdownNow();
+                this.agent.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            this.agent.shutdownNow();
+        }
         /* Keep the key only for the lifetime of the controller. The quorum owns a
          * defensive copy for validation, so both copies must be erased explicitly. */
         this.quorum.clearSecret();
@@ -298,7 +383,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             throw new IllegalArgumentException("retention cursor belongs to another Store generation");
         }
         try {
-            final AeronReplicationCursor requested = AeronReplicationCursor.decode(cursor.providerPosition());
+            final AeronReplicationCursor requested = AeronReplicationCursor.decode(cursor.providerPositionBytes());
             if (!requested.clusterId().equals(this.clusterId) ||
                 !requested.storeGeneration().equals(this.storeGeneration) ||
                 requested.epoch() != this.writerEpoch || requested.sequence() != cursor.logicalSequence() ||

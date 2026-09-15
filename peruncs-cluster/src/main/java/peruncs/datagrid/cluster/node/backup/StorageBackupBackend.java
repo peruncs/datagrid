@@ -8,7 +8,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
 
 import static org.eclipse.serializer.math.XMath.notNegative;
 
@@ -33,18 +32,18 @@ public interface StorageBackupBackend {
     /// @throws NodeLibraryException if listing fails
     List<BackupMetadata> listBackups() throws NodeLibraryException;
 
-        /// Downloads the latest usable backup.
+        /// Restores the latest usable backup.
     ///
     /// @param targetRootPath destination root
-    /// @throws NodeLibraryException if download fails
-    void downloadLatestBackup(Path targetRootPath) throws NodeLibraryException;
+    /// @throws NodeLibraryException if restore fails
+    void restoreLatestBackup(Path targetRootPath) throws NodeLibraryException;
 
         /// Reads the replication cursor from an earlier backup.
     ///
     /// @param skip number of newest backups to skip; zero selects the newest
-    /// @return stored replication cursor, when present
+    /// @return stored replication cursor, or `null` when there is no earlier backup
     /// @throws NodeLibraryException if reading fails
-    Optional<ReplicationCursor> getCursorFromPreviousBackup(int skip) throws NodeLibraryException;
+    ReplicationCursor getCursorFromPreviousBackup(int skip) throws NodeLibraryException;
 
         /// Reports whether at least one backup exists.
     ///
@@ -54,41 +53,23 @@ public interface StorageBackupBackend {
         return !this.listBackups().isEmpty();
     }
 
-        /// Returns the newest backup allowed by the slot policy.
-    ///
-    /// @param ignoreManualSlot whether to ignore the manual slot
-    /// @return newest backup, or `null`
-    /// @throws NodeLibraryException if listing fails
-    default BackupMetadata latestBackup(final boolean ignoreManualSlot) throws NodeLibraryException {
-        return this.listBackups()
-                .stream()
-                .filter(b -> !ignoreManualSlot || !b.manualSlot())
-                .max(Comparator.comparingLong(BackupMetadata::timestamp))
-                .orElse(null);
-    }
-
         /// Returns a backup counted from newest to oldest.
     ///
+    /// Zero selects the newest backup; larger values skip that many newer
+    /// complete backups. Negative values are never meaningful.
+    ///
     /// @param skip number of newest backups to skip; zero selects the newest
-    /// @return selected backup, when present
+    /// @return selected backup, or `null` when there is no such backup
     /// @throws NodeLibraryException if listing fails
-    default Optional<BackupMetadata> getLastBackup(final int skip) throws NodeLibraryException {
-        /* Zero selects the newest backup; larger values skip that many newer
-         * complete backups.  Negative values are never meaningful. */
+    default BackupMetadata getLastBackup(final int skip) throws NodeLibraryException {
         notNegative(skip);
 
         /* Implementations may return an immutable snapshot. Sorting a copy keeps
          * this default method independent of the list implementation. */
         final var backups = new ArrayList<>(this.listBackups());
+        backups.sort(Comparator.comparingLong(BackupMetadata::timestamp).reversed());
 
-        if (backups.size() <= skip) {
-            // no previous storage
-            return Optional.empty();
-        }
-
-        backups.sort(Comparator.comparingLong(BackupMetadata::timestamp));
-
-        return Optional.of(backups.get(backups.size() - 1 - skip));
+        return skip < backups.size() ? backups.get(skip) : null;
     }
 
         /// Deletes one backup.
@@ -97,21 +78,21 @@ public interface StorageBackupBackend {
     /// @throws NodeLibraryException if deletion fails
     void deleteBackup(BackupMetadata backup) throws NodeLibraryException;
 
-        /// Creates and uploads one backup.
+        /// Creates one backup.
     ///
     /// @param connection storage connection
     /// @param cursor     replication cursor to store
     /// @param backup     backup metadata
-    /// @throws NodeLibraryException if creation or upload fails
-    void createAndUploadBackup(StorageConnection connection, final ReplicationCursor cursor, BackupMetadata backup)
+    /// @throws NodeLibraryException if creation fails
+    void createBackup(StorageConnection connection, final ReplicationCursor cursor, BackupMetadata backup)
             throws NodeLibraryException;
 
-        /// Downloads one backup.
+        /// Restores one backup.
     ///
     /// @param storageDestinationParentPath destination parent
-    /// @param backup                       backup to download
-    /// @throws NodeLibraryException if download fails
-    void downloadBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeLibraryException;
+    /// @param backup                       backup to restore
+    /// @throws NodeLibraryException if restore fails
+    void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeLibraryException;
 
         /// Reports whether user-uploaded storage exists.
     ///
@@ -119,11 +100,11 @@ public interface StorageBackupBackend {
     /// @throws NodeLibraryException if the check fails
     boolean hasUserUploadedStorage() throws NodeLibraryException;
 
-        /// Downloads user-uploaded storage.
+        /// Restores user-uploaded storage.
     ///
     /// @param storageDestinationParentPath destination parent
-    /// @throws NodeLibraryException if download fails
-    void downloadUserUploadedStorage(Path storageDestinationParentPath) throws NodeLibraryException;
+    /// @throws NodeLibraryException if restore fails
+    void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeLibraryException;
 
         /// Deletes user-uploaded storage.
     ///

@@ -22,7 +22,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -532,16 +531,32 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
 
                 /// Creates the storage node manager.
         ///
+        /// Aeron roles are fixed at transport creation, so Aeron nodes get a
+        /// reader with no promotion operation; other transports get a
+        /// promotable manager for the reader-to-distributor transition.
+        ///
         /// @return storage node manager
         private StorageNodeManager ensureStorageNodeManager() {
-            return StorageNodeManager.New(
+            final String transport = this.getClusterReplicationTransport().id();
+            if ("aeron".equalsIgnoreCase(transport)) {
+                return StorageNodeManager.New(
+                        this.getStorageBinaryDataDistributor(),
+                        this.getStorageTaskExecutor(),
+                        this.getStorageBinaryDataClient(),
+                        this.getStorageNodeHealthCheck(),
+                        this.getStorageDiskSpaceReader(),
+                        this.getReplicationPositionProvider(),
+                        transport
+                );
+            }
+            return PromotableStorageNodeManager.New(
                     this.getStorageBinaryDataDistributor(),
                     this.getStorageTaskExecutor(),
                     this.getStorageBinaryDataClient(),
                     this.getStorageNodeHealthCheck(),
                     this.getStorageDiskSpaceReader(),
                     this.getReplicationPositionProvider(),
-                    this.getClusterReplicationTransport().id()
+                    transport
             );
         }
 
@@ -809,14 +824,14 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
 
             // user uploaded a new storage
             if (backend.hasUserUploadedStorage()) {
-                LOGGER.log(System.Logger.Level.INFO, "Downloading user uploaded storage");
+                LOGGER.log(System.Logger.Level.INFO, "Restoring user uploaded storage");
 
                 useLatestCursor = true;
                 // since the storage is now different from before,
                 // the storage nodes also need the exact same storage
                 requiresStorageUpload = true;
                 this.deleteDirectory(storageRootPath);
-                backend.downloadUserUploadedStorage(storageParentPath);
+                backend.restoreUserUploadedStorage(storageParentPath);
                 backend.deleteUserUploadedStorage();
             } else if (this.restoreLatestBackupIfRequired(storageRootPath, backend)) {
                 LOGGER.log(System.Logger.Level.INFO, "Restored the newest compatible storage backup");
@@ -866,7 +881,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             }, this.backupNodeGcInterval());
             housekeeper.schedule(
                     "StorageBackup",
-                    NodeHousekeeper.backupWork(this.getStorageBackupTaskExecutor()),
+                    this.getStorageBackupTaskExecutor().createScheduledWork(),
                     this.backupNodeBackupInterval()
             );
 
@@ -954,7 +969,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             }, this.storageNodeGcInterval());
             housekeeper.schedule(
                     "StorageLimitChecker",
-                    NodeHousekeeper.limitCheckWork(this.getStorageDiskSpaceReader(), limitGate),
+                    limitGate.createScheduledWork(this.getStorageDiskSpaceReader()),
                     Duration.ofMinutes(requiredPositive(
                             this.getNodeLibraryPropertiesProvider().storageLimitCheckerIntervalMinutes(),
                             "STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES"
@@ -996,7 +1011,11 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 try {
                     StorageExceptionHandler.defaultHandleException(throwable, channel);
                 } catch (final StorageException exception) {
-                    GlobalErrorHandling.handleFatalError(exception);
+                    /* A node is embedded in an application and must not call
+                     * System.exit. Log the fatal error and rethrow so the
+                     * application supervisor decides on termination. */
+                    LOGGER.log(System.Logger.Level.ERROR, "Shutting down application due to fatal error", exception);
+                    throw exception;
                 }
             });
             return foundation;
@@ -1058,25 +1077,26 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 return false;
             }
             if (!storageExists) {
-                final ReplicationCursor backup = backend.getCursorFromPreviousBackup(0).orElseThrow(() ->
-                        new NodeLibraryException("The newest storage backup has no replication cursor"));
+                final ReplicationCursor backup = backend.getCursorFromPreviousBackup(0);
+                if (backup == null) {
+                    throw new NodeLibraryException("The newest storage backup has no replication cursor");
+                }
                 this.deleteOffsetFile();
                 this.restoreBackupAndCursor(backend, backup, storageRootPath);
                 return true;
             }
 
-            final var latest = backend.getCursorFromPreviousBackup(0);
-            if (latest.isEmpty()) {
+            final ReplicationCursor backup = backend.getCursorFromPreviousBackup(0);
+            if (backup == null) {
                 return false;
             }
             final ReplicationCursor local = this.getStoredReplicationCursorManager().get();
-            final ReplicationCursor backup = latest.get();
             final boolean localBoundaryUnknown = local.logicalSequence() < 0;
             final boolean identityMismatch = !Objects.equals(local.transport(), backup.transport()) ||
                                              !Objects.equals(local.storeGeneration(), backup.storeGeneration());
             final boolean localBehind = local.logicalSequence() < backup.logicalSequence();
             final boolean equalSequencePositionMismatch = local.logicalSequence() == backup.logicalSequence() &&
-                                                          !Arrays.equals(local.providerPosition(), backup.providerPosition());
+                                                           !Objects.equals(local.providerPosition(), backup.providerPosition());
             if (!localBoundaryUnknown && !identityMismatch && !localBehind && !equalSequencePositionMismatch) {
                 return false;
             }
@@ -1096,7 +1116,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 final Path storageRootPath
         ) {
             try {
-                backend.downloadLatestBackup(this.storageParentPath());
+                backend.restoreLatestBackup(this.storageParentPath());
                 this.getStoredReplicationCursorManager().set(backup);
             } catch (final RuntimeException | Error failure) {
                 /* A downloaded Store without its matching cursor is not a valid

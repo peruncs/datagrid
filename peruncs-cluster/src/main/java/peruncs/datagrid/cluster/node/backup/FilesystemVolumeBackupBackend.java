@@ -10,10 +10,11 @@ import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 
 import java.io.IOException;
 import java.nio.file.*;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
-import java.util.UUID;
+import java.util.Set;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -39,20 +40,20 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
 
         private Default(final Path backupVolumePath) {
             this.backupVolumePath = backupVolumePath;
-            this.userUploadedStorageArchivePath = backupVolumePath.resolve(BackupArchive.USER_UPLOADED_STORAGE_ARCHIVE);
+            this.userUploadedStorageArchivePath = backupVolumePath.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE);
         }
 
         @Override
-        public Optional<ReplicationCursor> getCursorFromPreviousBackup(final int skip) throws NodeLibraryException {
+        public ReplicationCursor getCursorFromPreviousBackup(final int skip) throws NodeLibraryException {
             LOGGER.log(System.Logger.Level.TRACE, "Getting backup metadata info of latest-%s".formatted(skip));
-            final var previousBackup = this.getLastBackup(skip).orElse(null);
-            if (previousBackup == null) return Optional.empty();
+            final var previousBackup = this.getLastBackup(skip);
+            if (previousBackup == null) return null;
 
             final Path archive = this.toArchivePath(previousBackup);
             try {
-                return Optional.of(ReplicationCursorStore.decode(BackupArchive.readManifest(archive)));
+                return ReplicationCursorStore.decode(BackupArchive.readManifest(archive));
             } catch (final IOException failure) {
-                throw new NodeLibraryException("Failed to read backup manifest from %s".formatted(archive), failure);
+                throw new NodeLibraryException("Failed to decode backup manifest from %s".formatted(archive), failure);
             }
         }
 
@@ -72,7 +73,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
         }
 
         @Override
-        public void createAndUploadBackup(
+        public void createBackup(
                 final StorageConnection connection,
                 final ReplicationCursor cursor,
                 final BackupMetadata backup
@@ -110,16 +111,16 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
         }
 
         @Override
-        public void downloadBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
+        public void restoreBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
                 throws NodeLibraryException {
             this.restoreArchive(this.toArchivePath(backup), storageDestinationParentPath, true);
         }
 
         @Override
-        public void downloadLatestBackup(final Path targetRootPath) throws NodeLibraryException {
-            final var backup = this.latestBackup(false);
-            if (backup == null) throw new NodeLibraryException("No backups are available to download");
-            this.downloadBackup(targetRootPath, backup);
+        public void restoreLatestBackup(final Path targetRootPath) throws NodeLibraryException {
+            final var backup = this.getLastBackup(0);
+            if (backup == null) throw new NodeLibraryException("No backups are available to restore");
+            this.restoreBackup(targetRootPath, backup);
         }
 
         @Override
@@ -129,7 +130,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
         }
 
         @Override
-        public void downloadUserUploadedStorage(final Path storageDestinationParentPath) throws NodeLibraryException {
+        public void restoreUserUploadedStorage(final Path storageDestinationParentPath) throws NodeLibraryException {
             this.restoreArchive(this.userUploadedStorageArchivePath, storageDestinationParentPath, false);
         }
 
@@ -166,8 +167,31 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
 
         private void publishArchive(final Path temporaryArchive, final Path destination) {
             try {
-                StorageFileOperations.ensureNoSymbolicLinks(destination);
-                Files.move(temporaryArchive, destination, StandardCopyOption.ATOMIC_MOVE);
+                try {
+                    StorageFileOperations.moveFileAtomically(temporaryArchive, destination);
+                } catch (final FileAlreadyExistsException alreadyPublished) {
+                    /* A crash between publication and acknowledgement retries the same
+                     * backup identity. Publish is idempotent only when the existing
+                     * archive is complete; a same-name partial file must be
+                     * replaced instead of mistaken for a durable backup. */
+                    if (this.isCompleteArchive(destination)) {
+                        LOGGER.log(System.Logger.Level.DEBUG,
+                                "Backup archive is already published at %s".formatted(destination));
+                        /* The export workspace cleanup deletes this file; a best
+                         * effort delete here must not turn a durable backup into
+                         * a publication failure. */
+                        try {
+                            Files.deleteIfExists(temporaryArchive);
+                        } catch (final IOException cleanupFailure) {
+                            LOGGER.log(System.Logger.Level.WARNING,
+                                    "Failed to delete superseded backup workspace file %s".formatted(temporaryArchive),
+                                    cleanupFailure);
+                        }
+                        return;
+                    }
+                    StorageFileOperations.deleteRegularFile(destination);
+                    StorageFileOperations.moveFileAtomically(temporaryArchive, destination);
+                }
                 StorageFileOperations.forceDirectory(this.backupVolumePath);
             } catch (final AtomicMoveNotSupportedException unsupported) {
                 throw new NodeLibraryException("Atomic backup publication is not supported", unsupported);
@@ -176,10 +200,23 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             }
         }
 
+        private boolean isCompleteArchive(final Path destination) {
+            try {
+                final String name = destination.getFileName().toString();
+                if (!BackupArchive.isBackupFileName(name)) return false;
+                BackupArchive.parseMetadata(name, this.backupVolumePath);
+                BackupArchive.readManifest(destination);
+                return true;
+            } catch (final RuntimeException incomplete) {
+                return false;
+            }
+        }
+
         private void deleteArchive(final Path archive) throws NodeLibraryException {
             try {
-                StorageFileOperations.ensureNoSymbolicLinks(archive);
-                if (Files.deleteIfExists(archive)) StorageFileOperations.forceDirectory(this.backupVolumePath);
+                if (StorageFileOperations.deleteRegularFile(archive)) {
+                    StorageFileOperations.forceDirectory(this.backupVolumePath);
+                }
             } catch (final IOException failure) {
                 throw new NodeLibraryException("Failed to delete backup archive %s".formatted(archive), failure);
             }
@@ -205,7 +242,10 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                 StorageFileOperations.ensureNoSymbolicLinks(parent);
                 Files.createDirectories(parent);
                 final Path temporary = Files.createTempDirectory(
-                        parent, prefix + UUID.randomUUID() + "-", StorageFileOperations.ownerOnlyDirectoryAttributes());
+                        parent, prefix, PosixFilePermissions.asFileAttribute(Set.of(
+                                PosixFilePermission.OWNER_READ,
+                                PosixFilePermission.OWNER_WRITE,
+                                PosixFilePermission.OWNER_EXECUTE)));
                 StorageFileOperations.ensureNoSymbolicLinks(temporary);
                 return temporary;
             } catch (final IOException failure) {

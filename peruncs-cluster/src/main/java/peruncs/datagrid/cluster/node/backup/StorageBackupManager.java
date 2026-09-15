@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.node.backup;
 
+import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.concurrency.XThreads;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
@@ -12,13 +13,12 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
-/// This manager creates, lists, downloads, and deletes storage backups.
+/// This manager creates, lists, restores, and deletes storage backups.
 ///
 /// Backup creation is single-flight because it temporarily stops the
 /// replication reader and captures the current message position. Read-only
@@ -64,11 +64,11 @@ public interface StorageBackupManager {
     /// @throws NodeLibraryException if backup creation fails
     void createStorageBackup(boolean useManualSlot) throws NodeLibraryException;
 
-        /// Downloads the latest backup.
+        /// Restores the latest backup.
     ///
     /// @param targetRootPath destination root
-    /// @throws NodeLibraryException if download fails
-    void downloadLatestBackup(Path targetRootPath) throws NodeLibraryException;
+    /// @throws NodeLibraryException if restore fails
+    void restoreLatestBackup(Path targetRootPath) throws NodeLibraryException;
 
         /// Lists available backups.
     ///
@@ -82,12 +82,12 @@ public interface StorageBackupManager {
     /// @throws NodeLibraryException if deletion fails
     void deleteBackup(BackupMetadata backup) throws NodeLibraryException;
 
-        /// Downloads one backup.
+        /// Restores one backup.
     ///
     /// @param storageDestinationParentPath destination parent
-    /// @param backup                       backup to download
-    /// @throws NodeLibraryException if download fails
-    void downloadBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeLibraryException;
+    /// @param backup                       backup to restore
+    /// @throws NodeLibraryException if restore fails
+    void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeLibraryException;
 
         /// Reports whether user storage exists.
     ///
@@ -95,11 +95,11 @@ public interface StorageBackupManager {
     /// @throws NodeLibraryException if the check fails
     boolean hasUserUploadedStorage() throws NodeLibraryException;
 
-        /// Downloads user storage.
+        /// Restores user storage.
     ///
     /// @param storageDestinationParentPath destination parent
-    /// @throws NodeLibraryException if download fails
-    void downloadUserUploadedStorage(Path storageDestinationParentPath) throws NodeLibraryException;
+    /// @throws NodeLibraryException if restore fails
+    void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeLibraryException;
 
         /// Deletes user storage.
     ///
@@ -119,7 +119,7 @@ public interface StorageBackupManager {
         private final Supplier<ReplicationCursor> cursorSupplier;
         private final StorageBinaryDataClient dataClient;
         private final ReplicationLogRetention retention;
-        private final ReentrantLock backupLock = new ReentrantLock();
+        private final LockedExecutor backup = LockedExecutor.New();
 
         private Default(
                 final StorageConnection storageConnection,
@@ -139,8 +139,8 @@ public interface StorageBackupManager {
 
         @Override
         public void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException {
-            this.backupLock.lock();
-            try {
+            this.backup.write(() ->
+            {
                 LOGGER.log(System.Logger.Level.TRACE, "Creating new storage backup");
 
                 final List<BackupMetadata> backups = this.listBackups();
@@ -171,7 +171,7 @@ public interface StorageBackupManager {
 
                 Throwable operationFailure = null;
                 try {
-                    this.backend.createAndUploadBackup(this.storageConnection, this.cursorSupplier.get(), newBackup);
+                    this.backend.createBackup(this.storageConnection, this.cursorSupplier.get(), newBackup);
 
                     /* Prune only after the new backup is durable.  If upload fails, every
                      * previously recoverable backup remains available for recovery. */
@@ -196,17 +196,16 @@ public interface StorageBackupManager {
                     if (!useManualSlot) {
                         // delete up to the previous backup to save on replication log storage
                         if (this.retention.isSupported()) {
-                            this.backend.getCursorFromPreviousBackup(1)
-                                    .ifPresent(info ->
-                                    {
-                                        final ReplicationLogRetention.MaintenanceResult result =
-                                                this.deleteThroughWithReplayRetry(info);
-                                        switch (result.status()) {
-                                            case DELETED -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention deleted Archive history through %s".formatted(result.position()));
-                                            case NOTHING_TO_DELETE -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention found no complete Archive segment to delete");
-                                            case DEFERRED_ACTIVE_REPLAY -> LOGGER.log(System.Logger.Level.WARNING, "Replication retention deferred because an Archive replay is active at %s".formatted(result.position()));
-                                        }
-                                    });
+                            final var info = this.backend.getCursorFromPreviousBackup(1);
+                            if (info != null) {
+                                final ReplicationLogRetention.MaintenanceResult result =
+                                        this.deleteThroughWithReplayRetry(info);
+                                switch (result.status()) {
+                                    case DELETED -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention deleted Archive history through %s".formatted(result.position()));
+                                    case NOTHING_TO_DELETE -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention found no complete Archive segment to delete");
+                                    case DEFERRED_ACTIVE_REPLAY -> LOGGER.log(System.Logger.Level.WARNING, "Replication retention deferred because an Archive replay is active at %s".formatted(result.position()));
+                                }
+                            }
                         } else {
                             LOGGER.log(System.Logger.Level.WARNING, "Replication retention is unsupported; preserving Archive history");
                         }
@@ -231,9 +230,7 @@ public interface StorageBackupManager {
                         }
                     }
                 }
-            } finally {
-                this.backupLock.unlock();
-            }
+            });
         }
 
         private long nextBackupTimestamp(final List<BackupMetadata> backups, final boolean manualSlot) {
@@ -250,12 +247,12 @@ public interface StorageBackupManager {
         }
 
         @Override
-        public void downloadLatestBackup(final Path targetRootPath) {
-            final var backup = this.backend.latestBackup(false);
+        public void restoreLatestBackup(final Path targetRootPath) {
+            final var backup = this.backend.getLastBackup(0);
             if (backup == null) {
-                throw new NodeLibraryException("No backups are available to download");
+                throw new NodeLibraryException("No backups are available to restore");
             }
-            this.downloadBackup(targetRootPath, backup);
+            this.restoreBackup(targetRootPath, backup);
         }
 
         @Override
@@ -269,15 +266,15 @@ public interface StorageBackupManager {
         }
 
         @Override
-        public void downloadBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
+        public void restoreBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
                 throws NodeLibraryException {
-            this.backend.downloadBackup(storageDestinationParentPath, backup);
+            this.backend.restoreBackup(storageDestinationParentPath, backup);
         }
 
         @Override
-        public void downloadUserUploadedStorage(final Path storageDestinationParentPath)
+        public void restoreUserUploadedStorage(final Path storageDestinationParentPath)
                 throws NodeLibraryException {
-            this.backend.downloadUserUploadedStorage(storageDestinationParentPath);
+            this.backend.restoreUserUploadedStorage(storageDestinationParentPath);
         }
 
         @Override

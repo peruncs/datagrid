@@ -253,7 +253,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         }
         final AeronClusteredCacheMessageSender created;
         try {
-            created = AeronClusteredCacheMessageSender.UpdateTimestamps(
+            created = AeronClusteredCacheMessageSender.New(
                     resources,
                     senderId,
                     sequence,

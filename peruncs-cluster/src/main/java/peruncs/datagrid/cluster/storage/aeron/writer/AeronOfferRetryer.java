@@ -6,6 +6,8 @@ import org.agrona.concurrent.BackoffIdleStrategy;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
+import java.util.concurrent.locks.LockSupport;
+
 /// The bounded retry policy used by the writer's Aeron publications.
 ///
 /// The helper reuses its buffer and idle strategy, so it belongs to one
@@ -46,6 +48,7 @@ final class AeronOfferRetryer {
         long backPressured = 0;
         long notConnected = 0;
         long adminActions = 0;
+        long attempt = 0L;
         while (true) {
             if (Thread.currentThread().isInterrupted()) {
                 Thread.currentThread().interrupt();
@@ -75,6 +78,13 @@ final class AeronOfferRetryer {
                 }
                 throw new IllegalStateException("Aeron offer timed out: %s, connected=%s".formatted(reason, this.offerer.isConnected()));
             }
+            /* Full-jitter spacing between attempts keeps concurrent writers from
+             * retrying in lockstep after a shared back-pressure wave. The idle
+             * strategy still governs the tight spin; this park only desynchronizes
+             * successive attempts within the per-operation deadline above. */
+            attempt++;
+            LockSupport.parkNanos(
+                    ReplicationRetry.fullJitterDelayNanos(attempt, 1_000L, 1_000_000L));
             this.idle.idle();
         }
     }

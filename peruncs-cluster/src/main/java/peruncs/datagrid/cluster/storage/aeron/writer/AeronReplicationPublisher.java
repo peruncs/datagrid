@@ -323,6 +323,11 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return this.nextSequence;
     }
 
+        /// Returns the writer epoch bound to the checkpoint at construction.
+    long epoch() {
+        return this.epoch;
+    }
+
         /// Reserves the next sequence so a durable fence and its later publication
     /// share one sequence number. The reservation must either be used by the
     /// explicit-sequence preparation method or released after a local rejection.

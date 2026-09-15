@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.storage.index;
 
+import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.typing.KeyValue;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
@@ -26,6 +27,10 @@ public final class ClusterStoreIndexes {
             "Cluster replication supports only embedded Lucene indexes; external directories are not supported";
     private static final String EXTERNAL_VECTOR_MESSAGE =
             "Cluster replication supports only in-graph JVector indexes; external index directories are not supported";
+        /* Registration check-then-act must not lock on the foreign index object:
+         * any other code synchronizing on it could deadlock with registration,
+         * and nothing else honors that monitor. One executor guards both. */
+    private static final LockedExecutor REGISTRATION = LockedExecutor.New();
 
     private ClusterStoreIndexes() {
     }
@@ -57,7 +62,8 @@ public final class ClusterStoreIndexes {
             final DocumentPopulator<E> documentPopulator
     ) {
         final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
-        synchronized (checkedMap.index()) {
+        return REGISTRATION.write(() ->
+        {
             if (checkedMap.index().get(LuceneIndex.class) != null) {
                 throw new IllegalStateException("a clustered map already has a Lucene index");
             }
@@ -66,7 +72,7 @@ public final class ClusterStoreIndexes {
             );
             if (registered == null) throw new IllegalStateException("failed to register clustered Lucene index");
             return registered;
-        }
+        });
     }
 
         /// Rejects a Lucene context that stores files outside the Store graph.
@@ -116,13 +122,14 @@ public final class ClusterStoreIndexes {
             final Vectorizer<? super E> vectorizer
     ) {
         final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
-        synchronized (checkedMap.index()) {
+        return REGISTRATION.write(() ->
+        {
             VectorIndices<E> indices = checkedMap.index().get(VectorIndices.Category());
             if (indices == null) {
                 indices = checkedMap.index().register(VectorIndices.Category());
             }
             return addVector(indices, name, configuration, vectorizer);
-        }
+        });
     }
 
         /// Rejects any JVector configuration that uses an external directory.

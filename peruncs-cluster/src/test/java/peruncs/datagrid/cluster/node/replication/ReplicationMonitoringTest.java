@@ -17,13 +17,6 @@ class ReplicationMonitoringTest {
                 return false;
             }
 
-            public void switchToDistribution() {
-            }
-
-            public boolean finishDistributionSwitch() {
-                return true;
-            }
-
             public long getCurrentMessageIndex() {
                 return 7;
             }

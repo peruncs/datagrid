@@ -8,14 +8,17 @@ import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Queue;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the backup manager's stop, durability, retention, and resume protocol.
 class StorageBackupManagerTest {
     private static final ReplicationCursor CURSOR =
-            new ReplicationCursor("test", null, 7L, new byte[]{1, 2, 3});
+            new ReplicationCursor("test", null, 7L, "010203");
 
     private static StorageBackupManager manager(
             final FakeBackend backend,
@@ -209,8 +212,8 @@ class StorageBackupManagerTest {
         }
 
         @Override
-        public Optional<ReplicationCursor> getCursorFromPreviousBackup(final int skip) {
-            return Optional.ofNullable(this.previousCursor);
+        public ReplicationCursor getCursorFromPreviousBackup(final int skip) {
+            return this.previousCursor;
         }
 
         @Override
@@ -220,7 +223,7 @@ class StorageBackupManagerTest {
         }
 
         @Override
-        public void createAndUploadBackup(
+        public void createBackup(
                 final StorageConnection connection,
                 final ReplicationCursor cursor,
                 final BackupMetadata backup
@@ -231,11 +234,11 @@ class StorageBackupManagerTest {
         }
 
         @Override
-        public void downloadLatestBackup(final Path destination) {
+        public void restoreLatestBackup(final Path destination) {
         }
 
         @Override
-        public void downloadBackup(final Path destination, final BackupMetadata backup) {
+        public void restoreBackup(final Path destination, final BackupMetadata backup) {
         }
 
         @Override
@@ -244,7 +247,7 @@ class StorageBackupManagerTest {
         }
 
         @Override
-        public void downloadUserUploadedStorage(final Path destination) {
+        public void restoreUserUploadedStorage(final Path destination) {
         }
 
         @Override

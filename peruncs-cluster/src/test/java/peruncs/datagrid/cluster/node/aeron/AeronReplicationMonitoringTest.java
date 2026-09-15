@@ -107,7 +107,7 @@ class AeronReplicationMonitoringTest {
             positionProvider.init();
             final ReplicationCursor cursor = positionProvider.latest();
             assertEquals("aeron", cursor.transport());
-            final AeronReplicationCursor aeronCursor = AeronReplicationCursor.decode(cursor.providerPosition());
+            final AeronReplicationCursor aeronCursor = AeronReplicationCursor.decode(cursor.providerPositionBytes());
             assertEquals(cursor.logicalSequence(), aeronCursor.sequence());
             assertEquals(cursor.storeGeneration(), aeronCursor.storeGeneration());
         }
@@ -162,7 +162,7 @@ class AeronReplicationMonitoringTest {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
                 .create(properties("writer"))) {
             assertThrows(UnsupportedOperationException.class,
-                    () -> transport.retention().deleteThrough(new ReplicationCursor("aeron", null, -1, new byte[0])));
+                    () -> transport.retention().deleteThrough(new ReplicationCursor("aeron", null, -1, "")));
         }
     }
 
@@ -296,7 +296,7 @@ class AeronReplicationMonitoringTest {
 
         @Override
         public ReplicationCursor cursor() {
-            return new ReplicationCursor("aeron", null, -1, new byte[0]);
+            return new ReplicationCursor("aeron", null, -1, "");
         }
 
         @Override

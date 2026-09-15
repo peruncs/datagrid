@@ -4,30 +4,41 @@ import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Tests replication cursor behavior.
 class ReplicationCursorTest {
-        /// Verifies provider position is defensive and identity is value based.
+        /// Verifies the position is stored as immutable hex and identity is value based.
     @Test
-    void providerPositionIsDefensiveAndIdentityIsValueBased() {
-        final byte[] position = {1, 2, 3};
+    void providerPositionIsImmutableHexAndIdentityIsValueBased() {
         final UUID generation = UUID.randomUUID();
-        final ReplicationCursor cursor = new ReplicationCursor("aeron", generation, 8, position);
-        position[0] = 9;
-        assertArrayEquals(new byte[]{1, 2, 3}, cursor.providerPosition());
-        final byte[] returned = cursor.providerPosition();
-        returned[1] = 9;
-        assertArrayEquals(new byte[]{1, 2, 3}, cursor.providerPosition());
+        final ReplicationCursor cursor = ReplicationCursor.of("aeron", generation, 8, new byte[]{1, 2, 3});
+
+        assertEquals("010203", cursor.providerPosition());
+        assertTrue(cursor.hasProviderPosition());
+        assertEquals(cursor, new ReplicationCursor("aeron", generation, 8, "010203"));
+        assertEquals(cursor.hashCode(), new ReplicationCursor("aeron", generation, 8, "010203").hashCode());
     }
 
-        /// Verifies rejection of invalid sequence and transport.
+        /// Verifies empty and null positions normalize to the absent marker.
     @Test
-    void rejectsInvalidSequenceAndTransport() {
+    void emptyPositionMeansAbsent() {
+        assertEquals("", new ReplicationCursor("aeron", null, -1, "").providerPosition());
+        assertEquals("", ReplicationCursor.of("aeron", null, -1, null).providerPosition());
+        assertEquals("", ReplicationCursor.of("aeron", null, -1, new byte[0]).providerPosition());
+        assertTrue(!new ReplicationCursor("aeron", null, -1, "").hasProviderPosition());
+    }
+
+        /// Verifies rejection of invalid sequence, transport, and position.
+    @Test
+    void rejectsInvalidSequenceTransportAndPosition() {
         assertThrows(IllegalArgumentException.class,
-                () -> new ReplicationCursor("", null, -1, new byte[0]));
+                () -> new ReplicationCursor("", null, -1, ""));
         assertThrows(IllegalArgumentException.class,
-                () -> new ReplicationCursor("aeron", null, -2, new byte[0]));
+                () -> new ReplicationCursor("aeron", null, -2, ""));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ReplicationCursor("aeron", null, -1, "zz"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ReplicationCursor("aeron", null, -1, "abc"));
     }
 }

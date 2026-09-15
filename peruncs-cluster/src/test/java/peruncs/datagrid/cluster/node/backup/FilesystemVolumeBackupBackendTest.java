@@ -11,7 +11,6 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Optional;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -20,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Verifies filesystem archive publication, restore, listing, and deletion.
 class FilesystemVolumeBackupBackendTest {
     private static final ReplicationCursor CURSOR =
-            new ReplicationCursor("test", null, 3L, new byte[]{7});
+            new ReplicationCursor("test", null, 3L, "07");
 
     private static StorageConnection noOpStorageConnection() {
         return new TestStorageConnection();
@@ -51,7 +50,7 @@ class FilesystemVolumeBackupBackendTest {
 
     private static void createUserArchive(final Path volume, final String data) throws Exception {
         try (OutputStream output = Files.newOutputStream(
-                volume.resolve(BackupArchive.USER_UPLOADED_STORAGE_ARCHIVE));
+                volume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
              ZipOutputStream zip = new ZipOutputStream(output)) {
             zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/data"));
             zip.write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -71,8 +70,9 @@ class FilesystemVolumeBackupBackendTest {
 
         assertEquals(List.of(new BackupMetadata(100L, false), new BackupMetadata(300L, true)),
                 backend.listBackups());
-        assertEquals(new BackupMetadata(300L, true), backend.getLastBackup(0).orElseThrow());
-        assertEquals(new BackupMetadata(100L, false), backend.getLastBackup(1).orElseThrow());
+        assertEquals(new BackupMetadata(300L, true), backend.getLastBackup(0));
+        assertEquals(new BackupMetadata(100L, false), backend.getLastBackup(1));
+        assertNull(backend.getLastBackup(2));
     }
 
     @Test
@@ -82,13 +82,13 @@ class FilesystemVolumeBackupBackendTest {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
         final Path destination = root.resolve("new");
 
-        assertEquals(CURSOR, backend.getCursorFromPreviousBackup(0).orElseThrow());
-        backend.downloadLatestBackup(destination);
+        assertEquals(CURSOR, backend.getCursorFromPreviousBackup(0));
+        backend.restoreLatestBackup(destination);
 
         assertEquals("payload", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
         assertFalse(Files.exists(destination.resolve(StorageBackupBackend.MANIFEST_ENTRY)));
         assertFalse(Files.exists(destination.resolve(StorageBackupBackend.READY_ENTRY)));
-        assertThrows(NodeLibraryException.class, () -> backend.downloadLatestBackup(destination));
+        assertThrows(NodeLibraryException.class, () -> backend.restoreLatestBackup(destination));
     }
 
     @Test
@@ -96,7 +96,7 @@ class FilesystemVolumeBackupBackendTest {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
         final BackupMetadata metadata = new BackupMetadata(11L, false);
 
-        backend.createAndUploadBackup(noOpStorageConnection(), CURSOR, metadata);
+        backend.createBackup(noOpStorageConnection(), CURSOR, metadata);
 
         final Path archive = backupVolume.resolve("11.zip");
         assertTrue(Files.isRegularFile(archive));
@@ -113,10 +113,10 @@ class FilesystemVolumeBackupBackendTest {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
         final Path destination = root.resolve("destination");
 
-        backend.downloadBackup(destination, new BackupMetadata(20L, false));
+        backend.restoreBackup(destination, new BackupMetadata(20L, false));
 
         assertEquals("round-trip", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
-        assertEquals(CURSOR, backend.getCursorFromPreviousBackup(0).orElseThrow());
+        assertEquals(CURSOR, backend.getCursorFromPreviousBackup(0));
     }
 
     @Test
@@ -139,7 +139,7 @@ class FilesystemVolumeBackupBackendTest {
         final Path destination = root.resolve("destination");
 
         assertTrue(backend.hasUserUploadedStorage());
-        backend.downloadUserUploadedStorage(destination);
+        backend.restoreUserUploadedStorage(destination);
         assertEquals("user", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
         backend.deleteUserUploadedStorage();
         assertFalse(backend.hasUserUploadedStorage());
@@ -154,7 +154,7 @@ class FilesystemVolumeBackupBackendTest {
         Files.createDirectories(destination.resolve(StorageBackupBackend.STORAGE_ENTRY));
 
         assertThrows(NodeLibraryException.class,
-                () -> backend.downloadBackup(destination, new BackupMetadata(12L, false)));
+                () -> backend.restoreBackup(destination, new BackupMetadata(12L, false)));
     }
 
     @Test
@@ -166,12 +166,12 @@ class FilesystemVolumeBackupBackendTest {
             }
 
             @Override
-            public Optional<ReplicationCursor> getCursorFromPreviousBackup(final int skip) {
-                return Optional.empty();
+            public ReplicationCursor getCursorFromPreviousBackup(final int skip) {
+                return null;
             }
 
             @Override
-            public void downloadLatestBackup(final Path destination) {
+            public void restoreLatestBackup(final Path destination) {
             }
 
             @Override
@@ -179,7 +179,7 @@ class FilesystemVolumeBackupBackendTest {
             }
 
             @Override
-            public void createAndUploadBackup(
+            public void createBackup(
                     final StorageConnection connection,
                     final ReplicationCursor cursor,
                     final BackupMetadata backup
@@ -187,7 +187,7 @@ class FilesystemVolumeBackupBackendTest {
             }
 
             @Override
-            public void downloadBackup(final Path destination, final BackupMetadata backup) {
+            public void restoreBackup(final Path destination, final BackupMetadata backup) {
             }
 
             @Override
@@ -196,7 +196,7 @@ class FilesystemVolumeBackupBackendTest {
             }
 
             @Override
-            public void downloadUserUploadedStorage(final Path destination) {
+            public void restoreUserUploadedStorage(final Path destination) {
             }
 
             @Override
@@ -204,7 +204,7 @@ class FilesystemVolumeBackupBackendTest {
             }
         };
 
-        assertEquals(Optional.of(new BackupMetadata(20L, false)), backend.getLastBackup(0));
-        assertEquals(Optional.of(new BackupMetadata(10L, false)), backend.getLastBackup(1));
+        assertEquals(new BackupMetadata(20L, false), backend.getLastBackup(0));
+        assertEquals(new BackupMetadata(10L, false), backend.getLastBackup(1));
     }
 }

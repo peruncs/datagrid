@@ -32,6 +32,25 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     /// @return the submission result; `BUSY` is an explicit, retryable outcome
     BackupStartResult runBackup(boolean useManualSlot);
 
+        /// Creates the periodic full-backup task.
+    ///
+    /// The task uses the automatic backup slot of this shared single-flight
+    /// executor. A run while another backup is active is skipped instead of
+    /// queuing behind it.
+    ///
+    /// @return backup task for housekeeper scheduling
+    default Runnable createScheduledWork() {
+        return () ->
+        {
+            System.getLogger(StorageBackupTaskExecutor.class.getName())
+                    .log(System.Logger.Level.INFO, "Issuing full backup");
+            if (this.runBackup(false) == BackupStartResult.BUSY) {
+                System.getLogger(StorageBackupTaskExecutor.class.getName()).log(
+                        System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
+            }
+        };
+    }
+
     /// Describes whether a backup request was accepted by the single-flight executor.
     enum BackupStartResult {
         /// The backup task was submitted.

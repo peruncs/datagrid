@@ -23,12 +23,27 @@ public final class Crc32c {
     /// @param length number of bytes to include
     /// @return CRC32C value
     public static int compute(final byte[] bytes, final int offset, final int length) {
+        return compute(bytes, offset, length, accumulator());
+    }
+
+        /// Returns the CRC32C of a byte range reusing caller-owned state.
+    ///
+    /// Hot paths must pass their own accumulator instead of allocating one
+    /// per call. The accumulator is reset before use and is not retained.
+    ///
+    /// @param bytes  source bytes
+    /// @param offset first byte to include
+    /// @param length number of bytes to include
+    /// @param reuse  caller-owned accumulator
+    /// @return CRC32C value
+    public static int compute(final byte[] bytes, final int offset, final int length, final CRC32C reuse) {
         if (bytes == null || offset < 0 || length < 0 || offset > bytes.length - length) {
             throw new IllegalArgumentException("invalid CRC32C range");
         }
-        final CRC32C crc = accumulator();
-        crc.update(bytes, offset, length);
-        return (int) crc.getValue();
+        if (reuse == null) throw new NullPointerException("reuse");
+        reuse.reset();
+        reuse.update(bytes, offset, length);
+        return (int) reuse.getValue();
     }
 
         /// Returns the CRC32C of the complete byte array.

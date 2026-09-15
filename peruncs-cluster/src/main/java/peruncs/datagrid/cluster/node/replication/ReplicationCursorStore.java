@@ -79,7 +79,7 @@ public final class ReplicationCursorStore {
         if (cursor == null) throw new NullPointerException("cursor");
         final byte[] transport = cursor.transport().getBytes(StandardCharsets.UTF_8);
         if (transport.length > MAX_TRANSPORT_BYTES) throw new IOException("transport name is too long");
-        final byte[] position = cursor.providerPosition();
+        final byte[] position = cursor.providerPositionBytes();
         if (position.length > Integer.MAX_VALUE - FIXED_BYTES - MAX_TRANSPORT_BYTES) {
             throw new IOException("cursor position is too large");
         }
@@ -134,7 +134,7 @@ public final class ReplicationCursorStore {
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
                     .decode(ByteBuffer.wrap(transport))
                     .toString();
-            return new ReplicationCursor(transportName,
+            return ReplicationCursor.of(transportName,
                     generation.equals(NULL_GENERATION) ? null : generation, sequence, position);
         } catch (final CharacterCodingException | IllegalArgumentException invalidCursor) {
             throw new IOException("invalid replication cursor values", invalidCursor);

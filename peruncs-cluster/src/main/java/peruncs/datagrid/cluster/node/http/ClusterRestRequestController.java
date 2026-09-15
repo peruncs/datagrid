@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node.http;
 
 import peruncs.datagrid.cluster.node.ClusterNodeManager;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.PromotableStorageNodeManager;
 import peruncs.datagrid.cluster.node.StorageNodeManager;
 import peruncs.datagrid.cluster.node.backup.BackupNodeManager;
 import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
@@ -342,7 +343,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         @Override
         public boolean postActivateDistributorFinish() throws HttpResponseException {
-            return this.handleRequest(this.storageNodeManager::finishDistributionSwitch);
+            return this.handleRequest(() -> this.promotable().finishDistributionSwitch());
         }
 
         @Override
@@ -355,10 +356,23 @@ public interface ClusterRestRequestController extends AutoCloseable {
             LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridActivateDistributorStart request");
             this.handleRequest(() ->
             {
-                if (!this.storageNodeManager.isDistributor()) {
-                    this.storageNodeManager.switchToDistribution();
+                final PromotableStorageNodeManager promotable = this.promotable();
+                if (!promotable.isDistributor()) {
+                    promotable.switchToDistribution();
                 }
             });
+        }
+
+                /// Returns the promotable manager, or fails when this node is a fixed-role reader.
+        ///
+        /// @return promotable storage node manager
+        /// @throws HttpResponseException when the transport has no promotion operation
+        private PromotableStorageNodeManager promotable() throws HttpResponseException {
+            if (this.storageNodeManager instanceof PromotableStorageNodeManager promotable) {
+                return promotable;
+            }
+            throw HttpResponseException.notADistributor(
+                    "reader promotion is unsupported for transport %s".formatted(this.storageNodeManager.getReplicationTransport()));
         }
 
         @Override

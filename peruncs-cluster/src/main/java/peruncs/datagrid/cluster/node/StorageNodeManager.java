@@ -1,6 +1,5 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
@@ -15,11 +14,16 @@ import static org.eclipse.serializer.util.X.notNull;
 
 /// This manager controls a storage node's distributor role.
 ///
-/// A node starts as a reader and can switch to distribution only through the
-/// two-phase activation methods. The switch is complete only after the finish
-/// step confirms that the new role is ready.
+/// The role is fixed when the manager is created: a reader never exposes a
+/// promotion operation, so an unsupported transition is unrepresentable.
+/// Nodes whose transport supports promotion use
+/// [PromotableStorageNodeManager] instead.
 public interface StorageNodeManager extends ClusterNodeManager {
-        /// Creates a manager with an explicit transport id for monitoring labels.
+        /// Creates a reader manager with an explicit transport id for monitoring labels.
+    ///
+    /// The returned manager is never a distributor and offers no promotion
+    /// operation. Use [PromotableStorageNodeManager] for transports that
+    /// support the reader-to-distributor transition.
     ///
     /// @param dataDistributor        binary distributor
     /// @param storageTaskExecutor    storage task executor
@@ -28,7 +32,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
     /// @param storageDiskSpaceReader disk-space reader
     /// @param positionProvider       position provider
     /// @param replicationTransport   transport id
-    /// @return storage node manager
+    /// @return reader storage node manager
     static StorageNodeManager New(
             final StorageBinaryDataDistributor dataDistributor,
             final StorageTaskExecutor storageTaskExecutor,
@@ -38,7 +42,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
             final ReplicationPositionProvider positionProvider,
             final String replicationTransport
     ) {
-        return new Default(
+        return new Reader(
                 notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient), notNull(healthCheck),
                 notNull(storageDiskSpaceReader), notNull(positionProvider),
                 replicationTransport
@@ -49,15 +53,6 @@ public interface StorageNodeManager extends ClusterNodeManager {
     ///
     /// @return `true` when distributing
     boolean isDistributor();
-
-        /// Starts the reader-to-distributor transition.
-    void switchToDistribution();
-
-        /// Finishes the reader-to-distributor transition.
-    ///
-    /// @return `true` when the transition completed
-    /// @throws HttpResponseException if the node is not ready
-    boolean finishDistributionSwitch() throws HttpResponseException;
 
         /// Returns the last applied or published logical replication sequence, or `-1`.
     long getCurrentMessageIndex();
@@ -71,20 +66,25 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// Returns the provider lifecycle state shown by monitoring endpoints.
     ReplicationHealth.State getReplicationState();
 
-        /// Implements the reader-to-distributor role transition.
-    final class Default implements StorageNodeManager {
+        /// Shared reader monitoring, health, and lifecycle for both roles.
+    abstract class Base implements StorageNodeManager {
         private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
-        private final StorageBinaryDataDistributor dataDistributor;
-        private final StorageTaskExecutor storageTaskExecutor;
-        private final StorageBinaryDataClient dataClient;
-        private final StorageNodeHealthCheck healthCheck;
-        private final StorageDiskSpaceReader storageDiskSpaceReader;
-        private final ReplicationPositionProvider positionProvider;
-        private final String replicationTransport;
+        /// Binary distributor used after promotion.
+        protected final StorageBinaryDataDistributor dataDistributor;
+        /// Executor for storage checks.
+        protected final StorageTaskExecutor storageTaskExecutor;
+        /// Replication client drained before promotion.
+        protected final StorageBinaryDataClient dataClient;
+        /// Health check closed on promotion.
+        protected final StorageNodeHealthCheck healthCheck;
+        /// Disk-space reader for size reporting.
+        protected final StorageDiskSpaceReader storageDiskSpaceReader;
+        /// Provider for the latest writer sequence.
+        protected final ReplicationPositionProvider positionProvider;
+        /// Transport id for monitoring labels.
+        protected final String replicationTransport;
 
-        private volatile boolean isDistributor;
-        private volatile boolean isSwitchingToDistributor;
         private volatile boolean closed;
         private volatile boolean positionProviderClosed;
 
@@ -97,7 +97,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// @param storageDiskSpaceReader disk-space reader
         /// @param positionProvider       position provider
         /// @param replicationTransport   transport id
-        public Default(
+        protected Base(
                 final StorageBinaryDataDistributor dataDistributor,
                 final StorageTaskExecutor storageTaskExecutor,
                 final StorageBinaryDataClient dataClient,
@@ -144,108 +144,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
         }
 
         @Override
-        public boolean isDistributor() {
-            return this.isDistributor;
-        }
-
-        /// Begins the one-way transition from replication reader to distributor.
-        ///
-        /// Aeron roles are fixed at transport creation, so an Aeron reader
-        /// can never promote — start a node configured as writer instead.
-        /// Otherwise the reader is asked to stop at its latest message; a
-        /// failed reader or a failed stop aborts the transition and resets
-        /// it for a retry.
-        @Override
-        public synchronized void switchToDistribution() {
-            if (this.isDistributor() || this.isSwitchingToDistributor) {
-                return;
-            }
-            if ("aeron".equalsIgnoreCase(this.replicationTransport)) {
-                /* Aeron roles are fixed at transport creation.  A reader owns a
-                 * persistent subscription and its provider deliberately has no writer
-                 * publication factory, so promoting it would report a distributor that
-                 * cannot replicate.  Reject the transition before stopping the reader. */
-                throw new UnsupportedOperationException(
-                        "%s reader promotion is unsupported; start a node configured as writer".formatted(this.replicationTransport));
-            }
-
-            if (this.dataClient.failure() != null) {
-                throw new IllegalStateException("Cannot promote a failed replication reader",
-                        this.dataClient.failure());
-            }
-            LOGGER.log(System.Logger.Level.INFO, "Turning on distribution.");
-            this.isSwitchingToDistributor = true;
-            try {
-                this.dataClient.stopAtLatestMessage();
-            } catch (final RuntimeException | Error failure) {
-                this.isSwitchingToDistributor = false;
-                throw failure;
-            }
-        }
-
-        /// Completes the transition started by [switchToDistribution()][#switchToDistribution()].
-        ///
-        /// Returns `false` while the reader is still draining; once it has
-        /// stopped at a resolved boundary, the reader resources are closed,
-        /// the distributor continues from the reader's cursor, and the node
-        /// becomes a distributor permanently — it can never become a reader
-        /// again. A failed or incompletely stopped reader fails the switch
-        /// instead of promoting over an unresolved boundary.
-        ///
-        /// @return `true` once this node distributes
-        /// @throws HttpResponseException if no switch was started
-        @Override
-        public synchronized boolean finishDistributionSwitch() throws HttpResponseException {
-            if (!this.isSwitchingToDistributor) {
-                throw HttpResponseException.notADistributor("switchToDistribution() has to be called first");
-            }
-
-            if (this.isDistributor) {
-                return true;
-            }
-            if ("aeron".equalsIgnoreCase(this.replicationTransport)) {
-                /* Keep the invariant defensive if a stale flag or an older caller reaches
-                 * this method without passing through switchToDistribution(). */
-                throw new UnsupportedOperationException(
-                        "%s reader promotion is unsupported; start a node configured as writer".formatted(this.replicationTransport));
-            }
-
-            final RuntimeException readerFailure = this.dataClient.failure();
-            if (readerFailure != null) {
-                throw new IllegalStateException("Cannot promote a failed replication reader", readerFailure);
-            }
-            if (this.dataClient.isRunning()) {
-                return false;
-            }
-            final StorageBinaryDataClient.StopOutcome stopOutcome = this.dataClient.stopResult().outcome();
-            if (stopOutcome != StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
-                throw new IllegalStateException("Cannot promote before replication reader stopped at a resolved boundary: %s".formatted(stopOutcome));
-            }
-
-            final var cursor = this.dataClient.cursor();
-
-            // once a node has been switched to distribution it will never become a reader node anymore
-            RuntimeException failure = null;
-            try {
-                this.healthCheck.close();
-            } catch (final RuntimeException closeFailure) {
-                failure = closeFailure;
-            }
-            try {
-                this.dataClient.dispose();
-            } catch (final RuntimeException closeFailure) {
-                if (failure == null) failure = closeFailure;
-                else failure.addSuppressed(closeFailure);
-            }
-            if (failure != null) {
-                throw new IllegalStateException("failed to close reader resources during promotion", failure);
-            }
-            this.dataDistributor.messageIndex(cursor.logicalSequence());
-
-            this.isDistributor = true;
-            this.isSwitchingToDistributor = false;
-            return true;
-        }
+        public abstract boolean isDistributor();
 
         @Override
         public long getCurrentMessageIndex() {
@@ -350,6 +249,28 @@ public interface StorageNodeManager extends ClusterNodeManager {
              * Archive control session is stopping); the enclosing close() is retryable
              * and must not turn that first failure into a silent resource leak. */
             this.positionProviderClosed = true;
+        }
+    }
+
+        /// A storage node that only reads. It exposes no promotion operation:
+    /// activating distribution on it is a wiring error, not a runtime refusal.
+    final class Reader extends Base {
+        private Reader(
+                final StorageBinaryDataDistributor dataDistributor,
+                final StorageTaskExecutor storageTaskExecutor,
+                final StorageBinaryDataClient dataClient,
+                final StorageNodeHealthCheck healthCheck,
+                final StorageDiskSpaceReader storageDiskSpaceReader,
+                final ReplicationPositionProvider positionProvider,
+                final String replicationTransport
+        ) {
+            super(dataDistributor, storageTaskExecutor, dataClient, healthCheck,
+                    storageDiskSpaceReader, positionProvider, replicationTransport);
+        }
+
+        @Override
+        public boolean isDistributor() {
+            return false;
         }
     }
 }

@@ -17,7 +17,7 @@ class ReplicationCursorStoreTest {
     @Test
     void roundTripsOpaqueProviderPositionAtomically() throws Exception {
         final var path = Files.createTempFile("datagrid-replication", ".cursor");
-        final var expected = new ReplicationCursor("aeron", UUID.randomUUID(), 17, new byte[]{4, 5, 6});
+        final var expected = new ReplicationCursor("aeron", UUID.randomUUID(), 17, "040506");
         ReplicationCursorStore.write(path, expected);
         assertEquals(expected, ReplicationCursorStore.read(path));
         Files.deleteIfExists(path);
@@ -27,7 +27,7 @@ class ReplicationCursorStoreTest {
     @Test
     void detectsCorruptCursorBeforeUsingProviderBytes() throws Exception {
         final var path = Files.createTempFile("datagrid-replication", ".cursor");
-        ReplicationCursorStore.write(path, new ReplicationCursor("aeron", null, 3, new byte[]{1}));
+        ReplicationCursorStore.write(path, new ReplicationCursor("aeron", null, 3, "01"));
         final byte[] bytes = Files.readAllBytes(path);
         bytes[10] ^= 1;
         Files.write(path, bytes);
@@ -39,7 +39,7 @@ class ReplicationCursorStoreTest {
     @Test
     void rejectsTrailingCursorBytes() throws Exception {
         final var path = Files.createTempFile("datagrid-replication", ".cursor");
-        ReplicationCursorStore.write(path, new ReplicationCursor("aeron", null, 3, new byte[]{1}));
+        ReplicationCursorStore.write(path, new ReplicationCursor("aeron", null, 3, "01"));
         final byte[] original = Files.readAllBytes(path);
         final byte[] extended = Arrays.copyOf(original, original.length + 1);
         System.arraycopy(original, 0, extended, 0, original.length - Integer.BYTES);
@@ -55,14 +55,14 @@ class ReplicationCursorStoreTest {
     @Test
     void rejectsUnknownFlagsAndMalformedUtf8() throws Exception {
         final byte[] flags = ReplicationCursorStore.encode(
-                new ReplicationCursor("aeron", null, 3, new byte[]{1}));
+                new ReplicationCursor("aeron", null, 3, "01"));
         ByteBuffer.wrap(flags).putShort(6, (short) 1);
         ByteBuffer.wrap(flags).putInt(flags.length - Integer.BYTES,
                 Crc32c.compute(flags, 0, flags.length - Integer.BYTES));
         assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.decode(flags));
 
         final byte[] malformed = ReplicationCursorStore.encode(
-                new ReplicationCursor("aeron", null, 3, new byte[]{1}));
+                new ReplicationCursor("aeron", null, 3, "01"));
         malformed[12] = (byte) 0xc3;
         malformed[13] = 0x28;
         ByteBuffer.wrap(malformed).putInt(malformed.length - Integer.BYTES,

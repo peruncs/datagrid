@@ -20,7 +20,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     /// @return disabled transport
     static ClusterReplicationTransport noOp() {
         return new ClusterReplicationTransport() {
-            private final ReplicationCursor cursor = new ReplicationCursor("none", null, -1, new byte[0]);
+            private final ReplicationCursor cursor = new ReplicationCursor("none", null, -1, "");
 
             @Override
             public String id() {

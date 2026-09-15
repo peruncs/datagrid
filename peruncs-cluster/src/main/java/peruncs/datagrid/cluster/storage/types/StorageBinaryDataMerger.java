@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.collections.types.XEnum;
+import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistence;
@@ -18,6 +19,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
@@ -30,12 +33,17 @@ import static org.eclipse.serializer.util.X.notNull;
 /// Providers must call this merger only after their transport-specific commit
 /// validation has completed.
 ///
-/// The implementation has one explicit lock order: queue draining may acquire
-/// {@code materializationLock} and then {@code applyLock}; no path acquires
-/// them in the reverse order. {@code flushMonitor} is independent and is never
-/// held while acquiring either data lock. The instance monitor is used only for
-/// the short lifecycle transition in {@code dispose}. Store and graph callbacks
-/// run after the data locks have been released.
+/// The implementation holds two locks with one explicit order: queue draining
+/// runs inside the materialization {@code LockedExecutor} and then takes
+/// {@code queueLock}; no path acquires them in the reverse order. The
+/// coalescing-delay condition belongs to {@code queueLock} — a condition must
+/// bind to its guarding lock, which {@code LockedExecutor} does not expose,
+/// so the queue lock stays explicit — and lifecycle uses only volatiles plus
+/// the executor's own thread safety. Store and graph callbacks run after both
+/// locks have been released. A single merged lock is deliberately not used:
+/// draining must release the queue admission lock before a blocking graph
+/// update, or a slow Store would stall the Aeron polling thread and look like
+/// transport loss.
 public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disposable {
         /// Creates a merger with bounded deferred materialization.
     ///
@@ -89,13 +97,13 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 .name("eclipse-datagrid-store-materializer", 0L)
                 .factory());
         private final ConcurrentLinkedQueue<ByteBuffer> cachedData = new ConcurrentLinkedQueue<>();
-        private final Object applyLock = new Object();
         /* Queue admission and object-graph materialization are separate concerns.
          * The worker and awaitApplied() can run concurrently, but a Store update
          * must never materialize two batches at once or callbacks can observe and
          * mutate the graph out of order. */
-        private final Object materializationLock = new Object();
-        private final Object flushMonitor = new Object();
+        private final ReentrantLock queueLock = new ReentrantLock();
+        private final Condition flushCondition = this.queueLock.newCondition();
+        private final LockedExecutor materialization = LockedExecutor.New();
         private final BinaryPersistenceFoundation<?> foundation;
         private final StorageConnection storage;
         private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
@@ -206,10 +214,13 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 StorageBinaryDataImporter.release(ownedBuffers);
                 throw new IllegalArgumentException("Storage binary exceeds the 1 GiB materialization limit");
             }
-            boolean drainFirst;
-            synchronized (this.applyLock) {
+            final boolean drainFirst;
+            this.queueLock.lock();
+            try {
                 final long projected = Math.addExact(this.cachedBytes, incomingBytes);
                 drainFirst = this.cachedBytes > 0 && projected > MAX_CACHED_BYTES;
+            } finally {
+                this.queueLock.unlock();
             }
             if (drainFirst) {
                 try {
@@ -224,7 +235,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
 
             boolean queued = false;
             try {
-                synchronized (this.applyLock) {
+                this.queueLock.lock();
+                try {
                     /* The worker can fail between the entry check above and this
                      * ownership hand-off.  Reject before enqueueing so a caller never
                      * loses the native buffers into a dead queue. */
@@ -247,7 +259,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                             this.workerScheduled = true;
                             this.updateFuture = this.executor.submit(this::runMaterializationWorker);
                         } catch (final RuntimeException | Error failure) {
-                            /* Submission happens under applyLock, so the worker cannot have
+                            /* Submission happens under queueLock, so the worker cannot have
                              * removed these newly queued buffers yet. */
                             for (final ByteBuffer buffer : ownedBuffers) {
                                 this.cachedData.removeIf(candidate -> candidate == buffer);
@@ -258,6 +270,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                             throw failure;
                         }
                     }
+                } finally {
+                    this.queueLock.unlock();
                 }
 
                 if (this.cachedBufferCount.get() > this.cacheLimit) {
@@ -292,15 +306,18 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             try {
                 this.awaitFlushRequestOrTimeout();
                 while (true) {
-                    synchronized (this.applyLock) {
+                    this.queueLock.lock();
+                    try {
                         if (this.cachedData.isEmpty()) {
                             this.workerScheduled = false;
                             return;
                         }
+                    } finally {
+                        this.queueLock.unlock();
                     }
                     /* Drain ownership under the queue lock, then release it before
                      * materializing. Store graph updates may block or complete on another
-                     * executor; keeping applyLock across that wait previously stalled the
+                     * executor; keeping queueLock across that wait previously stalled the
                      * Aeron polling thread and made a slow Store look like transport loss. */
                     this.applyData();
                 }
@@ -325,7 +342,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         }
 
         private void applyData() {
-            synchronized (this.materializationLock) {
+            this.materialization.write(() ->
+            {
                 final XEnum<ByteBuffer> data = X.Enum();
                 final AtomicBoolean released = new AtomicBoolean();
                 final Runnable release = () ->
@@ -337,13 +355,16 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     }
                 };
 
-                synchronized (this.applyLock) {
+                this.queueLock.lock();
+                try {
                     ByteBuffer next;
                     while ((next = this.cachedData.poll()) != null) {
                         this.cachedBufferCount.decrementAndGet();
                         this.cachedBytes = Math.subtractExact(this.cachedBytes, next.remaining());
                         data.add(next);
                     }
+                } finally {
+                    this.queueLock.unlock();
                 }
 
                 try {
@@ -387,41 +408,46 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     }
                     throw failure;
                 }
-            }
+            });
         }
 
         private void applyDataSafely() {
             final boolean hasData;
-            synchronized (this.applyLock) {
+            this.queueLock.lock();
+            try {
                 hasData = !this.cachedData.isEmpty();
+            } finally {
+                this.queueLock.unlock();
             }
             if (hasData) this.applyData();
         }
 
         private void awaitFlushRequestOrTimeout() {
             if (this.cachingTimeoutMs <= 0L) return;
-            synchronized (this.flushMonitor) {
+            this.queueLock.lock();
+            try {
                 if (this.flushRequested) {
                     this.flushRequested = false;
                     return;
                 }
-                final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(this.cachingTimeoutMs);
+                long remaining = TimeUnit.MILLISECONDS.toNanos(this.cachingTimeoutMs);
                 try {
-                    while (!this.flushRequested) {
-                        final long remaining = deadline - System.nanoTime();
-                        if (remaining <= 0L) break;
-                        TimeUnit.NANOSECONDS.timedWait(this.flushMonitor, remaining);
+                    while (!this.flushRequested && remaining > 0L) {
+                        remaining = this.flushCondition.awaitNanos(remaining);
                     }
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException("Storage graph update worker was interrupted", interrupted);
                 }
                 this.flushRequested = false;
+            } finally {
+                this.queueLock.unlock();
             }
         }
 
         private void releaseCachedData() {
-            synchronized (this.applyLock) {
+            this.queueLock.lock();
+            try {
                 ByteBuffer buffer;
                 while ((buffer = this.cachedData.poll()) != null) {
                     this.cachedBufferCount.decrementAndGet();
@@ -429,6 +455,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 }
                 this.cachedBufferCount.set(0L);
                 this.cachedBytes = 0L;
+            } finally {
+                this.queueLock.unlock();
             }
         }
 
@@ -494,15 +522,15 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         @Override
         public void dispose() {
             /* A timeout is retryable: the worker may still own native buffers.  Do
-             * not let the first failed attempt make every later cleanup a no-op. */
-            synchronized (this) {
-                if (this.disposed && this.executor.isTerminated()) {
-                    this.releaseCachedData();
-                    return;
-                }
-                this.disposed = true;
-                this.executor.shutdown();
+             * not let the first failed attempt make every later cleanup a no-op.
+             * Lifecycle needs no monitor: disposed is volatile, workerScheduled is
+             * only touched under queueLock, and the executor is thread-safe. */
+            if (this.disposed && this.executor.isTerminated()) {
+                this.releaseCachedData();
+                return;
             }
+            this.disposed = true;
+            this.executor.shutdown();
             boolean terminated = false;
             try {
                 // if any external processes like Kubernetes shuts us down, it will wait for the externally set
@@ -558,11 +586,14 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
              * materialization, and interrupting it can leave the object graph half-applied.
              */
             /* Wake a worker that is in its coalescing delay.  The flag avoids a lost
-             * notification when the worker is between checking the flag and entering
-             * wait(). */
-            synchronized (this.flushMonitor) {
+             * signal when the worker is between checking the flag and awaiting
+             * the condition. */
+            this.queueLock.lock();
+            try {
                 this.flushRequested = true;
-                this.flushMonitor.notifyAll();
+                this.flushCondition.signalAll();
+            } finally {
+                this.queueLock.unlock();
             }
             this.applyDataSafely();
             final Future<?> pending = this.updateFuture;

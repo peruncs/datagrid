@@ -3,6 +3,8 @@ package peruncs.datagrid.cache.aeron;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.zip.CRC32C;
 
@@ -27,6 +29,9 @@ final class AeronClusteredCacheMessageCodec {
     static final int HEADER_LENGTH = Integer.BYTES * 3 + Long.BYTES * 3;
         /// Magic "DGCC" identifying a DataGrid clustered-cache frame.
     private static final int MAGIC = 0x44474343;
+        /// Allocation-free big-endian long view over sender-id bytes.
+    private static final VarHandle LONG_BE =
+            MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);
     private static final int MAGIC_OFFSET = 0;
     private static final int VERSION_OFFSET = Integer.BYTES;
     private static final int SENDER_ID_OFFSET = Integer.BYTES * 2;
@@ -224,16 +229,9 @@ final class AeronClusteredCacheMessageCodec {
         return sequence >= 0 && sequence < Long.MAX_VALUE;
     }
 
-        /// Reads a big-endian long without allocating a buffer.
+        /// Reads a big-endian long without allocating.
     private static long readLong(final byte[] bytes, final int offset) {
-        return ((long) bytes[offset] & 0xffL) << 56 |
-               ((long) bytes[offset + 1] & 0xffL) << 48 |
-               ((long) bytes[offset + 2] & 0xffL) << 40 |
-               ((long) bytes[offset + 3] & 0xffL) << 32 |
-               ((long) bytes[offset + 4] & 0xffL) << 24 |
-               ((long) bytes[offset + 5] & 0xffL) << 16 |
-               ((long) bytes[offset + 6] & 0xffL) << 8 |
-               ((long) bytes[offset + 7] & 0xffL);
+        return (long) LONG_BE.get(bytes, offset);
     }
 
         /// Identity of one frame sender, used as a gap-tracking key.

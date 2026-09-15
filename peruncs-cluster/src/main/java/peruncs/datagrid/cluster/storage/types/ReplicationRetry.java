@@ -1,5 +1,7 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import java.util.concurrent.ThreadLocalRandom;
+
 /// Monotonic-clock helpers shared by bounded transport retry loops.
 ///
 /// Replication code must use a monotonic deadline. A wall-clock deadline
@@ -49,5 +51,31 @@ public final class ReplicationRetry {
     /// @return `true` when no retry time remains
     public static boolean expired(final long deadlineNanos) {
         return remainingNanos(deadlineNanos) == 0L;
+    }
+
+        /// Returns a full-jitter exponential backoff delay for one retry attempt.
+    ///
+    /// The delay is uniform in `[0, min(capNanos, baseNanos * 2^(attempt-1))]`
+    /// so concurrent writers do not retry in lockstep after a shared outage.
+    /// The per-operation deadline from [#deadlineNanos] still bounds the total
+    /// wait; this delay only spaces individual attempts.
+    ///
+    /// @param attempt   1-based retry attempt number
+    /// @param baseNanos delay for the first attempt, must be positive
+    /// @param capNanos  maximum delay, must be positive
+    /// @return backoff delay in nanoseconds
+    public static long fullJitterDelayNanos(final long attempt, final long baseNanos, final long capNanos) {
+        if (attempt < 1L) throw new IllegalArgumentException("attempt must be positive");
+        if (baseNanos <= 0L) throw new IllegalArgumentException("baseNanos must be positive");
+        if (capNanos <= 0L) throw new IllegalArgumentException("capNanos must be positive");
+        long exponential;
+        try {
+            exponential = Math.multiplyExact(baseNanos, 1L << Math.min(attempt - 1L, 62L));
+        } catch (final ArithmeticException overflow) {
+            exponential = Long.MAX_VALUE;
+        }
+        final long capped = Math.min(exponential, capNanos);
+        final long bound = capped == Long.MAX_VALUE ? Long.MAX_VALUE : capped + 1L;
+        return ThreadLocalRandom.current().nextLong(bound);
     }
 }

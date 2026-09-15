@@ -8,7 +8,6 @@ import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /// Tests the durable replication cursor manager.
@@ -19,7 +18,7 @@ class StoredReplicationCursorManagerTest {
         final Path directory = Files.createTempDirectory("replication-cursor-");
         final Path path = directory.resolve("offset");
         final UUID generation = UUID.randomUUID();
-        final ReplicationCursor expected = new ReplicationCursor("aeron", generation, 17L, new byte[]{1, 2, 3});
+        final ReplicationCursor expected = new ReplicationCursor("aeron", generation, 17L, "010203");
         try {
             try (StoredReplicationCursorManager manager = StoredReplicationCursorManager.NewAtomic(path)) {
                 manager.set(expected);
@@ -30,7 +29,7 @@ class StoredReplicationCursorManagerTest {
                 assertEquals(expected.logicalSequence(), restored.logicalSequence());
                 assertEquals(expected.transport(), restored.transport());
                 assertEquals(expected.storeGeneration(), restored.storeGeneration());
-                assertArrayEquals(expected.providerPosition(), restored.providerPosition());
+                assertEquals(expected.providerPosition(), restored.providerPosition());
             }
             try (var files = Files.list(directory)) {
                 assertEquals(1L, files.count(), "atomic replacement must not leave a temp file");
@@ -58,7 +57,7 @@ class StoredReplicationCursorManagerTest {
         try {
             AtomicFileStoreCrashHook.runWithHook((name, ignored) -> phase.compareAndSet(null, name), () -> {
                 try (StoredReplicationCursorManager manager = StoredReplicationCursorManager.NewAtomic(path)) {
-                    manager.set(new ReplicationCursor("aeron", UUID.randomUUID(), 1L, new byte[]{4}));
+                    manager.set(new ReplicationCursor("aeron", UUID.randomUUID(), 1L, "04"));
                 }
             });
             assertEquals("BEFORE_CURSOR_TEMP_WRITE", phase.get());

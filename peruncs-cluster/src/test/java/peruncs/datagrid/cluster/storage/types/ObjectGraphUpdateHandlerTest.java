@@ -21,7 +21,7 @@ class ObjectGraphUpdateHandlerTest {
         {
             try {
                 ObjectGraphUpdateHandler.runStructured(
-                        updater -> updater.updateObjectGraph(),
+                        Runnable::run,
                         () ->
                         {
                             updateThread.set(Thread.currentThread());

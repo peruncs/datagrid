@@ -1,29 +1,30 @@
 package peruncs.datagrid.cluster.node.replication;
 
-import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.UUID;
 
 /// Durable Aeron replication position.
 ///
 /// `logicalSequence` is the Data Grid ordering value. The opaque
 /// `providerPosition` is interpreted only by the Aeron transport (for
-/// example an Aeron recording id/position pair).
+/// example an Aeron recording id/position pair), stored as lowercase hex so
+/// the record is deeply immutable; an empty string carries no position.
 ///
 /// @param transport        selected provider id
 /// @param storeGeneration  immutable Store image identity, or `null` when the provider has none
 /// @param logicalSequence  last fully resolved transaction, or `-1` before the first one
-/// @param providerPosition provider-specific position bytes
+/// @param providerPosition provider-specific position bytes, lowercase hex
 public record ReplicationCursor(
         String transport,
         UUID storeGeneration,
         long logicalSequence,
-        byte[] providerPosition) {
-        /// Validates and copies the provider position.
+        String providerPosition) {
+        /// Validates the cursor fields.
     ///
     /// @param transport        selected provider id
     /// @param storeGeneration  Store generation
     /// @param logicalSequence  last resolved transaction
-    /// @param providerPosition provider position bytes
+    /// @param providerPosition provider position bytes, lowercase hex
     public ReplicationCursor {
         if (transport == null || transport.isBlank()) {
             throw new IllegalArgumentException("transport must not be blank");
@@ -31,30 +32,46 @@ public record ReplicationCursor(
         if (logicalSequence < -1) {
             throw new IllegalArgumentException("logicalSequence must be >= -1");
         }
-        providerPosition = providerPosition == null ? new byte[0] : providerPosition.clone();
-    }
-
-        /// Returns a copy of the provider position.
-    ///
-    /// @return provider position copy
-    public byte[] providerPosition() {
-        return this.providerPosition.clone();
-    }
-
-    @Override
-    public boolean equals(final Object other) {
-        if (!(other instanceof ReplicationCursor cursor)) {
-            return false;
+        if (providerPosition == null) providerPosition = "";
+        if (!providerPosition.isEmpty()) {
+            try {
+                HexFormat.of().parseHex(providerPosition);
+            } catch (final IllegalArgumentException notHex) {
+                throw new IllegalArgumentException("providerPosition must be even-length lowercase hex", notHex);
+            }
         }
-        return this.logicalSequence == cursor.logicalSequence
-               && java.util.Objects.equals(this.transport, cursor.transport)
-               && java.util.Objects.equals(this.storeGeneration, cursor.storeGeneration)
-               && Arrays.equals(this.providerPosition, cursor.providerPosition);
     }
 
-    @Override
-    public int hashCode() {
-        return java.util.Objects.hash(this.transport, this.storeGeneration, this.logicalSequence,
-                Arrays.hashCode(this.providerPosition));
+        /// Creates a cursor from raw provider position bytes.
+    ///
+    /// @param transport        selected provider id
+    /// @param storeGeneration  Store generation
+    /// @param logicalSequence  last resolved transaction
+    /// @param providerPosition provider position bytes, or `null` for none
+    /// @return cursor with a hex-encoded position
+    public static ReplicationCursor of(
+            final String transport,
+            final UUID storeGeneration,
+            final long logicalSequence,
+            final byte[] providerPosition
+    ) {
+        return new ReplicationCursor(transport, storeGeneration, logicalSequence,
+                providerPosition == null ? "" : HexFormat.of().formatHex(providerPosition));
+    }
+
+        /// Reports whether the cursor carries provider state.
+    ///
+    /// @return `true` when a provider position is present
+    public boolean hasProviderPosition() {
+        return !this.providerPosition.isEmpty();
+    }
+
+        /// Decodes the hex position back to bytes for provider codecs.
+    ///
+    /// @return provider position bytes, empty when absent
+    public byte[] providerPositionBytes() {
+        return this.providerPosition.isEmpty()
+                ? new byte[0]
+                : HexFormat.of().parseHex(this.providerPosition);
     }
 }

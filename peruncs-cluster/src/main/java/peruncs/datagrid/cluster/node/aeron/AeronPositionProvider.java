@@ -63,7 +63,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
                 ? new byte[0]
                 : new AeronReplicationCursor(this.clusterId.get(), this.nodeId.get(), generation,
                 this.epoch.getAsLong(), boundary.recordingId(), boundary.position(), boundary.sequence()).encode();
-        return new ReplicationCursor("aeron", generation, boundary.sequence(), encoded);
+        return ReplicationCursor.of("aeron", generation, boundary.sequence(), encoded);
     }
 
     @Override

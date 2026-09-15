@@ -75,7 +75,7 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
 
                 try {
                     ReplicationCursorStore.write(this.path, cursor);
-                    final long written = cursor.providerPosition().length;
+                    final long written = cursor.providerPosition().length() / 2;
                     if (LOGGER.isLoggable(System.Logger.Level.DEBUG) && cursor.logicalSequence() % 10_000 == 0) {
                         LOGGER.log(System.Logger.Level.DEBUG, "Stored replication sequence %s, written %s bytes".formatted(cursor.logicalSequence(), written));
                     }
@@ -101,7 +101,7 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
                 LOGGER.log(System.Logger.Level.DEBUG, "Read previous replication sequence at %s".formatted(this.cursor.logicalSequence()));
             } catch (final NoSuchFileException missing) {
                 LOGGER.log(System.Logger.Level.DEBUG, "New replication cursor file has been created.");
-                this.cursor = new ReplicationCursor("none", null, -1, new byte[0]);
+                this.cursor = new ReplicationCursor("none", null, -1, "");
             } catch (final IOException failure) {
                 throw new NodeLibraryException("Failed to read binary replication cursor %s".formatted(this.path), failure);
             }

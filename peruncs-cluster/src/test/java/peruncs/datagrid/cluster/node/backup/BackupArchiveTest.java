@@ -60,7 +60,7 @@ class BackupArchiveTest {
 
     @Test
     void readsCursorManifestWithoutExtractingStorage(@TempDir final Path root) throws Exception {
-        final ReplicationCursor expected = new ReplicationCursor("test", null, 9L, new byte[]{4, 5});
+        final ReplicationCursor expected = new ReplicationCursor("test", null, 9L, "0405");
         final Path archive = root.resolve("cursor.zip");
         writeArchive(archive,
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
@@ -88,7 +88,7 @@ class BackupArchiveTest {
         final Path archive = root.resolve("missing-manifest.zip");
         writeArchive(archive, new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null));
 
-        assertThrows(IOException.class, () -> BackupArchive.readManifest(archive));
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive));
     }
 
     @Test
@@ -96,7 +96,7 @@ class BackupArchiveTest {
         final Path archive = root.resolve("large-manifest.zip");
         writeArchive(archive, new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[(1 << 20) + 1]));
 
-        assertThrows(IOException.class, () -> BackupArchive.readManifest(archive));
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive));
     }
 
     @Test

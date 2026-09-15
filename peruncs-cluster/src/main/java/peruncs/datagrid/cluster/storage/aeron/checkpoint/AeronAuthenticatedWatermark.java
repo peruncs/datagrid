@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.agrona.DirectBuffer;
+import org.eclipse.serializer.concurrency.LockedExecutor;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -26,7 +27,7 @@ import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointC
 /// @param recordingId     Aeron Archive recording identity
 /// @param sequence        transaction sequence acknowledged by the reader
 /// @param position        Archive position acknowledged by the reader
-/// @param authentication  HMAC over the identity and progress fields
+/// @param authentication  HMAC over the identity and progress fields, lowercase hex
 public record AeronAuthenticatedWatermark(
         UUID readerId,
         UUID clusterId,
@@ -35,7 +36,7 @@ public record AeronAuthenticatedWatermark(
         long recordingId,
         long sequence,
         long position,
-        byte[] authentication) {
+        String authentication) {
 
     private static final int VERSION = 1;
     private static final int IDENTITY_LENGTH = Integer.BYTES + UUID_BYTES * 3 + Long.BYTES * 4;
@@ -46,17 +47,26 @@ public record AeronAuthenticatedWatermark(
     private static final UUID UUID_ZERO = new UUID(0L, 0L);
     private static final ScopedValue<Mac> MAC = ScopedValue.newInstance();
 
-        /// Creates a watermark and copies the authentication bytes so the token is
-    /// immutable after construction.
+        /// Validates a watermark token, which is immutable after construction.
     public AeronAuthenticatedWatermark {
         if (readerId == null || clusterId == null || storeGeneration == null || authentication == null) {
             throw new NullPointerException("watermark identity and authentication are required");
         }
         if (writerEpoch < 0 || recordingId < 0 || sequence < -1 || sequence == Long.MAX_VALUE || position < -1 ||
-            authentication.length != AUTHENTICATION_LENGTH) {
+            !isAuthenticationHex(authentication)) {
             throw new IllegalArgumentException("invalid Aeron watermark");
         }
-        authentication = authentication.clone();
+    }
+
+        /// Reports whether a tag is a 32-byte lowercase-hex HMAC.
+    private static boolean isAuthenticationHex(final String authentication) {
+        if (authentication.length() != AUTHENTICATION_LENGTH * 2) return false;
+        try {
+            HexFormat.of().parseHex(authentication);
+            return true;
+        } catch (final IllegalArgumentException notHex) {
+            return false;
+        }
     }
 
         /// Creates a signed watermark using a caller-owned secret key.
@@ -81,9 +91,9 @@ public record AeronAuthenticatedWatermark(
             final byte[] secret
     ) {
         validateFields(readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
-        final byte[] authentication = authenticate(canonical(readerId, clusterId,
+        final String authentication = HexFormat.of().formatHex(authenticate(canonical(readerId, clusterId,
                         storeGeneration, writerEpoch, recordingId, sequence, position),
-                secret);
+                secret));
         return new AeronAuthenticatedWatermark(readerId, clusterId,
                 storeGeneration, writerEpoch, recordingId, sequence, position,
                 authentication);
@@ -177,8 +187,7 @@ public record AeronAuthenticatedWatermark(
         offset += Long.BYTES;
         final long position = getLong(encoded, offset);
         offset += Long.BYTES;
-        final byte[] authentication = new byte[AUTHENTICATION_LENGTH];
-        System.arraycopy(encoded, offset, authentication, 0, AUTHENTICATION_LENGTH);
+        final String authentication = HexFormat.of().formatHex(encoded, offset, offset + AUTHENTICATION_LENGTH);
         return new AeronAuthenticatedWatermark(
                 readerId, clusterId, storeGeneration, epoch, recordingId, sequence, position, authentication);
     }
@@ -213,10 +222,11 @@ public record AeronAuthenticatedWatermark(
         final long sequence = encoded.getLong(cursor += Long.BYTES, ByteOrder.BIG_ENDIAN);
         final long position = encoded.getLong(cursor += Long.BYTES, ByteOrder.BIG_ENDIAN);
         cursor += Long.BYTES;
-        final byte[] authentication = new byte[AUTHENTICATION_LENGTH];
-        encoded.getBytes(cursor, authentication);
+        final byte[] authenticationBytes = new byte[AUTHENTICATION_LENGTH];
+        encoded.getBytes(cursor, authenticationBytes);
         return new AeronAuthenticatedWatermark(
-                readerId, clusterId, storeGeneration, epoch, recordingId, sequence, position, authentication);
+                readerId, clusterId, storeGeneration, epoch, recordingId, sequence, position,
+                HexFormat.of().formatHex(authenticationBytes));
     }
 
         /// Creates an authenticated aggregate at the least advanced boundary. The
@@ -340,32 +350,6 @@ public record AeronAuthenticatedWatermark(
         }
     }
 
-        /// Returns a defensive copy so callers cannot mutate the signed token.
-    ///
-    /// @return authentication tag copy
-    @Override
-    public byte[] authentication() {
-        return this.authentication.clone();
-    }
-
-    @Override
-    public boolean equals(final Object candidate) {
-        if (this == candidate) return true;
-        if (!(candidate instanceof AeronAuthenticatedWatermark other)) return false;
-        return this.writerEpoch == other.writerEpoch && this.recordingId == other.recordingId &&
-               this.sequence == other.sequence && this.position == other.position &&
-               this.readerId.equals(other.readerId) && this.clusterId.equals(other.clusterId) &&
-               this.storeGeneration.equals(other.storeGeneration) &&
-               Arrays.equals(this.authentication, other.authentication);
-    }
-
-    @Override
-    public int hashCode() {
-        int result = Objects.hash(this.readerId, this.clusterId, this.storeGeneration,
-                this.writerEpoch, this.recordingId, this.sequence, this.position);
-        return 31 * result + Arrays.hashCode(this.authentication);
-    }
-
         /// Verifies the HMAC without accepting a token with a different identity.
     ///
     /// @param secret HMAC secret
@@ -379,7 +363,7 @@ public record AeronAuthenticatedWatermark(
                 putCanonical(canonical, this.readerId, this.clusterId, this.storeGeneration, this.writerEpoch,
                         this.recordingId, this.sequence, this.position);
                 authenticateInto(canonical, IDENTITY_LENGTH, secret, expected, 0);
-                return MessageDigest.isEqual(this.authentication, expected);
+                return MessageDigest.isEqual(HexFormat.of().parseHex(this.authentication), expected);
             } finally {
                 Arrays.fill(canonical, (byte) 0);
                 Arrays.fill(expected, (byte) 0);
@@ -394,13 +378,15 @@ public record AeronAuthenticatedWatermark(
         final byte[] encoded = new byte[ENCODED_LENGTH];
         putCanonical(encoded, this.readerId, this.clusterId, this.storeGeneration,
                 this.writerEpoch, this.recordingId, this.sequence, this.position);
-        System.arraycopy(this.authentication, 0, encoded, IDENTITY_LENGTH, AUTHENTICATION_LENGTH);
+        final byte[] authentication = HexFormat.of().parseHex(this.authentication);
+        System.arraycopy(authentication, 0, encoded, IDENTITY_LENGTH, AUTHENTICATION_LENGTH);
         return encoded;
     }
 
         /// Tracks the greatest accepted watermark and rejects replay, rollback, or a
     /// conflicting position for an already acknowledged sequence.
     public static final class Validator implements AutoCloseable {
+        private final LockedExecutor state = LockedExecutor.New();
         private final byte[] secret;
         private final Map<UUID, AeronAuthenticatedWatermark> latest = new HashMap<>();
         private boolean erased;
@@ -417,80 +403,107 @@ public record AeronAuthenticatedWatermark(
                 /// Accepts a verified, monotonically advancing reader watermark.
         ///
         /// @param watermark watermark to accept
-        public synchronized void accept(final AeronAuthenticatedWatermark watermark) {
-            this.ensureOpen();
-            if (watermark == null || !watermark.verify(this.secret))
-                throw new SecurityException("invalid Aeron watermark authentication");
-            final AeronAuthenticatedWatermark previous = this.latest.get(watermark.readerId());
-            if (previous != null && (!sameWriterIdentity(previous, watermark) ||
-                                     !monotonicProgress(watermark, previous))) {
-                throw new IllegalStateException("Aeron reader watermark is not monotonic");
-            }
-            this.latest.put(watermark.readerId(), watermark);
+        public void accept(final AeronAuthenticatedWatermark watermark) {
+            this.state.write(() ->
+            {
+                this.ensureOpen();
+                if (watermark == null || !watermark.verify(this.secret))
+                    throw new SecurityException("invalid Aeron watermark authentication");
+                final AeronAuthenticatedWatermark previous = this.latest.get(watermark.readerId());
+                if (previous != null && (!sameWriterIdentity(previous, watermark) ||
+                                         !monotonicProgress(watermark, previous))) {
+                    throw new IllegalStateException("Aeron reader watermark is not monotonic");
+                }
+                this.latest.put(watermark.readerId(), watermark);
+            });
         }
 
                 /// Returns the latest accepted watermark for one reader, or `null`.
         ///
         /// @param readerId reader identity
         /// @return latest accepted watermark, or `null`
-        public synchronized AeronAuthenticatedWatermark latest(final UUID readerId) {
-            this.ensureOpen();
-            return this.latest.get(readerId);
+        public AeronAuthenticatedWatermark latest(final UUID readerId) {
+            return this.state.read(() ->
+            {
+                this.ensureOpen();
+                return this.latest.get(readerId);
+            });
         }
 
                 /// Restores one reader entry after a failed durable state write.
         ///
         /// @param readerId  reader identity
         /// @param watermark prior watermark, or `null` to remove the entry
-        public synchronized void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark) {
-            this.ensureOpen();
-            if (readerId == null) throw new NullPointerException("readerId");
-            if (watermark == null) {
-                this.latest.remove(readerId);
-                return;
-            }
-            if (!readerId.equals(watermark.readerId()) || !watermark.verify(this.secret))
-                throw new SecurityException("cannot restore an unauthenticated Aeron watermark");
-            this.latest.put(readerId, watermark);
+        public void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark) {
+            this.state.write(() ->
+            {
+                this.ensureOpen();
+                if (readerId == null) throw new NullPointerException("readerId");
+                if (watermark == null) {
+                    this.latest.remove(readerId);
+                    return;
+                }
+                if (!readerId.equals(watermark.readerId()) || !watermark.verify(this.secret))
+                    throw new SecurityException("cannot restore an unauthenticated Aeron watermark");
+                this.latest.put(readerId, watermark);
+            });
         }
 
                 /// Returns a stable snapshot for aggregation or diagnostics.
         ///
         /// @return immutable reader-to-watermark snapshot
-        public synchronized Map<UUID, AeronAuthenticatedWatermark> snapshot() {
-            this.ensureOpen();
-            return Map.copyOf(this.latest);
+        public Map<UUID, AeronAuthenticatedWatermark> snapshot() {
+            return this.state.read(() ->
+            {
+                this.ensureOpen();
+                return Map.copyOf(this.latest);
+            });
         }
 
                 /// Returns whether every supplied reader has a validated watermark.
-        synchronized boolean containsAll(final Set<UUID> readers) {
-            this.ensureOpen();
-            return this.latest.keySet().containsAll(readers);
+        boolean containsAll(final Set<UUID> readers) {
+            return this.state.read(() ->
+            {
+                this.ensureOpen();
+                return this.latest.keySet().containsAll(readers);
+            });
         }
 
                 /// Removes a reader's validated watermark when its retirement is persisted.
-        synchronized void remove(final UUID readerId) {
-            this.ensureOpen();
-            this.latest.remove(readerId);
+        void remove(final UUID readerId) {
+            this.state.write(() ->
+            {
+                this.ensureOpen();
+                this.latest.remove(readerId);
+            });
         }
 
                 /// Returns whether this validator has a watermark for the supplied reader.
-        synchronized boolean contains(final UUID readerId) {
-            this.ensureOpen();
-            return this.latest.containsKey(readerId);
+        boolean contains(final UUID readerId) {
+            return this.state.read(() ->
+            {
+                this.ensureOpen();
+                return this.latest.containsKey(readerId);
+            });
         }
 
                 /// Rejects operations after the secret has been erased.
-        synchronized void ensureOpen() {
-            if (this.erased) throw new IllegalStateException("Aeron watermark validator is closed");
+        void ensureOpen() {
+            this.state.read(() ->
+            {
+                if (this.erased) throw new IllegalStateException("Aeron watermark validator is closed");
+            });
         }
 
                 /// Erases the HMAC key when the owning retention controller is closed.
-        synchronized void clearSecret() {
-            if (!this.erased) {
-                Arrays.fill(this.secret, (byte) 0);
-                this.erased = true;
-            }
+        void clearSecret() {
+            this.state.write(() ->
+            {
+                if (!this.erased) {
+                    Arrays.fill(this.secret, (byte) 0);
+                    this.erased = true;
+                }
+            });
         }
 
                 /// Erases the retained HMAC key.
@@ -502,6 +515,7 @@ public record AeronAuthenticatedWatermark(
 
         /// Verifies and aggregates a configured set of reader acknowledgements.
     public static final class Quorum implements AutoCloseable {
+        private final LockedExecutor state = LockedExecutor.New();
         private final Set<UUID> expectedReaders;
         private final Set<UUID> activeReaders;
         private final Set<UUID> retiredReaders = new HashSet<>();
@@ -525,22 +539,27 @@ public record AeronAuthenticatedWatermark(
                 /// Accepts one authenticated acknowledgement from a configured reader.
         ///
         /// @param watermark acknowledgement to accept
-        public synchronized void accept(final AeronAuthenticatedWatermark watermark) {
-            this.validator.ensureOpen();
-            if (watermark == null || watermark.sequence() < 0 || watermark.position() < 0 ||
-                !this.activeReaders.contains(watermark.readerId()))
-                throw new SecurityException("Aeron watermark reader is not part of the configured quorum");
-            this.validator.accept(watermark);
+        public void accept(final AeronAuthenticatedWatermark watermark) {
+            this.state.write(() ->
+            {
+                this.validator.ensureOpen();
+                if (watermark == null || watermark.sequence() < 0 || watermark.position() < 0 ||
+                    !this.activeReaders.contains(watermark.readerId()))
+                    throw new SecurityException("Aeron watermark reader is not part of the configured quorum");
+                this.validator.accept(watermark);
+            });
         }
 
                 /// Returns the least advanced acknowledgement once every reader has reported.
         ///
         /// @return least advanced authenticated acknowledgement
-        public synchronized AeronAuthenticatedWatermark aggregate() {
-            this.validator.ensureOpen();
-            if (this.activeReaders.isEmpty())
-                throw new IllegalStateException("Aeron reader quorum has no active readers");
-            AeronAuthenticatedWatermark least = null;
+        public AeronAuthenticatedWatermark aggregate() {
+            return this.state.read(() ->
+            {
+                this.validator.ensureOpen();
+                if (this.activeReaders.isEmpty())
+                    throw new IllegalStateException("Aeron reader quorum has no active readers");
+                AeronAuthenticatedWatermark least = null;
             for (final UUID readerId : this.activeReaders) {
                 final AeronAuthenticatedWatermark watermark = this.validator.latest(readerId);
                 if (watermark == null) {
@@ -558,17 +577,21 @@ public record AeronAuthenticatedWatermark(
                     if (compareProgress(watermark, least) < 0) least = watermark;
                 }
             }
-            return sign(UUID_ZERO, least.clusterId(), least.storeGeneration(), least.writerEpoch(),
-                    least.recordingId(), least.sequence(), least.position(), this.validator.secret);
+                return sign(UUID_ZERO, least.clusterId(), least.storeGeneration(), least.writerEpoch(),
+                        least.recordingId(), least.sequence(), least.position(), this.validator.secret);
+            });
         }
 
                 /// Returns whether every configured reader has supplied a watermark.
         ///
         /// @return `true` when every configured reader has reported
-        public synchronized boolean isComplete() {
-            this.validator.ensureOpen();
-            return !this.activeReaders.isEmpty() &&
-                   this.validator.containsAll(this.activeReaders);
+        public boolean isComplete() {
+            return this.state.read(() ->
+            {
+                this.validator.ensureOpen();
+                return !this.activeReaders.isEmpty() &&
+                       this.validator.containsAll(this.activeReaders);
+            });
         }
 
                 /// Returns the active readers that have not supplied a durable watermark.
@@ -576,87 +599,111 @@ public record AeronAuthenticatedWatermark(
         /// retention authorization by itself.
         ///
         /// @return immutable set of readers still missing from the quorum
-        public synchronized Set<UUID> missingReaders() {
-            this.validator.ensureOpen();
-            final HashSet<UUID> missing = new HashSet<>();
-            for (final UUID readerId : this.activeReaders) {
-                if (!this.validator.contains(readerId)) missing.add(readerId);
-            }
-            return Set.copyOf(missing);
+        public Set<UUID> missingReaders() {
+            return this.state.read(() ->
+            {
+                this.validator.ensureOpen();
+                final HashSet<UUID> missing = new HashSet<>();
+                for (final UUID readerId : this.activeReaders) {
+                    if (!this.validator.contains(readerId)) missing.add(readerId);
+                }
+                return Set.copyOf(missing);
+            });
         }
 
                 /// Returns whether a reader identity is part of this writer's retention quorum.
         ///
         /// @param readerId reader identity
         /// @return `true` when the reader belongs to the quorum
-        public synchronized boolean acceptsReader(final UUID readerId) {
-            this.validator.ensureOpen();
-            return this.activeReaders.contains(readerId);
+        public boolean acceptsReader(final UUID readerId) {
+            return this.state.read(() ->
+            {
+                this.validator.ensureOpen();
+                return this.activeReaders.contains(readerId);
+            });
         }
 
                 /// Permanently retires a configured reader from subsequent quorum decisions.
         ///
         /// @param readerId configured reader identity
         /// @return `true` when the reader was newly retired
-        public synchronized boolean retire(final UUID readerId) {
-            this.validator.ensureOpen();
-            if (!this.expectedReaders.contains(readerId))
-                throw new IllegalArgumentException("reader is not configured for this Aeron quorum: %s".formatted(readerId));
-            if (!this.retiredReaders.add(readerId)) return false;
-            this.activeReaders.remove(readerId);
-            this.validator.remove(readerId);
-            return true;
+        public boolean retire(final UUID readerId) {
+            return this.state.write(() ->
+            {
+                this.validator.ensureOpen();
+                if (!this.expectedReaders.contains(readerId))
+                    throw new IllegalArgumentException("reader is not configured for this Aeron quorum: %s".formatted(readerId));
+                if (!this.retiredReaders.add(readerId)) return false;
+                this.activeReaders.remove(readerId);
+                this.validator.remove(readerId);
+                return true;
+            });
         }
 
                 /// Restores a reader when durable retirement persistence fails.
         ///
         /// @param readerId configured reader identity
-        public synchronized void reinstate(final UUID readerId) {
-            this.validator.ensureOpen();
-            if (this.retiredReaders.remove(readerId)) this.activeReaders.add(readerId);
+        public void reinstate(final UUID readerId) {
+            this.state.write(() ->
+            {
+                this.validator.ensureOpen();
+                if (this.retiredReaders.remove(readerId)) this.activeReaders.add(readerId);
+            });
         }
 
                 /// Returns the durable retirement tombstones.
         ///
         /// @return immutable set of retired reader identities
-        public synchronized Set<UUID> retiredReaders() {
-            this.validator.ensureOpen();
-            return Set.copyOf(this.retiredReaders);
+        public Set<UUID> retiredReaders() {
+            return this.state.read(() ->
+            {
+                this.validator.ensureOpen();
+                return Set.copyOf(this.retiredReaders);
+            });
         }
 
                 /// Returns the authenticated per-reader state for durable persistence.
         ///
         /// @return immutable reader-to-watermark snapshot
-        public synchronized Map<UUID, AeronAuthenticatedWatermark> snapshot() {
-            this.validator.ensureOpen();
-            return this.validator.snapshot();
+        public Map<UUID, AeronAuthenticatedWatermark> snapshot() {
+            return this.state.read(() ->
+            {
+                this.validator.ensureOpen();
+                return this.validator.snapshot();
+            });
         }
 
                 /// Returns one reader's current acknowledgement for transactional updates.
         ///
         /// @param readerId reader identity
         /// @return current acknowledgement, or `null`
-        public synchronized AeronAuthenticatedWatermark latest(final UUID readerId) {
-            this.validator.ensureOpen();
-            return this.validator.latest(readerId);
+        public AeronAuthenticatedWatermark latest(final UUID readerId) {
+            return this.state.read(() ->
+            {
+                this.validator.ensureOpen();
+                return this.validator.latest(readerId);
+            });
         }
 
                 /// Restores one reader's prior acknowledgement after persistence failure.
         ///
         /// @param readerId  reader identity
         /// @param watermark prior watermark, or `null` to remove the entry
-        public synchronized void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark) {
-            this.validator.ensureOpen();
-            if (readerId == null || !this.expectedReaders.contains(readerId))
-                throw new IllegalArgumentException("reader is not configured for this Aeron quorum: %s".formatted(readerId));
-            if (watermark != null && !this.activeReaders.contains(readerId))
-                throw new IllegalStateException("cannot restore a watermark for a retired Aeron reader: %s".formatted(readerId));
-            this.validator.restore(readerId, watermark);
+        public void restore(final UUID readerId, final AeronAuthenticatedWatermark watermark) {
+            this.state.write(() ->
+            {
+                this.validator.ensureOpen();
+                if (readerId == null || !this.expectedReaders.contains(readerId))
+                    throw new IllegalArgumentException("reader is not configured for this Aeron quorum: %s".formatted(readerId));
+                if (watermark != null && !this.activeReaders.contains(readerId))
+                    throw new IllegalStateException("cannot restore a watermark for a retired Aeron reader: %s".formatted(readerId));
+                this.validator.restore(readerId, watermark);
+            });
         }
 
                 /// Erases the validator key after the retention controller releases it.
-        public synchronized void clearSecret() {
-            this.validator.clearSecret();
+        public void clearSecret() {
+            this.state.write(this.validator::clearSecret);
         }
 
                 /// Erases the retained HMAC key.

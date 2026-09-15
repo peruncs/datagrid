@@ -46,6 +46,12 @@ final class TransactionAssembler {
      * transaction, including duplicate replay validation. */
     private final CRC32C dataCrc = new CRC32C();
     private final byte[] crcScratch = new byte[16 * 1024];
+    /* Dictionaries repeat nearly verbatim across transactions. Decode the
+     * assembled direct range with one reused decoder instead of copying it
+     * through a per-transaction heap array first. Only the API-required
+     * String itself still allocates. */
+    private final java.nio.charset.CharsetDecoder dictionaryDecoder =
+            StandardCharsets.UTF_8.newDecoder();
     /* The next sequence is reserved while the assembler monitor is held. It
      * closes the gap between accepting a terminal marker and invoking the
      * receiver callback (which deliberately runs outside the monitor). */
@@ -294,9 +300,13 @@ final class TransactionAssembler {
         if (completed.dictionary == null) {
             dictionary = null;
         } else {
-            final byte[] dictionaryBytes = new byte[completed.dictionaryLength];
-            completed.dictionary.getBytes(0, dictionaryBytes);
-            dictionary = new String(dictionaryBytes, StandardCharsets.UTF_8);
+            final ByteBuffer view = completed.dictionaryStorage.asReadOnlyBuffer();
+            view.position(0).limit(completed.dictionaryLength);
+            try {
+                dictionary = this.dictionaryDecoder.reset().decode(view).toString();
+            } catch (final java.nio.charset.CharacterCodingException failure) {
+                throw new IllegalStateException("type dictionary is not valid UTF-8", failure);
+            }
         }
         final ByteBuffer direct = completed.dataStorage == null
                 ? EMPTY_BUFFER.duplicate()

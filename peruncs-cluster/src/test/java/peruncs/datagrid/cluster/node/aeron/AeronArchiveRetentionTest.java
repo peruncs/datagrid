@@ -79,12 +79,12 @@ class AeronArchiveRetentionTest {
     }
 
     private static ReplicationCursor deletionCursor(final long position) {
-        return new ReplicationCursor("aeron", GENERATION, 4, new AeronReplicationCursor(
+        return ReplicationCursor.of("aeron", GENERATION, 4, new AeronReplicationCursor(
                 CLUSTER, UUID.randomUUID(), GENERATION, 1, 17, position, 4).encode());
     }
 
     private static ReplicationCursor cursor(final UUID reader) {
-        return new ReplicationCursor("aeron", GENERATION, 4, AeronAuthenticatedWatermark.sign(
+        return ReplicationCursor.of("aeron", GENERATION, 4, AeronAuthenticatedWatermark.sign(
                 reader, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET).encode());
     }
 
@@ -123,7 +123,7 @@ class AeronArchiveRetentionTest {
         final AtomicBoolean started = new AtomicBoolean();
         final AeronArchiveRetention retention = retention(() -> started.set(true));
         assertThrows(IllegalArgumentException.class, () -> retention.recordReaderWatermark(
-                new ReplicationCursor("aeron", GENERATION, 1, new byte[]{1, 2, 3})));
+                new ReplicationCursor("aeron", GENERATION, 1, "010203")));
         assertFalse(started.get(), "authentication must precede lazy writer startup");
         retention.close();
     }
@@ -145,7 +145,7 @@ class AeronArchiveRetentionTest {
         });
         final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
                 READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET);
-        retention.recordReaderWatermark(new ReplicationCursor("aeron", GENERATION, 4, watermark.encode()));
+        retention.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode()));
         assertTrue(retention.isSupported());
         retention.close();
     }
@@ -180,11 +180,11 @@ class AeronArchiveRetentionTest {
         });
         final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
                 READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET);
-        retention.recordReaderWatermark(new ReplicationCursor("aeron", GENERATION, 4, watermark.encode()));
+        retention.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode()));
         final byte[] ordinaryPosition = new AeronReplicationCursor(
                 CLUSTER, UUID.randomUUID(), GENERATION, 1, 17, 4_096, 4).encode();
         final IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> retention.deleteThrough(new ReplicationCursor("aeron", GENERATION, 4, ordinaryPosition)));
+                () -> retention.deleteThrough(ReplicationCursor.of("aeron", GENERATION, 4, ordinaryPosition)));
         assertEquals("Aeron Archive is not running", failure.getMessage());
         retention.close();
     }
@@ -227,7 +227,7 @@ class AeronArchiveRetentionTest {
         final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
                 READER, CLUSTER, GENERATION, 1, 17, 5, 4_096, SECRET);
         assertThrows(IllegalStateException.class, () -> retention.recordReaderWatermark(
-                new ReplicationCursor("aeron", GENERATION, 5, watermark.encode())));
+                ReplicationCursor.of("aeron", GENERATION, 5, watermark.encode())));
         assertFalse(retention.isSupported(), "an acknowledgement beyond the writer boundary must not complete quorum");
         retention.close();
     }
@@ -239,7 +239,7 @@ class AeronArchiveRetentionTest {
             Files.deleteIfExists(state);
             final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
                     READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET);
-            final ReplicationCursor cursor = new ReplicationCursor("aeron", GENERATION, 4, watermark.encode());
+            final ReplicationCursor cursor = ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode());
             final AeronArchiveRetention first = retention(() -> {
             }, state);
             first.recordReaderWatermark(cursor);
@@ -309,7 +309,7 @@ class AeronArchiveRetentionTest {
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state);
             first.retireReader(secondReader);
-            first.recordReaderWatermark(new ReplicationCursor("aeron", GENERATION, 4,
+            first.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4,
                     AeronAuthenticatedWatermark.sign(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET).encode()));
             assertTrue(first.isSupported());
             first.close();
@@ -320,7 +320,7 @@ class AeronArchiveRetentionTest {
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state);
             assertTrue(restarted.isSupported());
-            assertThrows(SecurityException.class, () -> restarted.recordReaderWatermark(new ReplicationCursor(
+            assertThrows(SecurityException.class, () -> restarted.recordReaderWatermark(ReplicationCursor.of(
                     "aeron", GENERATION, 4, AeronAuthenticatedWatermark.sign(
                     secondReader, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET).encode())));
             restarted.close();

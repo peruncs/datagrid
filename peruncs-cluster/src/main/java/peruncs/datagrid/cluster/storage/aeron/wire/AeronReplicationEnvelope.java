@@ -360,6 +360,15 @@ public final class AeronReplicationEnvelope {
         return Crc32c.compute(payload);
     }
 
+        /// Computes the same checksum reusing caller-owned CRC state.
+    ///
+    /// Hot paths must use this overload or the direct-buffer form instead of
+    /// allocating a fresh accumulator per call.
+    public static int crc32c(final byte[] payload, final CRC32C reuse) {
+        if (payload == null) throw new IllegalArgumentException("payload must not be null");
+        return Crc32c.compute(payload, 0, payload.length, reuse);
+    }
+
         /// Computes the same checksum directly from an Agrona buffer range.
     /// A caller-owned context must be bound with [#withChecksumContext(ChecksumContext,
     /// Supplier)]. This requirement keeps the direct-buffer path allocation-free.

@@ -145,7 +145,7 @@ public final class StorageBinaryDataChunker {
                 if (buffer == null || !buffer.isDirect()) {
                     throw new StorageBinaryDataException("owned binary contains a non-direct buffer");
                 }
-                final int logicalLength = data instanceof ChunksWrapper ? buffer.position() : buffer.remaining();
+                final int logicalLength = logicalLength(data, buffer);
                 if (logicalLength < 0 || logicalLength > buffer.capacity()) {
                     throw new StorageBinaryDataException("owned binary contains an invalid buffer length");
                 }
@@ -171,9 +171,10 @@ public final class StorageBinaryDataChunker {
         notNull(data);
         final ByteBuffer[] source = bufferArray(data);
         final ByteBuffer[] result = new ByteBuffer[source.length];
+        final boolean wrapped = data instanceof ChunksWrapper;
         for (int index = 0; index < source.length; index++) {
             final ByteBuffer buffer = source[index];
-            if (data instanceof ChunksWrapper) {
+            if (wrapped) {
                 final int logicalLength = buffer.position();
                 if (logicalLength < 0 || logicalLength > buffer.capacity()) {
                     throw new StorageBinaryDataException("invalid wrapped binary buffer length");
@@ -184,6 +185,20 @@ public final class StorageBinaryDataChunker {
             result[index] = buffer.slice();
         }
         return result;
+    }
+
+        /// Returns the logical payload length of one channel buffer.
+    ///
+    /// Serializer's [ChunksWrapper] stores its logical length in the source
+    /// position; ordinary binaries expose the remaining bytes instead. This is
+    /// the single type-test for that distinction; callers must use this
+    /// helper instead of branching on the binary type themselves.
+    ///
+    /// @param data   source Store binary
+    /// @param buffer one channel buffer of that binary
+    /// @return logical payload length in bytes
+    private static int logicalLength(final Binary data, final ByteBuffer buffer) {
+        return data instanceof ChunksWrapper ? buffer.position() : buffer.remaining();
     }
 
         /// One transport packet and its position in the source binary.

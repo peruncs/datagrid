@@ -33,7 +33,7 @@ class NodeHousekeeperTest {
     @Test
     void backupWorkRunsBackupWhenIdle() {
         final BackupFake backups = new BackupFake();
-        final Runnable task = NodeHousekeeper.backupWork(backups);
+        final Runnable task = backups.createScheduledWork();
 
         task.run();
 
@@ -46,7 +46,7 @@ class NodeHousekeeperTest {
     void backupWorkSkipsWhenBusy() {
         final BackupFake backups = new BackupFake();
         backups.busy.set(true);
-        final Runnable task = NodeHousekeeper.backupWork(backups);
+        final Runnable task = backups.createScheduledWork();
 
         task.run();
 
@@ -58,7 +58,7 @@ class NodeHousekeeperTest {
     void backupWorkSkipsWhenStartIsRejected() {
         final BackupFake backups = new BackupFake();
         backups.rejectWithoutRunning.set(true);
-        final Runnable task = NodeHousekeeper.backupWork(backups);
+        final Runnable task = backups.createScheduledWork();
 
         assertDoesNotThrow(task::run);
         assertEquals(1, backups.backupRequests.get());
@@ -69,7 +69,7 @@ class NodeHousekeeperTest {
     void limitCheckWorkUpdatesGate() {
         final AtomicLong usedBytes = new AtomicLong(10_000_000_000L);
         final StorageLimitGate gate = StorageLimitGate.New(10);
-        final Runnable task = NodeHousekeeper.limitCheckWork(usedBytes::get, gate);
+        final Runnable task = gate.createScheduledWork(usedBytes::get);
 
         task.run();
         assertTrue(gate.limitReached());

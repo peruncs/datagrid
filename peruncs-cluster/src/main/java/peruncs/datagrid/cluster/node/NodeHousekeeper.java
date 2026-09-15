@@ -1,9 +1,5 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.backup.StorageBackupTaskExecutor;
-import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
-import peruncs.datagrid.cluster.node.store.StorageLimitGate;
-
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -59,52 +55,6 @@ public final class NodeHousekeeper implements AutoCloseable {
             LOGGER.log(System.Logger.Level.ERROR, "Fatal housekeeper task '%s' failure".formatted(scheduled.name()), failure);
             throw failure;
         }
-    }
-
-        /// Creates the periodic full-backup task.
-    ///
-    /// The task uses the automatic backup slot of the shared single-flight
-    /// backup executor. A run while another backup is active is skipped instead
-    /// of queuing behind it.
-    ///
-    /// @param backupExecutor shared backup task executor
-    /// @return backup task
-    public static Runnable backupWork(final StorageBackupTaskExecutor backupExecutor) {
-        notNull(backupExecutor);
-        return () ->
-        {
-            LOGGER.log(System.Logger.Level.INFO, "Issuing full backup");
-            if (backupExecutor.runBackup(false) == StorageBackupTaskExecutor.BackupStartResult.BUSY) {
-                LOGGER.log(System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
-            }
-        };
-    }
-
-        /// Creates the periodic storage-limit check task.
-    ///
-    /// The task measures used disk space and records it in the gate, which
-    /// request threads read to decide whether writes are still accepted.
-    ///
-    /// @param diskSpaceReader storage measurement source
-    /// @param limitGate       shared limit state
-    /// @return limit-check task
-    public static Runnable limitCheckWork(
-            final StorageDiskSpaceReader diskSpaceReader,
-            final StorageLimitGate limitGate
-    ) {
-        notNull(diskSpaceReader);
-        notNull(limitGate);
-        return () ->
-        {
-            LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
-            final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
-            final long usedGb = usedBytes / 1_000_000_000L;
-            LOGGER.log(System.Logger.Level.INFO, "Storage Size: %sgb/%sgb (%s bytes)".formatted(usedGb, limitGate.limitGb(), usedBytes));
-            if (usedBytes >= limitGate.limitBytes()) {
-                LOGGER.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
-            }
-            limitGate.updateUsage(usedBytes);
-        };
     }
 
         /// Registers one periodic task. Tasks must be scheduled before start.

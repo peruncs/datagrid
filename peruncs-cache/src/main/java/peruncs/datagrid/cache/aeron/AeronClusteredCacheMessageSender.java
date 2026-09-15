@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.LongAdder;
 /// shared per node identity when `node-id` is configured, and per
 /// provider otherwise, so receivers never see false gaps when several providers
 /// share one node id.
-public abstract class AeronClusteredCacheMessageSender
+public final class AeronClusteredCacheMessageSender
         implements CacheEntryCreatedListener<Object, Object>, CacheEntryUpdatedListener<Object, Object>, Disposable {
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusteredCacheMessageSender.class.getName());
@@ -100,7 +100,7 @@ public abstract class AeronClusteredCacheMessageSender
     /// @param publishTimeoutNanos maximum time to wait for the publication to accept a frame
     /// @param maxPayloadBytes     maximum accepted payload size
     /// @return timestamp-cache sender
-    static AeronClusteredCacheMessageSender UpdateTimestamps(
+    static AeronClusteredCacheMessageSender New(
             final AeronClusteredCacheResources resources,
             final byte[] senderId,
             final AeronClusteredCacheSenderSequence.SequenceLease sequence,
@@ -110,13 +110,14 @@ public abstract class AeronClusteredCacheMessageSender
             final long publishTimeoutNanos,
             final int maxPayloadBytes
     ) {
-        return new UpdateTimestamps(resources, senderId, sequence, sequenceLock, releaseSequence, serializer,
-                publishTimeoutNanos, maxPayloadBytes);
+        return new AeronClusteredCacheMessageSender(resources, senderId, sequence, sequenceLock, releaseSequence,
+                serializer, publishTimeoutNanos, maxPayloadBytes);
     }
 
         /// Returns the publish deadline, saturating at [Long#MAX_VALUE] so an
     /// extreme configured timeout cannot overflow the addition and fail
-    /// immediately.
+    /// immediately. This mirrors `ReplicationRetry` deadline semantics; it
+    /// lives here because the cache module must not depend on cluster types.
     private static long saturatingDeadline(final long timeoutNanos) {
         final long now = System.nanoTime();
         try {
@@ -133,26 +134,34 @@ public abstract class AeronClusteredCacheMessageSender
         return Math.max(remaining, 0L);
     }
 
-        /// Converts one cache event into a cluster update message.
-    ///
-    /// @param event source cache event
-    /// @return timestamp update message for the event
-    protected abstract TimestampsRegionUpdateMessage createMessage(CacheEntryEvent<?, ?> event);
-
         /// Serializes and publishes each event in order.
     ///
     /// @param events cache events to publish
-    protected void handleEvents(final Iterable<CacheEntryEvent<?, ?>> events)
+    private void handleEvents(final Iterable<CacheEntryEvent<?, ?>> events)
             throws CacheEntryListenerException {
         for (final CacheEntryEvent<?, ?> event : events) {
             final byte[] payload;
             try {
-                payload = AeronClusteredCachePayloadCodec.encode(this.createMessage(event));
+                payload = AeronClusteredCachePayloadCodec.encode(TimestampsRegionUpdateMessage.fromEvent(event));
             } catch (final RuntimeException failure) {
                 throw new CacheEntryListenerException("Failed to serialize clustered-cache message", failure);
             }
             this.publish(payload);
         }
+    }
+
+        /// Publishes created entries to the cluster.
+    @Override
+    public void onCreated(final Iterable<CacheEntryEvent<?, ?>> events)
+            throws CacheEntryListenerException {
+        this.handleEvents(events);
+    }
+
+        /// Publishes updated entries to the cluster.
+    @Override
+    public void onUpdated(final Iterable<CacheEntryEvent<?, ?>> events)
+            throws CacheEntryListenerException {
+        this.handleEvents(events);
     }
 
     private void publish(final byte[] payload) {
@@ -239,11 +248,6 @@ public abstract class AeronClusteredCacheMessageSender
             this.scratch = null;
             XMemory.deallocateDirectByteBuffer(buffer.byteBuffer());
         }
-    }
-
-        /// Releases the scratch buffer after publication quiescence.
-    private void releaseAllScratch() {
-        this.releaseScratch();
     }
 
     private ConcurrentPublication ensurePublication() {
@@ -365,7 +369,7 @@ public abstract class AeronClusteredCacheMessageSender
                 }
             }
         } finally {
-            if (quiescent) this.releaseAllScratch();
+            if (quiescent) this.releaseScratch();
             if (completed) this.releaseSequence.run();
             if (!completed) {
                 synchronized (this.lifecycleMonitor) {
@@ -394,40 +398,5 @@ public abstract class AeronClusteredCacheMessageSender
         /// Returns whether this single-use sender has completed disposal.
     boolean isDisposed() {
         return this.disposed;
-    }
-
-        /// Converts timestamp cache events into cluster update messages.
-    private static final class UpdateTimestamps extends AeronClusteredCacheMessageSender
-            implements CacheEntryCreatedListener<Object, Object>, CacheEntryUpdatedListener<Object, Object> {
-        private UpdateTimestamps(
-                final AeronClusteredCacheResources resources,
-                final byte[] senderId,
-                final AeronClusteredCacheSenderSequence.SequenceLease sequence,
-                final Object sequenceLock,
-                final Runnable releaseSequence,
-                final Serializer<byte[]> serializer,
-                final long publishTimeoutNanos,
-                final int maxPayloadBytes
-        ) {
-            super(resources, senderId, sequence, sequenceLock, releaseSequence, serializer,
-                    publishTimeoutNanos, maxPayloadBytes);
-        }
-
-        @Override
-        public void onCreated(final Iterable<CacheEntryEvent<?, ?>> events)
-                throws CacheEntryListenerException {
-            this.handleEvents(events);
-        }
-
-        @Override
-        public void onUpdated(final Iterable<CacheEntryEvent<?, ?>> events)
-                throws CacheEntryListenerException {
-            this.handleEvents(events);
-        }
-
-        @Override
-        protected TimestampsRegionUpdateMessage createMessage(final CacheEntryEvent<?, ?> event) {
-            return TimestampsRegionUpdateMessage.fromEvent(event);
-        }
     }
 }

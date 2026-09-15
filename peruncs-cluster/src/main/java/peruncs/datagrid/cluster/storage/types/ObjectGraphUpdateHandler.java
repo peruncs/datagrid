@@ -20,7 +20,7 @@ public interface ObjectGraphUpdateHandler {
     ///
     /// @return synchronized update handler
     static ObjectGraphUpdateHandler Synchronized() {
-        return updater -> XThreads.executeSynchronized(updater::updateObjectGraph);
+        return updater -> XThreads.executeSynchronized(updater::run);
     }
 
         /// Runs an update in a structured virtual-thread child.
@@ -37,7 +37,7 @@ public interface ObjectGraphUpdateHandler {
     /// @throws StructuredTaskScope.TimeoutException if the timeout expires
     static void runStructured(
             final ObjectGraphUpdateHandler handler,
-            final ObjectGraphUpdater updater,
+            final Runnable updater,
             final Duration timeout
     ) throws InterruptedException {
         notNull(handler);
@@ -65,6 +65,6 @@ public interface ObjectGraphUpdateHandler {
     /// result is never acknowledged merely because the child was forked.
     ///
     /// @param updater update to run
-    void objectGraphUpdateAvailable(ObjectGraphUpdater updater);
+    void objectGraphUpdateAvailable(Runnable updater);
 
 }

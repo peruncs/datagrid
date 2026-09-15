@@ -66,4 +66,28 @@ public final class StorageLimitGate {
     public long limitBytes() {
         return this.limitBytes;
     }
+
+        /// Creates the periodic storage-limit check task.
+    ///
+    /// The task measures used disk space and records it in this gate, which
+    /// request threads read to decide whether writes are still accepted.
+    ///
+    /// @param diskSpaceReader storage measurement source
+    /// @return limit-check task for housekeeper scheduling
+    public Runnable createScheduledWork(final StorageDiskSpaceReader diskSpaceReader) {
+        if (diskSpaceReader == null) throw new NullPointerException("diskSpaceReader");
+        return () ->
+        {
+            final System.Logger logger = System.getLogger(StorageLimitGate.class.getName());
+            logger.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
+            final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
+            final long usedGb = usedBytes / 1_000_000_000L;
+            logger.log(System.Logger.Level.INFO,
+                    "Storage Size: %sgb/%sgb (%s bytes)".formatted(usedGb, this.limitGb(), usedBytes));
+            if (usedBytes >= this.limitBytes()) {
+                logger.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
+            }
+            this.updateUsage(usedBytes);
+        };
+    }
 }
