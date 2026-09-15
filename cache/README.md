@@ -35,8 +35,8 @@ isolated network.
 `mvn -pl cache -am test`. The provider suite runs a real embedded
 MediaDriver over `aeron:ipc`.
 
-## Decisions
+## Design
 
-- [ADR 0001](docs/adr/0001-volatile-broadcast-over-aeron.md): volatile broadcast
-- [ADR 0002](docs/adr/0002-synchronous-fail-fast-sender.md): synchronous sender
-- [ADR 0003](docs/adr/0003-fail-closed-receiver.md): fail-closed receiver
+The architectural decisions — volatile broadcast, synchronous fail-fast
+sending, fail-closed receiving — are recorded in the
+[module documentation](src/main/java/module-info.java).

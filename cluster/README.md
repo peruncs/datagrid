@@ -30,7 +30,7 @@ resources from the DataGrid storage-manager shutdown callback.
 
 For a reader, set `ECLIPSE_DATAGRID_AERON_RECORDING_ID` to the writer's
 recording. Reader identity/checkpoint persistence is supplied by the
-nodelibrary deployment; this provider does not invent an identity from the
+node deployment; this provider does not invent an identity from the
 network address.
 One provider instance owns one configured replication stream; use separate
 provider instances/channels for multiple streams.
@@ -142,10 +142,8 @@ Run the transport and UDP/Archive integration tests with:
 mvn -pl cluster -am verify
 ```
 
-## Decisions
+## Design
 
-- [ADR 0001](docs/adr/0001-archive-first-replication.md): Archive-first replication
-- [ADR 0002](docs/adr/0002-fixed-roles-without-consensus.md): fixed roles
-- [ADR 0003](docs/adr/0003-durable-cursors-and-checkpoints.md): durable cursors
-- [ADR 0004](docs/adr/0004-quorum-gated-retention.md): quorum-gated retention
-- [ADR 0005](docs/adr/0005-in-graph-index-policy.md): in-graph indexes
+The architectural decisions — Archive-first replication, fixed roles,
+durable cursors and checkpoints, quorum-gated retention, in-graph indexes —
+are recorded in the [module documentation](src/main/java/module-info.java).
