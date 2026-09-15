@@ -1,18 +1,12 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.memory.XMemory;
-import org.eclipse.serializer.persistence.binary.types.ChunksBuffer;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
-import org.eclipse.serializer.util.BufferSizeProviderIncremental;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Tests storage binary data chunker behavior.
 class StorageBinaryDataChunkerTest {

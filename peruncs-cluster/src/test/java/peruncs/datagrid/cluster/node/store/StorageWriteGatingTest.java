@@ -11,7 +11,8 @@ import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
 
 import java.nio.file.Path;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// The storage limit gates only the write entry points.
 ///

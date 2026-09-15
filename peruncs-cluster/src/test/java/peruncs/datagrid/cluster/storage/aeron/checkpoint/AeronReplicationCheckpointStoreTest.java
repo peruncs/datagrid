@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.nio.ByteBuffer;

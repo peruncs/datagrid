@@ -1,7 +1,6 @@
 package peruncs.datagrid.cache.test;
 
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageSender;
-import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
 
 import javax.cache.Cache;
 import javax.cache.configuration.CacheEntryListenerConfiguration;

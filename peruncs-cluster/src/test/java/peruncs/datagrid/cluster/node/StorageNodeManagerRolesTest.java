@@ -12,9 +12,7 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.lang.reflect.Proxy;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the reader/promotable role split is structural, not a runtime flag.
 class StorageNodeManagerRolesTest {

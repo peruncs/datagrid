@@ -1,6 +1,5 @@
 package peruncs.datagrid.cluster.storage.types;
 
-import org.eclipse.serializer.collections.types.XEnum;
 import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistence;
@@ -9,7 +8,6 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDescription;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.typing.Disposable;
-import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.ByteBuffer;

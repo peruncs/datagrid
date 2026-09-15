@@ -8,7 +8,7 @@ import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
 import javax.cache.configuration.MutableConfiguration;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /// A remote timestamp applied through a real cache must never be rebroadcast.
 ///
