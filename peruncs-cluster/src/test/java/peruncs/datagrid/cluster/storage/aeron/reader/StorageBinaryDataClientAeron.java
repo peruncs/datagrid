@@ -62,7 +62,8 @@ public final class StorageBinaryDataClientAeron implements Disposable {
                     () -> false,
                     () -> false,
                     () -> {
-                    }
+                    },
+                    AeronReaderLifecycle.defaultIdleStrategy()
             );
         } catch (final RuntimeException e) {
             this.assembler.failure(e);

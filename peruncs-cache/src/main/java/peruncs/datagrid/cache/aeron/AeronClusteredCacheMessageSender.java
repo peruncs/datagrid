@@ -5,7 +5,6 @@ import io.aeron.Publication;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.eclipse.serializer.Serializer;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
@@ -74,7 +73,6 @@ public final class AeronClusteredCacheMessageSender
             final AeronClusteredCacheSenderSequence.SequenceLease sequence,
             final Object sequenceLock,
             final Runnable releaseSequence,
-            final Serializer<byte[]> serializer,
             final long publishTimeoutNanos,
             final int maxPayloadBytes
     ) {
@@ -86,7 +84,6 @@ public final class AeronClusteredCacheMessageSender
         this.sequence = sequence;
         this.sequenceLock = sequenceLock;
         this.releaseSequence = releaseSequence;
-        java.util.Objects.requireNonNull(serializer, "serializer");
         this.publishTimeoutNanos = publishTimeoutNanos;
         this.maxPayloadBytes = maxPayloadBytes;
     }
@@ -96,7 +93,6 @@ public final class AeronClusteredCacheMessageSender
     /// @param resources           shared Aeron resources for this node
     /// @param senderId            sender identity used so the node ignores its own frames
     /// @param sequence            sequence source shared by every sender of this identity
-    /// @param serializer          configured cache serializer contract
     /// @param publishTimeoutNanos maximum time to wait for the publication to accept a frame
     /// @param maxPayloadBytes     maximum accepted payload size
     /// @return timestamp-cache sender
@@ -106,12 +102,11 @@ public final class AeronClusteredCacheMessageSender
             final AeronClusteredCacheSenderSequence.SequenceLease sequence,
             final Object sequenceLock,
             final Runnable releaseSequence,
-            final Serializer<byte[]> serializer,
             final long publishTimeoutNanos,
             final int maxPayloadBytes
     ) {
         return new AeronClusteredCacheMessageSender(resources, senderId, sequence, sequenceLock, releaseSequence,
-                serializer, publishTimeoutNanos, maxPayloadBytes);
+                publishTimeoutNanos, maxPayloadBytes);
     }
 
         /// Returns the publish deadline, saturating at [Long#MAX_VALUE] so an

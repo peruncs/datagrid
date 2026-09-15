@@ -5,7 +5,6 @@ import io.aeron.Subscription;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.BackoffIdleStrategy;
-import org.eclipse.serializer.Serializer;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
@@ -76,21 +75,18 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
     ///
     /// @param resources       shared Aeron resources for this node
     /// @param senderId        sender identity used to ignore this node's frames
-    /// @param serializer      configured cache serializer contract
     /// @param messageAcceptor target for accepted invalidations
     /// @param maxPayloadBytes maximum accepted payload size
     AeronClusteredCacheMessageReceiver(
             final AeronClusteredCacheResources resources,
             final byte[] senderId,
             final Runnable releaseSequence,
-            final Serializer<byte[]> serializer,
             final ClusteredCacheMessageAcceptor messageAcceptor,
             final int maxPayloadBytes
     ) {
         this.resources = Objects.requireNonNull(resources, "resources");
         this.senderId = Objects.requireNonNull(senderId, "senderId").clone();
         this.releaseSequence = Objects.requireNonNull(releaseSequence, "releaseSequence");
-        Objects.requireNonNull(serializer, "serializer");
         this.messageAcceptor = Objects.requireNonNull(messageAcceptor, "messageAcceptor");
         if (senderId.length != Long.BYTES * 2) {
             throw new IllegalArgumentException("sender id must be exactly 16 bytes");

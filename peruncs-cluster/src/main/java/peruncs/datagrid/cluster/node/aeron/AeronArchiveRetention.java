@@ -272,6 +272,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         /// Permanently retires a reader, deleting its quorum entry and state.
     ///
     /// @param readerId permanently retired reader identity
+    @Override
     public void retireReader(final UUID readerId) {
         this.onAgent(() -> this.retireReaderOnAgent(readerId));
     }
@@ -384,6 +385,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     public void close() {
         if (this.closed) return;
         this.closed = true;
+        boolean terminated = true;
         /* Queued commands drain first: shutdown() lets the running and queued
          * retention work finish, so no purge is abandoned mid-decision. */
         this.agent.shutdown();
@@ -391,6 +393,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             if (!this.agent.awaitTermination(30, TimeUnit.SECONDS)) {
                 this.agent.shutdownNow();
                 if (!this.agent.awaitTermination(5, TimeUnit.SECONDS)) {
+                    terminated = false;
                     LOGGER.log(System.Logger.Level.WARNING,
                             "Aeron retention agent did not terminate after shutdown");
                 }
@@ -398,6 +401,15 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             this.agent.shutdownNow();
+            terminated = false;
+        }
+        if (!terminated) {
+            /* A command may still be executing on the agent and reading the key.
+             * Erasing it now would race a live HMAC computation, so retain the
+             * key and let the operator restart the process to reclaim it. */
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Aeron retention agent did not terminate; retaining the HMAC key");
+            return;
         }
         /* Keep the key only for the lifetime of the controller. The quorum owns a
          * defensive copy for validation, so both copies must be erased explicitly. */

@@ -64,6 +64,17 @@ public final class HttpResponseException extends NodeLibraryException {
         return new HttpResponseException(null, cause, 500, List.of());
     }
 
+        /// Creates a service-unavailable response for a not-ready or unhealthy node.
+    ///
+    /// Kubernetes readiness and liveness probes treat 503 as retryable, unlike
+    /// the 500 an internal error would produce.
+    ///
+    /// @param message failure message
+    /// @return service-unavailable response
+    public static HttpResponseException serviceUnavailable(final String message) {
+        return new HttpResponseException(message, null, 503, List.of());
+    }
+
         /// Returns the HTTP status code represented by this exception.
     ///
     /// @return HTTP status code

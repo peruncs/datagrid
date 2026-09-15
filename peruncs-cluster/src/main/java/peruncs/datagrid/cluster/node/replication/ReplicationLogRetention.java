@@ -32,7 +32,17 @@ public interface ReplicationLogRetention extends AutoCloseable {
     }
 
         /// Permanently removes a decommissioned reader from the retention quorum.
-    /// Implementations must persist the retirement before allowing it to affect
+    ///
+    /// Implementations must persist the retirement before it can affect a
+    /// deletion decision. Transports without reader-watermark support reject
+    /// this operation explicitly.
+    ///
+    /// @param readerId permanently retired reader identity
+    default void retireReader(final UUID readerId) {
+        throw new UnsupportedOperationException("reader retirement is unsupported by this transport");
+    }
+
+        /// Releases the retention resources and erases any retained key material.
     @Override
     void close();
 

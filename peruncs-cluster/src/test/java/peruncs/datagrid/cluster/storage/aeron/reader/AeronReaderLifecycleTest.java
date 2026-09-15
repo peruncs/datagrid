@@ -159,7 +159,7 @@ class AeronReaderLifecycleTest {
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> false, () -> polls.incrementAndGet() == 1 ? 1 : 0,
                 () -> polls.get() >= 2, () -> false, () -> {
-                });
+                }, AeronReaderLifecycle.defaultIdleStrategy());
 
         assertFalse(active.get());
         assertEquals(2, polls.get());
@@ -172,7 +172,8 @@ class AeronReaderLifecycleTest {
         final AtomicBoolean timedOut = new AtomicBoolean();
 
         AeronReaderLifecycle.runPollingLoop(
-                active, () -> false, () -> 0, () -> false, () -> true, () -> timedOut.set(true));
+                active, () -> false, () -> 0, () -> false, () -> true, () -> timedOut.set(true),
+                AeronReaderLifecycle.defaultIdleStrategy());
 
         assertFalse(active.get());
         assertTrue(timedOut.get());
@@ -189,7 +190,7 @@ class AeronReaderLifecycleTest {
                 () -> AeronReaderLifecycle.runPollingLoop(
                         active, () -> false, () -> 0, () -> false, () -> true, () -> {
                             throw expected;
-                        }
+                        }, AeronReaderLifecycle.defaultIdleStrategy()
                 )
         );
 
@@ -205,7 +206,7 @@ class AeronReaderLifecycleTest {
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> polls.get() == 0, polls::incrementAndGet,
                 () -> false, () -> false, () -> {
-                });
+                }, AeronReaderLifecycle.defaultIdleStrategy());
         assertEquals(0, polls.get());
     }
 }

@@ -9,10 +9,16 @@ import java.util.Objects;
 ///
 /// It keeps the greatest timestamp seen for each table. A message for an
 /// unopened cache is ignored because opening that cache will establish its own
-/// local state. The EntryProcessor comparison and mutation run under the
-/// cache's per-key lock, so a concurrent local timestamp write cannot be lost.
-/// The listener filter marks this synchronous remote update as silent to prevent
-/// a broadcast loop.
+/// local state. The comparison and mutation run through a JCache
+/// `EntryProcessor` so they execute under the cache's internal table lock; a
+/// concurrent local timestamp write therefore cannot move the value backwards.
+/// The listener filter marks this synchronous remote update as silent so it is
+/// never broadcast back to the cluster.
+///
+/// `Cache.putSilentIfGreater` would express this directly, but the published
+/// `eclipse-store` snapshot this module builds against does not yet expose it,
+/// and it dispatches no listener. Until the dependency provides it, the
+/// processor plus a filter is the only atomic, non-rebroadcasting path.
 public class ClusteredCacheMessageAcceptor {
     private static final System.Logger LOGGER =
             System.getLogger(ClusteredCacheMessageAcceptor.class.getName());

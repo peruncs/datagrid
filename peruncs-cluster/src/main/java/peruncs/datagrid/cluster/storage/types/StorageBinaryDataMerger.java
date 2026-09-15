@@ -13,6 +13,7 @@ import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.*;
@@ -352,16 +353,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private void applyData() {
             this.materialization.write(() ->
             {
-                final XEnum<ByteBuffer> data = X.Enum();
+                final ArrayList<ByteBuffer> data = new ArrayList<>();
                 final AtomicBoolean released = new AtomicBoolean();
-                final Runnable release = () ->
-                {
-                    /* Empty binaries are duplicates of one shared static buffer;
-                     * only the guarded release knows to skip them. */
-                    if (released.compareAndSet(false, true)) {
-                        StorageBinaryDataImporter.release(data.toArray(ByteBuffer.class));
-                    }
-                };
 
                 this.queueLock.lock();
                 try {
@@ -374,6 +367,17 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 } finally {
                     this.queueLock.unlock();
                 }
+                /* One exact-size array, shared by the release and the materializer
+                 * without the reflective toArray(Class) overload. */
+                final ByteBuffer[] buffers = data.toArray(ByteBuffer[]::new);
+                final Runnable release = () ->
+                {
+                    /* Empty binaries are duplicates of one shared static buffer;
+                     * only the guarded release knows to skip them. */
+                    if (released.compareAndSet(false, true)) {
+                        StorageBinaryDataImporter.release(buffers);
+                    }
+                };
 
                 try {
                     ObjectGraphUpdateHandler.runStructured(
@@ -381,12 +385,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                             () ->
                             {
                                 try {
-                                    StorageBinaryDataMaterializer.materialize(this.storage, data.toArray(ByteBuffer.class));
+                                    StorageBinaryDataMaterializer.materialize(this.storage, buffers);
                                 } finally {
                                     release.run();
                                 }
                             },
-                            java.time.Duration.ofSeconds(APPLY_TIMEOUT_SECONDS));
+                            Duration.ofSeconds(APPLY_TIMEOUT_SECONDS));
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                     /* The structured scope closes only after its child terminates;

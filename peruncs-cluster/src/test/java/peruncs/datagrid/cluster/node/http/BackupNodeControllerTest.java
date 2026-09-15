@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.backup.BackupBusyException;
 import peruncs.datagrid.cluster.node.backup.BackupNodeManager;
 import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
-import peruncs.datagrid.cluster.node.http.StorageNodeRestRouteConfigurations.PostBackup;
+
 
 import java.lang.reflect.Proxy;
 
@@ -30,7 +30,7 @@ class BackupNodeControllerTest {
         final ClusterRestRequestController controller = ClusterRestRequestController.BackupNode(busy);
 
         final HttpResponseException failure = assertThrows(HttpResponseException.class,
-                () -> controller.postBackup(new PostBackup.Body(Boolean.FALSE)));
+                () -> controller.postBackup(new PostBackupRequest(Boolean.FALSE)));
         assertEquals(409, failure.statusCode());
     }
 }

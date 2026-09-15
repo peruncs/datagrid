@@ -22,6 +22,6 @@ class Crc32cTest {
         /// Null input is rejected consistently instead of failing while reading its length.
     @Test
     void rejectsNullInput() {
-        assertThrows(IllegalArgumentException.class, () -> Crc32c.compute((byte[]) null));
+        assertThrows(NullPointerException.class, () -> Crc32c.compute((byte[]) null));
     }
 }

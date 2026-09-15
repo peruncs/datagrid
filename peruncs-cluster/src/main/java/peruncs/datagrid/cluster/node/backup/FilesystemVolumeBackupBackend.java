@@ -29,7 +29,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
     /// @param backupVolumePath backup volume path
     /// @return filesystem backup backend
     static FilesystemVolumeBackupBackend New(final Path backupVolumePath) {
-        return New(backupVolumePath, BackupArchiveLimits.Default());
+        return New(backupVolumePath, BackupArchiveLimits.defaults());
     }
 
     /// Creates a filesystem backup backend with explicit restore limits.

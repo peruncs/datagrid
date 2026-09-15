@@ -7,7 +7,6 @@ import peruncs.datagrid.cluster.node.StorageNodeManager;
 import peruncs.datagrid.cluster.node.backup.BackupBusyException;
 import peruncs.datagrid.cluster.node.backup.BackupNodeManager;
 import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
-import peruncs.datagrid.cluster.node.http.StorageNodeRestRouteConfigurations.PostBackup;
 
 import java.util.function.Supplier;
 
@@ -74,7 +73,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         /// Returns current storage size.
     ///
-    /// @return storage size text
+    /// @return storage size in bytes
     /// @throws HttpResponseException if the request fails
     long getStorageBytes() throws HttpResponseException;
 
@@ -88,7 +87,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
     ///
     /// @param body backup request body
     /// @throws HttpResponseException if the request fails
-    void postBackup(PostBackup.Body body) throws HttpResponseException;
+    void postBackup(PostBackupRequest body) throws HttpResponseException;
 
         /// Reports whether a backup is running.
     ///
@@ -156,7 +155,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
             this.handleRequest(() ->
             {
                 if (!this.nodeManager.isHealthy()) {
-                    throw HttpResponseException.internalServerError();
+                    throw HttpResponseException.serviceUnavailable("node is not healthy");
                 }
             });
         }
@@ -166,7 +165,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
             this.handleRequest(() ->
             {
                 if (!this.nodeManager.isReady()) {
-                    throw HttpResponseException.internalServerError();
+                    throw HttpResponseException.serviceUnavailable("node is not ready");
                 }
             });
         }
@@ -215,7 +214,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         }
 
         @Override
-        public void postBackup(PostBackup.Body body) throws HttpResponseException {
+        public void postBackup(PostBackupRequest body) throws HttpResponseException {
             throw HttpResponseException.badRequest();
         }
 
@@ -234,17 +233,11 @@ public interface ClusterRestRequestController extends AutoCloseable {
         /// @param request request action
         /// @throws HttpResponseException if the request fails
         protected void handleRequest(final Runnable request) throws HttpResponseException {
-            try {
+            this.handleRequest(() ->
+            {
                 request.run();
-            } catch (final Exception e) {
-                // the exception has already been handled
-                if (e instanceof HttpResponseException) {
-                    throw e;
-                }
-
-                LOGGER.log(System.Logger.Level.ERROR, "Failed to handle request", e);
-                throw HttpResponseException.internalServerError();
-            }
+                return null;
+            });
         }
 
                 /// Runs a value request and maps failures to HTTP exceptions.
@@ -258,12 +251,12 @@ public interface ClusterRestRequestController extends AutoCloseable {
                 return request.get();
             } catch (final Exception e) {
                 // the exception has already been handled
-                if (e instanceof HttpResponseException) {
-                    throw e;
+                if (e instanceof HttpResponseException handled) {
+                    throw handled;
                 }
 
                 LOGGER.log(System.Logger.Level.ERROR, "Failed to handle request", e);
-                throw HttpResponseException.internalServerError();
+                throw HttpResponseException.internalServerError(e);
             }
         }
     }
@@ -329,7 +322,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         }
 
         @Override
-        public void postBackup(PostBackup.Body body) throws HttpResponseException {
+        public void postBackup(PostBackupRequest body) throws HttpResponseException {
             LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridBackup request");
             if (body == null || body.useManualSlot() == null) {
                 throw HttpResponseException.badRequest("backup request must specify useManualSlot");
@@ -421,7 +414,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         }
 
         @Override
-        public void postBackup(PostBackup.Body body) throws HttpResponseException {
+        public void postBackup(PostBackupRequest body) throws HttpResponseException {
             throw HttpResponseException.badRequest();
         }
 

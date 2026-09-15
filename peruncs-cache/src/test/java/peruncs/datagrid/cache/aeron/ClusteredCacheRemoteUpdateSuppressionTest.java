@@ -1,7 +1,6 @@
 package peruncs.datagrid.cache.aeron;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cache.test.ClusteredCacheTestSupport;
 import peruncs.datagrid.cache.types.ClusteredCacheEntryListenerConfiguration;
 import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
@@ -13,13 +12,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// A remote timestamp applied through a real cache must never be rebroadcast.
 ///
-/// Listener suppression only sees updates applied on the thread running
-/// `cache.invoke`. If upstream ever dispatches listeners on another thread,
-/// the suppression binding is lost and every received invalidation is
-/// re-broadcast into an infinite cluster loop. This test exercises the real
-/// cache, the real listener configuration, and the real (unconnected) sender:
-/// any publish attempt fails on the sender's missing resources, so the test
-/// fails loudly on that day instead of looping silently in production.
+/// Remote updates are applied with `Cache.putSilentIfGreater`, which performs
+/// the max comparison under the cache's internal table lock and dispatches no
+/// cache listener at all. This test exercises the real cache, the real listener
+/// configuration, and the real (unconnected) sender: any publish attempt fails
+/// on the sender's missing resources, so the test fails loudly if a remote
+/// update ever reaches the sender.
 class ClusteredCacheRemoteUpdateSuppressionTest {
     @Test
     void remoteUpdateThroughRealCacheIsNotRebroadcast() {
@@ -35,7 +33,6 @@ class ClusteredCacheRemoteUpdateSuppressionTest {
                     new Object(),
                     () -> {
                     },
-                    ClusteredCacheTestSupport.serializer(),
                     TimeUnit.MINUTES.toNanos(1L),
                     1024);
             cache.registerCacheEntryListener(new ClusteredCacheEntryListenerConfiguration(sender)

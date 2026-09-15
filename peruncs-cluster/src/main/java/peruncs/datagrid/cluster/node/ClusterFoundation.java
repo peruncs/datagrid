@@ -723,7 +723,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         }
 
 
-        private StoredReplicationCursorManager getStoredReplicationCursorManager() {
+        private synchronized StoredReplicationCursorManager getStoredReplicationCursorManager() {
             if (this.storedReplicationCursorManager == null) {
                 this.storedReplicationCursorManager = this.dispatch(this.ensureStoredReplicationCursorManager());
             }

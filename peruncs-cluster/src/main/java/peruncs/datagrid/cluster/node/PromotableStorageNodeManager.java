@@ -65,7 +65,8 @@ public interface PromotableStorageNodeManager extends StorageNodeManager {
 
         private volatile boolean isDistributor;
         private volatile boolean isSwitchingToDistributor;
-        private volatile boolean readerResourcesReleased;
+        private volatile boolean healthReleased;
+        private volatile boolean clientReleased;
 
         private Default(
                 final StorageBinaryDataDistributor dataDistributor,
@@ -145,16 +146,22 @@ public interface PromotableStorageNodeManager extends StorageNodeManager {
 
             // once a node has been switched to distribution it will never become a reader node anymore
             RuntimeException failure = null;
-            try {
-                this.healthCheck.close();
-            } catch (final RuntimeException closeFailure) {
-                failure = closeFailure;
+            if (!this.healthReleased) {
+                try {
+                    this.healthCheck.close();
+                    this.healthReleased = true;
+                } catch (final RuntimeException closeFailure) {
+                    failure = closeFailure;
+                }
             }
-            try {
-                this.dataClient.dispose();
-            } catch (final RuntimeException closeFailure) {
-                if (failure == null) failure = closeFailure;
-                else failure.addSuppressed(closeFailure);
+            if (!this.clientReleased) {
+                try {
+                    this.dataClient.dispose();
+                    this.clientReleased = true;
+                } catch (final RuntimeException closeFailure) {
+                    if (failure == null) failure = closeFailure;
+                    else failure.addSuppressed(closeFailure);
+                }
             }
             if (failure != null) {
                 throw new IllegalStateException("failed to close reader resources during promotion", failure);
@@ -163,15 +170,14 @@ public interface PromotableStorageNodeManager extends StorageNodeManager {
 
             this.isDistributor = true;
             this.isSwitchingToDistributor = false;
-            /* The health check and data client are released now; a later close()
-             * must not dispose them again. */
-            this.readerResourcesReleased = true;
             return true;
         }
 
         @Override
         protected boolean readerResourcesReleased() {
-            return this.readerResourcesReleased;
+            /* A later close() must not dispose a resource that promotion already
+             * released, so report release only for those actually closed. */
+            return this.healthReleased && this.clientReleased;
         }
     }
 }

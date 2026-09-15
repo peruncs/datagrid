@@ -1,7 +1,5 @@
 package peruncs.datagrid.cache.types;
 
-import org.eclipse.serializer.Serializer;
-import org.eclipse.serializer.SerializerFoundation;
 import org.eclipse.store.cache.hibernate.types.CacheRegionFactory;
 import org.eclipse.store.cache.hibernate.types.ConfigurationPropertyNames;
 import org.eclipse.store.cache.hibernate.types.StorageAccess;
@@ -16,16 +14,14 @@ import peruncs.datagrid.cache.aeron.AeronClusteredCacheConfiguration;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageCommunicationProvider;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageReceiver;
 
-import java.util.Collection;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /// This region factory adds clustered invalidation to the Store cache factory.
 ///
-/// During preparation it creates one serializer, Aeron provider, receiver,
-/// and listener configuration for the session factory. During release it closes
-/// those resources before the base factory releases the local caches.
+/// During preparation it creates one Aeron provider, receiver, and listener
+/// configuration for the session factory. During release it closes those
+/// resources before the base factory releases the local caches.
 ///
 /// Hibernate hands settings to this factory as a raw string map. This factory
 /// is the only place that reads that dialect: it translates the keys below
@@ -55,8 +51,6 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     private static final String KEY_DRIVER_TIMEOUT_MILLIS = AERON_PREFIX + "driver-timeout-millis";
         /// Key bounding the accepted serialized payload size.
     private static final String KEY_MAX_PAYLOAD_BYTES = AERON_PREFIX + "max-payload-bytes";
-        /// Key selecting the serializer type provider instance.
-    private static final String KEY_SERIALIZATION_TYPES_PROVIDER = CLUSTERED_PREFIX + "serialization-types-provider";
 
         /// Listener configuration created during session-factory preparation.
     private volatile ClusteredCacheEntryListenerConfiguration cacheEntryListenerConfiguration;
@@ -164,24 +158,21 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     /// @param properties Hibernate cache properties
     @Override
     protected void prepareForUse(final SessionFactoryOptions settings, final Map properties) {
-        super.prepareForUse(settings, properties);
         try {
-            final var typesProvider = this.resolveSerializationTypesProvider(settings, properties);
-            final var serializer = Serializer.Bytes(SerializerFoundation.New()
-                    .registerEntityTypes(typesProvider.provideTypes()));
+            super.prepareForUse(settings, properties);
 
             final var comProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final var messageAcceptor = new ClusteredCacheMessageAcceptor(this.cacheManager);
             final var configuration = clusteredCacheConfiguration(properties);
 
-            this.cacheMessageReceiver = comProvider.provideMessageReceiver(configuration, serializer, messageAcceptor);
+            this.cacheMessageReceiver = comProvider.provideMessageReceiver(configuration, messageAcceptor);
             this.cacheEntryListenerConfiguration = new ClusteredCacheEntryListenerConfiguration(
-                    comProvider.provideUpdateTimestampsCacheMessageSender(configuration, serializer));
+                    comProvider.provideUpdateTimestampsCacheMessageSender(configuration));
             this.cacheMessageReceiver.start();
         } catch (final RuntimeException | Error failure) {
-            /* The CacheManager was acquired by super.prepareForUse above, so it
-             * must be released on every failure path, not only when no
-             * clustered resource was created yet. */
+            /* super.prepareForUse assigns the CacheManager before it can throw
+             * (bad configuration), so it must be released on every failure path,
+             * not only when a clustered resource was already created. */
             try {
                 this.disposeClusteredResources();
             } catch (final Throwable cleanupFailure) {
@@ -240,39 +231,6 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         if (!receiver.isRunning()) {
             throw new CacheException("Clustered cache invalidation receiver is not running");
         }
-    }
-
-        /// Resolves the serializer type provider from a Hibernate setting.
-    ///
-    /// The provider must be supplied as an already-created object. Reflective
-    /// class loading is deliberately unsupported because this configuration is
-    /// reached from Hibernate metadata and can otherwise instantiate arbitrary
-    /// application classes.
-    ///
-    /// @param settings   session factory settings (reserved for superclass API compatibility)
-    /// @param properties Hibernate cache properties
-    /// @return resolved serializer type provider
-    /// @throws CacheException when the provider is not an instance or registers unsupported types
-    protected SerializationTypesProvider resolveSerializationTypesProvider(
-            final SessionFactoryOptions settings,
-            @SuppressWarnings("rawtypes") // superclass uses raw type
-            final Map properties
-    ) {
-        final Object setting = properties.get(KEY_SERIALIZATION_TYPES_PROVIDER);
-        if (setting == null) {
-            return new SerializationTypesProvider.Default();
-        }
-        if (!(setting instanceof final SerializationTypesProvider provider)) {
-            throw new CacheException(
-                    "Serialization types provider must be supplied as an instance of %s".formatted(
-                            SerializationTypesProvider.class.getName()));
-        }
-        final Collection<Class<?>> types = provider.provideTypes();
-        if (types == null || types.size() != 1 || !types.equals(List.of(TimestampsRegionUpdateMessage.class))) {
-            throw new CacheException(
-                    "Clustered cache serialization may register only TimestampsRegionUpdateMessage");
-        }
-        return provider;
     }
 
     @Override

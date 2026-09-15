@@ -5,15 +5,13 @@ import org.hibernate.cache.CacheException;
 import org.hibernate.engine.spi.SharedSessionContractImplementor;
 import org.junit.jupiter.api.Test;
 
-import java.util.Collection;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Verifies the region factory health gate and serializer provider resolution.
+/// Verifies the region factory health gate and configuration translation.
 class ClusteredCacheRegionFactoryTest {
     @Test
     void failClosedStorageAccessRefusesOperationsAfterReceiverFailure() {
@@ -69,36 +67,6 @@ class ClusteredCacheRegionFactoryTest {
     }
 
     @Test
-    void resolveSerializationTypesProviderDefaultsWhenUnset() {
-        final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
-
-        final SerializationTypesProvider provider = factory.resolveSerializationTypesProvider(null, Map.of());
-
-        assertInstanceOf(SerializationTypesProvider.Default.class, provider);
-    }
-
-    @Test
-    void resolveSerializationTypesProviderAcceptsConfiguredInstance() {
-        final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
-
-        final SerializationTypesProvider provider = factory.resolveSerializationTypesProvider(
-                null, Map.of("hibernate.cache.eclipsestore.clustered.serialization-types-provider",
-                        new PublicTypesProvider()));
-
-        assertInstanceOf(PublicTypesProvider.class, provider);
-    }
-
-    @Test
-    void resolveSerializationTypesProviderRejectsWrongClass() {
-        final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
-
-        assertThrows(CacheException.class,
-                () -> factory.resolveSerializationTypesProvider(null,
-                        Map.of("hibernate.cache.eclipsestore.clustered.serialization-types-provider", String.class)),
-                "reflective or wrongly typed providers must fail at configuration time");
-    }
-
-    @Test
     void clusteredCacheConfigurationTranslatesHibernateKeys() {
         final Map<String, Object> properties = new HashMap<>();
         properties.put("hibernate.cache.eclipsestore.clustered.aeron.channel", "aeron:ipc");
@@ -138,16 +106,5 @@ class ClusteredCacheRegionFactoryTest {
         badStream.put("hibernate.cache.eclipsestore.clustered.aeron.stream-id", "-1");
         assertThrows(IllegalArgumentException.class,
                 () -> ClusteredCacheRegionFactory.clusteredCacheConfiguration(badStream));
-    }
-
-        /// Types provider with a public no-argument constructor.
-    public static final class PublicTypesProvider implements SerializationTypesProvider {
-        public PublicTypesProvider() {
-        }
-
-        @Override
-        public Collection<Class<?>> provideTypes() {
-            return List.of(TimestampsRegionUpdateMessage.class);
-        }
     }
 }

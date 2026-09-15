@@ -44,12 +44,11 @@
 /// @since 1.0
 module peruncs.datagrid.cache
 {
-    requires org.eclipse.serializer;
     requires org.eclipse.serializer.base;
-    requires org.eclipse.store.cache;
-    requires org.eclipse.store.cache.hibernate;
-    requires org.hibernate.orm.core;
-    requires cache.api;
+    requires transitive org.eclipse.store.cache;
+    requires transitive org.eclipse.store.cache.hibernate;
+    requires transitive org.hibernate.orm.core;
+    requires transitive cache.api;
     requires io.aeron.client;
     requires io.aeron.driver;
     requires org.agrona;

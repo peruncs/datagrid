@@ -47,6 +47,9 @@ public record AeronRetryPolicy(
         if (jitterBaseNanos <= 0L || jitterCapNanos <= 0L) {
             throw new IllegalArgumentException("jitter bounds must be positive");
         }
+        if (jitterBaseNanos > jitterCapNanos) {
+            throw new IllegalArgumentException("jitter delays must grow with base <= cap");
+        }
         if (archiveProbeDelayNanos <= 0L || catalogProbeInitialDelayNanos <= 0L || catalogProbeMaxDelayNanos <= 0L) {
             throw new IllegalArgumentException("probe delays must be positive");
         }

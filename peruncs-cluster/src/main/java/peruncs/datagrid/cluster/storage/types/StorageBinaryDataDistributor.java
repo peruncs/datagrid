@@ -116,12 +116,11 @@ public interface StorageBinaryDataDistributor extends Disposable {
     /// restart snapshot and later incremental exports never need separate slots.
     final class Caching implements StorageBinaryDataDistributor {
         private final StorageBinaryDataDistributor delegate;
-        /* The single staged dictionary: an incremental export or a restart snapshot. */
-        private final AtomicReference<String> pendingDictionary = new AtomicReference<>();
-        /* A queued restart snapshot is authoritative: it already contains every
-         * type registered so far, so incremental exports arriving afterwards are
-         * stale startup-disabled accumulations and must not overwrite it. */
-        private volatile boolean snapshotStaged;
+        /* The single staged dictionary plus whether it is an authoritative restart
+         * snapshot. Both are held in one immutable value so the staged string and
+         * its provenance can never be observed out of sync. A `null` reference
+         * means nothing is staged. */
+        private final AtomicReference<Pending> pending = new AtomicReference<>();
 
         private Caching(final StorageBinaryDataDistributor delegate) {
             this.delegate = delegate;
@@ -129,10 +128,9 @@ public interface StorageBinaryDataDistributor extends Disposable {
 
         @Override
         public void distributeData(final Binary data) {
-            final String dictionary = this.pendingDictionary.getAndSet(null);
-            this.snapshotStaged = false;
-            if (dictionary != null) {
-                this.delegate.distributeTypeDictionary(dictionary);
+            final Pending staged = this.pending.getAndSet(null);
+            if (staged != null) {
+                this.delegate.distributeTypeDictionary(staged.dictionary());
             }
             this.delegate.distributeData(data);
         }
@@ -140,27 +138,27 @@ public interface StorageBinaryDataDistributor extends Disposable {
         @Override
         public void distributeTypeDictionary(final String typeDictionaryData) {
             if (typeDictionaryData == null) {
-                this.pendingDictionary.set(null);
-                this.snapshotStaged = false;
-            } else if (!this.snapshotStaged) {
-                this.pendingDictionary.set(typeDictionaryData);
+                this.pending.set(null);
+                return;
             }
+            /* Do not let a later incremental export overwrite an authoritative
+             * restart snapshot that is still waiting for the next transaction. */
+            this.pending.updateAndGet(current ->
+                    current != null && current.snapshot() ? current : new Pending(typeDictionaryData, false));
         }
 
         @Override
         public void queueTypeDictionaryForNextTransaction(final String typeDictionaryData) {
             /* A node may have accumulated an incremental dictionary while startup
              * distribution was disabled. The restart snapshot is authoritative and
-             * replaces that stale value; the flag keeps later stale incrementals
-             * from overwriting the snapshot before the next transaction consumes it. */
-            this.pendingDictionary.set(typeDictionaryData);
-            this.snapshotStaged = typeDictionaryData != null;
+             * replaces that stale value. */
+            this.pending.set(typeDictionaryData == null ? null : new Pending(typeDictionaryData, true));
         }
 
         @Override
         public String consumeTypeDictionary() {
-            this.snapshotStaged = false;
-            return this.pendingDictionary.getAndSet(null);
+            final Pending staged = this.pending.getAndSet(null);
+            return staged == null ? null : staged.dictionary();
         }
 
         @Override
@@ -190,9 +188,12 @@ public interface StorageBinaryDataDistributor extends Disposable {
 
         @Override
         public void dispose() {
-            this.pendingDictionary.set(null);
-            this.snapshotStaged = false;
+            this.pending.set(null);
             this.delegate.dispose();
+        }
+
+        /// One staged dictionary and whether it is an authoritative snapshot.
+        private record Pending(String dictionary, boolean snapshot) {
         }
     }
 }

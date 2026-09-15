@@ -2,9 +2,9 @@ package peruncs.datagrid.cache.aeron;
 
 import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
-import org.eclipse.serializer.Serializer;
 import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -23,9 +23,9 @@ import java.util.UUID;
 /// cache semantics do not depend on transport timing.
 ///
 /// One provider owns at most one sender and one receiver. Repeated requests
-/// return the same handle; a request with a different serializer, acceptor, or
-/// transport limit is rejected instead of creating a second handle that could
-/// close the shared publication or subscription underneath the first.
+/// return the same handle; a request with a different acceptor or transport
+/// limit is rejected instead of creating a second handle that could close the
+/// shared publication or subscription underneath the first.
 ///
 /// Topology: the default channel is `aeron:ipc`, which is single-host.
 /// Multi-host deployments must configure a UDP channel with
@@ -62,11 +62,9 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     private Object sequenceLock;
     private String configuredNodeId;
     private AeronClusteredCacheMessageSender sender;
-    private Serializer<byte[]> senderSerializer;
     private long senderOfferTimeoutNanos;
     private int senderMaxPayloadBytes;
     private AeronClusteredCacheMessageReceiver receiver;
-    private Serializer<byte[]> receiverSerializer;
     private ClusteredCacheMessageAcceptor receiverAcceptor;
     private int receiverMaxPayloadBytes;
     private boolean senderSequenceReleased;
@@ -139,7 +137,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         if (host == null) {
             return false;
         }
-        final String normalized = host.trim().toLowerCase(java.util.Locale.ROOT);
+        final String normalized = host.trim().toLowerCase(Locale.ROOT);
         return normalized.equals("*") || normalized.equals("0.0.0.0") || normalized.equals("::") ||
                normalized.equals("0:0:0:0:0:0:0:0");
     }
@@ -148,7 +146,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         if (host == null) {
             return false;
         }
-        final String normalized = host.trim().toLowerCase(java.util.Locale.ROOT);
+        final String normalized = host.trim().toLowerCase(Locale.ROOT);
         return normalized.equals("localhost") || normalized.equals("127.0.0.1") ||
                normalized.equals("::1") || normalized.equals("0:0:0:0:0:0:0:1");
     }
@@ -168,31 +166,23 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// releases the lease and closes still-unbound resources again.
     ///
     /// @param configuration injected Aeron configuration
-    /// @param serializer serializer shared by the sender and receiver
     /// @return sender for timestamp cache events
     public synchronized AeronClusteredCacheMessageSender provideUpdateTimestampsCacheMessageSender(
-            final AeronClusteredCacheConfiguration configuration,
-            final Serializer<byte[]> serializer
+            final AeronClusteredCacheConfiguration configuration
     ) {
         Objects.requireNonNull(configuration, "configuration");
-        Objects.requireNonNull(serializer, "serializer");
         this.ensureProviderOpen();
         final byte[] senderId = this.ensureSenderId(configuration);
         final long offerTimeoutNanos = configuration.offerTimeoutNanos();
         final int maxPayloadBytes = configuration.maxPayloadBytes();
-        if (this.receiverSerializer != null && this.receiverSerializer != serializer) {
-            throw new IllegalArgumentException(
-                    "The Aeron clustered-cache sender and receiver must use the same serializer");
-        }
         if (this.sender != null) {
-            if (this.sender instanceof AeronClusteredCacheMessageSender existingSender && existingSender.isDisposed()) {
+            if (this.sender.isDisposed()) {
                 throw new IllegalStateException(
                         "The Aeron clustered-cache sender is single-use and has been disposed; create a new provider");
             }
-            if (this.senderSerializer != serializer ||
-                this.senderOfferTimeoutNanos != offerTimeoutNanos || this.senderMaxPayloadBytes != maxPayloadBytes) {
+            if (this.senderOfferTimeoutNanos != offerTimeoutNanos || this.senderMaxPayloadBytes != maxPayloadBytes) {
                 throw new IllegalArgumentException(
-                        "The Aeron clustered-cache provider already owns a sender with different serializer or limits");
+                        "The Aeron clustered-cache provider already owns a sender with different limits");
             }
             return this.sender;
         }
@@ -216,7 +206,6 @@ public class AeronClusteredCacheMessageCommunicationProvider {
                     sequence,
                     this.sequenceLock,
                     this::senderClosed,
-                    serializer,
                     offerTimeoutNanos,
                     maxPayloadBytes);
         } catch (final RuntimeException | Error failure) {
@@ -227,7 +216,6 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             this.closeUnboundResources(failure);
             throw failure;
         }
-        this.senderSerializer = serializer;
         this.senderOfferTimeoutNanos = offerTimeoutNanos;
         this.senderMaxPayloadBytes = maxPayloadBytes;
         this.sender = created;
@@ -249,16 +237,13 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// live runtime behind it.
     ///
     /// @param configuration   injected Aeron configuration
-    /// @param serializer      serializer shared by the sender and receiver
     /// @param messageAcceptor target for received messages
     /// @return receiver for remote cache messages
     public synchronized AeronClusteredCacheMessageReceiver provideMessageReceiver(
             final AeronClusteredCacheConfiguration configuration,
-            final Serializer<byte[]> serializer,
             final ClusteredCacheMessageAcceptor messageAcceptor
     ) {
         Objects.requireNonNull(configuration, "configuration");
-        Objects.requireNonNull(serializer, "serializer");
         Objects.requireNonNull(messageAcceptor, "messageAcceptor");
         this.ensureProviderOpen();
         /* Validate the node id before creating resources so a conflicting second
@@ -266,17 +251,12 @@ public class AeronClusteredCacheMessageCommunicationProvider {
          * resources behind for a retry. */
         final byte[] senderId = this.ensureSenderId(configuration);
         final int maxPayloadBytes = configuration.maxPayloadBytes();
-        if (this.senderSerializer != null && this.senderSerializer != serializer) {
-            throw new IllegalArgumentException(
-                    "The Aeron clustered-cache sender and receiver must use the same serializer");
-        }
         if (this.receiver != null) {
-            if (this.receiver instanceof AeronClusteredCacheMessageReceiver existingReceiver && existingReceiver.isDisposed()) {
+            if (this.receiver.isDisposed()) {
                 throw new IllegalStateException(
                         "The Aeron clustered-cache receiver is single-use and has been disposed; create a new provider");
             }
-            if (this.receiverSerializer != serializer || this.receiverAcceptor != messageAcceptor ||
-                this.receiverMaxPayloadBytes != maxPayloadBytes) {
+            if (this.receiverAcceptor != messageAcceptor || this.receiverMaxPayloadBytes != maxPayloadBytes) {
                 throw new IllegalArgumentException(
                         "The Aeron clustered-cache provider already owns a receiver with different configuration");
             }
@@ -289,14 +269,12 @@ public class AeronClusteredCacheMessageCommunicationProvider {
                     resources,
                     senderId,
                     this::receiverClosed,
-                    serializer,
                     messageAcceptor,
                     maxPayloadBytes);
         } catch (final RuntimeException | Error failure) {
             this.closeUnboundResources(failure);
             throw failure;
         }
-        this.receiverSerializer = serializer;
         this.receiverAcceptor = messageAcceptor;
         this.receiverMaxPayloadBytes = maxPayloadBytes;
         this.receiver = created;
@@ -380,7 +358,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         try {
             this.resources.close();
             this.resources = null;
-        } catch (final RuntimeException cleanupFailure) {
+        } catch (final Throwable cleanupFailure) {
             if (primary != cleanupFailure) primary.addSuppressed(cleanupFailure);
         }
     }

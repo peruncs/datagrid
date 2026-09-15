@@ -106,7 +106,7 @@ class FilesystemVolumeBackupBackendTest {
         assertTrue(Files.isRegularFile(archive));
         assertEquals(List.of(metadata), backend.listBackups());
         assertEquals(CURSOR, ReplicationCursorStore.decode(
-                BackupArchive.readManifest(archive, BackupArchiveLimits.Default().maxExtractedBytes())));
+                BackupArchive.readManifest(archive, BackupArchiveLimits.defaults().maxExtractedBytes())));
     }
 
     @Test

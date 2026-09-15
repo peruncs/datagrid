@@ -11,7 +11,6 @@ import javax.cache.event.EventType;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.publish;
-import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.serializer;
 
 /// Verifies the listener configuration owns its sender and disposes it once.
 class ClusteredCacheEntryListenerConfigurationTest {
@@ -24,7 +23,7 @@ class ClusteredCacheEntryListenerConfigurationTest {
     void disposeIsIdempotentAndFailsClosed() {
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(configuration(), serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(configuration());
         final ClusteredCacheEntryListenerConfiguration configuration =
                 new ClusteredCacheEntryListenerConfiguration(sender);
 
@@ -40,7 +39,7 @@ class ClusteredCacheEntryListenerConfigurationTest {
     void listenerFactoryReturnsTheSender() {
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(configuration(), serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(configuration());
         final ClusteredCacheEntryListenerConfiguration configuration =
                 new ClusteredCacheEntryListenerConfiguration(sender);
         try {

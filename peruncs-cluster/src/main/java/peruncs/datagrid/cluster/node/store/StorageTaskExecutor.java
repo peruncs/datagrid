@@ -104,22 +104,30 @@ public interface StorageTaskExecutor extends AutoCloseable {
         public synchronized void close() {
             if (this.closed) return;
             this.closing = true;
+            RuntimeException failure = null;
             try {
                 final Future<?> task = this.checksTask.get();
                 if (task != null) task.cancel(true);
                 this.executor.shutdownNow();
                 try {
                     if (!this.executor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                        throw new IllegalStateException(
+                        failure = new IllegalStateException(
                                 "Storage checks did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
                     }
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    throw new IllegalStateException("Interrupted while stopping storage checks", interrupted);
+                    failure = new IllegalStateException("Interrupted while stopping storage checks", interrupted);
                 }
-                this.closed = true;
             } finally {
+                /* The executor is shut down and must never accept another task, so
+                 * mark the terminal state even when the bounded wait timed out;
+                 * otherwise a later runChecks would submit to a dead executor and
+                 * leak the raw RejectedExecutionException. */
+                this.closed = true;
                 this.closing = false;
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
 

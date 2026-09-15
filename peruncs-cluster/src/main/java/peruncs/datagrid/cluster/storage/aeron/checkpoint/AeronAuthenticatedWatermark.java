@@ -532,10 +532,10 @@ public record AeronAuthenticatedWatermark(
                     this.erased = true;
                 }
             });
-            /* A Mac bound to this thread was dummy-scrubbed after its last use,
-             * but re-scrub it anyway: clear runs outside authentication, so this
-             * is the last chance to evict any schedule the per-use scrub missed. */
-            if (MAC.isBound()) scrub(MAC.get());
+            /* The thread-bound Mac is dummy-scrubbed in a finally after every use,
+             * so it never retains this key schedule between calls. There is no
+             * JDK API to wipe a Mac's in-flight schedule, so no additional scrub
+             * is possible or needed here. */
         }
 
                 /// Erases the retained HMAC key.

@@ -5,6 +5,7 @@ import org.agrona.concurrent.IdleStrategy;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
@@ -17,22 +18,26 @@ final class AeronReaderLifecycle {
         /// Runs the subscription duty cycle used by both readers. Keeping idle and
     /// stop-at-tail handling here prevents the test reader and the production
     /// reader from acquiring different lifecycle semantics.
+    ///
+    /// @param active        reader running flag
+    /// @param stopPolling   terminal condition that ends the loop
+    /// @param poller        returns the number of fragments read in one poll
+    /// @param stopWhenIdle  whether an idle poll should stop at the live boundary
+    /// @param timedOut      whether the stop budget has expired
+    /// @param onTimeout     action run once on timeout
+    /// @param idleStrategy  Agrona idle strategy built from the configured retry policy
     static void runPollingLoop(
             final AtomicBoolean active,
             final BooleanSupplier stopPolling,
             final IntSupplier poller,
             final BooleanSupplier stopWhenIdle,
             final BooleanSupplier timedOut,
-            final Runnable onTimeout
+            final Runnable onTimeout,
+            final IdleStrategy idleStrategy
     ) {
-        final IdleStrategy idleStrategy = new BackoffIdleStrategy();
         while (active.get() && !stopPolling.getAsBoolean()) {
             if (timedOut.getAsBoolean()) {
-                try {
-                    onTimeout.run();
-                } finally {
-                    active.set(false);
-                }
+                runTimeout(onTimeout, active);
                 return;
             }
             final int work = poller.getAsInt();
@@ -45,20 +50,25 @@ final class AeronReaderLifecycle {
                 return;
             }
             if (timedOut.getAsBoolean()) {
-                try {
-                    onTimeout.run();
-                } finally {
-                    active.set(false);
-                }
+                runTimeout(onTimeout, active);
                 return;
             }
             idleStrategy.idle(work);
         }
     }
 
-        /// Stops polling, waits up to five seconds for a different polling thread, and
-    /// closes the subscription only after that thread has exited. On timeout the
-    /// subscription remains open so the caller can retry without a use-after-close.
+    private static void runTimeout(final Runnable onTimeout, final AtomicBoolean active) {
+        try {
+            onTimeout.run();
+        } finally {
+            active.set(false);
+        }
+    }
+
+        /// Stops polling with the default five-second budget.
+    ///
+    /// Convenience for tests and non-configurable callers; production code passes
+    /// the reader's configured stop timeout to the explicit-budget overload.
     ///
     /// @param active            reader running flag
     /// @param thread            reader polling thread, or `null`
@@ -70,12 +80,19 @@ final class AeronReaderLifecycle {
             final CountDownLatch stopped,
             final Runnable closeSubscription
     ) {
-        stopAndClose(active, thread, stopped, closeSubscription,
-                java.util.concurrent.TimeUnit.SECONDS.toNanos(5L));
+        stopAndClose(active, thread, stopped, closeSubscription, TimeUnit.SECONDS.toNanos(5L));
     }
 
-        /// Variant with an explicit wait budget used by deterministic lifecycle tests.
-    /// Production callers should use the five-second overload above.
+        /// Stops polling and waits up to the configured stop budget for a different
+    /// polling thread, then closes the subscription only after that thread has
+    /// exited. On timeout the subscription remains open so the caller can retry
+    /// without a use-after-close.
+    ///
+    /// @param active            reader running flag
+    /// @param thread            reader polling thread, or `null`
+    /// @param stopped           latch released by the polling thread on exit
+    /// @param closeSubscription callback that closes the reader subscription
+    /// @param timeoutNanos      bounded wait budget in nanoseconds
     static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,
@@ -101,7 +118,7 @@ final class AeronReaderLifecycle {
             final long deadline = ReplicationRetry.deadlineNanos(timeoutNanos);
             try {
                 final long remaining = ReplicationRetry.remainingNanos(deadline);
-                if (remaining <= 0L || !stopped.await(remaining, java.util.concurrent.TimeUnit.NANOSECONDS)) {
+                if (remaining <= 0L || !stopped.await(remaining, TimeUnit.NANOSECONDS)) {
                     failure = new IllegalStateException("Aeron reader polling thread did not stop");
                 } else {
                     /* The latch is released from the polling thread's finally block. Use
@@ -111,7 +128,7 @@ final class AeronReaderLifecycle {
                     if (joinNanos <= 0L) {
                         failure = new IllegalStateException("Aeron reader polling thread did not stop");
                     } else {
-                        final long joinMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(joinNanos);
+                        final long joinMillis = TimeUnit.NANOSECONDS.toMillis(joinNanos);
                         thread.join(Math.max(1L, joinMillis));
                         if (thread.isAlive()) {
                             failure = new IllegalStateException("Aeron reader polling thread did not stop");
@@ -125,17 +142,20 @@ final class AeronReaderLifecycle {
         }
         /* Do not close a subscription while a polling thread is still able to
          * access it. The caller retains ownership and may retry after it stops. */
-        if (failure != null) {
-            throw failure;
-        }
-        try {
-            closeSubscription.run();
-        } catch (final RuntimeException closeFailure) {
-            failure = closeFailure;
+        if (failure == null) {
+            try {
+                closeSubscription.run();
+            } catch (final RuntimeException closeFailure) {
+                failure = closeFailure;
+            }
         }
         if (failure != null) {
             throw failure;
         }
     }
 
+    /// Builds the default reader idle strategy.
+    static IdleStrategy defaultIdleStrategy() {
+        return new BackoffIdleStrategy();
+    }
 }

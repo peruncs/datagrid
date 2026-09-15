@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import java.util.Objects;
 import java.util.zip.CRC32C;
 
 /// Shared CRC32C implementation for replication wire and checkpoint data.
@@ -37,10 +38,11 @@ public final class Crc32c {
     /// @param reuse  caller-owned accumulator
     /// @return CRC32C value
     public static int compute(final byte[] bytes, final int offset, final int length, final CRC32C reuse) {
-        if (bytes == null || offset < 0 || length < 0 || offset > bytes.length - length) {
+        Objects.requireNonNull(bytes, "bytes");
+        if (offset < 0 || length < 0 || offset > bytes.length - length) {
             throw new IllegalArgumentException("invalid CRC32C range");
         }
-        if (reuse == null) throw new NullPointerException("reuse");
+        Objects.requireNonNull(reuse, "reuse");
         reuse.reset();
         reuse.update(bytes, offset, length);
         return (int) reuse.getValue();
@@ -51,7 +53,7 @@ public final class Crc32c {
     /// @param bytes source bytes
     /// @return CRC32C value
     public static int compute(final byte[] bytes) {
-        if (bytes == null) throw new IllegalArgumentException("bytes must not be null");
+        Objects.requireNonNull(bytes, "bytes");
         return compute(bytes, 0, bytes.length);
     }
 

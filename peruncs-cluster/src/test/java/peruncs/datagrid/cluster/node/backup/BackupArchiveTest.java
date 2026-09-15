@@ -41,7 +41,7 @@ class BackupArchiveTest {
 
         assertThrows(NodeLibraryException.class,
                 () -> BackupArchive.extractArchive(
-                        root.resolve("extracted"), archive, true, BackupArchiveLimits.Default()));
+                        root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults()));
         assertFalse(Files.exists(root.resolve("escaped")));
     }
 
@@ -55,7 +55,7 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
 
         BackupArchive.extractArchive(
-                root.resolve("extracted"), archive, true, BackupArchiveLimits.Default());
+                root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults());
 
         assertEquals("payload", Files.readString(root.resolve("extracted").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
@@ -70,7 +70,7 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.READY_ENTRY, (String) null));
 
         assertEquals(expected, ReplicationCursorStore.decode(
-                BackupArchive.readManifest(archive, BackupArchiveLimits.Default().maxExtractedBytes())));
+                BackupArchive.readManifest(archive, BackupArchiveLimits.defaults().maxExtractedBytes())));
         assertFalse(Files.exists(root.resolve("extracted")));
     }
 
@@ -82,7 +82,7 @@ class BackupArchiveTest {
         final Path extracted = root.resolve("extracted");
         assertThrows(NodeLibraryException.class,
                 () -> BackupArchive.extractArchive(
-                        extracted, archive, true, BackupArchiveLimits.Default()));
+                        extracted, archive, true, BackupArchiveLimits.defaults()));
         StorageFileOperations.cleanup(extracted, null);
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
@@ -93,7 +93,7 @@ class BackupArchiveTest {
         writeArchive(archive, new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null));
 
         assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
-                archive, BackupArchiveLimits.Default().maxExtractedBytes()));
+                archive, BackupArchiveLimits.defaults().maxExtractedBytes()));
     }
 
     @Test
@@ -102,7 +102,7 @@ class BackupArchiveTest {
         writeArchive(archive, new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[(1 << 20) + 1]));
 
         assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
-                archive, BackupArchiveLimits.Default().maxExtractedBytes()));
+                archive, BackupArchiveLimits.defaults().maxExtractedBytes()));
     }
 
     @Test
@@ -141,7 +141,7 @@ class BackupArchiveTest {
                 new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
 
         assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
-                root.resolve("extracted"), archive, true, BackupArchiveLimits.Default()));
+                root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults()));
     }
 
     @Test
@@ -157,7 +157,7 @@ class BackupArchiveTest {
         assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
                 tight, archive, true, new BackupArchiveLimits(8L)));
         BackupArchive.extractArchive(
-                root.resolve("roomy"), archive, true, BackupArchiveLimits.Default());
+                root.resolve("roomy"), archive, true, BackupArchiveLimits.defaults());
         assertEquals("payload", Files.readString(
                 root.resolve("roomy").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }

@@ -4,16 +4,19 @@ import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.PersistentSubscription;
 import io.aeron.logbuffer.ControlledFragmentHandler;
+import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /// Reads committed Store transactions from an Archive and then from the live
 /// publication.
@@ -22,7 +25,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /// only after replay catches up, so a restart needs no separate snapshot path.
 /// The subscription belongs to this reader; the caller remains responsible for
 /// the shared Aeron and Archive clients.
-public final class StorageBinaryDataClientAeronArchive implements org.eclipse.serializer.typing.Disposable {
+public final class StorageBinaryDataClientAeronArchive implements Disposable {
     private final PersistentSubscription subscription;
     private final TransactionAssembler assembler;
     private final long stopTimeoutNanos;
@@ -37,7 +40,12 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
     private volatile boolean disposeRequested;
     private volatile boolean live;
     private volatile boolean stopAtLatest;
-    private volatile StorageBinaryDataClient.StopOutcome stopOutcome = StorageBinaryDataClient.StopOutcome.NOT_STARTED;
+    /* A terminal outcome (FAILED, TIMED_OUT, CLOSED) is sticky: no later state,
+     * including disposal, may downgrade it to a success.  All transitions go
+     * through the atomic reference so a polling-thread timeout cannot race a
+     * concurrent disposal into the wrong final state. */
+    private final AtomicReference<StorageBinaryDataClient.StopOutcome> stopOutcome =
+            new AtomicReference<>(StorageBinaryDataClient.StopOutcome.NOT_STARTED);
 
 
     StorageBinaryDataClientAeronArchive(
@@ -51,9 +59,9 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
             final Runnable transactionResolved,
             final ReaderDeliveryListener deliveryListener
     ) {
-        this.subscription = java.util.Objects.requireNonNull(subscription, "subscription");
+        this.subscription = Objects.requireNonNull(subscription, "subscription");
         try {
-            this.stopTimeoutNanos = java.util.Objects.requireNonNull(configuration, "configuration").readerStopTimeoutNanos();
+            this.stopTimeoutNanos = Objects.requireNonNull(configuration, "configuration").readerStopTimeoutNanos();
             this.assembler = new TransactionAssembler(
                     configuration, clusterId, epoch, initialSequence, initialPosition, receiver, transactionResolved,
                     deliveryListener
@@ -225,6 +233,32 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
         }
     }
 
+        /// Records a failure outcome unless an earlier terminal outcome already won.
+    private void failOutcome() {
+        this.stopOutcome.updateAndGet(current ->
+                current == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
+                current == StorageBinaryDataClient.StopOutcome.CLOSED
+                        ? current
+                        : StorageBinaryDataClient.StopOutcome.FAILED);
+    }
+
+        /// Records the closed outcome only when no failure already terminated the reader.
+    private void closeOutcome() {
+        this.stopOutcome.updateAndGet(current ->
+                current == StorageBinaryDataClient.StopOutcome.FAILED ||
+                current == StorageBinaryDataClient.StopOutcome.TIMED_OUT
+                        ? current
+                        : StorageBinaryDataClient.StopOutcome.CLOSED);
+    }
+
+        /// Sets a non-terminal transition (RUNNING/STOPPING) unless a terminal outcome won.
+    private void transitionOutcome(final StorageBinaryDataClient.StopOutcome next) {
+        this.stopOutcome.updateAndGet(current -> switch (current) {
+            case FAILED, TIMED_OUT, CLOSED -> current;
+            default -> next;
+        });
+    }
+
         /// Starts replay and live polling; repeated calls have no effect.
     public synchronized void start() {
         if (this.disposed || this.disposeRequested) {
@@ -245,7 +279,7 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
         this.stopAtLatest = false;
         this.stopDeadlineNanos.set(0L);
         this.live = false;
-        this.stopOutcome = StorageBinaryDataClient.StopOutcome.RUNNING;
+        this.stopOutcome.set(StorageBinaryDataClient.StopOutcome.RUNNING);
         this.stopped = new CountDownLatch(1);
         this.thread = Thread.ofVirtual().name("datagrid-aeron-archive-reader").unstarted(this::run);
         this.thread.start();
@@ -271,10 +305,11 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
                     () -> this.stopAtLatest && ReplicationRetry.expired(this.stopDeadlineNanos.get()),
                     () ->
                     {
-                        this.stopOutcome = StorageBinaryDataClient.StopOutcome.TIMED_OUT;
+                        this.stopOutcome.set(StorageBinaryDataClient.StopOutcome.TIMED_OUT);
                         this.assembler.failure(new IllegalStateException(
                                 "Timed out waiting for Aeron Archive replay to reach the live tail"));
-                    }
+                    },
+                    AeronReaderLifecycle.defaultIdleStrategy()
             );
             this.completeRun();
         } catch (final RuntimeException e) {
@@ -288,8 +323,9 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
     }
 
     private synchronized void completeRun() {
-        if (this.stopOutcome == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-            this.stopOutcome == StorageBinaryDataClient.StopOutcome.CLOSED) {
+        final StorageBinaryDataClient.StopOutcome current = this.stopOutcome.get();
+        if (current == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
+            current == StorageBinaryDataClient.StopOutcome.CLOSED) {
             return;
         }
         if (this.subscription.hasFailed()) {
@@ -297,19 +333,17 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
                     "PersistentSubscription failed", this.subscription.failureReason()));
         }
         if (this.assembler.failure() != null) {
-            this.stopOutcome = StorageBinaryDataClient.StopOutcome.FAILED;
+            this.failOutcome();
             return;
         }
-        this.stopOutcome = this.stopAtLatest && this.live
+        this.transitionOutcome(this.stopAtLatest && this.live
                 ? StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY
-                : StorageBinaryDataClient.StopOutcome.STOPPED;
+                : StorageBinaryDataClient.StopOutcome.STOPPED);
     }
 
     private synchronized void finishRun(final CountDownLatch lifecycleStopped) {
-        if (this.assembler.failure() != null &&
-            this.stopOutcome != StorageBinaryDataClient.StopOutcome.TIMED_OUT &&
-            this.stopOutcome != StorageBinaryDataClient.StopOutcome.CLOSED) {
-            this.stopOutcome = StorageBinaryDataClient.StopOutcome.FAILED;
+        if (this.assembler.failure() != null) {
+            this.failOutcome();
         }
         this.active.set(false);
         this.live = false;
@@ -337,12 +371,12 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
         if (this.disposeRequested) {
             throw new IllegalStateException("Aeron Archive reader is stopping for disposal");
         }
-        if (this.stopOutcome == StorageBinaryDataClient.StopOutcome.FAILED || this.failure() != null) {
+        if (this.stopOutcome.get() == StorageBinaryDataClient.StopOutcome.FAILED || this.failure() != null) {
             return;
         }
         this.stopAtLatest = true;
         this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
-        if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
+        if (this.active.get()) this.transitionOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
     }
 
         /// Returns the last sequence delivered after commit and checksum validation.
@@ -422,25 +456,23 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
 
         /// Returns the stop boundary outcome and never infers success from a dead thread.
     public StorageBinaryDataClient.StopOutcome stopOutcome() {
-        return this.stopOutcome;
+        return this.stopOutcome.get();
     }
 
         /// Returns the terminal stop state and the last resolved sequence/position.
     public StorageBinaryDataClient.StopResult stopResult() {
         final CursorSnapshot cursor = this.assembler.cursorSnapshot();
-        return new StorageBinaryDataClient.StopResult(this.stopOutcome, cursor.sequence(), cursor.position());
+        return new StorageBinaryDataClient.StopResult(this.stopOutcome.get(), cursor.sequence(), cursor.position());
     }
 
         /// Stops polling after a terminal Aeron client or MediaDriver failure.
     ///
     /// @param failure terminal failure
     public synchronized void fail(final RuntimeException failure) {
-        this.assembler.failure(java.util.Objects.requireNonNull(failure, "failure"));
+        this.assembler.failure(Objects.requireNonNull(failure, "failure"));
         this.active.set(false);
         this.live = false;
-        if (this.stopOutcome != StorageBinaryDataClient.StopOutcome.CLOSED) {
-            this.stopOutcome = StorageBinaryDataClient.StopOutcome.FAILED;
-        }
+        this.failOutcome();
     }
 
         /// Stops polling and releases this reader's subscriptions.
@@ -456,15 +488,17 @@ public final class StorageBinaryDataClientAeronArchive implements org.eclipse.se
         synchronized (this) {
             if (this.disposed) return;
             this.disposeRequested = true;
-            if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
+            if (this.active.get()) this.transitionOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
             pollingThread = this.thread;
         }
-        AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close);
+        AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close,
+                this.stopTimeoutNanos);
         synchronized (this) {
             this.assembler.dispose();
             this.thread = null;
             this.disposed = true;
-            this.stopOutcome = StorageBinaryDataClient.StopOutcome.CLOSED;
+            /* A failed or timed-out reader must not be reported as a clean close. */
+            this.closeOutcome();
         }
     }
 

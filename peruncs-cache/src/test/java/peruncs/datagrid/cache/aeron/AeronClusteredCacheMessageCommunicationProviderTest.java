@@ -31,13 +31,12 @@ import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.publish;
-import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.serializer;
 
 /// Verifies the Aeron clustered-cache provider over a real embedded MediaDriver.
 class AeronClusteredCacheMessageCommunicationProviderTest {
     private static void provideSender(final AeronClusteredCacheConfiguration configuration) {
         new AeronClusteredCacheMessageCommunicationProvider()
-                .provideUpdateTimestampsCacheMessageSender(configuration, serializer())
+                .provideUpdateTimestampsCacheMessageSender(configuration)
                 .dispose();
     }
 
@@ -155,14 +154,14 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    receiverProvider.provideMessageReceiver(properties, serializer(), acceptor(received));
+                    receiverProvider.provideMessageReceiver(properties, acceptor(received));
             try {
                 receiver.start();
 
                 final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                         new AeronClusteredCacheMessageCommunicationProvider();
                 final AeronClusteredCacheMessageSender sender =
-                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
                 try {
                     publish(sender, EventType.CREATED, "default-query-results-region", "table-a", 42L);
                     publish(sender, EventType.UPDATED, "default-query-results-region", "table-a", 43L);
@@ -197,15 +196,15 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider secondProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageCommunicationProvider senderProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver firstReceiver =
-                    firstProvider.provideMessageReceiver(properties, serializer(), acceptor(first));
+                    firstProvider.provideMessageReceiver(properties, acceptor(first));
             final AeronClusteredCacheMessageReceiver secondReceiver =
-                    secondProvider.provideMessageReceiver(properties, serializer(), acceptor(second));
+                    secondProvider.provideMessageReceiver(properties, acceptor(second));
             try {
                 firstReceiver.start();
                 secondReceiver.start();
 
                 final AeronClusteredCacheMessageSender sender =
-                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
                 try {
                     publish(sender, EventType.CREATED, "cache", "table", 5L);
                 } finally {
@@ -233,15 +232,15 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider otherProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageCommunicationProvider senderProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver sameReceiver =
-                    sameProvider.provideMessageReceiver(properties, serializer(), acceptor(sameStream));
+                    sameProvider.provideMessageReceiver(properties, acceptor(sameStream));
             final AeronClusteredCacheMessageReceiver otherReceiver =
-                    otherProvider.provideMessageReceiver(otherStream, serializer(), acceptor(other));
+                    otherProvider.provideMessageReceiver(otherStream, acceptor(other));
             try {
                 sameReceiver.start();
                 otherReceiver.start();
 
                 final AeronClusteredCacheMessageSender sender =
-                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
                 try {
                     publish(sender, EventType.CREATED, "cache", "table", 1L);
                 } finally {
@@ -262,15 +261,14 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         final CountDownLatch selfReceived = new CountDownLatch(1);
         AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
         properties = withEmbeddedDriver(properties);
-        final var serializer = serializer();
 
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageReceiver receiver =
-                provider.provideMessageReceiver(properties, serializer, acceptor(new ArrayBlockingQueue<>(1), selfReceived));
+                provider.provideMessageReceiver(properties, acceptor(new ArrayBlockingQueue<>(1), selfReceived));
         try {
             receiver.start();
             final AeronClusteredCacheMessageSender sender =
-                    provider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+                    provider.provideUpdateTimestampsCacheMessageSender(properties);
             try {
                 publish(sender, EventType.CREATED, "cache", "table", 7L);
                 assertFalse(selfReceived.await(1, TimeUnit.SECONDS),
@@ -301,11 +299,11 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    receiverProvider.provideMessageReceiver(properties, serializer(), acceptor(received, selfReceived));
+                    receiverProvider.provideMessageReceiver(properties, acceptor(received, selfReceived));
             try {
                 receiver.start();
                 final AeronClusteredCacheMessageSender sender =
-                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
                 try {
                     publish(sender, EventType.CREATED, "cache", "table", 7L);
                     assertFalse(selfReceived.await(1, TimeUnit.SECONDS),
@@ -330,17 +328,17 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider observerProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver observer = observerProvider.provideMessageReceiver(
-                    observerProperties, serializer(), acceptor(received));
+                    observerProperties, acceptor(received));
             try {
                 observer.start();
                 final var firstProvider = new AeronClusteredCacheMessageCommunicationProvider();
-                final var first = firstProvider.provideUpdateTimestampsCacheMessageSender(senderProperties, serializer());
+                final var first = firstProvider.provideUpdateTimestampsCacheMessageSender(senderProperties);
                 publish(first, EventType.CREATED, "cache", "before-recreate", 1L);
                 assertNotNull(received.poll(10, TimeUnit.SECONDS));
                 first.dispose();
 
                 final var secondProvider = new AeronClusteredCacheMessageCommunicationProvider();
-                final var second = secondProvider.provideUpdateTimestampsCacheMessageSender(senderProperties, serializer());
+                final var second = secondProvider.provideUpdateTimestampsCacheMessageSender(senderProperties);
                 try {
                     publish(second, EventType.CREATED, "cache", "after-recreate", 2L);
                     assertNotNull(received.poll(10, TimeUnit.SECONDS));
@@ -363,7 +361,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(properties);
         try {
             assertTimeoutPreemptively(Duration.ofSeconds(10), () ->
                     assertThrows(CacheEntryListenerException.class,
@@ -383,7 +381,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         properties = withOfferTimeoutMillis(properties, 6000L);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(properties);
         final AtomicReference<Throwable> publishFailure = new AtomicReference<>();
         final Thread publisher = Thread.ofVirtual().name("blocked-cache-sender-publish-test").unstarted(() ->
         {
@@ -424,7 +422,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    receiverProvider.provideMessageReceiver(properties, serializer(), acceptor(received));
+                    receiverProvider.provideMessageReceiver(properties, acceptor(received));
             try {
                 receiver.start();
 
@@ -448,7 +446,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                             new AeronClusteredCacheMessageCommunicationProvider();
                     final AeronClusteredCacheMessageSender sender =
-                            senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                            senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
                     try {
                         publish(sender, EventType.CREATED, "cache", "table", 9L);
                     } finally {
@@ -469,11 +467,10 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         try (MediaDriver driver = launchDriver(root)) {
             AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             properties = withOfferTimeoutMillis(properties, 1L);
-            final var serializer = serializer();
             final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageSender sender =
-                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
             try {
                 assertThrows(CacheEntryListenerException.class,
                         () -> publish(sender, EventType.CREATED, "cache", "before-connect", 1L),
@@ -483,7 +480,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                         new AeronClusteredCacheMessageCommunicationProvider();
                 final AeronClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
-                        properties, serializer, acceptor(received));
+                        properties, acceptor(received));
                 try {
                     receiver.start();
                     publish(sender, EventType.CREATED, "cache", "after-connect", 2L);
@@ -509,7 +506,6 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
                     properties,
-                    serializer(),
                     new ClusteredCacheMessageAcceptor(null) {
                         @Override
                         public void accept(final TimestampsRegionUpdateMessage message) {
@@ -520,7 +516,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageSender sender =
-                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
             try {
                 publish(sender, EventType.CREATED, "cache", "table", 1L);
                 final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
@@ -542,7 +538,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 withMaxPayloadBytes(AeronClusteredCacheConfiguration.defaults(), 16);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(properties);
         try {
             assertThrows(CacheEntryListenerException.class,
                     () -> publish(sender, EventType.CREATED, "cache", "table-with-a-long-name", 1L),
@@ -557,7 +553,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         final AeronClusteredCacheConfiguration properties = AeronClusteredCacheConfiguration.defaults();
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(properties);
         sender.dispose();
 
         assertThrows(CacheEntryListenerException.class,
@@ -570,11 +566,10 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
         properties = withEmbeddedDriver(properties);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
-        final var serializer = serializer();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+                provider.provideUpdateTimestampsCacheMessageSender(properties);
         final AeronClusteredCacheMessageReceiver receiver =
-                provider.provideMessageReceiver(properties, serializer, acceptor(new ArrayBlockingQueue<>(1)));
+                provider.provideMessageReceiver(properties, acceptor(new ArrayBlockingQueue<>(1)));
         receiver.start();
         sender.dispose();
         sender.dispose();
@@ -588,7 +583,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1)));
+                    provider.provideMessageReceiver(properties, acceptor(new ArrayBlockingQueue<>(1)));
             receiver.start();
             receiver.dispose();
 
@@ -603,7 +598,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1)));
+                    provider.provideMessageReceiver(properties, acceptor(new ArrayBlockingQueue<>(1)));
 
             assertFalse(receiver.isRunning(), "a receiver is not running before start");
             receiver.start();
@@ -623,7 +618,6 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
                     properties,
-                    serializer(),
                     new ClusteredCacheMessageAcceptor(null) {
                         @Override
                         public void accept(final TimestampsRegionUpdateMessage message) {
@@ -646,7 +640,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageSender sender =
-                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
             try {
                 publish(sender, EventType.CREATED, "cache", "table", 1L);
                 assertTrue(entered.await(5, TimeUnit.SECONDS), "receiver callback did not start");
@@ -680,7 +674,6 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         try (MediaDriver driver = launchDriver(root)) {
             AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
-            final var serializer = serializer();
             final ClusteredCacheMessageAcceptor acceptor = acceptor(received);
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
@@ -688,20 +681,20 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     new AeronClusteredCacheMessageCommunicationProvider();
 
             final AeronClusteredCacheMessageReceiver receiver =
-                    receiverProvider.provideMessageReceiver(properties, serializer, acceptor);
+                    receiverProvider.provideMessageReceiver(properties, acceptor);
             receiver.start();
             final AeronClusteredCacheMessageSender sender =
-                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+                    senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
             publish(sender, EventType.CREATED, "cache", "table", 1L);
             assertNotNull(received.poll(10, TimeUnit.SECONDS));
             sender.dispose();
             receiver.dispose();
 
             assertThrows(IllegalStateException.class,
-                    () -> receiverProvider.provideMessageReceiver(properties, serializer, acceptor),
+                    () -> receiverProvider.provideMessageReceiver(properties, acceptor),
                     "a provider with closed resources must reject a new receiver lifecycle");
             assertThrows(IllegalStateException.class,
-                    () -> senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer),
+                    () -> senderProvider.provideUpdateTimestampsCacheMessageSender(properties),
                     "a provider with closed resources must reject a new sender lifecycle");
         }
     }
@@ -710,20 +703,20 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void providerReturnsOneOwnedSenderAndReceiverAndRejectsRebind(@TempDir final Path root) {
         AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
-        final var serializer = serializer();
         final ClusteredCacheMessageAcceptor acceptor = acceptor(new ArrayBlockingQueue<>(1));
 
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
-        assertSame(sender, provider.provideUpdateTimestampsCacheMessageSender(properties, serializer));
-        final AeronClusteredCacheMessageReceiver receiver = provider.provideMessageReceiver(properties, serializer, acceptor);
-        assertSame(receiver, provider.provideMessageReceiver(properties, serializer, acceptor));
+                provider.provideUpdateTimestampsCacheMessageSender(properties);
+        assertSame(sender, provider.provideUpdateTimestampsCacheMessageSender(properties));
+        final AeronClusteredCacheMessageReceiver receiver = provider.provideMessageReceiver(properties, acceptor);
+        assertSame(receiver, provider.provideMessageReceiver(properties, acceptor));
 
         assertThrows(IllegalArgumentException.class,
-                () -> provider.provideUpdateTimestampsCacheMessageSender(properties, serializer()),
-                "a second serializer cannot share the provider-owned sender");
+                () -> provider.provideUpdateTimestampsCacheMessageSender(
+                        withOfferTimeoutMillis(properties, properties.offerTimeoutMillis() + 1L)),
+                "a sender with different limits cannot share the provider-owned sender");
         assertThrows(IllegalArgumentException.class,
-                () -> provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1))),
+                () -> provider.provideMessageReceiver(properties, acceptor(new ArrayBlockingQueue<>(1))),
                 "a second acceptor cannot share the provider-owned receiver");
 
         sender.dispose();
@@ -734,20 +727,19 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void disposedHandlesAreNeverReturnedAgain(@TempDir final Path root) {
         final AeronClusteredCacheConfiguration properties =
                 withEmbeddedDriver(configuration(root.resolve("driver")));
-        final var serializer = serializer();
         final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                 new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                 new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
-                properties, serializer, acceptor(new ArrayBlockingQueue<>(4)));
+                properties, acceptor(new ArrayBlockingQueue<>(4)));
         receiver.start();
         final AeronClusteredCacheMessageSender sender =
-                senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer);
+                senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
         try {
             sender.dispose();
             assertThrows(IllegalStateException.class,
-                    () -> senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer));
+                    () -> senderProvider.provideUpdateTimestampsCacheMessageSender(properties));
         } finally {
             receiver.dispose();
         }
@@ -755,11 +747,11 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         final AeronClusteredCacheMessageCommunicationProvider receiverOnlyProvider =
                 new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageReceiver disposedReceiver = receiverOnlyProvider.provideMessageReceiver(
-                properties, serializer, acceptor(new ArrayBlockingQueue<>(4)));
+                properties, acceptor(new ArrayBlockingQueue<>(4)));
         disposedReceiver.start();
         disposedReceiver.dispose();
         assertThrows(IllegalStateException.class,
-                () -> receiverOnlyProvider.provideMessageReceiver(properties, serializer,
+                () -> receiverOnlyProvider.provideMessageReceiver(properties,
                         acceptor(new ArrayBlockingQueue<>(4))));
     }
 
@@ -767,11 +759,11 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void conflictingConfigurationIsRejected() {
         final AeronClusteredCacheConfiguration properties = AeronClusteredCacheConfiguration.defaults();
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
-        provider.provideUpdateTimestampsCacheMessageSender(properties, serializer()).dispose();
+        provider.provideUpdateTimestampsCacheMessageSender(properties).dispose();
 
         final AeronClusteredCacheConfiguration conflicting = withStreamId(properties, 2002);
         assertThrows(IllegalStateException.class,
-                () -> provider.provideMessageReceiver(conflicting, serializer(),
+                () -> provider.provideMessageReceiver(conflicting,
                         acceptor(new ArrayBlockingQueue<>(1))),
                 "a terminal provider must reject a new receiver lifecycle");
     }
@@ -781,11 +773,11 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         AeronClusteredCacheConfiguration properties = AeronClusteredCacheConfiguration.defaults();
         properties = withNodeId(properties, UUID.randomUUID());
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
-        provider.provideUpdateTimestampsCacheMessageSender(properties, serializer()).dispose();
+        provider.provideUpdateTimestampsCacheMessageSender(properties).dispose();
 
         final AeronClusteredCacheConfiguration conflicting = withNodeId(properties, UUID.randomUUID());
         assertThrows(IllegalStateException.class,
-                () -> provider.provideMessageReceiver(conflicting, serializer(),
+                () -> provider.provideMessageReceiver(conflicting,
                         acceptor(new ArrayBlockingQueue<>(1))),
                 "a terminal provider must reject a new receiver lifecycle");
     }
@@ -799,7 +791,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    receiverProvider.provideMessageReceiver(properties, serializer(), acceptor(received));
+                    receiverProvider.provideMessageReceiver(properties, acceptor(received));
             try {
                 receiver.start();
 
@@ -849,14 +841,14 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    receiverProvider.provideMessageReceiver(properties, serializer(), acceptor(received));
+                    receiverProvider.provideMessageReceiver(properties, acceptor(received));
             try {
                 receiver.start();
 
                 final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                         new AeronClusteredCacheMessageCommunicationProvider();
                 final AeronClusteredCacheMessageSender sender =
-                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
                 try {
                     final int publisherCount = 4;
                     final int perThread = 10;
@@ -908,7 +900,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
                     provider.provideMessageReceiver(
-                            properties, serializer(), acceptor(new ArrayBlockingQueue<>(2048)));
+                            properties, acceptor(new ArrayBlockingQueue<>(2048)));
             try {
                 receiver.start();
                 try (Aeron aeron = Aeron.connect(new Aeron.Context()
@@ -959,7 +951,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider observerProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver observer =
-                    observerProvider.provideMessageReceiver(observerProperties, serializer(), acceptor(received));
+                    observerProvider.provideMessageReceiver(observerProperties, acceptor(received));
             try {
                 observer.start();
 
@@ -968,9 +960,9 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 final AeronClusteredCacheMessageCommunicationProvider secondProvider =
                         new AeronClusteredCacheMessageCommunicationProvider();
                 final AeronClusteredCacheMessageSender first =
-                        firstProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                        firstProvider.provideUpdateTimestampsCacheMessageSender(properties);
                 final AeronClusteredCacheMessageSender second =
-                        secondProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
+                        secondProvider.provideUpdateTimestampsCacheMessageSender(properties);
                 try {
                     /* Interleave both providers so two independent per-instance
                      * counters would interleave (0, 0, 1, 1) and report false gaps. */
@@ -1020,9 +1012,9 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
             final AeronClusteredCacheMessageCommunicationProvider observerProviderA = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageCommunicationProvider observerProviderB = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver observerReceiverA = observerProviderA.provideMessageReceiver(
-                    observerA, serializer(), acceptor(receivedA));
+                    observerA, acceptor(receivedA));
             final AeronClusteredCacheMessageReceiver observerReceiverB = observerProviderB.provideMessageReceiver(
-                    observerB, serializer(), acceptor(receivedB));
+                    observerB, acceptor(receivedB));
             try {
                 observerReceiverA.start();
                 observerReceiverB.start();
@@ -1030,9 +1022,9 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 final AeronClusteredCacheMessageCommunicationProvider senderProviderA = new AeronClusteredCacheMessageCommunicationProvider();
                 final AeronClusteredCacheMessageCommunicationProvider senderProviderB = new AeronClusteredCacheMessageCommunicationProvider();
                 final AeronClusteredCacheMessageSender senderA =
-                        senderProviderA.provideUpdateTimestampsCacheMessageSender(streamA, serializer());
+                        senderProviderA.provideUpdateTimestampsCacheMessageSender(streamA);
                 final AeronClusteredCacheMessageSender senderB =
-                        senderProviderB.provideUpdateTimestampsCacheMessageSender(streamB, serializer());
+                        senderProviderB.provideUpdateTimestampsCacheMessageSender(streamB);
                 try {
                     for (int i = 0; i < 5; i++) {
                         publish(senderA, EventType.CREATED, "cache", "a-%s".formatted(i), i);
@@ -1114,18 +1106,15 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                         new MutableConfiguration<>().setTypes(Object.class, Object.class));
                 final var firstSenderProvider = new AeronClusteredCacheMessageCommunicationProvider();
                 final var secondSenderProvider = new AeronClusteredCacheMessageCommunicationProvider();
-                /* Each node keeps one serializer for both bindings, as the API requires. */
-                final var firstSerializer = serializer();
-                final var secondSerializer = serializer();
                 final AeronClusteredCacheMessageSender firstSender = firstSenderProvider
-                        .provideUpdateTimestampsCacheMessageSender(firstNode, firstSerializer);
+                        .provideUpdateTimestampsCacheMessageSender(firstNode);
                 final AeronClusteredCacheMessageSender secondSender = secondSenderProvider
-                        .provideUpdateTimestampsCacheMessageSender(secondNode, secondSerializer);
+                        .provideUpdateTimestampsCacheMessageSender(secondNode);
                 final AeronClusteredCacheMessageReceiver firstReceiver = firstSenderProvider
-                        .provideMessageReceiver(firstNode, firstSerializer,
+                        .provideMessageReceiver(firstNode,
                                 new ClusteredCacheMessageAcceptor(firstManager));
                 final AeronClusteredCacheMessageReceiver secondReceiver = secondSenderProvider
-                        .provideMessageReceiver(secondNode, secondSerializer,
+                        .provideMessageReceiver(secondNode,
                                 new ClusteredCacheMessageAcceptor(secondManager));
                 firstCache.registerCacheEntryListener(new ClusteredCacheEntryListenerConfiguration(
                         firstSender).getUpdateTimestampsCacheEntryListenerConfiguration());
@@ -1166,11 +1155,10 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
         final UUID nodeId = UUID.randomUUID();
         final AeronClusteredCacheConfiguration first = withNodeId(AeronClusteredCacheConfiguration.defaults(), nodeId);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
-        final var serializer = serializer();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(first, serializer);
+                provider.provideUpdateTimestampsCacheMessageSender(first);
         assertSame(sender, provider.provideUpdateTimestampsCacheMessageSender(
-                withNodeId(AeronClusteredCacheConfiguration.defaults(), nodeId), serializer));
+                withNodeId(AeronClusteredCacheConfiguration.defaults(), nodeId)));
         sender.dispose();
     }
 }

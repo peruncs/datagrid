@@ -1,7 +1,5 @@
 package peruncs.datagrid.cache.test;
 
-import org.eclipse.serializer.Serializer;
-import org.eclipse.serializer.SerializerFoundation;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageSender;
 import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
 
@@ -21,16 +19,10 @@ import java.util.Set;
 
 /// Shared fixtures for the clustered-cache Aeron adapter tests.
 ///
-/// The Aeron adapter module depends on this test-jar to exercise the serializer,
-/// event construction, and publish path.
+/// The Aeron adapter module depends on this test-jar to exercise event
+/// construction and the publish path.
 public final class ClusteredCacheTestSupport {
     private ClusteredCacheTestSupport() {
-    }
-
-        /// Creates the serializer used by the adapter tests.
-    public static Serializer<byte[]> serializer() {
-        return Serializer.Bytes(SerializerFoundation.New()
-                .registerEntityTypes(TimestampsRegionUpdateMessage.class));
     }
 
         /// Creates a timestamp-region cache event.
