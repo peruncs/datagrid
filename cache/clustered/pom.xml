@@ -1,34 +1,80 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>org.eclipse.datagrid</groupId>
-        <artifactId>cache-parent</artifactId>
+        <groupId>peruncs</groupId>
+        <artifactId>peruncs-cache-parent</artifactId>
         <version>1.0.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>cache-clustered-parent</artifactId>
-    <packaging>pom</packaging>
+    <artifactId>peruncs-cache-clustered</artifactId>
 
-    <name>Eclipse Data Grid Cache Clustered Parent</name>
-    <description>Eclipse Data Grid Cache Clustered Project</description>
-    <url>https://projects.eclipse.org/projects/technology.datagrid</url>
+    <name>Peruncs Data Grid Cache Clustered</name>
+    <description>Peruncs Data Grid Clustered Cache with Aeron invalidation</description>
+    <url>https://github.com/peruncs/datagrid</url>
 
-    <modules>
-        <module>clustered</module>
-        <module>kafka</module>
-        <module>aeron</module>
-    </modules>
+    <dependencies>
+        <dependency>
+            <groupId>org.eclipse.store</groupId>
+            <artifactId>cache-hibernate</artifactId>
+            <version>${eclipse-store.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.hibernate.orm</groupId>
+            <artifactId>hibernate-core</artifactId>
+            <version>7.4.6.Final</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <!-- The published cache-hibernate module descriptor requires the
+                 java.persistence module. Hibernate 7 uses jakarta.persistence, so
+                 the legacy API must be present to resolve that descriptor on the
+                 JPMS module path. It is provided and only used for module
+                 resolution; the cache code itself uses Hibernate/Jakarta types. -->
+            <groupId>javax.persistence</groupId>
+            <artifactId>javax.persistence-api</artifactId>
+            <version>2.2</version>
+            <scope>provided</scope>
+        </dependency>
 
-    <dependencyManagement>
-        <dependencies>
-        </dependencies>
-    </dependencyManagement>
+        <dependency>
+            <groupId>io.aeron</groupId>
+            <artifactId>aeron-client</artifactId>
+            <version>${aeron.version}</version>
+        </dependency>
+        <dependency>
+            <!-- The provider may launch an embedded MediaDriver for single-host
+                 deployments and tests; production deployments normally point at an
+                 external driver directory instead. -->
+            <groupId>io.aeron</groupId>
+            <artifactId>aeron-driver</artifactId>
+            <version>${aeron.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Test fixtures run on the class path; production sources stay JPMS-compiled. -->
+                    <useModulePath>false</useModulePath>
+                    <argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

@@ -1,4 +1,4 @@
-Review @docs/aeron-clustering-integration-plan.md for the  genral outline of Aeron Eclipse datagrid implemtnation
+Review @docs/aeron-design.md for the general outline of the Aeron datagrid implementation
 
 
 ## General code rules - items to investigate or fix:
@@ -23,11 +23,10 @@ Review @docs/aeron-clustering-integration-plan.md for the  genral outline of Aer
 18. Addd ample junit test and simulation coverage, especially since clustering is inolved. 
 19. Have we looked at the Aeron examples and cookbook for best practices? Does the implementation follow them?
 20. Use of Agrona and Eclipse Serializer and Eclipse Store utils  (LockedExecutor, StripeLockedExecutor) as much as possible ?
-21. Eclipse Datagrid constraints are strictly obeyed: 1-writer/N-reader nodes . Kafka and Aeron are equal implementations (plug-ins), both observable.
+21. Eclipse Datagrid constraints are strictly obeyed: 1-writer/N-reader nodes. 
 22. Memory inefficiencies when packing data in Aeron CBE and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want to avoid allocating objects (even temporary) on the JVM heap.
-23. Make sure embedded Lucene and JVector indexes are tested and part of the implementation. 
-24. If you notice issues with the legacy Kafka implementation, they should be.
-25. Javadocs at all levels - module, package and individual Java entities. Use simple anrrative, less jargon, first sentence is the most important.
+23. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
+24. Javadocs at all levels - module, package and individual Java entities. Use simple anrrative, less jargon, first sentence is the most important.
 
 
 
@@ -55,7 +54,6 @@ export GITHUB_ROOT="$HOME/projects/github"
 ```
 Here are the reference source code directories to borrow from:
 
-`$GITHUB_ROOT/apache/kafka`
 `$GITHUB_ROOT/aeron-io`
 `$GITHUB_ROOT/eclipse-store`
 `$GITHUB_ROOT/eclipse-serializer`
