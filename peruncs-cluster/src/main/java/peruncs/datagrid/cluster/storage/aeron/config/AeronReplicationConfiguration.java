@@ -8,8 +8,6 @@ import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage;
 
 import java.util.Objects;
-import java.util.Properties;
-import java.util.Set;
 
 /// Immutable framing and durability limits shared by one writer and its
 /// readers.
@@ -28,27 +26,6 @@ public final class AeronReplicationConfiguration {
     public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
         /// Hard upper bound for the largest accepted transaction in bytes.
     public static final int MAX_SUPPORTED_TRANSACTION_BYTES = StorageBinaryDataMessage.MAX_MESSAGE_LENGTH;
-    private static final String PREFIX = "eclipsestore.distribution.aeron.";
-        /// Property that sets the Aeron term length in bytes.
-    public static final String TERM_LENGTH_PROPERTY = PREFIX + "term-length";
-        /// Property that sets the publication MTU in bytes.
-    public static final String MTU_LENGTH_PROPERTY = PREFIX + "mtu-length";
-        /// Property that sets the logical Store-data chunk size in bytes.
-    public static final String CHUNK_SIZE_PROPERTY = PREFIX + "chunk-size";
-        /// Property that sets the largest accepted transaction in bytes.
-    public static final String MAX_TRANSACTION_BYTES_PROPERTY = PREFIX + "max-transaction-bytes";
-        /// Property that sets the publication wait in nanoseconds.
-    public static final String OFFER_TIMEOUT_NANOS_PROPERTY = PREFIX + "offer-timeout-nanos";
-        /// Property that sets the wait for an Archive recording to become visible.
-    public static final String RECORDING_START_TIMEOUT_NANOS_PROPERTY = PREFIX + "recording-start-timeout-nanos";
-        /// Property that sets the wait for an Archive position to become durable.
-    public static final String RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY = PREFIX + "recorded-position-timeout-nanos";
-        /// Property that sets the wait for an Archive recording to stop.
-    public static final String RECORDING_STOP_TIMEOUT_NANOS_PROPERTY = PREFIX + "recording-stop-timeout-nanos";
-        /// Property that sets the reader stop wait in nanoseconds.
-    public static final String READER_STOP_TIMEOUT_NANOS_PROPERTY = PREFIX + "reader-stop-timeout-nanos";
-        /// Property that selects the local and Archive durability order.
-    public static final String DURABILITY_MODE_PROPERTY = PREFIX + "durability-mode";
     private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_START_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;
@@ -101,83 +78,6 @@ public final class AeronReplicationConfiguration {
     /// @return new configuration builder
     public static Builder builder() {
         return new Builder();
-    }
-
-        /// Builds a configuration from properties. Missing values use the defaults;
-    /// malformed values fail before any Aeron resource is opened.
-    ///
-    /// @param properties source properties
-    /// @return validated configuration
-    /// @throws NullPointerException     if `properties` is `null`
-    /// @throws IllegalArgumentException if a value is malformed or unsafe
-    public static AeronReplicationConfiguration from(final Properties properties) {
-        Objects.requireNonNull(properties, "properties");
-        validateKnownProperties(properties);
-        return builder()
-                .termLength(integer(properties, TERM_LENGTH_PROPERTY, DEFAULT_TERM_LENGTH))
-                .mtuLength(integer(properties, MTU_LENGTH_PROPERTY, DEFAULT_MTU_LENGTH))
-                .chunkSize(integer(properties, CHUNK_SIZE_PROPERTY, DEFAULT_CHUNK_SIZE))
-                .maxTransactionBytes(integer(properties, MAX_TRANSACTION_BYTES_PROPERTY, DEFAULT_MAX_TRANSACTION_BYTES))
-                .offerTimeoutNanos(longValue(properties, OFFER_TIMEOUT_NANOS_PROPERTY, DEFAULT_OFFER_TIMEOUT_NANOS))
-                .recordingStartTimeoutNanos(longValue(properties, RECORDING_START_TIMEOUT_NANOS_PROPERTY,
-                        DEFAULT_RECORDING_START_TIMEOUT_NANOS))
-                .recordedPositionTimeoutNanos(longValue(properties, RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY,
-                        DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS))
-                .recordingStopTimeoutNanos(longValue(properties, RECORDING_STOP_TIMEOUT_NANOS_PROPERTY,
-                        DEFAULT_RECORDING_STOP_TIMEOUT_NANOS))
-                .readerStopTimeoutNanos(longValue(properties, READER_STOP_TIMEOUT_NANOS_PROPERTY,
-                        DEFAULT_READER_STOP_TIMEOUT_NANOS))
-                .durabilityMode(mode(properties.getProperty(DURABILITY_MODE_PROPERTY)))
-                .build();
-    }
-
-    private static void validateKnownProperties(final Properties properties) {
-        final Set<String> known = Set.of(
-                TERM_LENGTH_PROPERTY,
-                MTU_LENGTH_PROPERTY,
-                CHUNK_SIZE_PROPERTY,
-                MAX_TRANSACTION_BYTES_PROPERTY,
-                OFFER_TIMEOUT_NANOS_PROPERTY,
-                RECORDING_START_TIMEOUT_NANOS_PROPERTY,
-                RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY,
-                RECORDING_STOP_TIMEOUT_NANOS_PROPERTY,
-                READER_STOP_TIMEOUT_NANOS_PROPERTY,
-                DURABILITY_MODE_PROPERTY
-        );
-        for (final String name : properties.stringPropertyNames()) {
-            if (name.startsWith(PREFIX) && !known.contains(name)) {
-                throw new IllegalArgumentException("Unknown Aeron replication property: %s".formatted(name));
-            }
-        }
-    }
-
-    private static long longValue(final Properties properties, final String key, final long fallback) {
-        final String value = properties.getProperty(key);
-        if (value == null) return fallback;
-        try {
-            return Long.parseLong(value.trim());
-        } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("Invalid long for %s: %s".formatted(key, value), failure);
-        }
-    }
-
-    private static int integer(final Properties properties, final String key, final int fallback) {
-        final String value = properties.getProperty(key);
-        if (value == null) return fallback;
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("Invalid integer for %s: %s".formatted(key, value), failure);
-        }
-    }
-
-    private static ReplicationDurabilityMode mode(final String value) {
-        if (value == null || value.isBlank()) return ReplicationDurabilityMode.ARCHIVE_FIRST;
-        return switch (value.trim().toLowerCase(java.util.Locale.ROOT)) {
-            case "archive-first", "archive_first" -> ReplicationDurabilityMode.ARCHIVE_FIRST;
-            case "enqueue-then-archive", "enqueue_then_archive" -> ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE;
-            default -> throw new IllegalArgumentException("Unknown replication durability mode: %s".formatted(value));
-        };
     }
 
     private static int maxMessageLengthForTermLength(final int termLength) {

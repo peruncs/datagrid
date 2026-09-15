@@ -24,7 +24,7 @@
 /// closed when it detects that loss. The channel is assumed to sit on an isolated network; the
 /// frames carry no authentication, and the provider
 /// rejects wildcard, loopback, and non-MDC UDP channels to reduce the exposure.
-/// See [AeronClusteredConfigurationPropertyNames] for the settings.
+/// See [AeronClusteredCacheConfiguration] for the settings.
 ///
 /// @since 1.0
 package peruncs.datagrid.cache.aeron;

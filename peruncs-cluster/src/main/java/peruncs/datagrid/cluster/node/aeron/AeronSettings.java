@@ -8,6 +8,7 @@ import io.aeron.driver.ThreadingMode;
 import org.agrona.SystemUtil;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -102,27 +103,25 @@ record AeronSettings(
         if (!role.equals("writer") && !role.equals("reader") && !role.equals("backup-reader")) {
             throw new IllegalArgumentException("ECLIPSE_DATAGRID_REPLICATION_ROLE must be writer, reader, or backup-reader");
         }
-        final Properties values = new Properties();
-        put(values, properties, AeronReplicationConfiguration.TERM_LENGTH_PROPERTY, "ECLIPSE_DATAGRID_AERON_TERM_LENGTH");
-        put(values, properties, AeronReplicationConfiguration.MTU_LENGTH_PROPERTY, "ECLIPSE_DATAGRID_AERON_MTU_LENGTH");
-        put(values, properties, AeronReplicationConfiguration.CHUNK_SIZE_PROPERTY, "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE");
-        put(values, properties, AeronReplicationConfiguration.MAX_TRANSACTION_BYTES_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES");
-        put(values, properties, AeronReplicationConfiguration.DURABILITY_MODE_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE");
-        put(values, properties, AeronReplicationConfiguration.DURABILITY_MODE_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_DURABILITY_MODE");
-        put(values, properties, AeronReplicationConfiguration.OFFER_TIMEOUT_NANOS_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS");
-        put(values, properties, AeronReplicationConfiguration.RECORDING_START_TIMEOUT_NANOS_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_RECORDING_START_TIMEOUT_NANOS");
-        put(values, properties, AeronReplicationConfiguration.RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS");
-        put(values, properties, AeronReplicationConfiguration.RECORDING_STOP_TIMEOUT_NANOS_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS");
-        put(values, properties, AeronReplicationConfiguration.READER_STOP_TIMEOUT_NANOS_PROPERTY,
-                "ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS");
-        final AeronReplicationConfiguration replication = AeronReplicationConfiguration.from(values);
+        /* The replication framing is configured with typed builder values read
+         * once from the provider. No intermediate string map crosses into the
+         * replication configuration: the builder is its only construction path. */
+        final AeronReplicationConfiguration.Builder replicationBuilder = AeronReplicationConfiguration.builder();
+        integerSetting(properties, "ECLIPSE_DATAGRID_AERON_TERM_LENGTH", replicationBuilder::termLength);
+        integerSetting(properties, "ECLIPSE_DATAGRID_AERON_MTU_LENGTH", replicationBuilder::mtuLength);
+        integerSetting(properties, "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE", replicationBuilder::chunkSize);
+        integerSetting(properties, "ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES", replicationBuilder::maxTransactionBytes);
+        longSetting(properties, "ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS", replicationBuilder::offerTimeoutNanos);
+        longSetting(properties, "ECLIPSE_DATAGRID_AERON_RECORDING_START_TIMEOUT_NANOS",
+                replicationBuilder::recordingStartTimeoutNanos);
+        longSetting(properties, "ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS",
+                replicationBuilder::recordedPositionTimeoutNanos);
+        longSetting(properties, "ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS",
+                replicationBuilder::recordingStopTimeoutNanos);
+        longSetting(properties, "ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS",
+                replicationBuilder::readerStopTimeoutNanos);
+        replicationBuilder.durabilityMode(durabilityMode(properties));
+        final AeronReplicationConfiguration replication = replicationBuilder.build();
         final String cluster = value(properties, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", null);
         if (cluster == null) throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_CLUSTER_ID is required");
         final long epoch = parseLong(properties, "ECLIPSE_DATAGRID_AERON_EPOCH", "1");
@@ -398,17 +397,47 @@ record AeronSettings(
         };
     }
 
-    private static void put(final Properties values, final NodeLibraryPropertiesProvider properties,
-                            final String property, final String environment) {
-        final String value = value(properties, environment, null);
-        if (value != null) {
-            final String previous = values.getProperty(property);
-            if (previous != null && !equivalentSetting(previous, value)) {
-                throw new IllegalArgumentException(
-                        "Conflicting Aeron settings for %s: %s and %s".formatted(property, previous, value));
-            }
-            values.setProperty(property, value);
+    private static void integerSetting(final NodeLibraryPropertiesProvider properties,
+                                       final String environment, final java.util.function.IntConsumer setter) {
+        final String configured = value(properties, environment, null);
+        if (configured == null) return;
+        try {
+            setter.accept(Integer.parseInt(configured.trim()));
+        } catch (final NumberFormatException failure) {
+            throw new IllegalArgumentException(
+                    "Invalid integer for %s: %s".formatted(environment, configured), failure);
         }
+    }
+
+    private static void longSetting(final NodeLibraryPropertiesProvider properties,
+                                    final String environment, final java.util.function.LongConsumer setter) {
+        final String configured = value(properties, environment, null);
+        if (configured == null) return;
+        try {
+            setter.accept(Long.parseLong(configured.trim()));
+        } catch (final NumberFormatException failure) {
+            throw new IllegalArgumentException(
+                    "Invalid long for %s: %s".formatted(environment, configured), failure);
+        }
+    }
+
+        /// Resolves the durability mode from the primary and legacy environment
+    /// keys. Both keys set to different modes is a configuration conflict.
+    private static ReplicationDurabilityMode durabilityMode(final NodeLibraryPropertiesProvider properties) {
+        final String primary = value(properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE", null);
+        final String legacy = value(properties, "ECLIPSE_DATAGRID_AERON_DURABILITY_MODE", null);
+        if (primary != null && legacy != null && !equivalentSetting(primary, legacy)) {
+            throw new IllegalArgumentException(
+                    "Conflicting Aeron settings for durability mode: %s and %s".formatted(primary, legacy));
+        }
+        final String selected = primary != null ? primary : legacy;
+        if (selected == null || selected.isBlank()) return ReplicationDurabilityMode.ARCHIVE_FIRST;
+        return switch (selected.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "archive-first", "archive_first" -> ReplicationDurabilityMode.ARCHIVE_FIRST;
+            case "enqueue-then-archive", "enqueue_then_archive" -> ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE;
+            default -> throw new IllegalArgumentException(
+                    "Unknown replication durability mode: %s".formatted(selected));
+        };
     }
 
     private static boolean equivalentSetting(final String left, final String right) {

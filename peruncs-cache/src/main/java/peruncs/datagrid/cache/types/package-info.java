@@ -7,9 +7,9 @@
 /// receive an update before that cache is opened. Listener configuration owns
 /// the sender and releases it when the configuration is disposed.
 ///
-/// API surface: the region factory, acceptor, configuration property names,
-/// and serialization type provider. [ClusteredCachePropertyParsers] is an
-/// internal parsing helper and is not meant for application code.
+/// API surface: the region factory, acceptor, and serialization type
+/// provider. Hibernate setting maps are translated once in the region factory;
+/// the Aeron core takes an injected configuration object.
 ///
 /// @since 1.0
 package peruncs.datagrid.cache.types;

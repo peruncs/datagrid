@@ -5,11 +5,8 @@ import io.aeron.CommonContext;
 import org.eclipse.serializer.Serializer;
 import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 
-import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
-
-import static peruncs.datagrid.cache.types.ClusteredCachePropertyParsers.*;
 
 /// This provider builds the Aeron sender and receiver for clustered cache
 /// invalidation.
@@ -21,7 +18,7 @@ import static peruncs.datagrid.cache.types.ClusteredCachePropertyParsers.*;
 /// node's updates.
 ///
 /// The region factory creates one provider per session factory. The provider
-/// reads [AeronClusteredConfigurationPropertyNames] when the sender and
+/// takes an injected [AeronClusteredCacheConfiguration] when the sender and
 /// receiver are requested. It provides a synchronous, fail-on-error contract so
 /// cache semantics do not depend on transport timing.
 ///
@@ -53,13 +50,6 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusteredCacheMessageCommunicationProvider.class.getName());
 
-    private static final String DEFAULT_CHANNEL = "aeron:ipc";
-    private static final int DEFAULT_STREAM_ID = 2001;
-    private static final long DEFAULT_OFFER_TIMEOUT_MILLIS = 5_000L;
-    private static final long DEFAULT_DRIVER_TIMEOUT_MILLIS = 10_000L;
-    private static final int DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20;
-    private static final int MAX_PAYLOAD_BYTES = Integer.MAX_VALUE - AeronClusteredCacheMessageCodec.HEADER_LENGTH -
-            AeronClusteredCacheMessageCodec.CRC_LENGTH;
     /* A configured node id identifies all cache providers in one JVM, while the
      * random incarnation in the wire identity changes after a process restart.
      * Deriving the identity directly avoids an unbounded process-wide map keyed by
@@ -86,16 +76,6 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     public AeronClusteredCacheMessageCommunicationProvider() {
     }
 
-    private static int maxPayloadBytes(@SuppressWarnings("rawtypes") final Map properties) {
-        final int value = intProperty(properties, AeronClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES,
-                DEFAULT_MAX_PAYLOAD_BYTES, 1);
-        if (value > MAX_PAYLOAD_BYTES) {
-            throw new IllegalArgumentException(
-                    "%s must be at most %s".formatted(AeronClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES, MAX_PAYLOAD_BYTES));
-        }
-        return value;
-    }
-
     private static byte[] uuidBytes(final UUID value) {
         final byte[] bytes = new byte[Long.BYTES * 2];
         putLong(bytes, 0, value.getMostSignificantBits());
@@ -106,19 +86,6 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     private static void putLong(final byte[] target, final int offset, final long value) {
         for (int index = 0; index < Long.BYTES; index++) {
             target[offset + index] = (byte) (value >>> (Long.BYTES - 1 - index) * Byte.SIZE);
-        }
-    }
-
-    private static UUID parseNodeId(final String configured) {
-        try {
-            final UUID identity = UUID.fromString(configured.trim());
-            if (identity.equals(new UUID(0L, 0L))) {
-                throw new IllegalArgumentException("the zero UUID is not a valid node id");
-            }
-            return identity;
-        } catch (final IllegalArgumentException failure) {
-            throw new IllegalArgumentException(
-                    "%s must be a UUID: %s".formatted(AeronClusteredConfigurationPropertyNames.NODE_ID, configured), failure);
         }
     }
 
@@ -133,24 +100,24 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             uri = ChannelUri.parse(channel);
         } catch (final RuntimeException failure) {
             throw new IllegalArgumentException(
-                    "Invalid %s: %s".formatted(AeronClusteredConfigurationPropertyNames.CHANNEL, channel), failure);
+                    "Invalid channel: %s".formatted(channel), failure);
         }
         if (uri.isUdp()) {
             final String controlMode = uri.get(CommonContext.MDC_CONTROL_MODE_PARAM_NAME);
             if (!CommonContext.MDC_CONTROL_MODE_DYNAMIC.equalsIgnoreCase(controlMode)) {
                 throw new IllegalArgumentException(
-                        "%s must use control-mode=dynamic for N-to-N invalidation: %s (or use aeron:ipc for single-host deployments)".formatted(AeronClusteredConfigurationPropertyNames.CHANNEL, channel));
+                        "Channel must use control-mode=dynamic for N-to-N invalidation: %s (or use aeron:ipc for single-host deployments)".formatted(channel));
             }
             final String endpoint = uri.get(CommonContext.ENDPOINT_PARAM_NAME);
             final String endpointHost = endpointHost(endpoint);
             final String controlHost = endpointHost(uri.get(CommonContext.MDC_CONTROL_PARAM_NAME));
             if (isWildcardHost(endpointHost) || isWildcardHost(controlHost)) {
                 throw new IllegalArgumentException(
-                        "%s must not bind a wildcard endpoint: %s".formatted(AeronClusteredConfigurationPropertyNames.CHANNEL, channel));
+                        "Channel must not bind a wildcard endpoint: %s".formatted(channel));
             }
             if (!embeddedDriver && (isLoopbackHost(endpointHost) || isLoopbackHost(controlHost))) {
                 throw new IllegalArgumentException(
-                        "%s must not use a loopback endpoint outside an embedded driver: %s".formatted(AeronClusteredConfigurationPropertyNames.CHANNEL, channel));
+                        "Channel must not use a loopback endpoint outside an embedded driver: %s".formatted(channel));
             }
         }
     }
@@ -200,29 +167,19 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// a rejected call cannot leak a live runtime, and a failed construction
     /// releases the lease and closes still-unbound resources again.
     ///
-    /// @param properties cache configuration properties
+    /// @param configuration injected Aeron configuration
     /// @param serializer serializer shared by the sender and receiver
     /// @return sender for timestamp cache events
     public synchronized AeronClusteredCacheMessageSender provideUpdateTimestampsCacheMessageSender(
-            @SuppressWarnings("rawtypes") final Map properties,
+            final AeronClusteredCacheConfiguration configuration,
             final Serializer<byte[]> serializer
     ) {
-        if (properties == null) {
-            throw new NullPointerException("properties");
-        }
+        Objects.requireNonNull(configuration, "configuration");
         Objects.requireNonNull(serializer, "serializer");
         this.ensureProviderOpen();
-        final byte[] senderId = this.ensureSenderId(properties);
-        final long offerTimeoutMillis = longProperty(properties,
-                AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, DEFAULT_OFFER_TIMEOUT_MILLIS, 0L);
-        final long offerTimeoutNanos;
-        try {
-            offerTimeoutNanos = Math.multiplyExact(offerTimeoutMillis, 1_000_000L);
-        } catch (final ArithmeticException failure) {
-            throw new IllegalArgumentException(
-                    "%s is too large: %s".formatted(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, offerTimeoutMillis), failure);
-        }
-        final int maxPayloadBytes = maxPayloadBytes(properties);
+        final byte[] senderId = this.ensureSenderId(configuration);
+        final long offerTimeoutNanos = configuration.offerTimeoutNanos();
+        final int maxPayloadBytes = configuration.maxPayloadBytes();
         if (this.receiverSerializer != null && this.receiverSerializer != serializer) {
             throw new IllegalArgumentException(
                     "The Aeron clustered-cache sender and receiver must use the same serializer");
@@ -242,10 +199,10 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         /* Validate every value that can reject the binding before starting an
          * embedded driver or acquiring the shared sequence lease. A malformed
          * first request must not leak a live Aeron runtime that no handle owns. */
-        final AeronClusteredCacheResources resources = this.ensureResources(properties);
+        final AeronClusteredCacheResources resources = this.ensureResources(configuration);
         final AeronClusteredCacheSenderSequence.SequenceLease sequence;
         try {
-            sequence = this.ensureSequence(properties);
+            sequence = this.ensureSequence(configuration);
         } catch (final RuntimeException | Error failure) {
             this.releaseSequenceIfUnused();
             this.closeUnboundResources(failure);
@@ -291,26 +248,24 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// before any resource is created so a conflicting call cannot strand a
     /// live runtime behind it.
     ///
-    /// @param properties      cache configuration properties
+    /// @param configuration   injected Aeron configuration
     /// @param serializer      serializer shared by the sender and receiver
     /// @param messageAcceptor target for received messages
     /// @return receiver for remote cache messages
     public synchronized AeronClusteredCacheMessageReceiver provideMessageReceiver(
-            @SuppressWarnings("rawtypes") final Map properties,
+            final AeronClusteredCacheConfiguration configuration,
             final Serializer<byte[]> serializer,
             final ClusteredCacheMessageAcceptor messageAcceptor
     ) {
-        if (properties == null) {
-            throw new NullPointerException("properties");
-        }
+        Objects.requireNonNull(configuration, "configuration");
         Objects.requireNonNull(serializer, "serializer");
         Objects.requireNonNull(messageAcceptor, "messageAcceptor");
         this.ensureProviderOpen();
         /* Validate the node id before creating resources so a conflicting second
          * call fails with IllegalArgumentException and cannot leave closed
          * resources behind for a retry. */
-        final byte[] senderId = this.ensureSenderId(properties);
-        final int maxPayloadBytes = maxPayloadBytes(properties);
+        final byte[] senderId = this.ensureSenderId(configuration);
+        final int maxPayloadBytes = configuration.maxPayloadBytes();
         if (this.senderSerializer != null && this.senderSerializer != serializer) {
             throw new IllegalArgumentException(
                     "The Aeron clustered-cache sender and receiver must use the same serializer");
@@ -327,7 +282,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             }
             return this.receiver;
         }
-        final AeronClusteredCacheResources resources = this.ensureResources(properties);
+        final AeronClusteredCacheResources resources = this.ensureResources(configuration);
         final AeronClusteredCacheMessageReceiver created;
         try {
             created = new AeronClusteredCacheMessageReceiver(
@@ -362,22 +317,20 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// providers in this JVM; a new JVM gets a new incarnation so its sequence
     /// restart cannot be mistaken for a lost frame. The identity is fixed on
     /// first use; a later call with a different node id is rejected.
-    private byte[] ensureSenderId(@SuppressWarnings("rawtypes") final Map properties) {
-        final String configured = stringProperty(
-                properties, AeronClusteredConfigurationPropertyNames.NODE_ID, null);
-        final UUID configuredUuid = configured == null ? null : parseNodeId(configured);
+    private byte[] ensureSenderId(final AeronClusteredCacheConfiguration configuration) {
+        final UUID configuredUuid = configuration.nodeId();
         final String normalized = configuredUuid == null ? null : configuredUuid.toString();
         if (this.senderId == null) {
             this.configuredNodeId = normalized;
             final UUID processIncarnation = PROCESS_INCARNATION.get();
-            this.senderId = configured == null
+            this.senderId = configuredUuid == null
                     ? uuidBytes(UUID.randomUUID())
                     : uuidBytes(new UUID(
                     processIncarnation.getMostSignificantBits() ^ configuredUuid.getMostSignificantBits(),
                     processIncarnation.getLeastSignificantBits() ^ configuredUuid.getLeastSignificantBits()));
         } else if (!Objects.equals(this.configuredNodeId, normalized)) {
             throw new IllegalArgumentException(
-                    "Conflicting %s: the provider is already bound to node id %s, requested %s".formatted(AeronClusteredConfigurationPropertyNames.NODE_ID, this.configuredNodeId, configured));
+                    "Conflicting node-id: the provider is already bound to node id %s, requested %s".formatted(this.configuredNodeId, normalized));
         }
         return this.senderId;
     }
@@ -387,13 +340,11 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// same channel. The entry survives provider disposal so sequence continuity
     /// is preserved while remote receivers remain attached.
     private AeronClusteredCacheSenderSequence.SequenceLease ensureSequence(
-            @SuppressWarnings("rawtypes") final Map properties
+            final AeronClusteredCacheConfiguration configuration
     ) {
         if (this.sequenceLease == null) {
-            final String channel = stringProperty(
-                    properties, AeronClusteredConfigurationPropertyNames.CHANNEL, DEFAULT_CHANNEL);
-            final int streamId = intProperty(
-                    properties, AeronClusteredConfigurationPropertyNames.STREAM_ID, DEFAULT_STREAM_ID, 0);
+            final String channel = configuration.channel();
+            final int streamId = configuration.streamId();
             if (this.configuredNodeId == null) {
                 this.sequenceLease = AeronClusteredCacheSenderSequence.SequenceLease.local();
                 this.sequenceLock = new Object();
@@ -434,24 +385,19 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         }
     }
 
-    private AeronClusteredCacheResources ensureResources(@SuppressWarnings("rawtypes") final Map properties) {
-        final String channel = stringProperty(
-                properties, AeronClusteredConfigurationPropertyNames.CHANNEL, DEFAULT_CHANNEL);
-        final int streamId = intProperty(
-                properties, AeronClusteredConfigurationPropertyNames.STREAM_ID, DEFAULT_STREAM_ID, 0);
-        final String directory = stringProperty(
-                properties, AeronClusteredConfigurationPropertyNames.DIRECTORY, null);
-        final long driverTimeoutMillis = longProperty(properties,
-                AeronClusteredConfigurationPropertyNames.DRIVER_TIMEOUT_MILLIS, DEFAULT_DRIVER_TIMEOUT_MILLIS, 1L);
-        final boolean embeddedDriver = booleanProperty(
-                properties, AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, false);
+    private AeronClusteredCacheResources ensureResources(final AeronClusteredCacheConfiguration configuration) {
+        final String channel = configuration.channel();
+        final int streamId = configuration.streamId();
+        final String directory = configuration.directory();
+        final long driverTimeoutMillis = configuration.driverTimeoutMillis();
+        final boolean embeddedDriver = configuration.embeddedDriver();
 
         if (this.resources == null) {
-            if (DEFAULT_CHANNEL.equals(channel)) {
-                LOGGER.log(System.Logger.Level.WARNING, "No %s configured; defaulting to aeron:ipc, which is single-host. Multi-host deployments must configure a UDP channel with control-mode=dynamic.".formatted(AeronClusteredConfigurationPropertyNames.CHANNEL));
+            if (AeronClusteredCacheConfiguration.DEFAULT_CHANNEL.equals(channel)) {
+                LOGGER.log(System.Logger.Level.WARNING, "No channel configured; defaulting to aeron:ipc, which is single-host. Multi-host deployments must configure a UDP channel with control-mode=dynamic.");
             }
             if (embeddedDriver && directory == null) {
-                LOGGER.log(System.Logger.Level.WARNING, "No %s configured with %s enabled; the embedded MediaDriver will use a generated private directory.".formatted(AeronClusteredConfigurationPropertyNames.DIRECTORY, AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER));
+                LOGGER.log(System.Logger.Level.WARNING, "No directory configured with embedded driver enabled; the embedded MediaDriver will use a generated private directory.");
             }
             validateChannel(channel, embeddedDriver);
             this.resources = new AeronClusteredCacheResources(

@@ -3,6 +3,7 @@ package peruncs.datagrid.cache.types;
 import org.eclipse.serializer.Serializer;
 import org.eclipse.serializer.SerializerFoundation;
 import org.eclipse.store.cache.hibernate.types.CacheRegionFactory;
+import org.eclipse.store.cache.hibernate.types.ConfigurationPropertyNames;
 import org.eclipse.store.cache.hibernate.types.StorageAccess;
 import org.eclipse.store.cache.types.CacheManager;
 import org.hibernate.boot.spi.SessionFactoryOptions;
@@ -11,21 +12,51 @@ import org.hibernate.cache.internal.DefaultCacheKeysFactory;
 import org.hibernate.cache.spi.CacheKeysFactory;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.hibernate.engine.spi.SharedSessionContractImplementor;
+import peruncs.datagrid.cache.aeron.AeronClusteredCacheConfiguration;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageCommunicationProvider;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageReceiver;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /// This region factory adds clustered invalidation to the Store cache factory.
 ///
 /// During preparation it creates one serializer, Aeron provider, receiver,
 /// and listener configuration for the session factory. During release it closes
 /// those resources before the base factory releases the local caches.
+///
+/// Hibernate hands settings to this factory as a raw string map. This factory
+/// is the only place that reads that dialect: it translates the keys below
+/// into an injected [AeronClusteredCacheConfiguration] once, and the Aeron
+/// core never sees the map.
 public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     private static final System.Logger LOGGER =
             System.getLogger(ClusteredCacheRegionFactory.class.getName());
+
+        /// Prefix shared by the clustered-cache Hibernate keys.
+    private static final String CLUSTERED_PREFIX = ConfigurationPropertyNames.PREFIX + "clustered.";
+        /// Prefix shared by the Aeron clustered-cache Hibernate keys.
+    private static final String AERON_PREFIX = CLUSTERED_PREFIX + "aeron.";
+        /// Key for the Aeron channel shared by all participants.
+    private static final String KEY_CHANNEL = AERON_PREFIX + "channel";
+        /// Key for the Aeron stream id shared by all participants.
+    private static final String KEY_STREAM_ID = AERON_PREFIX + "stream-id";
+        /// Key for the optional node identity shared by every provider of one node.
+    private static final String KEY_NODE_ID = AERON_PREFIX + "node-id";
+        /// Key for the optional Aeron driver directory.
+    private static final String KEY_DIRECTORY = AERON_PREFIX + "directory";
+        /// Key launching a private embedded MediaDriver.
+    private static final String KEY_EMBEDDED_DRIVER = AERON_PREFIX + "embedded-driver";
+        /// Key bounding the sender publication wait in millis.
+    private static final String KEY_OFFER_TIMEOUT_MILLIS = AERON_PREFIX + "offer-timeout-millis";
+        /// Key bounding the Aeron client driver connection wait in millis.
+    private static final String KEY_DRIVER_TIMEOUT_MILLIS = AERON_PREFIX + "driver-timeout-millis";
+        /// Key bounding the accepted serialized payload size.
+    private static final String KEY_MAX_PAYLOAD_BYTES = AERON_PREFIX + "max-payload-bytes";
+        /// Key selecting the serializer type provider instance.
+    private static final String KEY_SERIALIZATION_TYPES_PROVIDER = CLUSTERED_PREFIX + "serialization-types-provider";
 
         /// Listener configuration created during session-factory preparation.
     private volatile ClusteredCacheEntryListenerConfiguration cacheEntryListenerConfiguration;
@@ -48,11 +79,89 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
 
     private static ClusteredCacheEntryListenerConfiguration createEntryListenerConfiguration(
             final AeronClusteredCacheMessageCommunicationProvider comProvider,
-            @SuppressWarnings("rawtypes") final Map properties,
+            final AeronClusteredCacheConfiguration configuration,
             final Serializer<byte[]> serializer
     ) {
         return new ClusteredCacheEntryListenerConfiguration(
-                comProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer));
+                comProvider.provideUpdateTimestampsCacheMessageSender(configuration, serializer));
+    }
+
+        /// Translates the Hibernate setting map into the injected Aeron
+    /// configuration. Absent or blank values use the record defaults; malformed
+    /// values fail before any Aeron resource is opened.
+    ///
+    /// @param properties Hibernate cache properties
+    /// @return Aeron configuration for the sender and receiver
+    static AeronClusteredCacheConfiguration clusteredCacheConfiguration(
+            @SuppressWarnings("rawtypes") final Map properties
+    ) {
+        final String nodeId = stringProperty(properties, KEY_NODE_ID, null);
+        return new AeronClusteredCacheConfiguration(
+                stringProperty(properties, KEY_CHANNEL, AeronClusteredCacheConfiguration.DEFAULT_CHANNEL),
+                intProperty(properties, KEY_STREAM_ID, AeronClusteredCacheConfiguration.DEFAULT_STREAM_ID, 0),
+                nodeId == null ? null : parseNodeId(nodeId),
+                stringProperty(properties, KEY_DIRECTORY, null),
+                booleanProperty(properties, KEY_EMBEDDED_DRIVER, false),
+                longProperty(properties, KEY_DRIVER_TIMEOUT_MILLIS,
+                        AeronClusteredCacheConfiguration.DEFAULT_DRIVER_TIMEOUT_MILLIS, 1L),
+                longProperty(properties, KEY_OFFER_TIMEOUT_MILLIS,
+                        AeronClusteredCacheConfiguration.DEFAULT_OFFER_TIMEOUT_MILLIS, 0L),
+                intProperty(properties, KEY_MAX_PAYLOAD_BYTES,
+                        AeronClusteredCacheConfiguration.DEFAULT_MAX_PAYLOAD_BYTES, 1));
+    }
+
+    private static UUID parseNodeId(final String configured) {
+        try {
+            return UUID.fromString(configured);
+        } catch (final IllegalArgumentException failure) {
+            throw new IllegalArgumentException(
+                    "%s must be a UUID: %s".formatted(KEY_NODE_ID, configured), failure);
+        }
+    }
+
+    private static String stringProperty(
+            @SuppressWarnings("rawtypes") final Map properties, final String name, final String fallback) {
+        final Object configured = properties.get(name);
+        if (configured == null) return fallback;
+        final String value = configured.toString().trim();
+        return value.isEmpty() ? fallback : value;
+    }
+
+    private static int intProperty(
+            @SuppressWarnings("rawtypes") final Map properties,
+            final String name, final int fallback, final int minimum) {
+        final long value = longProperty(properties, name, fallback, minimum);
+        if (value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("%s must be an integer: %s".formatted(name, value));
+        }
+        return (int) value;
+    }
+
+    private static long longProperty(
+            @SuppressWarnings("rawtypes") final Map properties,
+            final String name, final long fallback, final long minimum) {
+        final String configured = stringProperty(properties, name, null);
+        if (configured == null) return fallback;
+        final long value;
+        try {
+            value = Long.parseLong(configured);
+        } catch (final NumberFormatException failure) {
+            throw new IllegalArgumentException("%s must be a long: %s".formatted(name, configured), failure);
+        }
+        if (value < minimum) {
+            throw new IllegalArgumentException("%s must be at least %s: %s".formatted(name, minimum, value));
+        }
+        return value;
+    }
+
+    private static boolean booleanProperty(
+            @SuppressWarnings("rawtypes") final Map properties, final String name, final boolean fallback) {
+        final String configured = stringProperty(properties, name, null);
+        if (configured == null) return fallback;
+        if (!"true".equalsIgnoreCase(configured) && !"false".equalsIgnoreCase(configured)) {
+            throw new IllegalArgumentException("%s must be true or false: %s".formatted(name, configured));
+        }
+        return Boolean.parseBoolean(configured);
     }
 
         /// Prepares the clustered resources for one session factory. The Aeron
@@ -72,10 +181,11 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
 
             final var comProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final var messageAcceptor = new ClusteredCacheMessageAcceptor(this.cacheManager);
+            final var configuration = clusteredCacheConfiguration(properties);
 
-            this.cacheMessageReceiver = comProvider.provideMessageReceiver(properties, serializer, messageAcceptor);
+            this.cacheMessageReceiver = comProvider.provideMessageReceiver(configuration, serializer, messageAcceptor);
             this.cacheEntryListenerConfiguration =
-                    createEntryListenerConfiguration(comProvider, properties, serializer);
+                    createEntryListenerConfiguration(comProvider, configuration, serializer);
             this.cacheMessageReceiver.start();
         } catch (final RuntimeException | Error failure) {
             try {
@@ -156,7 +266,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
             @SuppressWarnings("rawtypes") // superclass uses raw type
             final Map properties
     ) {
-        final Object setting = properties.get(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER);
+        final Object setting = properties.get(KEY_SERIALIZATION_TYPES_PROVIDER);
         if (setting == null) {
             return new SerializationTypesProvider.Default();
         }

@@ -31,16 +31,10 @@ import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.serializer;
 
 /// Verifies the Aeron clustered-cache provider over a real embedded MediaDriver.
 class AeronClusteredCacheMessageCommunicationProviderTest {
-    private static void provideSender(final Map<String, Object> properties) {
+    private static void provideSender(final AeronClusteredCacheConfiguration configuration) {
         new AeronClusteredCacheMessageCommunicationProvider()
-                .provideUpdateTimestampsCacheMessageSender(properties, serializer())
+                .provideUpdateTimestampsCacheMessageSender(configuration, serializer())
                 .dispose();
-    }
-
-    private static Map<String, Object> properties(final String name, final String value) {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put(name, value);
-        return properties;
     }
 
     private static MediaDriver launchDriver(final Path root) {
@@ -51,14 +45,51 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 .threadingMode(ThreadingMode.SHARED));
     }
 
-    private static Map<String, Object> properties(final Path driverDirectory) {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put(AeronClusteredConfigurationPropertyNames.CHANNEL, "aeron:ipc");
-        properties.put(AeronClusteredConfigurationPropertyNames.STREAM_ID, "2001");
-        properties.put(AeronClusteredConfigurationPropertyNames.DIRECTORY, driverDirectory.toString());
-        properties.put(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, "10000");
-        properties.put(AeronClusteredConfigurationPropertyNames.DRIVER_TIMEOUT_MILLIS, "10000");
-        return properties;
+    private static AeronClusteredCacheConfiguration configuration(final Path driverDirectory) {
+        return new AeronClusteredCacheConfiguration(
+                "aeron:ipc", 2001, null, driverDirectory.toString(), false, 10_000L, 10_000L, 1 << 20);
+    }
+
+    private static AeronClusteredCacheConfiguration withStreamId(
+            final AeronClusteredCacheConfiguration base, final int streamId) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), streamId, base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+    }
+
+    private static AeronClusteredCacheConfiguration withChannel(
+            final AeronClusteredCacheConfiguration base, final String channel) {
+        return new AeronClusteredCacheConfiguration(
+                channel, base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+    }
+
+    private static AeronClusteredCacheConfiguration withNodeId(
+            final AeronClusteredCacheConfiguration base, final UUID nodeId) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), nodeId, base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+    }
+
+    private static AeronClusteredCacheConfiguration withEmbeddedDriver(
+            final AeronClusteredCacheConfiguration base) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), true,
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+    }
+
+    private static AeronClusteredCacheConfiguration withOfferTimeoutMillis(
+            final AeronClusteredCacheConfiguration base, final long offerTimeoutMillis) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), offerTimeoutMillis, base.maxPayloadBytes());
+    }
+
+    private static AeronClusteredCacheConfiguration withMaxPayloadBytes(
+            final AeronClusteredCacheConfiguration base, final int maxPayloadBytes) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), maxPayloadBytes);
     }
 
     private static ClusteredCacheMessageAcceptor acceptor(final BlockingQueue<TimestampsRegionUpdateMessage> received) {
@@ -115,7 +146,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void invalidationReachesAnotherNode(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
 
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
@@ -154,7 +185,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void threeNodesSeeEveryInvalidation(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final BlockingQueue<TimestampsRegionUpdateMessage> first = new ArrayBlockingQueue<>(16);
             final BlockingQueue<TimestampsRegionUpdateMessage> second = new ArrayBlockingQueue<>(16);
 
@@ -189,9 +220,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void streamMismatchIsolatesProviders(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
-            final Map<String, Object> otherStream = new HashMap<>(properties);
-            otherStream.put(AeronClusteredConfigurationPropertyNames.STREAM_ID, "2002");
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+            final AeronClusteredCacheConfiguration otherStream = withStreamId(properties, 2002);
 
             final BlockingQueue<TimestampsRegionUpdateMessage> sameStream = new ArrayBlockingQueue<>(16);
             final BlockingQueue<TimestampsRegionUpdateMessage> other = new ArrayBlockingQueue<>(16);
@@ -226,8 +256,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void embeddedDriverSkipsItsOwnInvalidation(@TempDir final Path root) throws Exception {
         final CountDownLatch selfReceived = new CountDownLatch(1);
-        final Map<String, Object> properties = properties(root.resolve("driver"));
-        properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
+        AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+        properties = withEmbeddedDriver(properties);
         final var serializer = serializer();
 
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
@@ -257,8 +287,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void configuredNodeIdSuppressesOtherProvidersOnTheSameNode(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
-            properties.put(AeronClusteredConfigurationPropertyNames.NODE_ID, UUID.randomUUID().toString());
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+            properties = withNodeId(properties, UUID.randomUUID());
 
             final CountDownLatch selfReceived = new CountDownLatch(1);
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(1);
@@ -289,10 +319,9 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void recreatingAProviderKeepsSequenceContinuity(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
             final String nodeId = UUID.randomUUID().toString();
-            final Map<String, Object> senderProperties = properties(root.resolve("driver"));
-            senderProperties.put(AeronClusteredConfigurationPropertyNames.NODE_ID, nodeId);
-            final Map<String, Object> observerProperties = new HashMap<>(senderProperties);
-            observerProperties.remove(AeronClusteredConfigurationPropertyNames.NODE_ID);
+            AeronClusteredCacheConfiguration senderProperties = configuration(root.resolve("driver"));
+            senderProperties = withNodeId(senderProperties, UUID.fromString(nodeId));
+            final AeronClusteredCacheConfiguration observerProperties = withNodeId(senderProperties, null);
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(4);
             final AeronClusteredCacheMessageCommunicationProvider observerProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
@@ -324,9 +353,9 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void senderFailsWhenNoPeerIsConnected(@TempDir final Path root) {
-        final Map<String, Object> properties = properties(root.resolve("driver"));
-        properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
-        properties.put(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, "250");
+        AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+        properties = withEmbeddedDriver(properties);
+        properties = withOfferTimeoutMillis(properties, 250L);
 
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
@@ -345,9 +374,9 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void senderDisposeDoesNotCloseAnInFlightPublication(@TempDir final Path root) throws Exception {
-        final Map<String, Object> properties = properties(root.resolve("driver"));
-        properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
-        properties.put(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, "6000");
+        AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+        properties = withEmbeddedDriver(properties);
+        properties = withOfferTimeoutMillis(properties, 6000L);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
                 provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
@@ -386,7 +415,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void malformedFrameFailsClosedBeforeLaterInvalidations(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
 
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
@@ -398,8 +427,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 try (Aeron aeron = Aeron.connect(new Aeron.Context()
                         .aeronDirectoryName(root.resolve("driver").toString()))) {
                     final Publication raw = aeron.addPublication(
-                            (String) properties.get(AeronClusteredConfigurationPropertyNames.CHANNEL),
-                            Integer.parseInt((String) properties.get(AeronClusteredConfigurationPropertyNames.STREAM_ID)));
+                            properties.channel(), properties.streamId());
                     awaitConnected(raw);
                     final UnsafeBuffer truncated =
                             new UnsafeBuffer(new byte[AeronClusteredCacheMessageCodec.HEADER_LENGTH - 1]);
@@ -435,8 +463,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void timedOutOfferDoesNotConsumeASequence(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
-            properties.put(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, "1");
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+            properties = withOfferTimeoutMillis(properties, 1L);
             final var serializer = serializer();
             final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
@@ -472,7 +500,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void acceptorFailureStopsReceiverAndIsObservable(@TempDir final Path root) {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
@@ -506,8 +534,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void oversizedPayloadFailsTheSend() {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put(AeronClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES, "16");
+        final AeronClusteredCacheConfiguration properties =
+                withMaxPayloadBytes(AeronClusteredCacheConfiguration.defaults(), 16);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
                 provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
@@ -522,8 +550,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void disposedSenderFailsTheCacheOperation() {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put(AeronClusteredConfigurationPropertyNames.CHANNEL, "aeron:ipc");
+        final AeronClusteredCacheConfiguration properties = AeronClusteredCacheConfiguration.defaults();
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
                 provider.provideUpdateTimestampsCacheMessageSender(properties, serializer());
@@ -536,8 +563,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void disposeIsIdempotent(@TempDir final Path root) {
-        final Map<String, Object> properties = properties(root.resolve("driver"));
-        properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
+        AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+        properties = withEmbeddedDriver(properties);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final var serializer = serializer();
         final AeronClusteredCacheMessageSender sender =
@@ -554,7 +581,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void disposedReceiverIsSingleUse(@TempDir final Path root) {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
                     provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1)));
@@ -569,7 +596,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void receiverIsRunningReflectsLifecycle(@TempDir final Path root) {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
                     provider.provideMessageReceiver(properties, serializer(), acceptor(new ArrayBlockingQueue<>(1)));
@@ -585,7 +612,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void blockedReceiverDisposeIsBoundedAndRetryable(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final CountDownLatch entered = new CountDownLatch(1);
             final CountDownLatch release = new CountDownLatch(1);
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
@@ -647,7 +674,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void providerResourcesAreTerminalAfterFullDispose(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
             final var serializer = serializer();
             final ClusteredCacheMessageAcceptor acceptor = acceptor(received);
@@ -677,7 +704,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void providerReturnsOneOwnedSenderAndReceiverAndRejectsRebind(@TempDir final Path root) {
-        final Map<String, Object> properties = properties(root.resolve("driver"));
+        AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final var serializer = serializer();
         final ClusteredCacheMessageAcceptor acceptor = acceptor(new ArrayBlockingQueue<>(1));
@@ -701,8 +728,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void disposedHandlesAreNeverReturnedAgain(@TempDir final Path root) {
-        final Map<String, Object> properties = properties(root.resolve("driver"));
-        properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
+        final AeronClusteredCacheConfiguration properties =
+                withEmbeddedDriver(configuration(root.resolve("driver")));
         final var serializer = serializer();
         final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                 new AeronClusteredCacheMessageCommunicationProvider();
@@ -734,14 +761,11 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void conflictingConfigurationIsRejected() {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put(AeronClusteredConfigurationPropertyNames.CHANNEL, "aeron:ipc");
-        properties.put(AeronClusteredConfigurationPropertyNames.STREAM_ID, "2001");
+        final AeronClusteredCacheConfiguration properties = AeronClusteredCacheConfiguration.defaults();
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         provider.provideUpdateTimestampsCacheMessageSender(properties, serializer()).dispose();
 
-        final Map<String, Object> conflicting = new HashMap<>(properties);
-        conflicting.put(AeronClusteredConfigurationPropertyNames.STREAM_ID, "2002");
+        final AeronClusteredCacheConfiguration conflicting = withStreamId(properties, 2002);
         assertThrows(IllegalStateException.class,
                 () -> provider.provideMessageReceiver(conflicting, serializer(),
                         acceptor(new ArrayBlockingQueue<>(1))),
@@ -750,14 +774,12 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void conflictingNodeIdIsRejected() {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put(AeronClusteredConfigurationPropertyNames.CHANNEL, "aeron:ipc");
-        properties.put(AeronClusteredConfigurationPropertyNames.NODE_ID, UUID.randomUUID().toString());
+        AeronClusteredCacheConfiguration properties = AeronClusteredCacheConfiguration.defaults();
+        properties = withNodeId(properties, UUID.randomUUID());
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         provider.provideUpdateTimestampsCacheMessageSender(properties, serializer()).dispose();
 
-        final Map<String, Object> conflicting = new HashMap<>(properties);
-        conflicting.put(AeronClusteredConfigurationPropertyNames.NODE_ID, UUID.randomUUID().toString());
+        final AeronClusteredCacheConfiguration conflicting = withNodeId(properties, UUID.randomUUID());
         assertThrows(IllegalStateException.class,
                 () -> provider.provideMessageReceiver(conflicting, serializer(),
                         acceptor(new ArrayBlockingQueue<>(1))),
@@ -768,7 +790,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void gapInSenderSequenceIsDetected(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
 
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
@@ -780,8 +802,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 try (Aeron aeron = Aeron.connect(new Aeron.Context()
                         .aeronDirectoryName(root.resolve("driver").toString()))) {
                     final Publication raw = aeron.addPublication(
-                            (String) properties.get(AeronClusteredConfigurationPropertyNames.CHANNEL),
-                            Integer.parseInt((String) properties.get(AeronClusteredConfigurationPropertyNames.STREAM_ID)));
+                            properties.channel(), properties.streamId());
                     awaitConnected(raw);
 
                     final byte[] otherSender = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.BIG_ENDIAN)
@@ -819,7 +840,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void concurrentPublishersDeliverEveryInvalidation(@TempDir final Path root) throws Exception {
         try (MediaDriver driver = launchDriver(root)) {
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(64);
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
 
             final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
                     new AeronClusteredCacheMessageCommunicationProvider();
@@ -879,7 +900,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void receiverFailsClosedWhenSenderIdentityCardinalityIsUnbounded(@TempDir final Path root) {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
                     provider.provideMessageReceiver(
@@ -889,8 +910,7 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 try (Aeron aeron = Aeron.connect(new Aeron.Context()
                         .aeronDirectoryName(root.resolve("driver").toString()))) {
                     final Publication raw = aeron.addPublication(
-                            (String) properties.get(AeronClusteredConfigurationPropertyNames.CHANNEL),
-                            Integer.parseInt((String) properties.get(AeronClusteredConfigurationPropertyNames.STREAM_ID)));
+                            properties.channel(), properties.streamId());
                     try {
                         awaitConnected(raw);
                         final byte[] payload = AeronClusteredCachePayloadCodec.encode(
@@ -924,13 +944,12 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     @Test
     void sharedNodeIdDoesNotCreateFalseGaps(@TempDir final Path root) {
         try (MediaDriver driver = launchDriver(root)) {
-            final Map<String, Object> properties = properties(root.resolve("driver"));
+            AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
             final String nodeId = UUID.randomUUID().toString();
-            properties.put(AeronClusteredConfigurationPropertyNames.NODE_ID, nodeId);
+            properties = withNodeId(properties, UUID.fromString(nodeId));
             /* The observer is a different node and must not share the node id,
              * otherwise it would self-suppress every observed frame. */
-            final Map<String, Object> observerProperties = new HashMap<>(properties);
-            observerProperties.remove(AeronClusteredConfigurationPropertyNames.NODE_ID);
+            final AeronClusteredCacheConfiguration observerProperties = withNodeId(properties, null);
 
             final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(32);
             final AeronClusteredCacheMessageCommunicationProvider observerProvider =
@@ -985,14 +1004,12 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     void sharedNodeIdOnDifferentStreamsDoesNotCreateFalseGaps(@TempDir final Path root) {
         try (MediaDriver driver = launchDriver(root)) {
             final String nodeId = UUID.randomUUID().toString();
-            final Map<String, Object> streamA = properties(root.resolve("driver"));
-            streamA.put(AeronClusteredConfigurationPropertyNames.NODE_ID, nodeId);
-            final Map<String, Object> streamB = new HashMap<>(streamA);
-            streamB.put(AeronClusteredConfigurationPropertyNames.STREAM_ID, "2002");
-            final Map<String, Object> observerA = new HashMap<>(streamA);
-            observerA.remove(AeronClusteredConfigurationPropertyNames.NODE_ID);
-            final Map<String, Object> observerB = new HashMap<>(streamB);
-            observerB.remove(AeronClusteredConfigurationPropertyNames.NODE_ID);
+            AeronClusteredCacheConfiguration streamA = configuration(root.resolve("driver"));
+            streamA = withNodeId(streamA, UUID.fromString(nodeId));
+            AeronClusteredCacheConfiguration streamB = streamA;
+            streamB = withStreamId(streamB, 2002);
+            final AeronClusteredCacheConfiguration observerA = withNodeId(streamA, null);
+            final AeronClusteredCacheConfiguration observerB = withNodeId(streamB, null);
 
             final BlockingQueue<TimestampsRegionUpdateMessage> receivedA = new ArrayBlockingQueue<>(16);
             final BlockingQueue<TimestampsRegionUpdateMessage> receivedB = new ArrayBlockingQueue<>(16);
@@ -1047,53 +1064,45 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     @Test
     void invalidConfigurationIsRejected() {
+        final AeronClusteredCacheConfiguration valid = AeronClusteredCacheConfiguration.defaults();
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.STREAM_ID, "-1")));
+                () -> withStreamId(valid, -1));
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "maybe")));
+                () -> withMaxPayloadBytes(valid, 0));
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES, "0")));
+                () -> withMaxPayloadBytes(valid, Integer.MAX_VALUE));
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.MAX_PAYLOAD_BYTES,
-                        Integer.toString(Integer.MAX_VALUE))));
+                () -> withOfferTimeoutMillis(valid, Long.MAX_VALUE));
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL, "not-a-channel")));
+                () -> withNodeId(valid, new UUID(0L, 0L)));
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS,
-                        Long.toString(Long.MAX_VALUE))));
+                () -> provideSender(withChannel(valid, "not-a-channel")));
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL,
-                        "aeron:udp?endpoint=localhost:40123")),
+                () -> provideSender(withChannel(valid, "aeron:udp?endpoint=localhost:40123")),
                 "unicast UDP cannot deliver N-to-N invalidations and must be rejected");
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL,
-                        "aeron:udp?endpoint=0.0.0.0:40123|control-mode=dynamic")),
+                () -> provideSender(withChannel(valid, "aeron:udp?endpoint=0.0.0.0:40123|control-mode=dynamic")),
                 "wildcard endpoints must be rejected");
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL,
+                () -> provideSender(withChannel(valid,
                         "aeron:udp?endpoint=10.0.0.1:40123|control=0.0.0.0:40124|control-mode=dynamic")),
                 "wildcard control endpoints must be rejected");
         assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.NODE_ID, "not-a-uuid")),
-                "an invalid node id must be rejected");
-        assertThrows(IllegalArgumentException.class,
-                () -> provideSender(properties(AeronClusteredConfigurationPropertyNames.CHANNEL,
+                () -> provideSender(withChannel(valid,
                         "aeron:udp?endpoint=localhost:40123|control-mode=dynamic")),
                 "loopback UDP outside an embedded driver must be rejected");
     }
 
     @Test
-    void nodeIdWhitespaceIsNormalizedAcrossRepeatedBindings() {
+    void sameNodeIdAcrossRepeatedBindingsReturnsTheSender() {
         final UUID nodeId = UUID.randomUUID();
-        final Map<String, Object> firstProperties = properties(
-                AeronClusteredConfigurationPropertyNames.NODE_ID, "  %s  ".formatted(nodeId));
-        final Map<String, Object> secondProperties = properties(
-                AeronClusteredConfigurationPropertyNames.NODE_ID, nodeId.toString());
+        final AeronClusteredCacheConfiguration first = withNodeId(AeronClusteredCacheConfiguration.defaults(), nodeId);
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final var serializer = serializer();
-        final AeronClusteredCacheMessageSender first =
-                provider.provideUpdateTimestampsCacheMessageSender(firstProperties, serializer);
-        assertSame(first, provider.provideUpdateTimestampsCacheMessageSender(secondProperties, serializer));
-        first.dispose();
+        final AeronClusteredCacheMessageSender sender =
+                provider.provideUpdateTimestampsCacheMessageSender(first, serializer);
+        assertSame(sender, provider.provideUpdateTimestampsCacheMessageSender(
+                withNodeId(AeronClusteredCacheConfiguration.defaults(), nodeId), serializer));
+        sender.dispose();
     }
 }

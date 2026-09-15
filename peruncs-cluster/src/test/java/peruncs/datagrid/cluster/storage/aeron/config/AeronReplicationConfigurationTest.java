@@ -39,21 +39,20 @@ class AeronReplicationConfigurationTest {
         assertEquals(4 * 1024 * 1024, configuration.maxMessageLength());
     }
 
-        /// Verifies that all tunable limits are read from properties.
+        /// Verifies that all tunable limits are set through the typed builder.
     @Test
-    void readsAllTunableLimitsFromProperties() {
-        final java.util.Properties properties = new java.util.Properties();
-        properties.setProperty(AeronReplicationConfiguration.TERM_LENGTH_PROPERTY, "1048576");
-        properties.setProperty(AeronReplicationConfiguration.MTU_LENGTH_PROPERTY, "1024");
-        properties.setProperty(AeronReplicationConfiguration.CHUNK_SIZE_PROPERTY, "32768");
-        properties.setProperty(AeronReplicationConfiguration.MAX_TRANSACTION_BYTES_PROPERTY, "262144");
-        properties.setProperty(AeronReplicationConfiguration.OFFER_TIMEOUT_NANOS_PROPERTY, "5000");
-        properties.setProperty(AeronReplicationConfiguration.RECORDING_START_TIMEOUT_NANOS_PROPERTY, "6000");
-        properties.setProperty(AeronReplicationConfiguration.RECORDED_POSITION_TIMEOUT_NANOS_PROPERTY, "7000");
-        properties.setProperty(AeronReplicationConfiguration.RECORDING_STOP_TIMEOUT_NANOS_PROPERTY, "8000");
-        properties.setProperty(AeronReplicationConfiguration.DURABILITY_MODE_PROPERTY, "enqueue-then-archive");
-
-        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.from(properties);
+    void readsAllTunableLimitsFromTheBuilder() {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(1048576)
+                .mtuLength(1024)
+                .chunkSize(32768)
+                .maxTransactionBytes(262144)
+                .offerTimeoutNanos(5000)
+                .recordingStartTimeoutNanos(6000)
+                .recordedPositionTimeoutNanos(7000)
+                .recordingStopTimeoutNanos(8000)
+                .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
+                .build();
         assertEquals(1024, configuration.mtuLength());
         assertEquals(32768, configuration.chunkSize());
         assertEquals(262144, configuration.maxTransactionBytes());
@@ -102,38 +101,10 @@ class AeronReplicationConfigurationTest {
                 .build());
     }
 
-        /// Verifies rejection of invalid properties before aeron starts.
+        /// Verifies rejection of a null durability mode through the builder.
     @Test
-    void rejectsInvalidPropertiesBeforeAeronStarts() {
-        final java.util.Properties properties = new java.util.Properties();
-        properties.setProperty(AeronReplicationConfiguration.DURABILITY_MODE_PROPERTY, "unknown");
-        assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.from(properties));
-        assertThrows(NullPointerException.class, () -> AeronReplicationConfiguration.from(null));
-    }
-
-        /// The Store API has no durable-first callback, so the mode is not part of the Aeron contract.
-    @Test
-    void rejectsRemovedLocalDurableFirstMode() {
-        final java.util.Properties properties = new java.util.Properties();
-        properties.setProperty(AeronReplicationConfiguration.DURABILITY_MODE_PROPERTY, "local-durable-first");
-        assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.from(properties));
-    }
-
-        /// Verifies reporting of invalid numeric properties with their key.
-    @Test
-    void reportsInvalidNumericPropertiesWithTheirKey() {
-        final java.util.Properties properties = new java.util.Properties();
-        properties.setProperty(AeronReplicationConfiguration.MTU_LENGTH_PROPERTY, "not-a-number");
-        final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
-                () -> AeronReplicationConfiguration.from(properties));
-        assertTrue(failure.getMessage().contains(AeronReplicationConfiguration.MTU_LENGTH_PROPERTY));
-    }
-
-        /// Unknown Aeron-prefixed settings must not be silently ignored.
-    @Test
-    void rejectsUnknownAeronProperties() {
-        final java.util.Properties properties = new java.util.Properties();
-        properties.setProperty("eclipsestore.distribution.aeron.typo", "true");
-        assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.from(properties));
+    void rejectsNullDurabilityMode() {
+        assertThrows(NullPointerException.class, () -> AeronReplicationConfiguration.builder()
+                .durabilityMode(null));
     }
 }

@@ -1,15 +1,13 @@
 package peruncs.datagrid.cache.types;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cache.aeron.AeronClusteredCacheConfiguration;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageCommunicationProvider;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageSender;
-import peruncs.datagrid.cache.aeron.AeronClusteredConfigurationPropertyNames;
 
 import javax.cache.configuration.CacheEntryListenerConfiguration;
 import javax.cache.event.CacheEntryListenerException;
 import javax.cache.event.EventType;
-import java.util.HashMap;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.publish;
@@ -17,21 +15,16 @@ import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.serializer;
 
 /// Verifies the listener configuration owns its sender and disposes it once.
 class ClusteredCacheEntryListenerConfigurationTest {
-    private static Map<String, Object> properties() {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put(AeronClusteredConfigurationPropertyNames.CHANNEL, "aeron:ipc");
-        properties.put(AeronClusteredConfigurationPropertyNames.STREAM_ID, "2001");
-        properties.put(AeronClusteredConfigurationPropertyNames.EMBEDDED_DRIVER, "true");
-        properties.put(AeronClusteredConfigurationPropertyNames.OFFER_TIMEOUT_MILLIS, "10000");
-        properties.put(AeronClusteredConfigurationPropertyNames.DRIVER_TIMEOUT_MILLIS, "10000");
-        return properties;
+    private static AeronClusteredCacheConfiguration configuration() {
+        return new AeronClusteredCacheConfiguration(
+                "aeron:ipc", 2001, null, null, true, 10_000L, 10_000L, 1 << 20);
     }
 
     @Test
     void disposeIsIdempotentAndFailsClosed() {
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties(), serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(configuration(), serializer());
         final ClusteredCacheEntryListenerConfiguration configuration =
                 new ClusteredCacheEntryListenerConfiguration(sender);
 
@@ -47,7 +40,7 @@ class ClusteredCacheEntryListenerConfigurationTest {
     void listenerFactoryReturnsTheSender() {
         final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
-                provider.provideUpdateTimestampsCacheMessageSender(properties(), serializer());
+                provider.provideUpdateTimestampsCacheMessageSender(configuration(), serializer());
         final ClusteredCacheEntryListenerConfiguration configuration =
                 new ClusteredCacheEntryListenerConfiguration(sender);
         try {
