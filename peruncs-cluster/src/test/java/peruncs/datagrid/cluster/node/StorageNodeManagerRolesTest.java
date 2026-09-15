@@ -59,8 +59,7 @@ class StorageNodeManagerRolesTest {
                 stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
                 stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
                 stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron");
-        final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(
-                manager, NodeLibraryPropertiesProvider.Env());
+        final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager);
 
         final HttpResponseException start = assertThrows(
                 HttpResponseException.class, controller::postActivateDistributorStart);

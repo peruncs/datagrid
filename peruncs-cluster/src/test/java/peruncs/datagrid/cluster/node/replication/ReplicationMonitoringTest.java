@@ -1,15 +1,16 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.StorageNodeManager;
 import peruncs.datagrid.cluster.node.http.ClusterRestRequestController;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Tests replication monitoring behavior.
 class ReplicationMonitoringTest {
-        /// Verifies that Aeron transport state, lag, and readiness are exposed as Prometheus metrics.
+        /// Verifies that Aeron transport state, lag, and readiness are exposed as raw values.
     @Test
     void exposesAeronTransportStateLagAndReadinessAsPrometheusMetrics() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {
@@ -56,15 +57,16 @@ class ReplicationMonitoringTest {
             }
         };
 
-        final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(
-                manager, NodeLibraryPropertiesProvider.Env());
-        final String metrics = controller.getReplicationMetrics();
-        assertTrue(metrics.contains("cluster_replication_current_sequence{transport=\"aeron\"} 7"));
-        assertTrue(metrics.contains("cluster_replication_latest_sequence{transport=\"aeron\"} 10"));
-        assertTrue(metrics.contains("cluster_replication_lag_transactions{transport=\"aeron\"} 3"));
-        assertTrue(metrics.contains("state=\"replaying\""));
-        assertTrue(metrics.contains("cluster_replication_ready{transport=\"aeron\"} 0"));
-        assertTrue(metrics.contains("cluster_replication_healthy{transport=\"aeron\"} 1"));
+        final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager);
+        final var metrics = controller.getReplicationMetrics();
+        assertEquals(7, metrics.currentSequence());
+        assertEquals(10, metrics.latestSequence());
+        assertEquals(3, metrics.lagTransactions());
+        assertEquals("aeron", metrics.transport());
+        assertEquals(ReplicationHealth.State.REPLAYING, metrics.state());
+        assertFalse(metrics.ready());
+        assertTrue(metrics.healthy());
+        assertEquals(123, controller.getStorageBytes());
         controller.close();
     }
 }

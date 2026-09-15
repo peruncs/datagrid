@@ -96,7 +96,7 @@ public final class StorageNodeRestRouteConfigurations {
                 /// Replication-metrics endpoint path.
         public static final String PATH = "/replication-metrics";
                 /// Replication-metrics response media type.
-        public static final String PRODUCES = MediaTypes.TEXT_PLAIN;
+        public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
         private GetReplicationMetrics() {
         }
@@ -115,27 +115,10 @@ public final class StorageNodeRestRouteConfigurations {
         }
 
                 /// Request body that selects the manual backup slot.
-        public static final class Body {
-            private Boolean useManualSlot;
-
-                        /// Creates an empty backup request body.
-            public Body() {
-            }
-
-                        /// Returns whether the manual slot was requested.
-            ///
-            /// @return manual-slot flag
-            public Boolean getUseManualSlot() {
-                return this.useManualSlot;
-            }
-
-                        /// Sets whether the manual slot is requested.
-            ///
-            /// @param useManualSlot manual-slot flag
-            public void setUseManualSlot(final Boolean useManualSlot) {
-                this.useManualSlot = useManualSlot;
-            }
-        }
+        ///
+        /// @param useManualSlot whether the manual slot was requested
+    public record Body(Boolean useManualSlot) {
+    }
     }
 
         /// Reads whether a backup is running.

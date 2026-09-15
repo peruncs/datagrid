@@ -868,9 +868,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             this.getStorageBinaryDataClient().start();
 
             this.clusterRequestController = ClusterRestRequestController.BackupNode(
-                    this.getBackupNodeManager(),
-                    this.getNodeLibraryPropertiesProvider()
-            );
+                    this.getBackupNodeManager());
 
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->
@@ -955,10 +953,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
 
             this.getStorageNodeHealthCheck().init();
 
-            this.clusterRequestController = ClusterRestRequestController.StorageNode(
-                    this.getStorageNodeManager(),
-                    this.getNodeLibraryPropertiesProvider()
-            );
+            this.clusterRequestController = ClusterRestRequestController.StorageNode(this.getStorageNodeManager());
 
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->
@@ -1050,7 +1045,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     storage,
                     this::closeReplicationTransportAndPositionProvider
             );
-            this.clusterRequestController = ClusterRestRequestController.DevNode();
+            this.clusterRequestController = ClusterRestRequestController.NoEndpoints();
         }
 
         private void deleteDirectory(final Path path) {
