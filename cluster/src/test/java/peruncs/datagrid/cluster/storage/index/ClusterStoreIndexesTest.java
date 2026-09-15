@@ -10,21 +10,18 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Checks the cluster index boundary and the Store lifecycle it protects.
- *
- * <p>The test deliberately exercises mutations, Store reload, text search,
- * vector search, and vectorizer reuse. A directory configuration is not a
- * supported fallback, so both index families must fail before registration
- * can create one.</p>
- */
+/// Checks the cluster index boundary and the Store lifecycle it protects.
+///
+/// The test deliberately exercises mutations, Store reload, text search,
+/// vector search, and vectorizer reuse. A directory configuration is not a
+/// supported fallback, so both index families must fail before registration
+/// can create one.
 @SuppressWarnings("unchecked")
 class ClusterStoreIndexesTest {
     private static final AtomicInteger VECTORIZE_CALLS = new AtomicInteger();

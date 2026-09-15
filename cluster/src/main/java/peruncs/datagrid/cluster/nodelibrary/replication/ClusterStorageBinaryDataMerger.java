@@ -16,7 +16,6 @@ import org.slf4j.Logger;
 import peruncs.datagrid.cluster.nodelibrary.exceptions.IncompatibleTypeDictionaryException;
 import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.storage.types.*;
-import peruncs.datagrid.cluster.storage.types.*;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -29,25 +28,21 @@ import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * Applies committed Store binary data on a reader node.
- *
- * <p>Incoming buffers are imported into the local Store immediately and then
- * coalesced for object-graph updates on a bounded single-thread executor.
- * Providers must call this merger only after their transport-specific commit
- * validation has completed.</p>
- */
+/// Applies committed Store binary data on a reader node.
+///
+/// Incoming buffers are imported into the local Store immediately and then
+/// coalesced for object-graph updates on a bounded single-thread executor.
+/// Providers must call this merger only after their transport-specific commit
+/// validation has completed.
 public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger, Disposable {
-    /**
-     * Creates a merger with bounded deferred materialization.
-     *
-     * @param foundation               persistence foundation
-     * @param storage                  Store connection
-     * @param objectGraphUpdateHandler graph update handler
-     * @param cachingTimeoutMs         maximum wait for a cached batch
-     * @param cachedBinaryLimit        maximum cached binary count
-     * @return binary merger
-     */
+        /// Creates a merger with bounded deferred materialization.
+    ///
+    /// @param foundation               persistence foundation
+    /// @param storage                  Store connection
+    /// @param objectGraphUpdateHandler graph update handler
+    /// @param cachingTimeoutMs         maximum wait for a cached batch
+    /// @param cachedBinaryLimit        maximum cached binary count
+    /// @return binary merger
     static ClusterStorageBinaryDataMerger New(
             final BinaryPersistenceFoundation<?> foundation,
             final StorageConnection storage,
@@ -64,28 +59,26 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
         );
     }
 
-    /**
-     * Returns an asynchronous materialization failure, or {@code null} while healthy.
-     *
-     * @return terminal failure, or {@code null}
-     */
+        /// Returns an asynchronous materialization failure, or `null` while healthy.
+    ///
+    /// @return terminal failure, or `null`
     default RuntimeException failure() {
         return null;
     }
 
-    /** Wait until the latest accepted import has completed object-graph materialization. */
+        /// Wait until the latest accepted import has completed object-graph materialization.
     default void awaitApplied() {
     }
 
-    /** Supplies conservative defaults for deferred object-graph application. */
+        /// Supplies conservative defaults for deferred object-graph application.
     interface Defaults {
-        /** Default cache timeout in milliseconds. */
+                /// Default cache timeout in milliseconds.
         long CACHING_TIMEOUT_MS = 10_000L;
-        /** Default cached binary count. */
+                /// Default cached binary count.
         long CACHING_LIMIT = 50L;
     }
 
-    /** Applies imported data on one bounded worker and reports failures. */
+        /// Applies imported data on one bounded worker and reports failures.
     class Default implements ClusterStorageBinaryDataMerger {
         private static final Logger LOG = Logging.getLogger(ClusterStorageBinaryDataMerger.class);
         private static final long MAX_CACHED_BYTES = 1L << 30;
@@ -131,11 +124,9 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
             this.cacheLimit = cacheLimit;
         }
 
-        /**
-         * Aeron transfers its assembled direct buffers before this callback starts.
-         *
-         * @return {@code true} because this merger releases the transferred buffers
-         */
+                /// Aeron transfers its assembled direct buffers before this callback starts.
+        ///
+        /// @return `true` because this merger releases the transferred buffers
         @Override
         public boolean canReceiveDataOwned() {
             return true;
@@ -161,7 +152,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
             this.scheduleMaterialization(ownedBuffers);
         }
 
-        /** Imports Aeron-owned direct buffers without a second native allocation. */
+                /// Imports Aeron-owned direct buffers without a second native allocation.
         @Override
         public boolean receiveDataOwned(final Binary data) {
             final ByteBuffer[] buffers = StorageBinaryDataChunker.ownedArray(
@@ -427,6 +418,15 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
             }
         }
 
+        /// Merges the writer's type dictionary: unknown types gain handlers,
+        /// structurally conflicting types fail the merger terminally.
+        ///
+        /// Newly registered definitions are persisted immediately, before the
+        /// transaction's binary is imported, so a restart can still resolve
+        /// every imported type id. The first failure is recorded and rethrown
+        /// on every later call; a failed merger never accepts more work.
+        ///
+        /// @param typeDictionaryData writer's type dictionary snapshot
         @Override
         public void receiveTypeDictionary(final String typeDictionaryData) {
             if (this.failure.get() != null) {
@@ -453,8 +453,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
 
                     } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
                         throw new IncompatibleTypeDictionaryException(
-                                "Remote type definition conflicts with local definition: "
-                                + localType + " <> " + remoteType
+                                "Remote type definition conflicts with local definition: %s <> %s".formatted(localType, remoteType)
                         );
                     }
                 });
@@ -471,6 +470,13 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
             }
         }
 
+        /// Shuts the materialization worker down, freeing native buffers only
+        /// once the worker truly owns nothing.
+        ///
+        /// The worker gets an orderly window first, then an interrupt window;
+        /// a timeout stays retryable instead of latching the merger into a
+        /// state where later cleanups silently do nothing. Buffers are
+        /// released only after termination is confirmed, never speculatively.
         @Override
         public void dispose() {
             /* A timeout is retryable: the worker may still own native buffers.  Do
@@ -506,6 +512,17 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
             }
         }
 
+        /// Blocks until the received binary is materialized into the object graph.
+        ///
+        /// This is the durability boundary behind replication cursors and
+        /// acknowledgements: it bypasses the normal coalescing delay, which
+        /// would otherwise add the full cache timeout to every commit, and
+        /// drains under the worker's own lock. The worker is woken with a flag
+        /// plus notification so no wake-up is lost, but never interrupted —
+        /// it may be mid-materialization and an interrupt could leave the
+        /// graph half-applied. A bounded wait that expires, or any worker
+        /// failure, fails the merger terminally; only safely queued buffers
+        /// are released, since the timed-out batch may still be owned.
         @Override
         public void awaitApplied() {
             if (this.failure.get() != null) {

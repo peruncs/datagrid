@@ -6,7 +6,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Smoke checks the benchmark's accounting without imposing machine-specific performance limits. */
+/// Smoke checks the benchmark's accounting without imposing machine-specific performance limits.
 class AeronEnvelopeBenchmarkTest {
     @Test
     void measuresChunkedCopyAndThroughput() {

@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Smoke tests the complete publisher staging benchmark without machine-specific limits. */
+/// Smoke tests the complete publisher staging benchmark without machine-specific limits.
 class AeronPublisherBenchmarkTest {
     @Test
     void measuresCopiesOffersAndAllocation() {

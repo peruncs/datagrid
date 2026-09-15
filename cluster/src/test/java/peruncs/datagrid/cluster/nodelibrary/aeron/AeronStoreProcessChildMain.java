@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.UnaryOperator;
 
-/** Forked real-Store writer used to prove channel routing across process restart. */
+/// Forked real-Store writer used to prove channel routing across process restart.
 public final class AeronStoreProcessChildMain {
     private AeronStoreProcessChildMain() {
     }
@@ -30,7 +30,7 @@ public final class AeronStoreProcessChildMain {
         if (arguments.length != 1) throw new IllegalArgumentException("mode is required");
         final String mode = arguments[0];
         if (!mode.equals("initial") && !mode.equals("restart") && !mode.equals("dictionary"))
-            throw new IllegalArgumentException("unknown Store process mode: " + mode);
+            throw new IllegalArgumentException("unknown Store process mode: %s".formatted(mode));
         final Path root = Path.of(System.getProperty("dg.aeron.store.root"));
         final UUID clusterId = UUID.fromString(System.getProperty("dg.aeron.store.cluster"));
         final UUID nodeId = UUID.fromString(System.getProperty("dg.aeron.store.node"));
@@ -75,7 +75,7 @@ public final class AeronStoreProcessChildMain {
                 final EmbeddedStorageManager manager;
                 if (mode.equals("initial")) {
                     final Root value = new Root();
-                    for (int i = 0; i < 2_048; i++) value.objects.add(new StoreType("object-" + i));
+                    for (int i = 0; i < 2_048; i++) value.objects.add(new StoreType("object-%s".formatted(i)));
                     manager = foundation.start(value);
                     try {
                         manager.storeRoot();
@@ -108,8 +108,7 @@ public final class AeronStoreProcessChildMain {
                 }
                 final long sequence = transport.positionProvider("store").latestSequence();
                 Files.writeString(root.resolve("control").resolve(mode),
-                        "channels=" + sawFourChannels.get() + ";dictionaries=" + dictionaryChunks.get() +
-                        ";sequence=" + sequence);
+                        "channels=%s;dictionaries=%s;sequence=%s".formatted(sawFourChannels.get(), dictionaryChunks.get(), sequence));
             } finally {
                 AeronCrashHooks.clear();
             }
@@ -168,7 +167,7 @@ public final class AeronStoreProcessChildMain {
         }
     }
 
-    /** Entity introduced only by the rejection/retry phase of the process fixture. */
+        /// Entity introduced only by the rejection/retry phase of the process fixture.
     public static final class RetryType {
         public final String value;
 

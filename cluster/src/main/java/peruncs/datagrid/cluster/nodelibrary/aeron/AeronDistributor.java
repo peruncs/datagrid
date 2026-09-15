@@ -10,12 +10,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 
-/**
- * The Aeron distributor state shared with the Store integration.
- * Data publication is intentionally rejected here. Aeron Store writes must use
- * the provider's persistence-target factory so local acceptance, Archive
- * publication, and checkpoint fencing share one transaction owner.
- */
+/// The Aeron distributor state shared with the Store integration.
+/// Data publication is intentionally rejected here. Aeron Store writes must use
+/// the provider's persistence-target factory so local acceptance, Archive
+/// publication, and checkpoint fencing share one transaction owner.
 final class AeronDistributor implements ClusterStorageBinaryDataDistributor {
     private final BooleanSupplier writer;
     private final LongConsumer sequenceSynchronizer;
@@ -75,7 +73,7 @@ final class AeronDistributor implements ClusterStorageBinaryDataDistributor {
                 "Aeron Store binaries must be written through the replication persistence target");
     }
 
-    /** The provider owns the shared Aeron/archive runtime. */
+        /// The provider owns the shared Aeron/archive runtime.
     @Override
     public void dispose() {
     }

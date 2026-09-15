@@ -19,7 +19,7 @@ import java.util.function.Supplier;
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.WARNING;
 
-/** Owns one node's MediaDriver, Aeron client, and Archive client lifecycle. */
+/// Owns one node's MediaDriver, Aeron client, and Archive client lifecycle.
 final class AeronRuntime implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(AeronRuntime.class.getName());
     private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;
@@ -52,7 +52,7 @@ final class AeronRuntime implements AutoCloseable {
                                     final String resource) {
         if (additional == null) return current;
         final Throwable normalized = additional instanceof RuntimeException || additional instanceof Error
-                ? additional : new IllegalStateException("failed to close " + resource, additional);
+                ? additional : new IllegalStateException("failed to close %s".formatted(resource), additional);
         if (current == null) return normalized;
         if (current != normalized) current.addSuppressed(normalized);
         return current;
@@ -93,14 +93,12 @@ final class AeronRuntime implements AutoCloseable {
         ensurePrivateDirectory(path, false);
     }
 
-    /**
-     * Creates a private Aeron directory and optionally fails closed when the
-     * filesystem cannot enforce owner-only permissions.
-     *
-     * @param path                         directory to create
-     * @param failIfPermissionsUnsupported whether a production caller must reject
-     *                                     a filesystem without POSIX permission support
-     */
+        /// Creates a private Aeron directory and optionally fails closed when the
+    /// filesystem cannot enforce owner-only permissions.
+    ///
+    /// @param path                         directory to create
+    /// @param failIfPermissionsUnsupported whether a production caller must reject
+    ///                                     a filesystem without POSIX permission support
     static void ensurePrivateDirectory(final Path path, final boolean failIfPermissionsUnsupported) {
         try {
             if (path == null) throw new NullPointerException("path");
@@ -110,13 +108,13 @@ final class AeronRuntime implements AutoCloseable {
                         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
             } catch (final UnsupportedOperationException ignored) {
                 if (failIfPermissionsUnsupported) {
-                    throw new IOException("Aeron production directories require owner-only permissions: " + path);
+                    throw new IOException("Aeron production directories require owner-only permissions: %s".formatted(path));
                 }
                 LOGGER.log(WARNING, "Aeron directory filesystem does not support POSIX permissions: %s".formatted(path));
                 Files.createDirectories(path);
             }
             if (!Files.isDirectory(path)) throw new IOException("path is not a directory");
-            if (Files.isSymbolicLink(path)) throw new IOException("symbolic-link directory is not allowed: " + path);
+            if (Files.isSymbolicLink(path)) throw new IOException("symbolic-link directory is not allowed: %s".formatted(path));
             try {
                 Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"));
             } catch (final UnsupportedOperationException ignored) {
@@ -130,13 +128,11 @@ final class AeronRuntime implements AutoCloseable {
         }
     }
 
-    /**
-     * Rejects a path that reaches its directory through a symbolic-link
-     * component. Checking only the final path is insufficient: a link in a
-     * parent component can redirect driver, Archive, or checkpoint files outside
-     * the operator-owned directory after validation. Missing components are
-     * ignored and are created only after this check.
-     */
+        /// Rejects a path that reaches its directory through a symbolic-link
+    /// component. Checking only the final path is insufficient: a link in a
+    /// parent component can redirect driver, Archive, or checkpoint files outside
+    /// the operator-owned directory after validation. Missing components are
+    /// ignored and are created only after this check.
     private static void rejectSymbolicLinkComponents(final Path path) throws IOException {
         final Path absolute = path.toAbsolutePath().normalize();
         Path current = absolute.getRoot();
@@ -254,7 +250,7 @@ final class AeronRuntime implements AutoCloseable {
         if (failure != null) throw new IllegalStateException("failed to close Aeron runtime", failure);
     }
 
-    /** Exhaustively releases every owned resource and aggregates close failures. */
+        /// Exhaustively releases every owned resource and aggregates close failures.
     private Throwable closeAllQuietly() {
         Throwable failure = null;
         if (this.archive != null) {

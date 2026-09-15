@@ -2,21 +2,17 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import org.agrona.DirectBuffer;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronOfferRetryer;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationPublisher;
 
 import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
 import java.util.UUID;
 
-/**
- * Test-side benchmark for the complete publisher staging path.
- *
- * <p>It runs the same data-chunk copy, CRC, envelope encoding, and terminal
- * marker path as a writer, using a non-blocking offerer instead of an Archive.
- * It reports bytes copied and allocated per transaction without adding a
- * benchmark dependency or production runtime code.</p>
- */
+/// Test-side benchmark for the complete publisher staging path.
+///
+/// It runs the same data-chunk copy, CRC, envelope encoding, and terminal
+/// marker path as a writer, using a non-blocking offerer instead of an Archive.
+/// It reports bytes copied and allocated per transaction without adding a
+/// benchmark dependency or production runtime code.
 public final class AeronPublisherBenchmark {
     private AeronPublisherBenchmark() {
     }
@@ -36,15 +32,14 @@ public final class AeronPublisherBenchmark {
         }
         final Result result = measure(payloadLength, chunkSize, sourceBuffers, warmup, iterations);
         System.out.printf(
-                "payload=%d chunks=%d sources=%d iterations=%d ns/tx=%.1f MiB/s=%.1f " +
-                "copiedBytes/tx=%d offeredBytes/tx=%d allocatedBytes/tx=%s%n",
+                "payload=%d chunks=%d sources=%d iterations=%d ns/tx=%.1f MiB/s=%.1f copiedBytes/tx=%d offeredBytes/tx=%d allocatedBytes/tx=%s%n",
                 result.payloadLength(), result.chunkCount(), result.sourceBuffers(), result.iterations(),
                 result.nanosecondsPerTransaction(), result.mebibytesPerSecond(), result.copiedBytesPerTransaction(),
                 result.offeredBytesPerTransaction(),
                 result.allocatedBytesPerTransaction() < 0 ? "unavailable" : Long.toString(result.allocatedBytesPerTransaction()));
     }
 
-    /** Measures publisher copy, CRC, envelope, and terminal-marker work. */
+        /// Measures publisher copy, CRC, envelope, and terminal-marker work.
     static Result measure(
             final int payloadLength, final int chunkSize, final int sourceBuffers, final int warmup, final int iterations) {
         if (payloadLength <= 0 || chunkSize <= 0 || sourceBuffers <= 0 || warmup < 0 || iterations <= 0)

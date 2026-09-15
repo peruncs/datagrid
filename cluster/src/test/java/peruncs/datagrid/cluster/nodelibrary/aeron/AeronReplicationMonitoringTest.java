@@ -16,7 +16,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies provider health reflects writer readiness and checkpoint state. */
+/// Verifies provider health reflects writer readiness and checkpoint state.
 class AeronReplicationMonitoringTest {
     private static NodelibraryPropertiesProvider properties(final String role) {
         return propertiesWith(role, null, null);
@@ -31,7 +31,7 @@ class AeronReplicationMonitoringTest {
             final String role, final String overrideName, final String overrideValue, final boolean production) {
         final String clusterId = UUID.randomUUID().toString();
         final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
-                "datagrid-aeron-monitoring-" + UUID.randomUUID());
+                "datagrid-aeron-monitoring-%s".formatted(UUID.randomUUID()));
         return new NodelibraryPropertiesProvider.Env() {
             @Override
             public String replicationRole() {
@@ -71,7 +71,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-    /** Verifies writer provider exposes aeron and reports live without reader client. */
+        /// Verifies writer provider exposes aeron and reports live without reader client.
     @Test
     void writerProviderExposesAeronAndReportsLiveWithoutReaderClient() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -92,7 +92,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-    /** Verifies position provider uses self describing recording position. */
+        /// Verifies position provider uses self describing recording position.
     @Test
     void positionProviderUsesSelfDescribingRecordingPosition() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -108,7 +108,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-    /** The embedded writer commits through its local Archive spy with no remote reader. */
+        /// The embedded writer commits through its local Archive spy with no remote reader.
     @Test
     void writerCommitsWithoutRemoteReader() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -129,7 +129,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-    /** Verifies Store binaries cannot bypass the fenced persistence target. */
+        /// Verifies Store binaries cannot bypass the fenced persistence target.
     @Test
     void distributorRejectsDataWithoutAStoreTarget() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -151,7 +151,7 @@ class AeronReplicationMonitoringTest {
         assertEquals(-1L, distributor.messageIndex());
     }
 
-    /** Retention must fail explicitly while authenticated watermarks are absent. */
+        /// Retention must fail explicitly while authenticated watermarks are absent.
     @Test
     void retentionRejectsDeletionUntilWatermarksAreConfigured() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -161,7 +161,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-    /** Verifies reader provider surfaces replay and failure states. */
+        /// Verifies reader provider surfaces replay and failure states.
     @Test
     void readerProviderSurfacesReplayAndFailureStates() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -185,7 +185,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-    /** Verifies rejection of invalid aeron epoch and stream settings. */
+        /// Verifies rejection of invalid aeron epoch and stream settings.
     @Test
     void rejectsInvalidAeronEpochAndStreamSettings() {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
@@ -194,14 +194,14 @@ class AeronReplicationMonitoringTest {
                 .create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_STREAM_ID", "-1")));
     }
 
-    /** Rejects an invalid Archive free-space admission threshold. */
+        /// Rejects an invalid Archive free-space admission threshold.
     @Test
     void rejectsNegativeArchiveCapacityThreshold() {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
                 .create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES", "-1")));
     }
 
-    /** The writer admission gate and health state fail closed when usable space is below the threshold. */
+        /// The writer admission gate and health state fail closed when usable space is below the threshold.
     @Test
     void reportsArchiveCapacityDegradationBeforeAcceptingWrites() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -217,7 +217,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-    /** Rejects channel framing overrides that disagree with the shared configuration. */
+        /// Rejects channel framing overrides that disagree with the shared configuration.
     @Test
     void rejectsConflictingChannelFraming() {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
@@ -228,7 +228,7 @@ class AeronReplicationMonitoringTest {
                         "aeron:udp?endpoint=localhost:0|mtu=1024k")));
     }
 
-    /** Writer topology validation is semantic, not a substring match. */
+        /// Writer topology validation is semantic, not a substring match.
     @Test
     void rejectsNonDynamicWriterTopology() {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
@@ -239,7 +239,7 @@ class AeronReplicationMonitoringTest {
                         "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=min")));
     }
 
-    /** Verifies rejection of malformed numeric and production temporary directory settings. */
+        /// Verifies rejection of malformed numeric and production temporary directory settings.
     @Test
     void rejectsMalformedNumericAndProductionTemporaryDirectorySettings() {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
@@ -270,7 +270,7 @@ class AeronReplicationMonitoringTest {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider().create(production));
     }
 
-    /** Production mode rejects the two common configuration forms that weaken network/durability guarantees. */
+        /// Production mode rejects the two common configuration forms that weaken network/durability guarantees.
     @Test
     void rejectsProductionSyncLevelZeroAndIpv6Wildcard() {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()

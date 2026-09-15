@@ -11,7 +11,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies the region factory health gate and serializer provider resolution. */
+/// Verifies the region factory health gate and serializer provider resolution.
 class ClusteredCacheRegionFactoryTest {
     @Test
     void failClosedStorageAccessRefusesOperationsAfterReceiverFailure() {
@@ -95,7 +95,7 @@ class ClusteredCacheRegionFactoryTest {
                 "a configured class with the wrong serialization contract must fail at configuration time");
     }
 
-    /** Types provider with a public no-argument constructor. */
+        /// Types provider with a public no-argument constructor.
     public static final class PublicTypesProvider implements SerializationTypesProvider {
         public PublicTypesProvider() {
         }

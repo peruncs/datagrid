@@ -1,8 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
-import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
 
 import java.nio.file.Files;
@@ -13,7 +11,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Verifies that restart records survive only as complete, checksummed files. */
+/// Verifies that restart records survive only as complete, checksummed files.
 class AeronReplicationCheckpointStoreTest {
     private static AeronReplicationCheckpoint checkpoint() {
         return new AeronReplicationCheckpoint(
@@ -24,7 +22,7 @@ class AeronReplicationCheckpointStoreTest {
         );
     }
 
-    /** Verifies round-tripping of the fixed recovery record. */
+        /// Verifies round-tripping of the fixed recovery record.
     @Test
     void roundTripsFixedRecoveryRecord() throws Exception {
         final Path path = Files.createTempFile("datagrid-checkpoint", ".bin");
@@ -35,7 +33,7 @@ class AeronReplicationCheckpointStoreTest {
         Files.deleteIfExists(path);
     }
 
-    /** Verifies rejection of torn and corrupt records. */
+        /// Verifies rejection of torn and corrupt records.
     @Test
     void rejectsTornAndCorruptRecords() throws Exception {
         final Path path = Files.createTempFile("datagrid-checkpoint", ".bin");
@@ -50,7 +48,7 @@ class AeronReplicationCheckpointStoreTest {
         Files.deleteIfExists(path);
     }
 
-    /** Verifies atomically replaces existing checkpoint and creates parent. */
+        /// Verifies atomically replaces existing checkpoint and creates parent.
     @Test
     void atomicallyReplacesExistingCheckpointAndCreatesParent() throws Exception {
         final Path directory = Files.createTempDirectory("datagrid-checkpoint-parent");
@@ -75,7 +73,7 @@ class AeronReplicationCheckpointStoreTest {
         }
     }
 
-    /** Verifies rejection of invalid checkpoint fields at construction. */
+        /// Verifies rejection of invalid checkpoint fields at construction.
     @Test
     void rejectsInvalidCheckpointFieldsAtConstruction() {
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
@@ -120,7 +118,7 @@ class AeronReplicationCheckpointStoreTest {
         }
     }
 
-    /** Reader uncertainty markers use cursor crash phases, never writer checkpoint phases. */
+        /// Reader uncertainty markers use cursor crash phases, never writer checkpoint phases.
     @Test
     void readerCursorUsesCursorCrashPhases() throws Exception {
         final Path path = Files.createTempFile("datagrid-reader-cursor", ".bin");

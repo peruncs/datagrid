@@ -18,16 +18,14 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/** Applies imported Store binaries and schedules object-graph refresh work. */
+/// Applies imported Store binaries and schedules object-graph refresh work.
 public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver {
-    /**
-     * Creates a merger for one Store connection.
-     *
-     * @param foundation               persistence foundation used for remote types
-     * @param storage                  Store connection that receives data
-     * @param objectGraphUpdateHandler callback that protects graph updates
-     * @return configured merger
-     */
+        /// Creates a merger for one Store connection.
+    ///
+    /// @param foundation               persistence foundation used for remote types
+    /// @param storage                  Store connection that receives data
+    /// @param objectGraphUpdateHandler callback that protects graph updates
+    /// @return configured merger
     static StorageBinaryDataMerger New(
             final BinaryPersistenceFoundation<?> foundation,
             final StorageConnection storage,
@@ -40,7 +38,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver {
         );
     }
 
-    /** Imports each binary and schedules its graph update. */
+        /// Imports each binary and schedules its graph update.
     class Default implements StorageBinaryDataMerger {
         private static final System.Logger LOGGER =
                 System.getLogger(StorageBinaryDataMerger.class.getName());
@@ -141,13 +139,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver {
                 {
                     final PersistenceTypeDefinition localType = localTypeDictionary.lookupTypeById(remoteType.typeId());
                     if (localType == null) {
-                        LOGGER.log(System.Logger.Level.DEBUG, "New type: " + remoteType.typeName());
+                        LOGGER.log(System.Logger.Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
                         this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
 
                     } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
                         throw new StorageBinaryDataException(
-                                "Remote type definition conflicts with local definition: "
-                                + localType + " <> " + remoteType
+                                "Remote type definition conflicts with local definition: %s <> %s".formatted(localType, remoteType)
                         );
                     }
                 });

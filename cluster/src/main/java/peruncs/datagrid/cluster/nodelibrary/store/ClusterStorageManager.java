@@ -23,25 +23,21 @@ import java.util.function.Predicate;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This storage manager adds cluster shutdown and size checks to Store.
- *
- * <p>The wrapper keeps the Store API visible while adding the node's shutdown
- * callback. The full implementation also validates storage size before writes
- * and routes graph updates through the cluster lock.</p>
- *
- * @param <T> root type
- */
+/// This storage manager adds cluster shutdown and size checks to Store.
+///
+/// The wrapper keeps the Store API visible while adding the node's shutdown
+/// callback. The full implementation also validates storage size before writes
+/// and routes graph updates through the cluster lock.
+///
+/// @param <T> root type
 public interface ClusterStorageManager<T> extends StorageManager {
-    /**
-     * Creates a manager with size validation and shutdown handling.
-     *
-     * @param <T>                   root type
-     * @param delegate              Store manager
-     * @param storageSizeValidation size validation policy
-     * @param shutdownCallback      shutdown callback
-     * @return cluster storage manager
-     */
+        /// Creates a manager with size validation and shutdown handling.
+    ///
+    /// @param <T>                   root type
+    /// @param delegate              Store manager
+    /// @param storageSizeValidation size validation policy
+    /// @param shutdownCallback      shutdown callback
+    /// @return cluster storage manager
     static <T> ClusterStorageManager<T> New(
             final StorageManager delegate,
             final StorageSizeValidation storageSizeValidation,
@@ -50,7 +46,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
         return new Default<>(notNull(delegate), notNull(storageSizeValidation), notNull(shutdownCallback));
     }
 
-    /** Runs the node callback and always gives the Store a chance to shut down. */
+        /// Runs the node callback and always gives the Store a chance to shut down.
     private static boolean shutdownWithCallback(
             final StorageManager delegate, final ShutdownCallback shutdownCallback) {
         Throwable failure = null;
@@ -71,14 +67,12 @@ public interface ClusterStorageManager<T> extends StorageManager {
         return result;
     }
 
-    /**
-     * Creates a manager that only adds shutdown handling.
-     *
-     * @param <T>              root type
-     * @param delegate         Store manager
-     * @param shutdownCallback shutdown callback
-     * @return cluster storage manager
-     */
+        /// Creates a manager that only adds shutdown handling.
+    ///
+    /// @param <T>              root type
+    /// @param delegate         Store manager
+    /// @param shutdownCallback shutdown callback
+    /// @return cluster storage manager
     static <T> ClusterStorageManager<T> Wrapper(final StorageManager delegate, final ShutdownCallback shutdownCallback) {
         return new Wrapper<>(notNull(delegate), notNull(shutdownCallback));
     }
@@ -90,21 +84,19 @@ public interface ClusterStorageManager<T> extends StorageManager {
     @Override
     ClusterStorageManager<T> start() throws NodelibraryException;
 
-    /** Runs node-specific work immediately before Store shuts down. */
+        /// Runs node-specific work immediately before Store shuts down.
     interface ShutdownCallback {
-        /**
-         * Creates a callback that does nothing.
-         *
-         * @return no-op callback
-         */
+                /// Creates a callback that does nothing.
+        ///
+        /// @return no-op callback
         static ShutdownCallback NoOp() {
             return new NoOp();
         }
 
-        /** Runs node-specific shutdown work. */
+                /// Runs node-specific shutdown work.
         void onShutdown();
 
-        /** A callback for applications that need no shutdown action. */
+                /// A callback for applications that need no shutdown action.
         final class NoOp implements ShutdownCallback {
             private NoOp() {
             }
@@ -116,21 +108,17 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
     }
 
-    /** Reports whether the configured storage limit has been reached. */
+        /// Reports whether the configured storage limit has been reached.
     interface StorageSizeValidation {
-        /**
-         * Reports whether another Store write must be rejected.
-         *
-         * @return {@code true} when the limit is reached
-         */
+                /// Reports whether another Store write must be rejected.
+        ///
+        /// @return `true` when the limit is reached
         boolean isStorageLimitReached();
     }
 
-    /**
-     * Adds the shutdown callback while delegating every Store operation.
-     *
-     * @param <T> root type
-     */
+        /// Adds the shutdown callback while delegating every Store operation.
+    ///
+    /// @param <T> root type
     class Wrapper<T> implements ClusterStorageManager<T> {
         private static final Logger LOG = LoggerFactory.getLogger(Wrapper.class);
 
@@ -338,11 +326,9 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
     }
 
-    /**
-     * Adds size validation and distributed graph-write behavior to Store.
-     *
-     * @param <T> root type
-     */
+        /// Adds size validation and distributed graph-write behavior to Store.
+    ///
+    /// @param <T> root type
     class Default<T> implements ClusterStorageManager<T> {
         private static final Logger LOG = LoggerFactory.getLogger(Default.class);
         private final StorageSizeValidation storageSizeValidation;
@@ -608,7 +594,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
             return this.delegate.exportAdjacencyData(workingDir);
         }
 
-        /** Adapts the cluster manager to Store's binary persistence manager. */
+                /// Adapts the cluster manager to Store's binary persistence manager.
         private final class BinaryPersistenceManagerAdapter implements PersistenceManager<Binary> {
             private final PersistenceManager<Binary> delegate;
 
@@ -800,7 +786,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
             }
         }
 
-        /** Registers binary types through the cluster manager boundary. */
+                /// Registers binary types through the cluster manager boundary.
         private final class ClusterPersistenceRegistererAdapter implements PersistenceRegisterer {
             private final PersistenceRegisterer delegate;
 
@@ -827,7 +813,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
             }
         }
 
-        /** Stores binary entities while applying the cluster's size rules. */
+                /// Stores binary entities while applying the cluster's size rules.
         private final class ClusterPersistenceStorerAdapter extends ClusterStorerAdapter implements PersistenceStorer {
             private final PersistenceStorer delegate;
 
@@ -858,7 +844,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
             }
         }
 
-        /** Delegates Store storer operations while preserving cluster checks. */
+                /// Delegates Store storer operations while preserving cluster checks.
         private class ClusterStorerAdapter implements Storer {
             private final Storer storer;
 

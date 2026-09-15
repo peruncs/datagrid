@@ -2,7 +2,6 @@ package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -11,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Tests storage binary data distributor behavior. */
+/// Tests storage binary data distributor behavior.
 class StorageBinaryDataDistributorTest {
     private static Thread thread(
             final String name,
@@ -33,7 +32,7 @@ class StorageBinaryDataDistributorTest {
         }, name);
     }
 
-    /** Verifies preservation of concurrent type dictionaries with their committing thread. */
+        /// Verifies preservation of concurrent type dictionaries with their committing thread.
     @Test
     void keepsConcurrentTypeDictionariesWithTheirCommittingThread()
             throws Exception {
@@ -71,7 +70,7 @@ class StorageBinaryDataDistributorTest {
         assertEquals("dictionary-2", dictionaries.get("writer-2"));
     }
 
-    /** Verifies that the dictionary is cleared after delegate failure. */
+        /// Verifies that the dictionary is cleared after delegate failure.
     @Test
     void clearsDictionaryAfterDelegateFailure() {
         final AtomicInteger dictionaryCalls = new AtomicInteger();

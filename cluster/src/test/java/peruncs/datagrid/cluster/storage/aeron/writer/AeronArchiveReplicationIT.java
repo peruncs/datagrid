@@ -8,7 +8,6 @@ import io.aeron.driver.ThreadingMode;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.RecordingInspector;
 import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeronArchive;
@@ -25,7 +24,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies that an Archive recording can be written, inspected, and extended. */
+/// Verifies that an Archive recording can be written, inspected, and extended.
 class AeronArchiveReplicationIT {
     private static final String CONTROL_RESPONSE_CHANNEL = "aeron:udp?endpoint=localhost:0";
 
@@ -48,7 +47,7 @@ class AeronArchiveReplicationIT {
         final Path root = Files.createTempDirectory(prefix);
         final Path aeronDirectory = root.resolve("aeron");
         final Path archiveDirectory = root.resolve("archive");
-        final String controlChannel = "aeron:udp?endpoint=localhost:" + controlPort;
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
         final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
@@ -114,14 +113,14 @@ class AeronArchiveReplicationIT {
         }
     }
 
-    /** Verifies corrupted recording payload fails archive inspection. */
+        /// Verifies corrupted recording payload fails archive inspection.
     @Test
     void corruptedRecordingPayloadFailsArchiveInspection() throws Exception {
         final int controlPort = freePort();
         final String directory = Files.createTempDirectory("datagrid-aeron-corrupt-").toString();
         final String aeronDirectory = Path.of(directory, "aeron").toString();
         final File archiveDirectory = new File(directory, "archive");
-        final String controlChannel = "aeron:udp?endpoint=localhost:" + controlPort;
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
         final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
@@ -162,7 +161,7 @@ class AeronArchiveReplicationIT {
                         .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
                 try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(restartMedia, restartArchive);
                      AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
-                    RecordingInspector.inspect(archive, recordingId, "aeron:udp?endpoint=localhost:" + freePort(),
+                    RecordingInspector.inspect(archive, recordingId, "aeron:udp?endpoint=localhost:%s".formatted(freePort()),
                             1001, clusterId, 2, 10_000);
                 }
             } catch (final Throwable corruptionDetected) {
@@ -175,7 +174,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-    /** Verifies truncated archive catalog cannot silently create a replacement recording. */
+        /// Verifies truncated archive catalog cannot silently create a replacement recording.
     @Test
     void truncatedArchiveCatalogCannotSilentlyCreateAReplacementRecording() throws Exception {
         final ArchiveFixture fixture = createStoppedRecording("datagrid-aeron-catalog-");
@@ -208,7 +207,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-    /** Verifies truncated recording frame fails archive inspection. */
+        /// Verifies truncated recording frame fails archive inspection.
     @Test
     void truncatedRecordingFrameFailsArchiveInspection() throws Exception {
         final ArchiveFixture fixture = createStoppedRecording("datagrid-aeron-tail-");
@@ -233,7 +232,7 @@ class AeronArchiveReplicationIT {
                 try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(media, archiveContext);
                      AeronArchive archive = AeronArchive.connect(clientContext)) {
                     RecordingInspector.inspect(archive, fixture.recordingId(),
-                            "aeron:udp?endpoint=localhost:" + freePort(), 1001, fixture.clusterId(), 2, 10_000,
+                            "aeron:udp?endpoint=localhost:%s".formatted(freePort()), 1001, fixture.clusterId(), 2, 10_000,
                             fixture.stopPosition());
                 }
             } catch (final Throwable corruptionDetected) {
@@ -246,7 +245,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-    /** Verifies fragmented data and its terminal marker are inspected across poll boundaries. */
+        /// Verifies fragmented data and its terminal marker are inspected across poll boundaries.
     @Test
     void fragmentedTailIsInspectedAcrossPollBoundaries() throws Exception {
         final ArchiveFixture fixture = createStoppedRecording("datagrid-aeron-fragmented-tail-");
@@ -264,7 +263,7 @@ class AeronArchiveReplicationIT {
             try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(media, archiveContext);
                  AeronArchive archive = AeronArchive.connect(clientContext)) {
                 final RecordingInspector.RecordingEvidence evidence = RecordingInspector.inspect(
-                        archive, fixture.recordingId(), "aeron:udp?endpoint=localhost:" + freePort(), 1001,
+                        archive, fixture.recordingId(), "aeron:udp?endpoint=localhost:%s".formatted(freePort()), 1001,
                         fixture.clusterId(), 2, 10_000, fixture.stopPosition(), 1);
                 assertEquals(AeronReplicationEnvelope.Kind.COMMIT,
                         evidence.terminalBySequence().get(0L));
@@ -276,13 +275,13 @@ class AeronArchiveReplicationIT {
         }
     }
 
-    /** Verifies replays recorded udp messages and joins live. */
+        /// Verifies replays recorded udp messages and joins live.
     @Test
     void replaysRecordedUdpMessagesAndJoinsLive() throws Exception {
         final int controlPort = freePort();
         final String directory = Files.createTempDirectory("datagrid-aeron-").toString();
         final File archiveDirectory = new File(directory, "archive");
-        final String controlChannel = "aeron:udp?endpoint=localhost:" + controlPort;
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
         // Archive control and replay are UDP; IPC is used only for the local
         // recorded publication so this test is deterministic on CI hosts.
         final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
@@ -401,9 +400,9 @@ class AeronArchiveReplicationIT {
                     archive.getStopPosition(recordingId) >= finalStop &&
                     archive.getStopPosition(recordingId) > archive.getStartPosition(recordingId), 10_000);
             final RecordingInspector.RecordingEvidence evidence = RecordingInspector.inspect(
-                    archive, recordingId, "aeron:udp?endpoint=localhost:" + freePort(), 1001, clusterId, 2, 10_000);
+                    archive, recordingId, "aeron:udp?endpoint=localhost:%s".formatted(freePort()), 1001, clusterId, 2, 10_000);
             assertEquals(AeronReplicationEnvelope.Kind.COMMIT, evidence.terminalBySequence().get(0L),
-                    "terminals=" + evidence.terminalBySequence() + " payloads=" + evidence.payloadCrcBySequence());
+                    "terminals=%s payloads=%s".formatted(evidence.terminalBySequence(), evidence.payloadCrcBySequence()));
             assertEquals(AeronReplicationEnvelope.Kind.COMMIT, evidence.terminalBySequence().get(1L));
             assertEquals(AeronReplicationEnvelope.Kind.COMMIT, evidence.terminalBySequence().get(2L));
             assertEquals(0L, evidence.orphanTailLength());
@@ -413,17 +412,15 @@ class AeronArchiveReplicationIT {
         }
     }
 
-    /**
-     * A closed Archive must not make the publisher report a successful close while
-     * its recording may still be active. The wrapper is retained so a caller can
-     * retry the Archive stop after reconnecting the control client.
-     */
+        /// A closed Archive must not make the publisher report a successful close while
+    /// its recording may still be active. The wrapper is retained so a caller can
+    /// retry the Archive stop after reconnecting the control client.
     @Test
     void archiveStopFailureKeepsPublisherOpenForRetry() throws Exception {
         final int controlPort = freePort();
         final String directory = Files.createTempDirectory("datagrid-aeron-close-").toString();
         final File archiveDirectory = new File(directory, "archive");
-        final String controlChannel = "aeron:udp?endpoint=localhost:" + controlPort;
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
         final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)

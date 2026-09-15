@@ -1,23 +1,21 @@
-/**
- * This module runs a Data Grid node with Aeron replication.
- *
- * <p>It defines the node lifecycle in {@code ...cluster.nodelibrary.node},
- * storage adaptation in {@code ...cluster.nodelibrary.store}, backup in
- * {@code ...cluster.nodelibrary.backup}, replication in
- * {@code ...cluster.nodelibrary.replication}, and the HTTP surface in
- * {@code ...cluster.nodelibrary.http}, implemented by the Aeron transport in
- * {@code ...cluster.nodelibrary.aeron}. Store binary movement lives in
- * {@code ...cluster.storage.types}, carried by
- * {@code ...cluster.storage.aeron.*}, with the embedded Lucene/JVector
- * index policy in {@code ...cluster.storage.index}. Aeron is the only
- * transport.</p>
- *
- * <p>Applications create the node services, start them in dependency order,
- * and close them in reverse order. The exported packages contain the public
- * contracts and errors used at those boundaries.</p>
- *
- * @since 1.0
- */
+/// This module runs a Data Grid node with Aeron replication.
+///
+/// It defines the node lifecycle in `...cluster.nodelibrary.node`,
+/// storage adaptation in `...cluster.nodelibrary.store`, backup in
+/// `...cluster.nodelibrary.backup`, replication in
+/// `...cluster.nodelibrary.replication`, and the HTTP surface in
+/// `...cluster.nodelibrary.http`, implemented by the Aeron transport in
+/// `...cluster.nodelibrary.aeron`. Store binary movement lives in
+/// `...cluster.storage.types`, carried by
+/// `...cluster.storage.aeron.*`, with the embedded Lucene/JVector
+/// index policy in `...cluster.storage.index`. Aeron is the only
+/// transport.
+///
+/// Applications create the node services, start them in dependency order,
+/// and close them in reverse order. The exported packages contain the public
+/// contracts and errors used at those boundaries.
+///
+/// @since 1.0
 module peruncs.datagrid.cluster
 {
     requires org.eclipse.store.storage.embedded;

@@ -16,42 +16,40 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.*;
 
-/**
- * Validated configuration for one Aeron transport. Structural values are
- * immutable; the internal retention-key copy is erased by its owning transport
- * during shutdown.
- *
- * @param replication                     validated publication framing and timeout settings
- * @param clusterId                       stable cluster identity shared by all members
- * @param epoch                           writer epoch used to reject stale frames
- * @param streamId                        data stream id; replay and watermark ids are derived from it
- * @param recordingId                     configured or discovered Archive recording id
- * @param liveChannel                     live data publication channel
- * @param replayChannel                   reader replay channel
- * @param controlChannel                  embedded Archive control request channel
- * @param controlResponseChannel          Archive control response channel
- * @param aeronDirectory                  MediaDriver directory
- * @param archiveDirectory                embedded Archive directory
- * @param checkpointPath                  durable writer checkpoint path
- * @param nodeId                          stable node identity used in writer recovery
- * @param storeGeneration                 identity of the Store image handled by this node
- * @param archiveFileSyncLevel            Archive file and catalog synchronization level
- * @param minimumArchiveFreeBytes         minimum embedded-Archive free space
- * @param externalArchive                 whether an external Archive owns the recording
- * @param role                            configured replication role
- * @param productionMode                  whether production-only validation is enabled
- * @param threadingMode                   MediaDriver threading mode
- * @param archiveThreadingMode            embedded Archive threading mode
- * @param archiveSegmentFileLength        Archive segment length in bytes
- * @param archiveLowStorageSpaceThreshold Archive low-storage threshold in bytes
- * @param maxConcurrentReplays            maximum simultaneous Archive replays
- * @param driverTimeoutMillis             MediaDriver timeout in milliseconds
- * @param archiveReplicationChannel       Archive replication channel
- * @param watermarkChannel                reader-watermark channel
- * @param watermarkStreamId               reader-watermark stream id
- * @param retentionSecret                 copied HMAC key for authenticated retention, or {@code null}
- * @param retentionReaders                configured reader identities required for retention
- */
+/// Validated configuration for one Aeron transport. Structural values are
+/// immutable; the internal retention-key copy is erased by its owning transport
+/// during shutdown.
+///
+/// @param replication                     validated publication framing and timeout settings
+/// @param clusterId                       stable cluster identity shared by all members
+/// @param epoch                           writer epoch used to reject stale frames
+/// @param streamId                        data stream id; replay and watermark ids are derived from it
+/// @param recordingId                     configured or discovered Archive recording id
+/// @param liveChannel                     live data publication channel
+/// @param replayChannel                   reader replay channel
+/// @param controlChannel                  embedded Archive control request channel
+/// @param controlResponseChannel          Archive control response channel
+/// @param aeronDirectory                  MediaDriver directory
+/// @param archiveDirectory                embedded Archive directory
+/// @param checkpointPath                  durable writer checkpoint path
+/// @param nodeId                          stable node identity used in writer recovery
+/// @param storeGeneration                 identity of the Store image handled by this node
+/// @param archiveFileSyncLevel            Archive file and catalog synchronization level
+/// @param minimumArchiveFreeBytes         minimum embedded-Archive free space
+/// @param externalArchive                 whether an external Archive owns the recording
+/// @param role                            configured replication role
+/// @param productionMode                  whether production-only validation is enabled
+/// @param threadingMode                   MediaDriver threading mode
+/// @param archiveThreadingMode            embedded Archive threading mode
+/// @param archiveSegmentFileLength        Archive segment length in bytes
+/// @param archiveLowStorageSpaceThreshold Archive low-storage threshold in bytes
+/// @param maxConcurrentReplays            maximum simultaneous Archive replays
+/// @param driverTimeoutMillis             MediaDriver timeout in milliseconds
+/// @param archiveReplicationChannel       Archive replication channel
+/// @param watermarkChannel                reader-watermark channel
+/// @param watermarkStreamId               reader-watermark stream id
+/// @param retentionSecret                 copied HMAC key for authenticated retention, or `null`
+/// @param retentionReaders                configured reader identities required for retention
 record AeronSettings(
         AeronReplicationConfiguration replication,
         UUID clusterId,
@@ -135,7 +133,7 @@ record AeronSettings(
         }
         final Path aeronDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_DIRECTORY", "/tmp/eclipse-datagrid-aeron"));
         final Path archiveDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY",
-                aeronDirectory.resolveSibling(aeronDirectory.getFileName() + ".archive").toString()));
+                aeronDirectory.resolveSibling("%s.archive".formatted(aeronDirectory.getFileName())).toString()));
         if (properties.isProdMode() && (temporaryPath(aeronDirectory) || temporaryPath(archiveDirectory))) {
             throw new IllegalArgumentException("Aeron directories must not use /tmp in production mode");
         }
@@ -151,7 +149,7 @@ record AeronSettings(
                 configuredStoreGeneration, "ECLIPSE_DATAGRID_AERON_STORE_GENERATION");
         // MediaDriver recreates its directory on startup, so checkpoints must live outside it.
         final Path checkpointPath = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH",
-                aeronDirectory.resolveSibling(aeronDirectory.getFileName() + ".writer.checkpoint").toString()));
+                aeronDirectory.resolveSibling("%s.writer.checkpoint".formatted(aeronDirectory.getFileName())).toString()));
         final Path normalizedAeronDirectory = aeronDirectory.toAbsolutePath().normalize();
         final Path normalizedArchiveDirectory = archiveDirectory.toAbsolutePath().normalize();
         final Path normalizedCheckpointPath = checkpointPath.toAbsolutePath().normalize();
@@ -159,8 +157,7 @@ record AeronSettings(
             overlaps(normalizedAeronDirectory, normalizedCheckpointPath) ||
             overlaps(normalizedArchiveDirectory, normalizedCheckpointPath)) {
             throw new IllegalArgumentException(
-                    "Aeron driver, archive, and checkpoint paths must not overlap: driver=" +
-                    aeronDirectory + ", archive=" + archiveDirectory + ", checkpoint=" + checkpointPath);
+                    "Aeron driver, archive, and checkpoint paths must not overlap: driver=%s, archive=%s, checkpoint=%s".formatted(aeronDirectory, archiveDirectory, checkpointPath));
         }
         if (properties.isProdMode() && (!aeronDirectory.isAbsolute() || !archiveDirectory.isAbsolute() || !checkpointPath.isAbsolute())) {
             throw new IllegalArgumentException("Aeron directories and checkpoint path must be absolute in production mode");
@@ -193,9 +190,9 @@ record AeronSettings(
          * production topology: explicit framing, dynamic MDC, and a stable
          * channel alias. Production deployments must override localhost endpoints
          * and are rejected below when they do not. */
-        final String channelAlias = "datagrid-" + cluster;
+        final String channelAlias = "datagrid-%s".formatted(cluster);
         final String liveChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
-                "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=" + channelAlias);
+                "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=%s".formatted(channelAlias));
         final String replayChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
                 "aeron:udp?endpoint=localhost:0|control=localhost:40123|control-mode=dynamic");
         final String archiveReplicationChannel = channel(properties,
@@ -242,8 +239,7 @@ record AeronSettings(
             archiveSegmentFileLength < replication.termLength() ||
             archiveLowStorageSpaceThreshold < 0 || maxConcurrentReplays <= 0 || driverTimeoutMillis <= 0) {
             throw new IllegalArgumentException(
-                    "Archive segment length must be a positive power of two; low-storage threshold must not be negative; " +
-                    "max concurrent replays must be positive");
+                    "Archive segment length must be a positive power of two; low-storage threshold must not be negative; max concurrent replays must be positive");
         }
         validateFraming(liveChannel, "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL", replication);
         validateFraming(replayChannel, "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL", replication);
@@ -375,7 +371,7 @@ record AeronSettings(
                 }
             }
         } catch (final IOException | IllegalArgumentException failure) {
-            throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE is invalid: " + path,
+            throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE is invalid: %s".formatted(path),
                     failure);
         }
     }
@@ -384,10 +380,10 @@ record AeronSettings(
         try {
             final byte[] secret = Base64.getDecoder().decode(configured);
             if (secret.length < 16) throw new IllegalArgumentException(
-                    property + " must decode to at least 16 bytes");
+                    "%s must decode to at least 16 bytes".formatted(property));
             return secret;
         } catch (final IllegalArgumentException failure) {
-            throw new IllegalArgumentException(property + " must be base64 and decode to at least 16 bytes", failure);
+            throw new IllegalArgumentException("%s must be base64 and decode to at least 16 bytes".formatted(property), failure);
         }
     }
 
@@ -409,7 +405,7 @@ record AeronSettings(
             final String previous = values.getProperty(property);
             if (previous != null && !equivalentSetting(previous, value)) {
                 throw new IllegalArgumentException(
-                        "Conflicting Aeron settings for " + property + ": " + previous + " and " + value);
+                        "Conflicting Aeron settings for %s: %s and %s".formatted(property, previous, value));
             }
             values.setProperty(property, value);
         }
@@ -434,12 +430,12 @@ record AeronSettings(
             channel.equals("aeron:udp") ||
             !(channel.startsWith("aeron:udp?") ||
               channel.equals("aeron:ipc") || channel.startsWith("aeron:ipc?"))) {
-            throw new IllegalArgumentException("Invalid Aeron channel for " + name + ": " + channel);
+            throw new IllegalArgumentException("Invalid Aeron channel for %s: %s".formatted(name, channel));
         }
         try {
             ChannelUri.parse(channel);
         } catch (final RuntimeException failure) {
-            throw new IllegalArgumentException("Invalid Aeron channel for " + name + ": " + channel, failure);
+            throw new IllegalArgumentException("Invalid Aeron channel for %s: %s".formatted(name, channel), failure);
         }
         if (channel.startsWith("aeron:udp?")) {
             boolean endpoint = false;
@@ -454,41 +450,39 @@ record AeronSettings(
                 }
             }
             if (!endpoint && !control) {
-                throw new IllegalArgumentException("Aeron UDP channel must specify endpoint= or control= for " + name);
+                throw new IllegalArgumentException("Aeron UDP channel must specify endpoint= or control= for %s".formatted(name));
             }
         }
         return channel;
     }
 
-    /**
-     * Returns whether the configured channel explicitly disables Aeron spy
-     * connection simulation. The driver-level setting must not silently
-     * override an operator's explicit {@code ssc=false} choice.
-     */
+        /// Returns whether the configured channel explicitly disables Aeron spy
+    /// connection simulation. The driver-level setting must not silently
+    /// override an operator's explicit `ssc=false` choice.
     private static void validateUdpAddress(final String address, final String name) {
         final String portText;
         if (address.startsWith("[")) {
             final int closingBracket = address.indexOf(']');
             if (closingBracket <= 1 || closingBracket + 1 >= address.length() ||
                 address.charAt(closingBracket + 1) != ':') {
-                throw new IllegalArgumentException("Aeron UDP address must include host and port for " + name);
+                throw new IllegalArgumentException("Aeron UDP address must include host and port for %s".formatted(name));
             }
             portText = address.substring(closingBracket + 2);
         } else {
             final int colon = address.lastIndexOf(':');
             if (colon <= 0 || colon == address.length() - 1) {
-                throw new IllegalArgumentException("Aeron UDP address must include host and port for " + name);
+                throw new IllegalArgumentException("Aeron UDP address must include host and port for %s".formatted(name));
             }
             portText = address.substring(colon + 1);
         }
         if (portText.isEmpty()) {
-            throw new IllegalArgumentException("Aeron UDP address must include host and port for " + name);
+            throw new IllegalArgumentException("Aeron UDP address must include host and port for %s".formatted(name));
         }
         try {
             final int port = Integer.parseInt(portText);
             if (port < 0 || port > 65535) throw new NumberFormatException();
         } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("Invalid Aeron UDP address for " + name + ": " + address, failure);
+            throw new IllegalArgumentException("Invalid Aeron UDP address for %s: %s".formatted(name, address), failure);
         }
     }
 
@@ -500,11 +494,9 @@ record AeronSettings(
         return endpointMatches(channel, AeronSettings::loopbackHost);
     }
 
-    /**
-     * Checks all endpoint-bearing URI options instead of relying on textual
-     * substrings.  The latter misses case/format variants (for example expanded
-     * IPv6 wildcards) and can match an unrelated option value.
-     */
+        /// Checks all endpoint-bearing URI options instead of relying on textual
+    /// substrings.  The latter misses case/format variants (for example expanded
+    /// IPv6 wildcards) and can match an unrelated option value.
     private static boolean endpointMatches(final String channel,
                                            final java.util.function.Predicate<String> hostPredicate) {
         final ChannelUri uri = ChannelUri.parse(channel);
@@ -546,19 +538,17 @@ record AeronSettings(
         return normalized.startsWith(Path.of("/tmp")) || normalized.startsWith(Path.of("/private/tmp"));
     }
 
-    /**
-     * Reject channel-level framing overrides that disagree with the values used
-     * to configure the MediaDriver and replication envelope. Without this check
-     * the channel silently wins and a writer and reader can use different term or
-     * MTU limits even though they share one replication configuration.
-     */
+        /// Reject channel-level framing overrides that disagree with the values used
+    /// to configure the MediaDriver and replication envelope. Without this check
+    /// the channel silently wins and a writer and reader can use different term or
+    /// MTU limits even though they share one replication configuration.
     private static void validateFraming(final String channel, final String name,
                                         final AeronReplicationConfiguration replication) {
         final ChannelUri uri;
         try {
             uri = ChannelUri.parse(channel);
         } catch (final RuntimeException failure) {
-            throw new IllegalArgumentException("Invalid Aeron channel for " + name + ": " + channel, failure);
+            throw new IllegalArgumentException("Invalid Aeron channel for %s: %s".formatted(name, channel), failure);
         }
         validateFramingOption(uri, CommonContext.TERM_LENGTH_PARAM_NAME, replication.termLength(), name);
         if (uri.isUdp()) {
@@ -574,11 +564,10 @@ record AeronSettings(
         try {
             value = SystemUtil.parseSize(option, configured);
         } catch (final RuntimeException failure) {
-            throw new IllegalArgumentException("Invalid " + option + " in " + name + ": " + configured, failure);
+            throw new IllegalArgumentException("Invalid %s in %s: %s".formatted(option, name, configured), failure);
         }
         if (value != expected) {
-            throw new IllegalArgumentException(name + " " + option + "=" + configured +
-                                               " conflicts with replication configuration value " + expected);
+            throw new IllegalArgumentException("%s %s=%s conflicts with replication configuration value %s".formatted(name, option, configured, expected));
         }
     }
 
@@ -588,7 +577,7 @@ record AeronSettings(
                 uri.get(CommonContext.MDC_CONTROL_MODE_PARAM_NAME)) ||
             !"max".equalsIgnoreCase(uri.get(CommonContext.FLOW_CONTROL_PARAM_NAME))) {
             throw new IllegalArgumentException(
-                    "Aeron writer live channel must use dynamic MDC with fc=max: " + channel);
+                    "Aeron writer live channel must use dynamic MDC with fc=max: %s".formatted(channel));
         }
     }
 
@@ -596,7 +585,7 @@ record AeronSettings(
         try {
             return Integer.parseInt(value(properties, name, fallback).trim());
         } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("Invalid " + name, failure);
+            throw new IllegalArgumentException("Invalid %s".formatted(name), failure);
         }
     }
 
@@ -604,7 +593,7 @@ record AeronSettings(
         try {
             return Long.parseLong(value(properties, name, fallback).trim());
         } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("Invalid " + name, failure);
+            throw new IllegalArgumentException("Invalid %s".formatted(name), failure);
         }
     }
 
@@ -612,11 +601,11 @@ record AeronSettings(
         try {
             final UUID parsed = UUID.fromString(value);
             if (parsed.equals(new UUID(0L, 0L))) {
-                throw new IllegalArgumentException(name + " must not be the zero UUID");
+                throw new IllegalArgumentException("%s must not be the zero UUID".formatted(name));
             }
             return parsed;
         } catch (final IllegalArgumentException failure) {
-            throw new IllegalArgumentException("Invalid " + name, failure);
+            throw new IllegalArgumentException("Invalid %s".formatted(name), failure);
         }
     }
 
@@ -625,12 +614,10 @@ record AeronSettings(
         return this.retentionSecret == null ? null : this.retentionSecret.clone();
     }
 
-    /**
-     * Returns the transport-owned key without cloning. This accessor is package
-     * private deliberately: only the owning transport may use the key, and it
-     * clears the array when the transport closes. Public callers always receive a
-     * defensive copy from {@link #retentionSecret()}.
-     */
+        /// Returns the transport-owned key without cloning. This accessor is package
+    /// private deliberately: only the owning transport may use the key, and it
+    /// clears the array when the transport closes. Public callers always receive a
+    /// defensive copy from [#retentionSecret()].
     byte[] retentionSecretUnsafe() {
         return this.retentionSecret;
     }
@@ -640,7 +627,7 @@ record AeronSettings(
         return this.retentionReaders;
     }
 
-    /** Erases the in-memory retention key when the owning transport closes. */
+        /// Erases the in-memory retention key when the owning transport closes.
     void clearRetentionSecret() {
         if (this.retentionSecret != null) Arrays.fill(this.retentionSecret, (byte) 0);
     }

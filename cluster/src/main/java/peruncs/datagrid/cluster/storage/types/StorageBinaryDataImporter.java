@@ -7,22 +7,20 @@ import java.nio.ByteBuffer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/** Copies incoming Store binary buffers into owned native memory and imports them. */
+/// Copies incoming Store binary buffers into owned native memory and imports them.
 public final class StorageBinaryDataImporter {
     private static final ByteBuffer EMPTY_DIRECT_BUFFER = ByteBuffer.allocateDirect(0);
 
     private StorageBinaryDataImporter() {
     }
 
-    /**
-     * Imports a snapshot of the source buffers and returns the native buffers that
-     * remain owned by the caller for subsequent object-graph materialization.
-     * Source positions are never changed.
-     *
-     * @param storage       destination Store connection
-     * @param sourceBuffers source buffers
-     * @return imported native buffers, owned by the caller
-     */
+        /// Imports a snapshot of the source buffers and returns the native buffers that
+    /// remain owned by the caller for subsequent object-graph materialization.
+    /// Source positions are never changed.
+    ///
+    /// @param storage       destination Store connection
+    /// @param sourceBuffers source buffers
+    /// @return imported native buffers, owned by the caller
     public static ByteBuffer[] importOwned(
             final StorageConnection storage,
             final ByteBuffer[] sourceBuffers
@@ -53,7 +51,7 @@ public final class StorageBinaryDataImporter {
                 final ByteBuffer source = notNull(sourceBuffers[i]).duplicate();
                 if (source.position() != 0) {
                     throw new IllegalArgumentException(
-                            "import buffers must be normalized to position zero; got " + source.position());
+                            "import buffers must be normalized to position zero; got %s".formatted(source.position()));
                 }
                 final int sourceLength = source.remaining();
                 if (sourceLength == 0) {
@@ -71,13 +69,11 @@ public final class StorageBinaryDataImporter {
         }
     }
 
-    /**
-     * Imports already-direct buffers without allocating a second native copy.
-     *
-     * @param storage destination Store connection
-     * @param buffers buffers offered by the transport
-     * @return {@code true} when all buffers were direct and ownership was imported
-     */
+        /// Imports already-direct buffers without allocating a second native copy.
+    ///
+    /// @param storage destination Store connection
+    /// @param buffers buffers offered by the transport
+    /// @return `true` when all buffers were direct and ownership was imported
     public static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers) {
         notNull(storage);
         notNull(buffers);
@@ -96,11 +92,9 @@ public final class StorageBinaryDataImporter {
         }
     }
 
-    /**
-     * Releases native buffers returned by {@link #importOwned(StorageConnection, ByteBuffer[])}.
-     *
-     * @param buffers buffers to release
-     */
+        /// Releases native buffers returned by [#importOwned(StorageConnection, ByteBuffer\[\])].
+    ///
+    /// @param buffers buffers to release
     public static void release(final ByteBuffer[] buffers) {
         if (buffers == null) return;
         RuntimeException failure = null;

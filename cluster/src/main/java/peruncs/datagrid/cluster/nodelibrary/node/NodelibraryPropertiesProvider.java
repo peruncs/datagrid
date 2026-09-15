@@ -3,177 +3,135 @@ package peruncs.datagrid.cluster.nodelibrary.node;
 import peruncs.datagrid.cluster.nodelibrary.backup.BackupTarget;
 
 
-/**
- * Configuration contract shared by cluster lifecycle code and the Aeron provider.
- * {@link #replicationTransport()} selects an explicit {@code aeron} or {@code none} selection.
- */
+/// Configuration contract shared by cluster lifecycle code and the Aeron provider.
+/// [#replicationTransport()] selects an explicit `aeron` or `none` selection.
 public interface NodelibraryPropertiesProvider {
-    /**
-     * Creates an environment-backed provider.
-     *
-     * @return properties provider
-     */
+        /// Creates an environment-backed provider.
+    ///
+    /// @return properties provider
     static NodelibraryPropertiesProvider Env() {
         return new Env();
     }
 
-    /**
-     * Returns the logical replication stream name.
-     *
-     * @return stream name
-     */
+        /// Returns the logical replication stream name.
+    ///
+    /// @return stream name
     default String replicationStreamName() {
         return null;
     }
 
-    /**
-     * Returns the selected replication transport.
-     *
-     * @return transport name
-     */
+        /// Returns the selected replication transport.
+    ///
+    /// @return transport name
     default String replicationTransport() {
         return "none";
     }
 
-    /**
-     * Optional provider-specific setting, allowing embedded applications to avoid
-     * environment variables. {@code ECLIPSE_DATAGRID_STORAGE_PATH} overrides the
-     * default {@code /storage} root used for the Store and durable replication
-     * cursor file.
-     *
-     * @param name provider-specific property name
-     * @return property value, or {@code null}
-     */
+        /// Optional provider-specific setting, allowing embedded applications to avoid
+    /// environment variables. `ECLIPSE_DATAGRID_STORAGE_PATH` overrides the
+    /// default `/storage` root used for the Store and durable replication
+    /// cursor file.
+    ///
+    /// @param name provider-specific property name
+    /// @return property value, or `null`
     default String replicationProperty(final String name) {
         return null;
     }
 
-    /**
-     * Fixed-topology node role: {@code writer}, {@code reader}, or {@code backup-reader}.
-     *
-     * @return node role
-     */
+        /// Fixed-topology node role: `writer`, `reader`, or `backup-reader`.
+    ///
+    /// @return node role
     default String replicationRole() {
         return isBackupNode() ? "backup-reader" : "writer";
     }
 
-    /**
-     * Returns whether the role was explicitly configured rather than inherited from the default.
-     *
-     * @return {@code true} when explicitly configured
-     */
+        /// Returns whether the role was explicitly configured rather than inherited from the default.
+    ///
+    /// @return `true` when explicitly configured
     default boolean replicationRoleConfigured() {
         return false;
     }
 
-    /**
-     * Reports whether this node restores backups.
-     *
-     * @return {@code true} for a backup node
-     */
+        /// Reports whether this node restores backups.
+    ///
+    /// @return `true` for a backup node
     boolean isBackupNode();
 
-    /**
-     * Returns the number of backups to retain.
-     *
-     * @return retained backup count
-     */
+        /// Returns the number of backups to retain.
+    ///
+    /// @return retained backup count
     Integer keptBackupsCount();
 
-    /**
-     * Returns the backup target.
-     *
-     * @return backup target
-     */
+        /// Returns the backup target.
+    ///
+    /// @return backup target
     BackupTarget backupTarget();
 
-    /**
-     * Returns the backup proxy URL.
-     *
-     * @return proxy URL
-     */
+        /// Returns the backup proxy URL.
+    ///
+    /// @return proxy URL
     String backupProxyServiceUrl();
 
-    /**
-     * Returns the storage check interval in minutes.
-     *
-     * @return interval in minutes
-     */
+        /// Returns the storage check interval in minutes.
+    ///
+    /// @return interval in minutes
     Integer storageLimitCheckerIntervalMinutes();
 
-    /**
-     * Returns the storage cleanup interval in minutes.
-     *
-     * @return interval in minutes, or {@code null} for the node default
-     */
+        /// Returns the storage cleanup interval in minutes.
+    ///
+    /// @return interval in minutes, or `null` for the node default
     default Integer gcIntervalMinutes() {
         return null;
     }
 
-    /**
-     * Returns the automatic backup interval in minutes.
-     *
-     * @return interval in minutes, or {@code null} for the node default
-     */
+        /// Returns the automatic backup interval in minutes.
+    ///
+    /// @return interval in minutes, or `null` for the node default
     default Integer backupIntervalMinutes() {
         return null;
     }
 
-    /**
-     * Returns the storage limit in gigabytes.
-     *
-     * @return storage limit
-     */
+        /// Returns the storage limit in gigabytes.
+    ///
+    /// @return storage limit
     Integer storageLimitGB();
 
-    /**
-     * Returns the pod name.
-     *
-     * @return pod name
-     */
+        /// Returns the pod name.
+    ///
+    /// @return pod name
     String myPodName();
 
-    /**
-     * Returns a stable node identity for transports that need to retain a
-     * consumer-group identity across process restarts.
-     *
-     * @return configured node identity, or {@code null} when none was supplied
-     */
+        /// Returns a stable node identity for transports that need to retain a
+    /// consumer-group identity across process restarts.
+    ///
+    /// @return configured node identity, or `null` when none was supplied
     default String replicationNodeIdentity() {
         return this.replicationProperty("ECLIPSE_DATAGRID_NODE_ID");
     }
 
-    /**
-     * Returns the pod namespace.
-     *
-     * @return namespace
-     */
+        /// Returns the pod namespace.
+    ///
+    /// @return namespace
     String myNamespace();
 
-    /**
-     * Reports whether production mode is enabled.
-     *
-     * @return {@code true} in production mode
-     */
+        /// Reports whether production mode is enabled.
+    ///
+    /// @return `true` in production mode
     boolean isProdMode();
 
-    /**
-     * Returns the merger timeout in milliseconds.
-     *
-     * @return timeout, or {@code null}
-     */
+        /// Returns the merger timeout in milliseconds.
+    ///
+    /// @return timeout, or `null`
     Long dataMergerTimeoutMs();
 
-    /**
-     * Returns the merger cache limit.
-     *
-     * @return cache limit, or {@code null}
-     */
+        /// Returns the merger cache limit.
+    ///
+    /// @return cache limit, or `null`
     Long dataMergerCachedDataLimit();
 
-    /** Reads node properties from environment variables. */
+        /// Reads node properties from environment variables.
     class Env implements NodelibraryPropertiesProvider {
-        /** Creates an environment-backed provider. */
+                /// Creates an environment-backed provider.
         public Env() {
         }
 
@@ -254,7 +212,7 @@ public interface NodelibraryPropertiesProvider {
                 return Integer.valueOf(number);
             } catch (final NumberFormatException failure) {
                 throw new IllegalArgumentException(
-                        "Invalid " + EnvKeys.STORAGE_LIMIT_GB + " value: " + configured, failure);
+                        "Invalid %s value: %s".formatted(EnvKeys.STORAGE_LIMIT_GB, configured), failure);
             }
         }
 
@@ -294,7 +252,7 @@ public interface NodelibraryPropertiesProvider {
             try {
                 return Integer.valueOf(env.trim());
             } catch (final NumberFormatException failure) {
-                throw new IllegalArgumentException("Invalid " + envKey + " value: " + env, failure);
+                throw new IllegalArgumentException("Invalid %s value: %s".formatted(envKey, env), failure);
             }
         }
 
@@ -304,7 +262,7 @@ public interface NodelibraryPropertiesProvider {
             try {
                 return Long.valueOf(env.trim());
             } catch (final NumberFormatException failure) {
-                throw new IllegalArgumentException("Invalid " + envKey + " value: " + env, failure);
+                throw new IllegalArgumentException("Invalid %s value: %s".formatted(envKey, env), failure);
             }
         }
 
@@ -316,42 +274,42 @@ public interface NodelibraryPropertiesProvider {
             return System.getenv(envKey);
         }
 
-        /** Names of the environment variables understood by the provider. */
+                /// Names of the environment variables understood by the provider.
         public static final class EnvKeys {
-            /** Replication stream environment variable. */
+                        /// Replication stream environment variable.
             public static final String REPLICATION_STREAM_NAME = "ECLIPSE_DATAGRID_REPLICATION_STREAM";
-            /** Replication transport environment variable. */
+                        /// Replication transport environment variable.
             public static final String REPLICATION_TRANSPORT = "ECLIPSE_DATAGRID_REPLICATION_TRANSPORT";
-            /** Store path environment variable. */
+                        /// Store path environment variable.
             public static final String STORAGE_PATH = "ECLIPSE_DATAGRID_STORAGE_PATH";
-            /** Filesystem backup volume environment variable. */
+                        /// Filesystem backup volume environment variable.
             public static final String BACKUP_PATH = "ECLIPSE_DATAGRID_BACKUP_PATH";
-            /** Backup-node environment variable. */
+                        /// Backup-node environment variable.
             public static final String IS_BACKUP_NODE = "IS_BACKUP_NODE";
-            /** Backup-target environment variable. */
+                        /// Backup-target environment variable.
             public static final String BACKUP_TARGET = "BACKUP_TARGET";
-            /** Retained-backups environment variable. */
+                        /// Retained-backups environment variable.
             public static final String KEPT_BACKUPS_COUNT = "KEPT_BACKUPS_COUNT";
-            /** Backup proxy URL environment variable. */
+                        /// Backup proxy URL environment variable.
             public static final String BACKUP_PROXY_SERVICE_URL = "BACKUP_PROXY_SERVICE_URL";
-            /** Storage-check interval environment variable. */
+                        /// Storage-check interval environment variable.
             public static final String STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES =
                     "STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES";
-            /** Storage cleanup interval environment variable. */
+                        /// Storage cleanup interval environment variable.
             public static final String GC_INTERVAL_MINUTES = "GC_INTERVAL_MINUTES";
-            /** Automatic backup interval environment variable. */
+                        /// Automatic backup interval environment variable.
             public static final String BACKUP_INTERVAL_MINUTES = "BACKUP_INTERVAL_MINUTES";
-            /** Storage limit environment variable. */
+                        /// Storage limit environment variable.
             public static final String STORAGE_LIMIT_GB = "STORAGE_LIMIT_GB";
-            /** Pod name environment variable. */
+                        /// Pod name environment variable.
             public static final String MY_POD_NAME = "MY_POD_NAME";
-            /** Pod namespace environment variable. */
+                        /// Pod namespace environment variable.
             public static final String MY_NAMESPACE = "MY_NAMESPACE";
-            /** Production-mode environment variable. */
+                        /// Production-mode environment variable.
             public static final String IS_PROD_MODE = "MSCNL_PROD_MODE";
-            /** Merger timeout environment variable. */
+                        /// Merger timeout environment variable.
             public static final String DATA_MERGER_TIMEOUT_MS = "MSCNL_DATA_MERGER_TIMEOUT";
-            /** Merger cache limit environment variable. */
+                        /// Merger cache limit environment variable.
             public static final String DATA_MERGER_LIMIT = "MSCNL_DATA_MERGER_LIMIT";
 
             private EnvKeys() {

@@ -9,8 +9,6 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.DistributedStorage;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -20,7 +18,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Proves the Store-level replacement contract used by at-least-once replay. */
+/// Proves the Store-level replacement contract used by at-least-once replay.
 class StorageBinaryImportIntegrationTest {
     private static EmbeddedStorageManager startExisting(final Path path, final CapturingDistributor capture) {
         final var foundation = foundation(path);
@@ -84,7 +82,7 @@ class StorageBinaryImportIntegrationTest {
         }
     }
 
-    /** Verifies imports the same binary transactions twice and survives restart. */
+        /// Verifies imports the same binary transactions twice and survives restart.
     @Test
     void importsTheSameBinaryTransactionsTwiceAndSurvivesRestart() throws Exception {
         final Path root = Files.createTempDirectory("datagrid-store-import-");
@@ -114,7 +112,7 @@ class StorageBinaryImportIntegrationTest {
             resumedRoot.values.add("two");
             resumedWriter.store(resumedRoot.values);
             for (int i = 0; i < 512; i++) {
-                resumedRoot.values.add("channel-value-" + i);
+                resumedRoot.values.add("channel-value-%s".formatted(i));
             }
             resumedWriter.store(resumedRoot.values);
             resumedWriter.shutdown();

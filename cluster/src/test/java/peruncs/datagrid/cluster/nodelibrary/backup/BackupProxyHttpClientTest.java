@@ -33,8 +33,7 @@ class BackupProxyHttpClientTest {
                     final byte[] body = attempt == 0 ? retryBody : successfulBody;
                     final String status = attempt == 0 ? "500 Internal Server Error" : "200 OK";
                     final OutputStream output = socket.getOutputStream();
-                    output.write(("HTTP/1.1 " + status + "\r\nContent-Length: " + body.length +
-                                  "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                    output.write(("HTTP/1.1 %s\r\nContent-Length: %s\r\nConnection: close\r\n\r\n".formatted(status, body.length)).getBytes(StandardCharsets.US_ASCII));
                     output.write(body);
                     output.flush();
                 }
@@ -74,7 +73,7 @@ class BackupProxyHttpClientTest {
             serverThread.start();
 
             final BackupProxyHttpClient client = BackupProxyHttpClient.New(
-                    URI.create("http://127.0.0.1:" + server.getLocalPort()),
+                    URI.create("http://127.0.0.1:%s".formatted(server.getLocalPort())),
                     2,
                     Duration.ZERO,
                     Duration.ofSeconds(5L),

@@ -9,7 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.CRC32C;
 
-/** Independent field-level oracle for the crash child's append-only Store fixture. */
+/// Independent field-level oracle for the crash child's append-only Store fixture.
 final class StoreFixture {
     private StoreFixture() {
     }
@@ -40,12 +40,11 @@ final class StoreFixture {
     static void assertRecords(final Path path, final List<byte[]> expected) throws IOException {
         final Evidence evidence = inspect(path);
         if (!evidence.valid() || evidence.records().size() != expected.size()) {
-            throw new AssertionError("invalid Store fixture " + path + ": actual=" +
-                                     evidence.records().size() + ", expected=" + expected.size() + ", valid=" + evidence.valid());
+            throw new AssertionError("invalid Store fixture %s: actual=%s, expected=%s, valid=%s".formatted(path, evidence.records().size(), expected.size(), evidence.valid()));
         }
         for (int i = 0; i < expected.size(); i++) {
             if (!java.util.Arrays.equals(expected.get(i), evidence.records().get(i))) {
-                throw new AssertionError("Store fixture payload mismatch at record " + i);
+                throw new AssertionError("Store fixture payload mismatch at record %s".formatted(i));
             }
         }
     }

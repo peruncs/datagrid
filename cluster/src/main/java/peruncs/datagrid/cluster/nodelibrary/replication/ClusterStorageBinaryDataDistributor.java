@@ -8,19 +8,15 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * Cluster-aware extension of the binary distributor.
- *
- * <p>The message index and ignore flag are lifecycle controls, not transport
- * details. {@link Caching} preserves a type dictionary until the next data
- * message and is used by the Aeron provider.</p>
- */
+/// Cluster-aware extension of the binary distributor.
+///
+/// The message index and ignore flag are lifecycle controls, not transport
+/// details. [Caching] preserves a type dictionary until the next data
+/// message and is used by the Aeron provider.
 public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDistributor {
-    /**
-     * Creates a distributor that ignores all transport work.
-     *
-     * @return neutral distributor
-     */
+        /// Creates a distributor that ignores all transport work.
+    ///
+    /// @return neutral distributor
     static ClusterStorageBinaryDataDistributor NoOp() {
         return new ClusterStorageBinaryDataDistributor() {
             private long index = -1;
@@ -53,65 +49,51 @@ public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDi
         };
     }
 
-    /**
-     * Creates a distributor that keeps dictionary data beside its next binary.
-     *
-     * @param delegate destination distributor
-     * @return caching distributor
-     */
+        /// Creates a distributor that keeps dictionary data beside its next binary.
+    ///
+    /// @param delegate destination distributor
+    /// @return caching distributor
     static ClusterStorageBinaryDataDistributor Caching(final ClusterStorageBinaryDataDistributor delegate) {
         return new Caching(notNull(delegate));
     }
 
-    /**
-     * Sets the next message index.
-     *
-     * @param index message index
-     */
+        /// Sets the next message index.
+    ///
+    /// @param index message index
     void messageIndex(long index);
 
-    /**
-     * Returns the current message index.
-     *
-     * @return message index
-     */
+        /// Returns the current message index.
+    ///
+    /// @return message index
     long messageIndex();
 
-    /**
-     * Sets whether distribution is ignored.
-     *
-     * @param ignore whether to ignore distribution
-     */
+        /// Sets whether distribution is ignored.
+    ///
+    /// @param ignore whether to ignore distribution
     void ignoreDistribution(boolean ignore);
 
-    /**
-     * Reports whether distribution is ignored.
-     *
-     * @return {@code true} when ignored
-     */
+        /// Reports whether distribution is ignored.
+    ///
+    /// @return `true` when ignored
     boolean ignoreDistribution();
 
-    /**
-     * Returns a terminal distribution failure, or {@code null} while healthy.
-     *
-     * @return terminal failure, or {@code null}
-     */
+        /// Returns a terminal distribution failure, or `null` while healthy.
+    ///
+    /// @return terminal failure, or `null`
     default RuntimeException failure() {
         return null;
     }
 
-    /**
-     * Queues a complete dictionary for the next data transaction, regardless of
-     * which Store thread performs that transaction. This is used after writer
-     * restart to re-establish the reader schema before new binaries arrive.
-     *
-     * @param typeDictionaryData assembled type dictionary
-     */
+        /// Queues a complete dictionary for the next data transaction, regardless of
+    /// which Store thread performs that transaction. This is used after writer
+    /// restart to re-establish the reader schema before new binaries arrive.
+    ///
+    /// @param typeDictionaryData assembled type dictionary
     default void queueTypeDictionaryForNextTransaction(final String typeDictionaryData) {
         this.distributeTypeDictionary(typeDictionaryData);
     }
 
-    /** Keeps dictionary data adjacent to the transaction that needs it. */
+        /// Keeps dictionary data adjacent to the transaction that needs it.
     final class Caching implements ClusterStorageBinaryDataDistributor {
         private final ClusterStorageBinaryDataDistributor delegate;
         private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();

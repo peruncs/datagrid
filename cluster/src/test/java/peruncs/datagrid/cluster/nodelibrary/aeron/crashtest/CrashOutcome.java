@@ -3,7 +3,7 @@ package peruncs.datagrid.cluster.nodelibrary.aeron.crashtest;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Typed, strict parser for a provider child outcome file. */
+/// Typed, strict parser for a provider child outcome file.
 record CrashOutcome(
         RecoveryPolicy policy,
         String health,
@@ -20,9 +20,9 @@ record CrashOutcome(
         for (final String line : text.split("\\R")) {
             if (line.isBlank()) continue;
             final int separator = line.indexOf('=');
-            if (separator <= 0) throw new IllegalArgumentException("malformed crash outcome line: " + line);
+            if (separator <= 0) throw new IllegalArgumentException("malformed crash outcome line: %s".formatted(line));
             if (values.put(line.substring(0, separator), line.substring(separator + 1)) != null) {
-                throw new IllegalArgumentException("duplicate crash outcome field: " + line.substring(0, separator));
+                throw new IllegalArgumentException("duplicate crash outcome field: %s".formatted(line.substring(0, separator)));
             }
         }
         final RecoveryPolicy policy = RecoveryPolicy.valueOf(required(values, "OUTCOME"));
@@ -41,7 +41,7 @@ record CrashOutcome(
 
     private static String required(final Map<String, String> values, final String key) {
         final String value = values.get(key);
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("missing outcome field " + key);
+        if (value == null || value.isBlank()) throw new IllegalArgumentException("missing outcome field %s".formatted(key));
         return value;
     }
 

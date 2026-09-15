@@ -6,24 +6,20 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataAcceptor;
 import org.eclipse.serializer.persistence.types.*;
 
-/**
- * This acceptor collects remote object ids and materializes them as one batch.
- *
- * <p>Root objects are left untouched because each node owns its local roots.
- * Repeated object ids are collected once, which matters when one transaction
- * contains several versions of an object.</p>
- */
+/// This acceptor collects remote object ids and materializes them as one batch.
+///
+/// Root objects are left untouched because each node owns its local roots.
+/// Repeated object ids are collected once, which matters when one transaction
+/// contains several versions of an object.
 public class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
     private final PersistenceTypeDictionary persistenceTypeDictionary;
     private final PersistenceObjectRegistry objectRegistry;
     private final PersistenceLoader loader;
     private final Set_long oids = Set_long.New();
 
-    /**
-     * Creates a materializer for one persistence manager.
-     *
-     * @param persistenceManager manager that owns the target graph
-     */
+        /// Creates a materializer for one persistence manager.
+    ///
+    /// @param persistenceManager manager that owns the target graph
     public ObjectMaterializer(final PersistenceManager<?> persistenceManager) {
         super();
 
@@ -45,8 +41,7 @@ public class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
         );
         if (ptd == null) {
             throw new StorageBinaryDataException(
-                    "Cannot materialize persisted entity with unknown type id " +
-                    Binary.getEntityTypeIdRawValue(entityStartAddress));
+                    "Cannot materialize persisted entity with unknown type id %s".formatted(Binary.getEntityTypeIdRawValue(entityStartAddress)));
         }
         if (
                 PersistenceRoots.class.isAssignableFrom(ptd.type())
@@ -76,7 +71,7 @@ public class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
         return true;
     }
 
-    /** Materializes each object collected by {@link #acceptEntityData(long, long)}. */
+        /// Materializes each object collected by [#acceptEntityData(long, long)].
     public void materialize() {
         try {
             // Batch-materializes all collected objects in the live graph

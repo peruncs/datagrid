@@ -11,9 +11,9 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Tests replication cursor store behavior. */
+/// Tests replication cursor store behavior.
 class ReplicationCursorStoreTest {
-    /** Verifies atomic round-tripping of an opaque provider position. */
+        /// Verifies atomic round-tripping of an opaque provider position.
     @Test
     void roundTripsOpaqueProviderPositionAtomically() throws Exception {
         final var path = Files.createTempFile("datagrid-replication", ".cursor");
@@ -23,7 +23,7 @@ class ReplicationCursorStoreTest {
         Files.deleteIfExists(path);
     }
 
-    /** Verifies detection of corrupt cursor before using provider bytes. */
+        /// Verifies detection of corrupt cursor before using provider bytes.
     @Test
     void detectsCorruptCursorBeforeUsingProviderBytes() throws Exception {
         final var path = Files.createTempFile("datagrid-replication", ".cursor");
@@ -35,7 +35,7 @@ class ReplicationCursorStoreTest {
         Files.deleteIfExists(path);
     }
 
-    /** Verifies that a valid checksum cannot hide an appended cursor payload. */
+        /// Verifies that a valid checksum cannot hide an appended cursor payload.
     @Test
     void rejectsTrailingCursorBytes() throws Exception {
         final var path = Files.createTempFile("datagrid-replication", ".cursor");

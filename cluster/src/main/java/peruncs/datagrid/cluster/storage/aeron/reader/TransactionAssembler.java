@@ -16,13 +16,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32C;
 
-/**
- * Reassembles chunks and releases a Store binary only after commit validation.
- *
- * <p>The production Archive reader and the test-only live reader use this same
- * state machine. That keeps ordering, checksum, and cursor hand-off rules in
- * one place.</p>
- */
+/// Reassembles chunks and releases a Store binary only after commit validation.
+///
+/// The production Archive reader and the test-only live reader use this same
+/// state machine. That keeps ordering, checksum, and cursor hand-off rules in
+/// one place.
 final class TransactionAssembler {
     /* ChunksWrapper requires a direct buffer even for an empty binary.  Reuse one
      * immutable zero-capacity view instead of allocating native memory per empty
@@ -166,8 +164,7 @@ final class TransactionAssembler {
         }
         final long lastResolvedSequence = this.lastResolvedSequence.get();
         if (envelope.sequence() < lastResolvedSequence) {
-            throw new IllegalStateException("replication sequence regressed: last resolved " +
-                                            lastResolvedSequence + ", received " + envelope.sequence());
+            throw new IllegalStateException("replication sequence regressed: last resolved %s, received %s".formatted(lastResolvedSequence, envelope.sequence()));
         }
         if (envelope.sequence() == lastResolvedSequence) {
             if (envelope.kind() != AeronReplicationEnvelope.Kind.COMMIT &&
@@ -179,8 +176,7 @@ final class TransactionAssembler {
                     (envelope.kind() == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY &&
                      (envelope.payloadLength() != this.lastResolutionDictionaryLength ||
                       envelope.chunkCount() != this.lastResolutionDictionaryChunkCount))) {
-                    throw new IllegalStateException("replayed data does not match the resolved transaction " +
-                                                    lastResolvedSequence);
+                    throw new IllegalStateException("replayed data does not match the resolved transaction %s".formatted(lastResolvedSequence));
                 }
                 if (this.transaction == null) {
                     this.transaction = new Transaction(envelope.sequence(), this.configuration.maxTransactionBytes(), true,
@@ -195,12 +191,10 @@ final class TransactionAssembler {
                 /* A resumed reader has only a cursor, not the terminal witness.  It
                  * must not silently accept a contradictory terminal at that cursor;
                  * restart from the persisted position instead. */
-                throw new IllegalStateException("terminal witness is unavailable for resolved sequence " +
-                                                lastResolvedSequence);
+                throw new IllegalStateException("terminal witness is unavailable for resolved sequence %s".formatted(lastResolvedSequence));
             }
             if (envelope.kind() != this.lastResolutionKind) {
-                throw new IllegalStateException("duplicate terminal has a different kind: expected " +
-                                                this.lastResolutionKind + ", received " + envelope.kind());
+                throw new IllegalStateException("duplicate terminal has a different kind: expected %s, received %s".formatted(this.lastResolutionKind, envelope.kind()));
             }
             if (envelope.payloadLength() != this.lastResolutionDataLength ||
                 envelope.chunkCount() != this.lastResolutionDataChunkCount) {
@@ -220,8 +214,7 @@ final class TransactionAssembler {
         }
         if (envelope.sequence() != this.nextExpectedSequence) {
             throw new IllegalStateException(
-                    "replication sequence gap: expected " + this.nextExpectedSequence +
-                    ", received " + envelope.sequence());
+                    "replication sequence gap: expected %s, received %s".formatted(this.nextExpectedSequence, envelope.sequence()));
         }
         if (envelope.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
             this.commit(envelope, position);
@@ -246,7 +239,7 @@ final class TransactionAssembler {
         }
         if (envelope.kind() != AeronReplicationEnvelope.Kind.TYPE_DICTIONARY &&
             envelope.kind() != AeronReplicationEnvelope.Kind.STORE_BINARY) {
-            throw new IllegalArgumentException("non-data envelope on replication data stream: " + envelope.kind());
+            throw new IllegalArgumentException("non-data envelope on replication data stream: %s".formatted(envelope.kind()));
         }
         if (this.transaction == null) {
             this.transaction = new Transaction(envelope.sequence(), this.configuration.maxTransactionBytes(), false,
@@ -350,7 +343,7 @@ final class TransactionAssembler {
         return new CursorSnapshot(this.lastResolvedSequence.get(), this.lastResolvedPosition.get());
     }
 
-    /** Returns whether chunks are waiting for a terminal marker. */
+        /// Returns whether chunks are waiting for a terminal marker.
     synchronized boolean hasIncompleteTransaction() {
         return this.transaction != null;
     }
@@ -373,7 +366,7 @@ final class TransactionAssembler {
         }
     }
 
-    /** Releases native buffers retained by an incomplete transaction. */
+        /// Releases native buffers retained by an incomplete transaction.
     void dispose() {
         synchronized (this.delivery) {
             synchronized (this) {
@@ -385,7 +378,7 @@ final class TransactionAssembler {
         }
     }
 
-    /** Holds fragments and commit metadata for one transaction. */
+        /// Holds fragments and commit metadata for one transaction.
     static final class Transaction {
         private final long sequence;
         private final int maxBytes;
@@ -505,7 +498,7 @@ final class TransactionAssembler {
         }
     }
 
-    /** Delivers one validated transaction outside the assembler monitor. */
+        /// Delivers one validated transaction outside the assembler monitor.
     private final class Delivery {
         private String dictionary;
         private ByteBuffer data;

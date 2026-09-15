@@ -16,13 +16,11 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.function.*;
 
-/**
- * Writer-owned, authenticated Archive retention controller.
- *
- * <p>This component deliberately owns no transport lifecycle. The provider
- * supplies a small writer access view, so retention cannot accidentally close
- * or replace the publication while validating a reader watermark.</p>
- */
+/// Writer-owned, authenticated Archive retention controller.
+///
+/// This component deliberately owns no transport lifecycle. The provider
+/// supplies a small writer access view, so retention cannot accidentally close
+/// or replace the publication while validating a reader watermark.
 final class AeronArchiveRetention implements ReplicationLogRetention {
     /* Versions 1 and 2 were development-only layouts. There is no migration
      * contract, so the complete tombstone-aware layout starts at version 3. */
@@ -103,6 +101,18 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         return this.quorum.isComplete();
     }
 
+    /// Deletes Archive history through the requested cursor, gated by the reader quorum.
+    ///
+    /// Nothing is deleted unless the complete configured reader set has
+    /// acknowledged at least the requested sequence, the watermark recording
+    /// matches the active writer, and the watermark stays within the durable
+    /// writer boundary. Deletion stops at complete segment boundaries; when a
+    /// live replay still uses a selected segment the request defers instead.
+    /// Any Archive failure fails closed. A cursor that has not crossed a full
+    /// segment reports nothing to delete rather than deleting partially.
+    ///
+    /// @param cursor durable boundary to delete through
+    /// @return deletion outcome with the boundary position
     @Override
     public synchronized MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
@@ -117,8 +127,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         try {
             if (!this.quorum.isComplete()) {
                 throw new IllegalStateException(
-                        "Aeron reader quorum has not acknowledged the requested boundary; missing=" +
-                        this.quorum.missingReaders());
+                        "Aeron reader quorum has not acknowledged the requested boundary; missing=%s".formatted(this.quorum.missingReaders()));
             }
             final AeronAuthenticatedWatermark quorumWatermark = this.quorum.aggregate();
             final AeronWriterBoundary requested = this.requestedBoundary(cursor);
@@ -170,7 +179,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         } catch (final RuntimeException failure) {
             if (failure instanceof ArchiveException archiveFailure) {
                 throw new IllegalStateException(
-                        "Aeron Archive retention failed closed (errorCode=" + archiveFailure.errorCode() + ")",
+                        "Aeron Archive retention failed closed (errorCode=%s)".formatted(archiveFailure.errorCode()),
                         archiveFailure);
             }
             throw new IllegalStateException("Aeron Archive retention failed closed", failure);
@@ -197,6 +206,13 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         }
     }
 
+    /// Records one reader's durable boundary into the retention quorum.
+    ///
+    /// The cursor must carry an authenticated watermark naming the same
+    /// sequence and Store generation as the cursor itself; anything else is
+    /// rejected as forgery or confusion rather than counted toward deletion.
+    ///
+    /// @param cursor reader cursor carrying the watermark
     @Override
     public synchronized void recordReaderWatermark(final ReplicationCursor cursor) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
@@ -222,7 +238,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         this.recordReaderWatermark(watermark);
     }
 
-    /** Accepts a watermark already decoded by the Aeron control subscription. */
+        /// Accepts a watermark already decoded by the Aeron control subscription.
     synchronized void recordReaderWatermark(final AeronAuthenticatedWatermark watermark) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
         if (!this.watermarkDeliveryAvailable.getAsBoolean()) {
@@ -345,8 +361,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 }
                 if (!this.quorum.acceptsReader(watermark.readerId())) {
                     throw new IOException(
-                            "retention state contains a watermark for an unconfigured or retired reader: " +
-                            watermark.readerId());
+                            "retention state contains a watermark for an unconfigured or retired reader: %s".formatted(watermark.readerId()));
                 }
                 watermarks.add(watermark);
             }
@@ -359,11 +374,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             for (int i = 0; i < retiredCount; i++) {
                 final UUID readerId = new UUID(buffer.getLong(), buffer.getLong());
                 if (!this.configuredReaders.contains(readerId))
-                    throw new IOException("retention state contains an unconfigured retired reader " + readerId);
+                    throw new IOException("retention state contains an unconfigured retired reader %s".formatted(readerId));
                 if (!retiredReaderSet.add(readerId))
-                    throw new IOException("retention state contains duplicate retired reader " + readerId);
+                    throw new IOException("retention state contains duplicate retired reader %s".formatted(readerId));
                 if (watermarkReaders.contains(readerId))
-                    throw new IOException("retention state contains both a watermark and retirement for " + readerId);
+                    throw new IOException("retention state contains both a watermark and retirement for %s".formatted(readerId));
                 retiredReaders.add(readerId);
             }
             if (buffer.hasRemaining()) throw new IOException("trailing retention state bytes");
@@ -376,7 +391,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             try {
                 for (final UUID readerId : retiredReaders) {
                     if (!restored.retire(readerId))
-                        throw new IOException("retention state contains duplicate retired reader " + readerId);
+                        throw new IOException("retention state contains duplicate retired reader %s".formatted(readerId));
                 }
                 for (final AeronAuthenticatedWatermark watermark : watermarks) restored.accept(watermark);
             } catch (final RuntimeException | IOException failure) {
@@ -390,11 +405,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         } catch (final NoSuchFileException ignored) {
             /* The state file is optional on first startup. */
         } catch (final IOException | RuntimeException failure) {
-            throw new IllegalStateException("cannot load authenticated Aeron retention state " + this.statePath, failure);
+            throw new IllegalStateException("cannot load authenticated Aeron retention state %s".formatted(this.statePath), failure);
         }
     }
 
-    /** Restores durable quorum state only once the watermark channel is usable. */
+        /// Restores durable quorum state only once the watermark channel is usable.
     private void ensureStateRestored() {
         if (!this.stateRestored && this.watermarkDeliveryAvailable.getAsBoolean()) {
             this.restoreState();
@@ -445,7 +460,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             });
             this.persistedBoundary = this.completeBoundary(this.quorum);
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot persist authenticated Aeron retention state " + this.statePath, failure);
+            throw new IllegalStateException("cannot persist authenticated Aeron retention state %s".formatted(this.statePath), failure);
         }
     }
 
@@ -463,7 +478,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                current.position() > this.persistedBoundary.position();
     }
 
-    /** Minimal Archive position view required by retention decisions. */
+        /// Minimal Archive position view required by retention decisions.
     record RecordingPositions(LongUnaryOperator startPosition, LongUnaryOperator stopPosition,
                               LongUnaryOperator recordingPosition) {
         RecordingPositions {

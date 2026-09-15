@@ -10,14 +10,12 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.zip.CRC32C;
 
-/**
- * Fixed CRC-protected barrier value exchanged by the reader crash child.
- *
- * <p>Unlike the writer milestone, this record includes the Archive position.
- * Reader cells use that position to prove that the cursor boundary and the
- * assembled transaction refer to the same terminal frame; the two schemas are
- * intentionally not interchangeable.</p>
- */
+/// Fixed CRC-protected barrier value exchanged by the reader crash child.
+///
+/// Unlike the writer milestone, this record includes the Archive position.
+/// Reader cells use that position to prove that the cursor boundary and the
+/// assembled transaction refer to the same terminal frame; the two schemas are
+/// intentionally not interchangeable.
 record ReaderMilestone(String point, long sequence, long position) {
     private static final int MAGIC = 0x4447524D;
     private static final short VERSION = 1;
@@ -38,9 +36,9 @@ record ReaderMilestone(String point, long sequence, long position) {
         value.putInt((int) crc.getValue()).flip();
         final Path absolute = path.toAbsolutePath();
         final Path parent = absolute.getParent();
-        if (parent == null) throw new IOException("Reader milestone path has no parent: " + path);
+        if (parent == null) throw new IOException("Reader milestone path has no parent: %s".formatted(path));
         Files.createDirectories(parent);
-        final Path temporary = Files.createTempFile(parent, absolute.getFileName() + ".tmp-", null);
+        final Path temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null);
         try {
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                 while (value.hasRemaining()) {
@@ -57,7 +55,7 @@ record ReaderMilestone(String point, long sequence, long position) {
         }
     }
 
-    /** Returns whether this reader-process schema can encode the named point. */
+        /// Returns whether this reader-process schema can encode the named point.
     static boolean supports(final String point) {
         for (final String supported : POINTS) if (supported.equals(point)) return true;
         return false;
@@ -65,7 +63,7 @@ record ReaderMilestone(String point, long sequence, long position) {
 
     static ReaderMilestone read(final Path path) throws IOException {
         final byte[] bytes = Files.readAllBytes(path);
-        if (bytes.length != BYTES) throw new IOException("invalid reader milestone length=" + bytes.length);
+        if (bytes.length != BYTES) throw new IOException("invalid reader milestone length=%s".formatted(bytes.length));
         final ByteBuffer value = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
         final int magic = value.getInt();
         final short version = value.getShort();
@@ -79,12 +77,12 @@ record ReaderMilestone(String point, long sequence, long position) {
         if (magic != MAGIC || version != VERSION || actual != (int) crc.getValue()) {
             throw new IOException("invalid reader milestone header or CRC");
         }
-        if (point >= POINTS.length) throw new IOException("unknown reader milestone point=" + point);
+        if (point >= POINTS.length) throw new IOException("unknown reader milestone point=%s".formatted(point));
         return new ReaderMilestone(POINTS[point], sequence, position);
     }
 
     private static int code(final String point) {
         for (int i = 0; i < POINTS.length; i++) if (POINTS[i].equals(point)) return i;
-        throw new IllegalArgumentException("unknown reader crash point " + point);
+        throw new IllegalArgumentException("unknown reader crash point %s".formatted(point));
     }
 }

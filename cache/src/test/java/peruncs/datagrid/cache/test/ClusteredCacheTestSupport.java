@@ -19,35 +19,33 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Shared fixtures for the clustered-cache Aeron adapter tests.
- *
- * <p>The Aeron adapter module depends on this test-jar to exercise the serializer,
- * event construction, and publish path.</p>
- */
+/// Shared fixtures for the clustered-cache Aeron adapter tests.
+///
+/// The Aeron adapter module depends on this test-jar to exercise the serializer,
+/// event construction, and publish path.
 public final class ClusteredCacheTestSupport {
     private ClusteredCacheTestSupport() {
     }
 
-    /** Creates the serializer used by the adapter tests. */
+        /// Creates the serializer used by the adapter tests.
     public static Serializer<byte[]> serializer() {
         return Serializer.Bytes(SerializerFoundation.New()
                 .registerEntityTypes(TimestampsRegionUpdateMessage.class));
     }
 
-    /** Creates a timestamp-region cache event. */
+        /// Creates a timestamp-region cache event.
     public static CacheEntryEvent<Object, Object> event(
             final String cacheName, final EventType eventType, final String tableName, final long timestamp) {
         return new TestCacheEntryEvent(new NamedCache(cacheName), eventType, tableName, timestamp);
     }
 
-    /** Creates a cache event with arbitrary key and value, for validation tests. */
+        /// Creates a cache event with arbitrary key and value, for validation tests.
     public static CacheEntryEvent<Object, Object> eventWith(
             final String cacheName, final EventType eventType, final Object key, final Object value) {
         return new TestCacheEntryEvent(new NamedCache(cacheName), eventType, key, value);
     }
 
-    /** Delivers one event to the sender through its JCache listener path. */
+        /// Delivers one event to the sender through its JCache listener path.
     public static void publish(final AeronClusteredCacheMessageSender sender, final EventType eventType,
                                final String cacheName, final String tableName, final long timestamp) {
         final CacheEntryEvent<Object, Object> event = event(cacheName, eventType, tableName, timestamp);
@@ -58,7 +56,7 @@ public final class ClusteredCacheTestSupport {
         }
     }
 
-    /** Cache stub that only answers {@link Cache#getName()}. */
+        /// Cache stub that only answers [Cache#getName()].
     private static final class NamedCache implements Cache<Object, Object> {
         private final String name;
 
@@ -210,7 +208,7 @@ public final class ClusteredCacheTestSupport {
         }
     }
 
-    /** Minimal cache event used by the sender's listener path. */
+        /// Minimal cache event used by the sender's listener path.
     public static final class TestCacheEntryEvent extends CacheEntryEvent<Object, Object> {
         private final Object key;
         private final Object value;

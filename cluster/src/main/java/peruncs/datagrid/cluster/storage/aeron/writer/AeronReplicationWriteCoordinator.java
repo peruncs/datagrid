@@ -11,19 +11,17 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 
-/**
- * Keeps local Store acceptance and Aeron publication in one ordered state
- * machine.
- *
- * <p>The coordinator owns the pending dictionary and prepared transaction for
- * its write path. It reports state changes to the checkpoint writer so
- * restart can distinguish a committed transaction from an uncertain one.</p>
- *
- * <p>This is an Aeron-only write coordinator. Store integration must use
- * {@link AeronStorageBinaryTargetDistributing}; exposing this object as the
- * distributor would allow publication without local Store
- * acceptance and would bypass the durable fence.</p>
- */
+/// Keeps local Store acceptance and Aeron publication in one ordered state
+/// machine.
+///
+/// The coordinator owns the pending dictionary and prepared transaction for
+/// its write path. It reports state changes to the checkpoint writer so
+/// restart can distinguish a committed transaction from an uncertain one.
+///
+/// This is an Aeron-only write coordinator. Store integration must use
+/// [AeronStorageBinaryTargetDistributing]; exposing this object as the
+/// distributor would allow publication without local Store
+/// acceptance and would bypass the durable fence.
 public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private final AeronReplicationPublisher publisher;
     private final ReplicationDurabilityMode durabilityMode;
@@ -82,11 +80,9 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         return this.publisher.nextSequence();
     }
 
-    /**
-     * Saves a type dictionary for the next transaction.
-     *
-     * @param typeDictionaryData dictionary text, or {@code null} to clear it
-     */
+        /// Saves a type dictionary for the next transaction.
+    ///
+    /// @param typeDictionaryData dictionary text, or `null` to clear it
     public void distributeTypeDictionary(final String typeDictionaryData) {
         this.writeLock.lock();
         try {
@@ -99,7 +95,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    /** Serializes one complete Store acceptance/publication transaction. */
+        /// Serializes one complete Store acceptance/publication transaction.
     void executeWriteAtomically(final WriteOperation operation) {
         if (operation == null) throw new NullPointerException("operation");
         this.writeLock.lock();
@@ -110,16 +106,14 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    /**
-     * Publishes and commits one Store binary using the archive-first fence.
-     *
-     * <p>This entry point is for the neutral distributor, which has no local
-     * persistence target to fence. Store writes should use
-     * {@link AeronStorageBinaryTargetDistributing} so local acceptance and
-     * publication remain one operation.</p>
-     *
-     * @param data binary to publish
-     */
+        /// Publishes and commits one Store binary using the archive-first fence.
+    ///
+    /// This entry point is for the neutral distributor, which has no local
+    /// persistence target to fence. Store writes should use
+    /// [AeronStorageBinaryTargetDistributing] so local acceptance and
+    /// publication remain one operation.
+    ///
+    /// @param data binary to publish
     void distributeData(final Binary data) {
         this.executeWriteAtomically(() ->
         {
@@ -129,10 +123,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         });
     }
 
-    /**
-     * Commits a token. If the result is unclear, records that fact before
-     * rethrowing so restart cannot silently reuse the sequence.
-     */
+        /// Commits a token. If the result is unclear, records that fact before
+    /// rethrowing so restart cannot silently reuse the sequence.
     synchronized void commitOrMarkUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
         this.commitMarkerPublished = false;
         try {
@@ -166,14 +158,12 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    /**
-     * Publishes a transaction's prepare phase and reports PREPARING to the
-     * checkpoint listener. The writer first records a small PREPARING fence for
-     * archive-first writes, because a local Store can accept data before the
-     * publication has a terminal marker. Enqueue-first writes reuse their existing
-     * ENQUEUED fence. The returned token must be committed or closed; listener
-     * failure fails the publisher closed.
-     */
+        /// Publishes a transaction's prepare phase and reports PREPARING to the
+    /// checkpoint listener. The writer first records a small PREPARING fence for
+    /// archive-first writes, because a local Store can accept data before the
+    /// publication has a terminal marker. Enqueue-first writes reuse their existing
+    /// ENQUEUED fence. The returned token must be committed or closed; listener
+    /// failure fails the publisher closed.
     synchronized AeronReplicationPublisher.PreparedTransaction prepare(final Binary data) {
         if (data == null) {
             throw new NullPointerException("data");
@@ -297,12 +287,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    /**
-     * Records a local ENQUEUE before Aeron preparation begins. This closes the
-     * dual-write window where the Store can accept data and the process can die
-     * before the reserved sequence is durably recorded. The returned sequence is
-     * the one that preparation must later reuse.
-     */
+        /// Records a local ENQUEUE before Aeron preparation begins. This closes the
+    /// dual-write window where the Store can accept data and the process can die
+    /// before the reserved sequence is durably recorded. The returned sequence is
+    /// the one that preparation must later reuse.
     synchronized long markLocalEnqueue(final Binary data) {
         if (data == null) throw new NullPointerException("data");
         if (this.localAcceptanceFence != null) {
@@ -369,23 +357,21 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         final long requiredBytes = Math.addExact(dataLength, dictionaryLength);
         if (!this.writeAdmission.test(requiredBytes)) {
             throw new IllegalStateException(
-                    "Aeron Archive has insufficient free capacity for transaction bytes=" + requiredBytes);
+                    "Aeron Archive has insufficient free capacity for transaction bytes=%s".formatted(requiredBytes));
         }
     }
 
-    /** Returns whether the publisher can still accept a transaction. */
+        /// Returns whether the publisher can still accept a transaction.
     boolean isWritable() {
         return !this.publisher.isFailed() && !this.publisher.isClosed();
     }
 
-    /**
-     * Executes Archive maintenance while this coordinator excludes every Store
-     * write. The supplied operation is responsible for stopping and extending the
-     * recording; keeping this monitor held prevents an unrecorded publication gap.
-     *
-     * @param maintenance bounded Archive maintenance operation
-     * @return operation result
-     */
+        /// Executes Archive maintenance while this coordinator excludes every Store
+    /// write. The supplied operation is responsible for stopping and extending the
+    /// recording; keeping this monitor held prevents an unrecorded publication gap.
+    ///
+    /// @param maintenance bounded Archive maintenance operation
+    /// @return operation result
     public long withWritesPaused(final LongSupplier maintenance) {
         if (maintenance == null) throw new NullPointerException("maintenance");
         this.writeLock.lock();
@@ -401,7 +387,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    /** Clears the pre-enqueue fence when the Store rejected the write. */
+        /// Clears the pre-enqueue fence when the Store rejected the write.
     synchronized void clearLocalEnqueue() {
         final LocalEnqueue local = this.localAcceptanceFence;
         if (local == null) return;
@@ -439,12 +425,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    /**
-     * Records that the local Store accepted an ENQUEUE_THEN_ARCHIVE write but
-     * publication preparation failed. The marker deliberately remains
-     * non-terminal so restart fails closed instead of assuming the Archive has
-     * the local transaction; recovery must reseed or explicitly repair the gap.
-     */
+        /// Records that the local Store accepted an ENQUEUE_THEN_ARCHIVE write but
+    /// publication preparation failed. The marker deliberately remains
+    /// non-terminal so restart fails closed instead of assuming the Archive has
+    /// the local transaction; recovery must reseed or explicitly repair the gap.
     synchronized void markEnqueueWithoutArchive() {
         final AeronReplicationPublisher.FailedPrepare failed = this.publisher.failedPrepare();
         final LocalEnqueue local = this.localAcceptanceFence;
@@ -517,7 +501,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.clearBufferScratch();
     }
 
-    /** Collects channel buffers into the reusable writer-owned array. */
+        /// Collects channel buffers into the reusable writer-owned array.
     private int collectBuffers(final Binary data) {
         if (data == null) throw new NullPointerException("data");
         this.bufferScratchCount = 0;
@@ -535,7 +519,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         return this.bufferScratchCount;
     }
 
-    /** Drops references to the last transaction's source buffers. */
+        /// Drops references to the last transaction's source buffers.
     private void clearBufferScratch() {
         Arrays.fill(this.bufferScratch, 0, this.bufferScratchCount, null);
         this.bufferScratchCount = 0;
@@ -556,13 +540,13 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.listener.onState(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
     }
 
-    /** Closes the publisher owned by this coordinator. */
+        /// Closes the publisher owned by this coordinator.
     @Override
     public void close() {
         this.dispose();
     }
 
-    /** Releases the publisher owned by this coordinator. */
+        /// Releases the publisher owned by this coordinator.
     public void dispose() {
         this.writeLock.lock();
         try {
@@ -602,7 +586,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         void run();
     }
 
-    /** Pairs a reserved sequence with the transaction queued for publication. */
+        /// Pairs a reserved sequence with the transaction queued for publication.
     private record LocalEnqueue(long sequence, AeronReplicationPublisher.TransactionMetadata metadata,
                                 Binary source, ByteBuffer[] buffers, int bufferCount) {
     }

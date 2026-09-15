@@ -15,15 +15,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * Runs periodic node maintenance on shared daemon threads.
- *
- * <p>Each node owns one housekeeper. Callers schedule every task first and
- * start the housekeeper last; close stops future runs and releases the
- * threads. Tasks run with a fixed delay, so a slow run postpones its own
- * next run instead of overlapping it. A failing task is logged and the
- * remaining tasks keep running.</p>
- */
+/// Runs periodic node maintenance on shared daemon threads.
+///
+/// Each node owns one housekeeper. Callers schedule every task first and
+/// start the housekeeper last; close stops future runs and releases the
+/// threads. Tasks run with a fixed delay, so a slow run postpones its own
+/// next run instead of overlapping it. A failing task is logged and the
+/// remaining tasks keep running.
 public final class NodeHousekeeper implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(NodeHousekeeper.class);
     private static final int THREADS = 2;
@@ -38,7 +36,7 @@ public final class NodeHousekeeper implements AutoCloseable {
         final AtomicInteger threadCount = new AtomicInteger();
         this.scheduler = new ScheduledThreadPoolExecutor(threads, task ->
         {
-            final Thread thread = new Thread(task, "datagrid-housekeeper-" + threadCount.incrementAndGet());
+            final Thread thread = new Thread(task, "datagrid-housekeeper-%s".formatted(threadCount.incrementAndGet()));
             thread.setDaemon(true);
             return thread;
         });
@@ -46,11 +44,9 @@ public final class NodeHousekeeper implements AutoCloseable {
         this.scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
-    /**
-     * Creates a housekeeper with two daemon threads.
-     *
-     * @return a housekeeper ready for scheduling
-     */
+        /// Creates a housekeeper with two daemon threads.
+    ///
+    /// @return a housekeeper ready for scheduling
     public static NodeHousekeeper New() {
         return new NodeHousekeeper(THREADS);
     }
@@ -65,16 +61,14 @@ public final class NodeHousekeeper implements AutoCloseable {
         }
     }
 
-    /**
-     * Creates the periodic full-backup task.
-     *
-     * <p>The task uses the automatic backup slot of the shared single-flight
-     * backup executor. A run while another backup is active is skipped instead
-     * of queuing behind it.</p>
-     *
-     * @param backupExecutor shared backup task executor
-     * @return backup task
-     */
+        /// Creates the periodic full-backup task.
+    ///
+    /// The task uses the automatic backup slot of the shared single-flight
+    /// backup executor. A run while another backup is active is skipped instead
+    /// of queuing behind it.
+    ///
+    /// @param backupExecutor shared backup task executor
+    /// @return backup task
     public static Runnable backupWork(final StorageBackupTaskExecutor backupExecutor) {
         notNull(backupExecutor);
         return () ->
@@ -92,16 +86,14 @@ public final class NodeHousekeeper implements AutoCloseable {
         };
     }
 
-    /**
-     * Creates the periodic storage-limit check task.
-     *
-     * <p>The task measures used disk space and records it in the gate, which
-     * request threads read to decide whether writes are still accepted.</p>
-     *
-     * @param diskSpaceReader storage measurement source
-     * @param limitGate       shared limit state
-     * @return limit-check task
-     */
+        /// Creates the periodic storage-limit check task.
+    ///
+    /// The task measures used disk space and records it in the gate, which
+    /// request threads read to decide whether writes are still accepted.
+    ///
+    /// @param diskSpaceReader storage measurement source
+    /// @param limitGate       shared limit state
+    /// @return limit-check task
     public static Runnable limitCheckWork(
             final StorageDiskSpaceReader diskSpaceReader,
             final StorageLimitGate limitGate
@@ -121,13 +113,11 @@ public final class NodeHousekeeper implements AutoCloseable {
         };
     }
 
-    /**
-     * Registers one periodic task. Tasks must be scheduled before start.
-     *
-     * @param name     human-readable task name used in log messages
-     * @param task     the work to run
-     * @param interval delay between the end of one run and the start of the next
-     */
+        /// Registers one periodic task. Tasks must be scheduled before start.
+    ///
+    /// @param name     human-readable task name used in log messages
+    /// @param task     the work to run
+    /// @param interval delay between the end of one run and the start of the next
     public synchronized void schedule(final String name, final Runnable task, final Duration interval) {
         if (this.closed) {
             throw new IllegalStateException("Node housekeeper is closed");
@@ -140,15 +130,13 @@ public final class NodeHousekeeper implements AutoCloseable {
         }
         notNull(task);
         if (interval == null || interval.isZero() || interval.isNegative()) {
-            throw new IllegalArgumentException("Housekeeper task '" + name + "' interval must be positive");
+            throw new IllegalArgumentException("Housekeeper task '%s' interval must be positive".formatted(name));
         }
         LOG.info("Scheduling housekeeper task '{}' every {}", name, interval);
         this.pending.add(new ScheduledTask(name, task, interval));
     }
 
-    /**
-     * Starts firing the scheduled tasks. The first run of each task waits one interval.
-     */
+        /// Starts firing the scheduled tasks. The first run of each task waits one interval.
     public synchronized void start() {
         if (this.closed) {
             throw new IllegalStateException("Node housekeeper is closed");
@@ -169,9 +157,7 @@ public final class NodeHousekeeper implements AutoCloseable {
         LOG.info("Started node housekeeper with {} task(s)", this.pending.size());
     }
 
-    /**
-     * Stops future runs and releases the threads. A running task is interrupted.
-     */
+        /// Stops future runs and releases the threads. A running task is interrupted.
     @Override
     public synchronized void close() {
         if (this.closed) {

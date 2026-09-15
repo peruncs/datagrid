@@ -11,9 +11,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/** Tests the durable replication cursor manager. */
+/// Tests the durable replication cursor manager.
 class StoredReplicationCursorManagerTest {
-    /** Verifies atomic cursor path round trips and replaces complete records. */
+        /// Verifies atomic cursor path round trips and replaces complete records.
     @Test
     void atomicPathRoundTripsAndReplacesCompleteRecords() throws Exception {
         final Path directory = Files.createTempDirectory("replication-cursor-");
@@ -49,7 +49,7 @@ class StoredReplicationCursorManagerTest {
         }
     }
 
-    /** Verifies production cursor writes use the shared atomic-file boundary. */
+        /// Verifies production cursor writes use the shared atomic-file boundary.
     @Test
     void atomicCursorWriteUsesAtomicFileStore() throws Exception {
         final Path directory = Files.createTempDirectory("replication-cursor-hook-");

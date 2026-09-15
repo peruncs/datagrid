@@ -9,7 +9,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Verifies that an Aeron driver directory itself cannot be a symlink. */
+/// Verifies that an Aeron driver directory itself cannot be a symlink.
 class AeronRuntimeTest {
     @Test
     void rejectsSymlinkedDirectory(@TempDir final Path root) throws Exception {

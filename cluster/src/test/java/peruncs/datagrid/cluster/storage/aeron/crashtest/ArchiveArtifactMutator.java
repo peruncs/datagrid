@@ -14,7 +14,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
 import java.util.regex.Pattern;
 
-/** Version-checked mutations used only by Archive corruption tests. */
+/// Version-checked mutations used only by Archive corruption tests.
 public final class ArchiveArtifactMutator {
     private static final long MAX_MUTATION_BYTES = 128L * 1024L * 1024L;
     private static final Pattern SEGMENT = Pattern.compile("(\\d+)-(\\d+)\\.rec");
@@ -22,7 +22,7 @@ public final class ArchiveArtifactMutator {
     private ArchiveArtifactMutator() {
     }
 
-    /** Returns all recording segments in physical order. */
+        /// Returns all recording segments in physical order.
     public static java.util.List<Path> segments(final Path archiveDirectory, final long recordingId)
             throws IOException {
         try (var files = Files.list(archiveDirectory)) {
@@ -32,7 +32,7 @@ public final class ArchiveArtifactMutator {
                 return matcher.matches() && Long.parseLong(matcher.group(1)) == recordingId;
             }).sorted(Comparator.comparingLong(ArchiveArtifactMutator::segmentBasePosition)).toList();
             if (matches.isEmpty()) {
-                throw new UnsupportedArtifactLayoutException("no recording segments for " + recordingId);
+                throw new UnsupportedArtifactLayoutException("no recording segments for %s".formatted(recordingId));
             }
             return matches;
         }
@@ -40,14 +40,14 @@ public final class ArchiveArtifactMutator {
 
     private static long segmentBasePosition(final Path path) {
         final var matcher = SEGMENT.matcher(path.getFileName().toString());
-        if (!matcher.matches()) throw new IllegalArgumentException("not an Archive segment: " + path);
+        if (!matcher.matches()) throw new IllegalArgumentException("not an Archive segment: %s".formatted(path));
         return Long.parseLong(matcher.group(2));
     }
 
-    /** Flips one byte in the first envelope payload and forces the segment. */
+        /// Flips one byte in the first envelope payload and forces the segment.
     public static void corruptFirstEnvelopePayload(final Path segment) throws IOException {
         if (Files.size(segment) > MAX_MUTATION_BYTES) {
-            throw new UnsupportedArtifactLayoutException("segment exceeds mutation bound: " + segment);
+            throw new UnsupportedArtifactLayoutException("segment exceeds mutation bound: %s".formatted(segment));
         }
         final byte[] bytes = Files.readAllBytes(segment);
         final int magic = AeronReplicationEnvelope.MAGIC;
@@ -75,7 +75,7 @@ public final class ArchiveArtifactMutator {
                 return;
             }
         }
-        throw new UnsupportedArtifactLayoutException("no replication envelope found in " + segment);
+        throw new UnsupportedArtifactLayoutException("no replication envelope found in %s".formatted(segment));
     }
 
     private static boolean hasMagic(final byte[] bytes, final int offset) {
@@ -93,10 +93,8 @@ public final class ArchiveArtifactMutator {
         }
     }
 
-    /**
-     * Shortens the final Aeron frame by one byte, leaving its replication envelope
-     * incomplete while preserving the segment's preallocated physical length.
-     */
+        /// Shortens the final Aeron frame by one byte, leaving its replication envelope
+    /// incomplete while preserving the segment's preallocated physical length.
     public static void truncateFinalFrame(
             final Path segment,
             final long recordingStartPosition,
@@ -104,27 +102,27 @@ public final class ArchiveArtifactMutator {
     ) throws IOException {
         final long recordedLength = recordingStopPosition - recordingStartPosition;
         if (recordedLength <= AeronReplicationEnvelope.HEADER_LENGTH) {
-            throw new UnsupportedArtifactLayoutException("recording is too small to truncate: " + segment);
+            throw new UnsupportedArtifactLayoutException("recording is too small to truncate: %s".formatted(segment));
         }
         final long segmentBase = segmentBasePosition(segment);
         final long physicalEnd = recordingStartPosition - segmentBase + recordedLength;
         if (physicalEnd <= 0) {
-            throw new UnsupportedArtifactLayoutException("recording start is outside segment: " + segment);
+            throw new UnsupportedArtifactLayoutException("recording start is outside segment: %s".formatted(segment));
         }
         if (physicalEnd > MAX_MUTATION_BYTES) {
-            throw new UnsupportedArtifactLayoutException("segment exceeds mutation bound: " + segment);
+            throw new UnsupportedArtifactLayoutException("segment exceeds mutation bound: %s".formatted(segment));
         }
         try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
             if (physicalEnd > channel.size()) {
                 throw new UnsupportedArtifactLayoutException(
-                        "recording positions exceed physical segment size: " + segment);
+                        "recording positions exceed physical segment size: %s".formatted(segment));
             }
             final ByteBuffer bytes = ByteBuffer.allocate(Math.toIntExact(physicalEnd))
                     .order(ByteOrder.LITTLE_ENDIAN);
             for (long position = 0; bytes.hasRemaining(); ) {
                 final int read = channel.read(bytes, position);
-                if (read < 0) throw new UnsupportedArtifactLayoutException("segment ended before recording boundary: " + segment);
-                if (read == 0) throw new UnsupportedArtifactLayoutException("cannot read recording boundary: " + segment);
+                if (read < 0) throw new UnsupportedArtifactLayoutException("segment ended before recording boundary: %s".formatted(segment));
+                if (read == 0) throw new UnsupportedArtifactLayoutException("cannot read recording boundary: %s".formatted(segment));
                 position += read;
             }
             bytes.flip();
@@ -135,13 +133,12 @@ public final class ArchiveArtifactMutator {
             int lastFrameLength = -1;
             while (frameOffset < endOffset) {
                 if (frameOffset + Integer.BYTES > endOffset) {
-                    throw new UnsupportedArtifactLayoutException("recording ends inside an Aeron frame header: " + segment);
+                    throw new UnsupportedArtifactLayoutException("recording ends inside an Aeron frame header: %s".formatted(segment));
                 }
                 final int frameLength = bytes.getInt(frameOffset);
                 if (frameLength < DataHeaderFlyweight.HEADER_LENGTH ||
                     frameLength > endOffset - frameOffset) {
-                    throw new UnsupportedArtifactLayoutException("invalid Aeron frame length " + frameLength +
-                                                                 " at " + frameOffset + " in " + segment);
+                    throw new UnsupportedArtifactLayoutException("invalid Aeron frame length %s at %s in %s".formatted(frameLength, frameOffset, segment));
                 }
                 if (frameLength > DataHeaderFlyweight.HEADER_LENGTH + AeronReplicationEnvelope.HEADER_LENGTH) {
                     lastFrameOffset = frameOffset;
@@ -150,13 +147,12 @@ public final class ArchiveArtifactMutator {
                 final int alignedLength = (frameLength + (FrameDescriptor.FRAME_ALIGNMENT - 1)) &
                                           -(FrameDescriptor.FRAME_ALIGNMENT);
                 if (alignedLength <= 0 || alignedLength > endOffset - frameOffset) {
-                    throw new UnsupportedArtifactLayoutException("invalid Aeron frame alignment at " + frameOffset +
-                                                                 " in " + segment);
+                    throw new UnsupportedArtifactLayoutException("invalid Aeron frame alignment at %s in %s".formatted(frameOffset, segment));
                 }
                 frameOffset += alignedLength;
             }
             if (lastFrameOffset < 0) {
-                throw new UnsupportedArtifactLayoutException("final Aeron frame is too small to truncate: " + segment);
+                throw new UnsupportedArtifactLayoutException("final Aeron frame is too small to truncate: %s".formatted(segment));
             }
             final ByteBuffer length = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN)
                     .putInt(lastFrameLength - 1);
@@ -166,11 +162,11 @@ public final class ArchiveArtifactMutator {
         }
     }
 
-    /** Truncates the catalog only when it has a recognizable preallocation. */
+        /// Truncates the catalog only when it has a recognizable preallocation.
     public static void truncateCatalog(final Path archiveDirectory) throws IOException {
         final Path catalog = archiveDirectory.resolve("archive.catalog");
         final long size = Files.size(catalog);
-        if (size < 64L) throw new UnsupportedArtifactLayoutException("catalog is too small: " + catalog);
+        if (size < 64L) throw new UnsupportedArtifactLayoutException("catalog is too small: %s".formatted(catalog));
         try (FileChannel channel = FileChannel.open(catalog, StandardOpenOption.WRITE)) {
             channel.truncate(64L);
             channel.force(true);

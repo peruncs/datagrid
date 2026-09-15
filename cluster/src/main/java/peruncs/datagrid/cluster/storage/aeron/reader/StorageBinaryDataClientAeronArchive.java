@@ -15,15 +15,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Reads committed Store transactions from an Archive and then from the live
- * publication.
- *
- * <p>Replay starts at the supplied durable position. The reader reports live
- * only after replay catches up, so a restart needs no separate snapshot path.
- * The subscription belongs to this reader; the caller remains responsible for
- * the shared Aeron and Archive clients.</p>
- */
+/// Reads committed Store transactions from an Archive and then from the live
+/// publication.
+///
+/// Replay starts at the supplied durable position. The reader reports live
+/// only after replay catches up, so a restart needs no separate snapshot path.
+/// The subscription belongs to this reader; the caller remains responsible for
+/// the shared Aeron and Archive clients.
 public final class StorageBinaryDataClientAeronArchive implements StorageBinaryDataClient {
     private final PersistentSubscription subscription;
     private final TransactionAssembler assembler;
@@ -70,25 +68,23 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
         }
     }
 
-    /**
-     * Creates a reader with no delivery durability callback.
-     *
-     * @param aeron               shared Aeron client, not owned by the reader
-     * @param archiveContext      Archive connection settings
-     * @param recordingId         recording to replay
-     * @param startPosition       first Archive position to replay
-     * @param liveChannel         live publication channel
-     * @param liveStreamId        live publication stream
-     * @param replayChannel       replay channel
-     * @param replayStreamId      replay stream
-     * @param configuration       shared framing and timeout limits
-     * @param clusterId           expected cluster identity
-     * @param epoch               expected writer epoch
-     * @param initialSequence     last sequence already applied by the Store
-     * @param receiver            destination for complete Store binaries
-     * @param transactionResolved callback after a transaction is delivered
-     * @return a reader that owns its subscriptions
-     */
+        /// Creates a reader with no delivery durability callback.
+    ///
+    /// @param aeron               shared Aeron client, not owned by the reader
+    /// @param archiveContext      Archive connection settings
+    /// @param recordingId         recording to replay
+    /// @param startPosition       first Archive position to replay
+    /// @param liveChannel         live publication channel
+    /// @param liveStreamId        live publication stream
+    /// @param replayChannel       replay channel
+    /// @param replayStreamId      replay stream
+    /// @param configuration       shared framing and timeout limits
+    /// @param clusterId           expected cluster identity
+    /// @param epoch               expected writer epoch
+    /// @param initialSequence     last sequence already applied by the Store
+    /// @param receiver            destination for complete Store binaries
+    /// @param transactionResolved callback after a transaction is delivered
+    /// @return a reader that owns its subscriptions
     public static StorageBinaryDataClientAeronArchive New(
             final Aeron aeron,
             final AeronArchive.Context archiveContext,
@@ -110,29 +106,27 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
                 transactionResolved, null, startPosition);
     }
 
-    /**
-     * Creates a reader with callbacks around Store materialisation.
-     *
-     * <p>The reader does not close {@code aeron} or the Archive client. Call
-     * {@link #dispose()} when the reader is no longer needed.</p>
-     *
-     * @param aeron               shared Aeron client, not owned by the reader
-     * @param archiveContext      Archive connection settings
-     * @param recordingId         recording to replay
-     * @param startPosition       first Archive position to replay
-     * @param liveChannel         live publication channel
-     * @param liveStreamId        live publication stream
-     * @param replayChannel       replay channel
-     * @param replayStreamId      replay stream
-     * @param configuration       shared framing and timeout limits
-     * @param clusterId           expected cluster identity
-     * @param epoch               expected writer epoch
-     * @param initialSequence     last sequence already applied by the Store
-     * @param receiver            destination for complete Store binaries
-     * @param transactionResolved callback after a transaction is delivered
-     * @param deliveryListener    callback around Store materialisation
-     * @return a reader that owns its subscriptions
-     */
+        /// Creates a reader with callbacks around Store materialisation.
+    ///
+    /// The reader does not close `aeron` or the Archive client. Call
+    /// [#dispose()] when the reader is no longer needed.
+    ///
+    /// @param aeron               shared Aeron client, not owned by the reader
+    /// @param archiveContext      Archive connection settings
+    /// @param recordingId         recording to replay
+    /// @param startPosition       first Archive position to replay
+    /// @param liveChannel         live publication channel
+    /// @param liveStreamId        live publication stream
+    /// @param replayChannel       replay channel
+    /// @param replayStreamId      replay stream
+    /// @param configuration       shared framing and timeout limits
+    /// @param clusterId           expected cluster identity
+    /// @param epoch               expected writer epoch
+    /// @param initialSequence     last sequence already applied by the Store
+    /// @param receiver            destination for complete Store binaries
+    /// @param transactionResolved callback after a transaction is delivered
+    /// @param deliveryListener    callback around Store materialisation
+    /// @return a reader that owns its subscriptions
     public static StorageBinaryDataClientAeronArchive New(
             final Aeron aeron,
             final AeronArchive.Context archiveContext,
@@ -155,30 +149,28 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
                 transactionResolved, deliveryListener, startPosition);
     }
 
-    /**
-     * Creates a reader with a complete recovered sequence and recording position.
-     * The initial position is retained in the atomic cursor snapshot until the
-     * first newly resolved transaction, so a reader that has not caught up cannot
-     * expose an unrelated position.
-     *
-     * @param aeron               shared Aeron client, not owned by the reader
-     * @param archiveContext      Archive connection settings
-     * @param recordingId         recording to replay
-     * @param startPosition       first Archive position to replay
-     * @param liveChannel         live publication channel
-     * @param liveStreamId        live publication stream
-     * @param replayChannel       replay channel
-     * @param replayStreamId      replay stream
-     * @param configuration       shared framing and timeout limits
-     * @param clusterId           expected cluster identity
-     * @param epoch               expected writer epoch
-     * @param initialSequence     last sequence already applied by the Store
-     * @param receiver            destination for complete Store binaries
-     * @param transactionResolved callback after a transaction is delivered
-     * @param deliveryListener    callback around Store materialisation
-     * @param initialPosition     last resolved Archive position, or {@code -1} for a new reader
-     * @return a reader that owns its subscriptions
-     */
+        /// Creates a reader with a complete recovered sequence and recording position.
+    /// The initial position is retained in the atomic cursor snapshot until the
+    /// first newly resolved transaction, so a reader that has not caught up cannot
+    /// expose an unrelated position.
+    ///
+    /// @param aeron               shared Aeron client, not owned by the reader
+    /// @param archiveContext      Archive connection settings
+    /// @param recordingId         recording to replay
+    /// @param startPosition       first Archive position to replay
+    /// @param liveChannel         live publication channel
+    /// @param liveStreamId        live publication stream
+    /// @param replayChannel       replay channel
+    /// @param replayStreamId      replay stream
+    /// @param configuration       shared framing and timeout limits
+    /// @param clusterId           expected cluster identity
+    /// @param epoch               expected writer epoch
+    /// @param initialSequence     last sequence already applied by the Store
+    /// @param receiver            destination for complete Store binaries
+    /// @param transactionResolved callback after a transaction is delivered
+    /// @param deliveryListener    callback around Store materialisation
+    /// @param initialPosition     last resolved Archive position, or `-1` for a new reader
+    /// @return a reader that owns its subscriptions
     public static StorageBinaryDataClientAeronArchive New(
             final Aeron aeron,
             final AeronArchive.Context archiveContext,
@@ -233,7 +225,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
         }
     }
 
-    /** Starts replay and live polling; repeated calls have no effect. */
+        /// Starts replay and live polling; repeated calls have no effect.
     @Override
     public synchronized void start() {
         if (this.disposed || this.disposeRequested) {
@@ -311,11 +303,9 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
         }
     }
 
-    /**
-     * Restarts a reader stopped at the live tail. A replay or validation failure
-     * is terminal; create a new reader from the durable cursor instead of
-     * reusing incomplete transaction state.
-     */
+        /// Restarts a reader stopped at the live tail. A replay or validation failure
+    /// is terminal; create a new reader from the durable cursor instead of
+    /// reusing incomplete transaction state.
     public synchronized void resume() {
         final RuntimeException failure = this.failure();
         if (failure != null) {
@@ -326,7 +316,7 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
         this.start();
     }
 
-    /** Requests a stop after replay reaches the current live tail. */
+        /// Requests a stop after replay reaches the current live tail.
     public synchronized void stopAtLatestMessage() {
         if (this.disposed) {
             return;
@@ -339,68 +329,54 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
         if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
     }
 
-    /**
-     * Returns the last sequence delivered after commit and checksum validation.
-     *
-     * @return last resolved transaction sequence
-     */
+        /// Returns the last sequence delivered after commit and checksum validation.
+    ///
+    /// @return last resolved transaction sequence
     public long lastResolvedSequence() {
         return this.assembler.lastResolvedSequence();
     }
 
-    /**
-     * Returns the last sequence materialized by the Store receiver.
-     *
-     * @return last applied transaction sequence
-     */
+        /// Returns the last sequence materialized by the Store receiver.
+    ///
+    /// @return last applied transaction sequence
     public long lastAppliedSequence() {
         return this.assembler.lastAppliedSequence();
     }
 
-    /**
-     * Returns whether the polling thread is active and has not failed.
-     *
-     * @return {@code true} when the reader is running
-     */
+        /// Returns whether the polling thread is active and has not failed.
+    ///
+    /// @return `true` when the reader is running
     public boolean isRunning() {
         return this.active.get() && !this.disposeRequested && this.failure() == null;
     }
 
-    /**
-     * Returns whether replay has transitioned to the live subscription.
-     *
-     * @return {@code true} after replay reaches the live stream
-     */
+        /// Returns whether replay has transitioned to the live subscription.
+    ///
+    /// @return `true` after replay reaches the live stream
     public boolean isLive() {
         return this.live;
     }
 
-    /**
-     * Returns the Archive position of the last resolved commit.
-     *
-     * @return last resolved Archive position
-     */
+        /// Returns the Archive position of the last resolved commit.
+    ///
+    /// @return last resolved Archive position
     public long lastResolvedPosition() {
         return this.assembler.lastResolvedPosition();
     }
 
-    /**
-     * Returns an atomic sequence/position snapshot for cursor persistence.
-     *
-     * @return current cursor snapshot
-     */
+        /// Returns an atomic sequence/position snapshot for cursor persistence.
+    ///
+    /// @return current cursor snapshot
     public CursorSnapshot cursorSnapshot() {
         return this.assembler.cursorSnapshot();
     }
 
-    /**
-     * Builds a cursor that can resume this reader from the same recording.
-     *
-     * @param nodeId          node that will own the resumed cursor
-     * @param storeGeneration Store image identity
-     * @param recordingId     Aeron Archive recording identity
-     * @return durable cursor for the current reader boundary
-     */
+        /// Builds a cursor that can resume this reader from the same recording.
+    ///
+    /// @param nodeId          node that will own the resumed cursor
+    /// @param storeGeneration Store image identity
+    /// @param recordingId     Aeron Archive recording identity
+    /// @return durable cursor for the current reader boundary
     public AeronReplicationCursor cursor(
             final UUID nodeId,
             final UUID storeGeneration,
@@ -418,32 +394,28 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
         );
     }
 
-    /**
-     * Returns the terminal polling failure, or {@code null} while healthy.
-     *
-     * @return terminal failure, or {@code null}
-     */
+        /// Returns the terminal polling failure, or `null` while healthy.
+    ///
+    /// @return terminal failure, or `null`
     public RuntimeException failure() {
         return this.assembler.failure();
     }
 
-    /** Returns the stop boundary outcome and never infers success from a dead thread. */
+        /// Returns the stop boundary outcome and never infers success from a dead thread.
     public StorageBinaryDataClient.StopOutcome stopOutcome() {
         return this.stopOutcome;
     }
 
-    /** Returns the terminal stop state and the last resolved sequence/position. */
+        /// Returns the terminal stop state and the last resolved sequence/position.
     @Override
     public StorageBinaryDataClient.StopResult stopResult() {
         final CursorSnapshot cursor = this.assembler.cursorSnapshot();
         return new StorageBinaryDataClient.StopResult(this.stopOutcome, cursor.sequence(), cursor.position());
     }
 
-    /**
-     * Stops polling after a terminal Aeron client or MediaDriver failure.
-     *
-     * @param failure terminal failure
-     */
+        /// Stops polling after a terminal Aeron client or MediaDriver failure.
+    ///
+    /// @param failure terminal failure
     public synchronized void fail(final RuntimeException failure) {
         this.assembler.failure(java.util.Objects.requireNonNull(failure, "failure"));
         this.active.set(false);
@@ -453,15 +425,13 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
         }
     }
 
-    /**
-     * Stops polling and releases this reader's subscriptions.
-     *
-     * <p>If the polling thread does not terminate within the bounded shutdown
-     * window this method throws and leaves the subscription and assembler-owned
-     * buffers intact. A later call must retry after the thread has exited; this
-     * preserves native-buffer ownership and avoids closing a subscription under
-     * the polling thread.</p>
-     */
+        /// Stops polling and releases this reader's subscriptions.
+    ///
+    /// If the polling thread does not terminate within the bounded shutdown
+    /// window this method throws and leaves the subscription and assembler-owned
+    /// buffers intact. A later call must retry after the thread has exited; this
+    /// preserves native-buffer ownership and avoids closing a subscription under
+    /// the polling thread.
     @Override
     public synchronized void dispose() {
         if (this.disposed) return;

@@ -16,11 +16,9 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/**
- * Child-process tests for the provider's writer and embedded Archive restart
- * boundary. The parent kills the child only after the requested milestone is
- * written to the control file.
- */
+/// Child-process tests for the provider's writer and embedded Archive restart
+/// boundary. The parent kills the child only after the requested milestone is
+/// written to the control file.
 class ProviderCrashMatrixIT {
     private static boolean isActiveDriverRetry(final String outcome) {
         final String normalized = outcome.toLowerCase(java.util.Locale.ROOT);
@@ -31,7 +29,7 @@ class ProviderCrashMatrixIT {
 
     private static void assertNotHarnessError(final CrashOutcome outcome, final String raw) {
         if (outcome.policy() == RecoveryPolicy.HARNESS_ERROR) {
-            throw new AssertionError("crash barrier was not reached; verify hook installation and point mapping\n" + raw);
+            throw new AssertionError("crash barrier was not reached; verify hook installation and point mapping\n%s".formatted(raw));
         }
     }
 
@@ -60,7 +58,7 @@ class ProviderCrashMatrixIT {
         final byte[] digest;
         try {
             digest = java.security.MessageDigest.getInstance("SHA-256")
-                    .digest(("dg-crash:" + sequence).getBytes(StandardCharsets.UTF_8));
+                    .digest(("dg-crash:%s".formatted(sequence)).getBytes(StandardCharsets.UTF_8));
         } catch (final java.security.NoSuchAlgorithmException impossible) {
             throw new AssertionError(impossible);
         }
@@ -75,7 +73,7 @@ class ProviderCrashMatrixIT {
         try {
             return Math.max(1L, Long.parseLong(value));
         } catch (final NumberFormatException failure) {
-            throw new IllegalArgumentException("invalid crash budget " + property + '=' + value, failure);
+            throw new IllegalArgumentException("invalid crash budget %s%s%s".formatted(property, '=', value), failure);
         }
     }
 
@@ -89,136 +87,136 @@ class ProviderCrashMatrixIT {
         try {
             return Files.exists(path) ? Files.size(path) : 0L;
         } catch (final IOException failure) {
-            throw new AssertionError("cannot inspect Store fixture " + path, failure);
+            throw new AssertionError("cannot inspect Store fixture %s".formatted(path), failure);
         }
     }
 
-    /** Verifies prepared data tail requires reseed. */
+        /// Verifies prepared data tail requires reseed.
     @Test
     void preparedDataTailRequiresReseed() throws Exception {
         this.assertReseed("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies dictionary data tail requires reseed. */
+        /// Verifies dictionary data tail requires reseed.
     @Test
     void dictionaryDataTailRequiresReseed() throws Exception {
         this.assertReseed("AFTER_DICTIONARY_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies prepared before local write requires reseed. */
+        /// Verifies prepared before local write requires reseed.
     @Test
     void preparedBeforeLocalWriteRequiresReseed() throws Exception {
         this.assertReseed("AFTER_PREPARE_BEFORE_LOCAL_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies the pre-publication fence refuses an ambiguous restart. */
+        /// Verifies the pre-publication fence refuses an ambiguous restart.
     @Test
     void crashBeforePrepareRequiresReseed() throws Exception {
         this.assertOutcome("BEFORE_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "RESEED_REQUIRED");
     }
 
-    /** Verifies a crash before the first publication connection leaves no writer state. */
+        /// Verifies a crash before the first publication connection leaves no writer state.
     @Test
     void beforePublicationConnectionLeavesNoWriterState() throws Exception {
         this.assertOutcome("BEFORE_PUBLICATION_CONNECTED", ReplicationDurabilityMode.ARCHIVE_FIRST,
                 false, false, "CONTINUE");
     }
 
-    /** Verifies local rejection after abort offer requires reseed. */
+        /// Verifies local rejection after abort offer requires reseed.
     @Test
     void localRejectionAfterAbortOfferRequiresReseed() throws Exception {
         this.assertOutcome("AFTER_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST, false, true,
                 "RESEED_REQUIRED");
     }
 
-    /** Verifies archive recorded before checkpoint requires reseed. */
+        /// Verifies archive recorded before checkpoint requires reseed.
     @Test
     void archiveRecordedBeforeCheckpointRequiresReseed() throws Exception {
         this.assertReseed("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies ambiguous commit offer requires reseed. */
+        /// Verifies ambiguous commit offer requires reseed.
     @Test
     void ambiguousCommitOfferRequiresReseed() throws Exception {
         this.assertReseed("AFTER_COMMIT_OFFER", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies a recorded commit without a coordinator return requires reseed. */
+        /// Verifies a recorded commit without a coordinator return requires reseed.
     @Test
     void recordedCommitBeforeCoordinatorReturnRequiresReseed() throws Exception {
         this.assertReseed("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies the commit-offer boundary fails closed before recording. */
+        /// Verifies the commit-offer boundary fails closed before recording.
     @Test
     void beforeCommitOfferRequiresReseed() throws Exception {
         this.assertReseed("BEFORE_COMMIT_OFFER", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies a prepared transaction that never reaches local Store write requires reseed. */
+        /// Verifies a prepared transaction that never reaches local Store write requires reseed.
     @Test
     void afterPrepareRequiresReseed() throws Exception {
         this.assertReseed("AFTER_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies local write ahead fence requires reseed. */
+        /// Verifies local write ahead fence requires reseed.
     @Test
     void localWriteAheadFenceRequiresReseed() throws Exception {
         this.assertReseed("AFTER_LOCAL_WRITE_BEFORE_COMMIT", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies enqueue before prepare fence requires reseed. */
+        /// Verifies enqueue before prepare fence requires reseed.
     @Test
     void enqueueBeforePrepareFenceRequiresReseed() throws Exception {
         this.assertReseed("AFTER_ENQUEUE_BEFORE_PREPARE", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, false);
     }
 
-    /** Verifies uncertain checkpoint requires reseed. */
+        /// Verifies uncertain checkpoint requires reseed.
     @Test
     void uncertainCheckpointRequiresReseed() throws Exception {
         this.assertReseed("DURING_COMMITTING_UNCERTAIN_WRITE", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, true);
     }
 
-    /** Verifies a checkpoint write interrupted before rename preserves the prior boundary. */
+        /// Verifies a checkpoint write interrupted before rename preserves the prior boundary.
     @Test
     void checkpointTempWriteBeforeRenameRequiresReseed() throws Exception {
         this.assertReseed("BEFORE_CHECKPOINT_TEMP_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies a checkpoint write interrupted during file output preserves the prior boundary. */
+        /// Verifies a checkpoint write interrupted during file output preserves the prior boundary.
     @Test
     void checkpointFileWriteRequiresReseed() throws Exception {
         this.assertReseed("DURING_CHECKPOINT_FILE_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies a forced temporary checkpoint that was not renamed leaves the prior boundary. */
+        /// Verifies a forced temporary checkpoint that was not renamed leaves the prior boundary.
     @Test
     void checkpointAfterTempWriteBeforeRenameRequiresReseed() throws Exception {
         this.assertReseed("AFTER_CHECKPOINT_TEMP_WRITE_BEFORE_RENAME", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-    /** Verifies a renamed checkpoint remains restartable before directory force completes. */
+        /// Verifies a renamed checkpoint remains restartable before directory force completes.
     @Test
     void checkpointRenameBeforeDirectorySyncContinues() throws Exception {
         this.assertOutcome("AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
                 ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "CONTINUE");
     }
 
-    /** Verifies a durable checkpoint remains restartable before in-memory sequence publication. */
+        /// Verifies a durable checkpoint remains restartable before in-memory sequence publication.
     @Test
     void checkpointBeforeSequenceUpdateContinues() throws Exception {
         this.assertOutcome("AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
                 ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "CONTINUE");
     }
 
-    /** Verifies that an orphaned first transaction is never silently reused. */
+        /// Verifies that an orphaned first transaction is never silently reused.
     @Test
     void firstTransactionOrphanRequiresReseed() throws Exception {
         this.assertOutcome("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST,
                 false, false, "RESEED_REQUIRED", null, 1, 0);
     }
 
-    /** Verifies the writer remains deterministic when no live subscriber is connected. */
+        /// Verifies the writer remains deterministic when no live subscriber is connected.
     @Test
     void writerWithoutSubscriberStillFailsClosedSafely() throws Exception {
         final String previous = System.getProperty("crash.matrix.subscriber");
@@ -231,17 +229,15 @@ class ProviderCrashMatrixIT {
         }
     }
 
-    /** Verifies failed prepare abort boundary requires reseed. */
+        /// Verifies failed prepare abort boundary requires reseed.
     @Test
     void failedPrepareAbortBoundaryRequiresReseed() throws Exception {
         this.assertReseed("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, true);
     }
 
-    /**
-     * Seeded process-kill soak.  It is enabled by the crashmatrix profile and
-     * remains configurable so a nightly run can increase the sample count
-     * without changing the deterministic cells above.
-     */
+        /// Seeded process-kill soak.  It is enabled by the crashmatrix profile and
+    /// remains configurable so a nightly run can increase the sample count
+    /// without changing the deterministic cells above.
     @Test
     void seededCrashSoakPreservesTheSafeOutcomeInvariant() throws Exception {
         final int iterations = Integer.getInteger("crash.matrix.random.iterations", 0);
@@ -302,13 +298,13 @@ class ProviderCrashMatrixIT {
                 final CrashScenario scenario = scenarios[random.nextInt(scenarios.length)];
                 this.assertOutcome(scenario.point(), scenario.durability(), scenario.injectPrepareFailure(),
                         scenario.rejectLocal(), scenario.expectedOutcome(),
-                        "seed=" + (baseSeed + seedIndex) + ",iteration=" + iteration,
+                        "seed=%s,iteration=%s".formatted((baseSeed + seedIndex), iteration),
                         scenario.writes(), scenario.targetSequence());
             }
         }
     }
 
-    /** Verifies a second crash after a valid checkpoint is read remains restartable. */
+        /// Verifies a second crash after a valid checkpoint is read remains restartable.
     @Test
     void doubleCrashDuringRecoveryPreservesCheckpointContinuation() throws Exception {
         try (DirectoryLayout layout = DirectoryLayout.create()) {
@@ -357,13 +353,12 @@ class ProviderCrashMatrixIT {
                     outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
                     if (!isActiveDriverRetry(outcome)) break;
                     assertEquals(storeSizeBeforeRetry, fileSize(base.resolve("store.records")),
-                            "recovery retry changed the Store fixture before startup " + restartAttempts);
+                            "recovery retry changed the Store fixture before startup %s".formatted(restartAttempts));
                     Thread.sleep(1_000L);
                 }
                 while (System.nanoTime() < restartDeadline);
                 assertFalse(outcome.contains("Active media driver detected"),
-                        "recording never became stopped before recovery retry deadline; attempts=" + restartAttempts +
-                        " outcome=" + outcome + "\n" + diagnostics(base.resolve("control")));
+                        "recording never became stopped before recovery retry deadline; attempts=%s outcome=%s\n%s".formatted(restartAttempts, outcome, diagnostics(base.resolve("control"))));
                 final CrashOutcome result = CrashOutcome.parse(outcome);
                 assertNotHarnessError(result, outcome);
                 assertEquals(RecoveryPolicy.CONTINUE, result.policy(), outcome);
@@ -374,7 +369,7 @@ class ProviderCrashMatrixIT {
                 if (child != null && child.isAlive()) child.destroyForcibly();
                 try {
                     final Path evidence = DiagnosticCollector.collect(base, failure.toString());
-                    throw new AssertionError("double-crash evidence: " + evidence, failure);
+                    throw new AssertionError("double-crash evidence: %s".formatted(evidence), failure);
                 } catch (final IOException evidenceFailure) {
                     failure.addSuppressed(evidenceFailure);
                     throw failure;
@@ -400,7 +395,7 @@ class ProviderCrashMatrixIT {
             final Path base = layout.root();
             if (runLabel != null) {
                 Files.createDirectories(base.resolve("control"));
-                Files.writeString(base.resolve("control/selection"), runLabel + ",point=" + point + '\n',
+                Files.writeString(base.resolve("control/selection"), "%s,point=%s%s".formatted(runLabel, point, '\n'),
                         StandardCharsets.UTF_8);
             }
             final int livePort = layout.livePort();
@@ -422,7 +417,7 @@ class ProviderCrashMatrixIT {
                 assertTrue(phase1Store.valid(), "phase1 Store fixture is not a complete record");
                 for (int i = 0; i < phase1Store.records().size(); i++) {
                     assertArrayEquals(payload(i), phase1Store.records().get(i),
-                            "unexpected phase1 Store payload at record " + i);
+                            "unexpected phase1 Store payload at record %s".formatted(i));
                 }
                 String outcome;
                 final long restartDeadline = System.nanoTime() +
@@ -437,18 +432,17 @@ class ProviderCrashMatrixIT {
                     outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
                     if (!outcome.contains("Active media driver detected")) break;
                     assertEquals(storeSizeBeforeRetry, fileSize(base.resolve("store.records")),
-                            "phase2 changed the Store fixture before recovery on retry " + restartAttempts);
+                            "phase2 changed the Store fixture before recovery on retry %s".formatted(restartAttempts));
                     Thread.sleep(1_000L);
                 }
                 while (System.nanoTime() < restartDeadline);
                 assertFalse(isActiveDriverRetry(outcome),
-                        "recording never became stopped before phase2 restart deadline; attempts=" + restartAttempts +
-                        " outcome=" + outcome + "\n" + diagnostics(base.resolve("control")));
+                        "recording never became stopped before phase2 restart deadline; attempts=%s outcome=%s\n%s".formatted(restartAttempts, outcome, diagnostics(base.resolve("control"))));
                 final CrashOutcome result;
                 try {
                     result = CrashOutcome.parse(outcome);
                 } catch (final RuntimeException parseFailure) {
-                    throw new AssertionError("invalid child outcome: " + outcome, parseFailure);
+                    throw new AssertionError("invalid child outcome: %s".formatted(outcome), parseFailure);
                 }
                 assertNotHarnessError(result, outcome);
                 assertEquals(RecoveryPolicy.valueOf(expectedOutcome), result.policy(), outcome);
@@ -461,11 +455,11 @@ class ProviderCrashMatrixIT {
                     assertTrue(checkpointCrc == Integer.toUnsignedLong(crc(payload(0))) ||
                                checkpointCrc == Integer.toUnsignedLong(crc(payload(1))) ||
                                checkpointCrc == Integer.toUnsignedLong(crc(payload(2))),
-                            "checkpoint CRC is not one of the test transaction payloads\n" + outcome);
+                            "checkpoint CRC is not one of the test transaction payloads\n%s".formatted(outcome));
                 }
                 if (result.policy() == RecoveryPolicy.CONTINUE && result.recordingId() != null && result.recordingId() >= 0) {
                     assertTrue(result.recordingPosition() != null && result.recordingPosition() >= 0,
-                            "checkpoint has recording identity without a replayable position\n" + outcome);
+                            "checkpoint has recording identity without a replayable position\n%s".formatted(outcome));
                 }
                 if (!"CONTINUE".equals(expectedOutcome)) {
                     assertTrue(result.error() != null && !result.error().isBlank(), outcome);
@@ -477,7 +471,7 @@ class ProviderCrashMatrixIT {
                 if (child != null && child.isAlive()) child.destroyForcibly();
                 try {
                     final Path evidence = DiagnosticCollector.collect(base, failure.toString());
-                    throw new AssertionError("crash cell evidence: " + evidence, failure);
+                    throw new AssertionError("crash cell evidence: %s".formatted(evidence), failure);
                 } catch (final IOException evidenceFailure) {
                     failure.addSuppressed(evidenceFailure);
                     throw failure;
@@ -502,24 +496,24 @@ class ProviderCrashMatrixIT {
         Files.deleteIfExists(control.resolve("milestone.reached"));
         Files.deleteIfExists(control.resolve("outcome"));
         Files.deleteIfExists(control.resolve("release"));
-        final Path stdout = control.resolve(mode + "-stdout.log");
-        final Path stderr = control.resolve(mode + "-stderr.log");
+        final Path stdout = control.resolve("%s-stdout.log".formatted(mode));
+        final Path stderr = control.resolve("%s-stderr.log".formatted(mode));
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final ProcessBuilder builder = new ProcessBuilder(javaExecutable,
                 "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
-                "-Ddg.crash.base=" + base,
-                "-Ddg.crash.mode=" + mode,
-                "-Ddg.crash.barrier=" + point,
-                "-Ddg.crash.sequence=" + targetSequence,
-                "-Ddg.crash.writes=" + writes,
-                "-Ddg.crash.durability=" + durability,
-                "-Ddg.crash.injectPrepareFailure=" + injectPrepareFailure,
-                "-Ddg.crash.rejectLocal=" + rejectLocal,
-                "-Ddg.crash.rejectSequence=" + (rejectLocal ? 1 : -1),
-                "-Ddg.crash.subscriber=" + System.getProperty("crash.matrix.subscriber", "true"),
-                "-Ddg.crash.livePort=" + livePort,
-                "-Ddg.crash.controlPort=" + controlPort,
+                "-Ddg.crash.base=%s".formatted(base),
+                "-Ddg.crash.mode=%s".formatted(mode),
+                "-Ddg.crash.barrier=%s".formatted(point),
+                "-Ddg.crash.sequence=%s".formatted(targetSequence),
+                "-Ddg.crash.writes=%s".formatted(writes),
+                "-Ddg.crash.durability=%s".formatted(durability),
+                "-Ddg.crash.injectPrepareFailure=%s".formatted(injectPrepareFailure),
+                "-Ddg.crash.rejectLocal=%s".formatted(rejectLocal),
+                "-Ddg.crash.rejectSequence=%s".formatted((rejectLocal ? 1 : -1)),
+                "-Ddg.crash.subscriber=%s".formatted(System.getProperty("crash.matrix.subscriber", "true")),
+                "-Ddg.crash.livePort=%s".formatted(livePort),
+                "-Ddg.crash.controlPort=%s".formatted(controlPort),
                 ProviderCrashChildMain.class.getName());
         builder.redirectOutput(stdout.toFile());
         builder.redirectError(stderr.toFile());
@@ -532,11 +526,11 @@ class ProviderCrashMatrixIT {
         final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
         while (!Files.exists(path) && System.nanoTime() < deadline) {
             if (!child.isAlive()) {
-                throw new AssertionError("child exited before " + path + "\n" + diagnostics(path.getParent()));
+                throw new AssertionError("child exited before %s\n%s".formatted(path, diagnostics(path.getParent())));
             }
             Thread.sleep(10L);
         }
-        assertTrue(Files.exists(path), "timed out waiting for " + path + "\n" + diagnostics(path.getParent()));
+        assertTrue(Files.exists(path), "timed out waiting for %s\n%s".formatted(path, diagnostics(path.getParent())));
     }
 
     private record CrashScenario(

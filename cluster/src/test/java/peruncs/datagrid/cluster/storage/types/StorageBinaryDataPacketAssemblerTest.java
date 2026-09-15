@@ -1,10 +1,6 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataException;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacket;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacketAssembler;
 
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -12,7 +8,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 import static peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage.MessageType.DATA;
 
-/** Tests storage binary data packet assembler behavior. */
+/// Tests storage binary data packet assembler behavior.
 class StorageBinaryDataPacketAssemblerTest {
     private static StorageBinaryDataPacket packet(final int index, final int count, final byte[] bytes) {
         return StorageBinaryDataPacket.New(DATA, 3, index, count, ByteBuffer.wrap(bytes));
@@ -27,7 +23,7 @@ class StorageBinaryDataPacketAssemblerTest {
         );
     }
 
-    /** Verifies that an incomplete message carries across batches and completes in order. */
+        /// Verifies that an incomplete message carries across batches and completes in order.
     @Test
     void carriesIncompleteMessageAcrossBatchesAndCompletesInOrder() {
         final StorageBinaryDataPacket first = packet(0, 2, new byte[]{1, 2});
@@ -44,7 +40,7 @@ class StorageBinaryDataPacketAssemblerTest {
         complete.completed().forEach(StorageBinaryDataMessage::dispose);
     }
 
-    /** Verifies that adjacent messages dispatch as one buffer group per type. */
+        /// Verifies that adjacent messages dispatch as one buffer group per type.
     @Test
     void dispatchesAdjacentMessagesAsOneBufferGroupPerType() {
         final var first = message(DATA, new byte[]{1});
@@ -53,7 +49,7 @@ class StorageBinaryDataPacketAssemblerTest {
 
         final var groups = new java.util.ArrayList<String>();
         StorageBinaryDataPacketAssembler.dispatch(List.of(first, second, dictionary), (last, buffers) ->
-                groups.add(last.type() + ":" + buffers.size()));
+                groups.add("%s:%s".formatted(last.type(), buffers.size())));
 
         assertEquals(List.of("DATA:2", "TYPE_DICTIONARY:1"), groups);
         first.dispose();
@@ -61,7 +57,7 @@ class StorageBinaryDataPacketAssemblerTest {
         dictionary.dispose();
     }
 
-    /** Verifies rejection of oversized message before native allocation. */
+        /// Verifies rejection of oversized message before native allocation.
     @Test
     void rejectsOversizedMessageBeforeNativeAllocation() {
         assertThrows(StorageBinaryDataException.class, () -> StorageBinaryDataMessage.New(
@@ -69,7 +65,7 @@ class StorageBinaryDataPacketAssemblerTest {
                         0, 1, ByteBuffer.allocate(0))));
     }
 
-    /** Packet indexes are zero-based and cannot point beyond the declared packet set. */
+        /// Packet indexes are zero-based and cannot point beyond the declared packet set.
     @Test
     void rejectsPacketIndexOutsidePacketCount() {
         assertThrows(IllegalArgumentException.class, () -> StorageBinaryDataPacket.New(

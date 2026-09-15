@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.publish;
 import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.serializer;
 
-/** Verifies the Aeron clustered-cache provider over a real embedded MediaDriver. */
+/// Verifies the Aeron clustered-cache provider over a real embedded MediaDriver.
 class AeronClusteredCacheMessageComProviderTest {
     private static void provideSender(final Map<String, Object> properties) {
         new AeronClusteredCacheMessageComProvider()
@@ -848,7 +848,7 @@ class AeronClusteredCacheMessageComProviderTest {
                                 return;
                             }
                             for (int i = 0; i < perThread; i++) {
-                                publish(sender, EventType.CREATED, "cache", "table-" + publisher + "-" + i,
+                                publish(sender, EventType.CREATED, "cache", "table-%s-%s".formatted(publisher, i),
                                         publisher * 1000L + i);
                             }
                         });
@@ -952,8 +952,8 @@ class AeronClusteredCacheMessageComProviderTest {
                     /* Interleave both providers so two independent per-instance
                      * counters would interleave (0, 0, 1, 1) and report false gaps. */
                     for (int i = 0; i < 5; i++) {
-                        publish(first, EventType.CREATED, "cache", "table-" + i, i);
-                        publish(second, EventType.CREATED, "cache", "table-" + (i + 100), i + 100L);
+                        publish(first, EventType.CREATED, "cache", "table-%s".formatted(i), i);
+                        publish(second, EventType.CREATED, "cache", "table-%s".formatted((i + 100)), i + 100L);
                     }
 
                     int delivered = 0;
@@ -1014,8 +1014,8 @@ class AeronClusteredCacheMessageComProviderTest {
                         senderProviderB.provideUpdateTimestampsCacheMessageSender(streamB, serializer());
                 try {
                     for (int i = 0; i < 5; i++) {
-                        publish(senderA, EventType.CREATED, "cache", "a-" + i, i);
-                        publish(senderB, EventType.CREATED, "cache", "b-" + i, i + 100L);
+                        publish(senderA, EventType.CREATED, "cache", "a-%s".formatted(i), i);
+                        publish(senderB, EventType.CREATED, "cache", "b-%s".formatted(i), i + 100L);
                     }
 
                     assertEquals(5, drainAll(receivedA, 5, 15));
@@ -1086,7 +1086,7 @@ class AeronClusteredCacheMessageComProviderTest {
     void nodeIdWhitespaceIsNormalizedAcrossRepeatedBindings() {
         final UUID nodeId = UUID.randomUUID();
         final Map<String, Object> firstProperties = properties(
-                AeronClusteredConfigurationPropertyNames.NODE_ID, "  " + nodeId + "  ");
+                AeronClusteredConfigurationPropertyNames.NODE_ID, "  %s  ".formatted(nodeId));
         final Map<String, Object> secondProperties = properties(
                 AeronClusteredConfigurationPropertyNames.NODE_ID, nodeId.toString());
         final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();

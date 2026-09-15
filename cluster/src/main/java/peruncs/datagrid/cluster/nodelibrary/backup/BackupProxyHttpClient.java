@@ -25,35 +25,29 @@ import java.util.regex.Pattern;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This client moves backup archives through the remote backup service.
- *
- * <p>It translates HTTP failures and malformed metadata into
- * {@link peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException}.
- * The caller owns the paths passed to upload and download.</p>
- */
+/// This client moves backup archives through the remote backup service.
+///
+/// It translates HTTP failures and malformed metadata into
+/// [peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException].
+/// The caller owns the paths passed to upload and download.
 public interface BackupProxyHttpClient {
-    /**
-     * Creates a client for a backup service.
-     *
-     * @param baseUri backup service base URI
-     * @return backup client
-     */
+        /// Creates a client for a backup service.
+    ///
+    /// @param baseUri backup service base URI
+    /// @return backup client
     static BackupProxyHttpClient New(final URI baseUri) {
         return new Default(notNull(baseUri), 3, Duration.ofMillis(100L), Duration.ofSeconds(30L), Duration.ofSeconds(10L));
     }
 
-    /**
-     * Creates a client with explicit retry and timeout policy.
-     *
-     * @param baseUri        backup service base URI
-     * @param maxAttempts    maximum number of attempts for one request
-     * @param retryBackoff   delay between retryable failures
-     * @param requestTimeout per-request timeout
-     * @param connectTimeout connection-establishment timeout
-     * @return backup client
-     * @throws IllegalArgumentException if an attempt count or duration is invalid
-     */
+        /// Creates a client with explicit retry and timeout policy.
+    ///
+    /// @param baseUri        backup service base URI
+    /// @param maxAttempts    maximum number of attempts for one request
+    /// @param retryBackoff   delay between retryable failures
+    /// @param requestTimeout per-request timeout
+    /// @param connectTimeout connection-establishment timeout
+    /// @return backup client
+    /// @throws IllegalArgumentException if an attempt count or duration is invalid
     static BackupProxyHttpClient New(
             final URI baseUri,
             final int maxAttempts,
@@ -64,42 +58,34 @@ public interface BackupProxyHttpClient {
         return new Default(notNull(baseUri), maxAttempts, retryBackoff, requestTimeout, connectTimeout);
     }
 
-    /**
-     * Uploads a backup file.
-     *
-     * @param s3Key    remote backup key
-     * @param filePath local file path
-     * @throws NodelibraryException if upload fails
-     */
+        /// Uploads a backup file.
+    ///
+    /// @param s3Key    remote backup key
+    /// @param filePath local file path
+    /// @throws NodelibraryException if upload fails
     void upload(final String s3Key, final Path filePath) throws NodelibraryException;
 
-    /**
-     * Deletes a remote backup.
-     *
-     * @param s3Key remote backup key
-     * @throws NodelibraryException if deletion fails
-     */
+        /// Deletes a remote backup.
+    ///
+    /// @param s3Key remote backup key
+    /// @throws NodelibraryException if deletion fails
     void delete(final String s3Key) throws NodelibraryException;
 
-    /**
-     * Downloads a remote backup.
-     *
-     * @param s3Key               remote backup key
-     * @param destinationFilePath local destination path
-     * @return destination path
-     * @throws NodelibraryException if download fails
-     */
+        /// Downloads a remote backup.
+    ///
+    /// @param s3Key               remote backup key
+    /// @param destinationFilePath local destination path
+    /// @return destination path
+    /// @throws NodelibraryException if download fails
     Path download(final String s3Key, final Path destinationFilePath) throws NodelibraryException;
 
-    /**
-     * Lists remote backups.
-     *
-     * @return remote backup metadata
-     * @throws NodelibraryException if listing fails
-     */
+        /// Lists remote backups.
+    ///
+    /// @return remote backup metadata
+    /// @throws NodelibraryException if listing fails
     List<BackupMetadataDto> list() throws NodelibraryException;
 
-    /** Implements backup transfers with the JDK HTTP client. */
+        /// Implements backup transfers with the JDK HTTP client.
     final class Default implements BackupProxyHttpClient {
         private static final Logger LOG = LoggerFactory.getLogger(BackupProxyHttpClient.class);
         private static final int MAX_METADATA_RESPONSE_BYTES = 1 << 20;
@@ -136,7 +122,7 @@ public interface BackupProxyHttpClient {
                 throw new IllegalArgumentException("backup proxy URI must be an http(s) origin without user info, query, or fragment");
             }
             final String text = baseUri.toString();
-            return URI.create(text.endsWith("/") ? text : text + "/");
+            return URI.create(text.endsWith("/") ? text : "%s/".formatted(text));
         }
 
         private static byte[] readMetadata(final InputStream input) throws IOException {
@@ -147,7 +133,7 @@ public interface BackupProxyHttpClient {
             while ((read = input.read(buffer)) != -1) {
                 if (read > MAX_METADATA_RESPONSE_BYTES - total) {
                     throw new NodelibraryException(
-                            "Backup metadata response exceeds " + MAX_METADATA_RESPONSE_BYTES + " bytes");
+                            "Backup metadata response exceeds %s bytes".formatted(MAX_METADATA_RESPONSE_BYTES));
                 }
                 output.write(buffer, 0, read);
                 total += read;
@@ -161,7 +147,7 @@ public interface BackupProxyHttpClient {
             try {
                 closeable.close();
             } catch (final Exception failure) {
-                throw new NodelibraryException("Failed to close retry response for " + operation, failure);
+                throw new NodelibraryException("Failed to close retry response for %s".formatted(operation), failure);
             }
         }
 
@@ -210,6 +196,16 @@ public interface BackupProxyHttpClient {
             this.validateOkResponse(res.statusCode());
         }
 
+        /// Downloads an archive without ever exposing a partial file at the destination.
+        ///
+        /// Bytes land in a uniquely named sibling `.part` file and are moved
+        /// into place atomically once the transfer validates; a failed
+        /// download deletes only the temporary file, so a retry never resumes
+        /// from — or mistakes — a torn archive.
+        ///
+        /// @param s3Key remote archive key
+        /// @param destinationFilePath final local path
+        /// @return absolute destination path
         @Override
         public Path download(final String s3Key, final Path destinationFilePath) throws NodelibraryException {
             LOG.trace("Downloading storage archive");
@@ -222,7 +218,7 @@ public interface BackupProxyHttpClient {
             }
             final Path absoluteDestination = destinationFilePath.toAbsolutePath();
             final Path temporary = absoluteDestination.resolveSibling(
-                    absoluteDestination.getFileName() + ".part-" + UUID.randomUUID());
+                    "%s.part-%s".formatted(absoluteDestination.getFileName(), UUID.randomUUID()));
             boolean installed = false;
             try {
                 final HttpResponse<Path> res = this.send(
@@ -261,7 +257,7 @@ public interface BackupProxyHttpClient {
             try (InputStream input = res.body()) {
                 if (res.statusCode() != 200) {
                     throw new NodelibraryException(
-                            "Unexpected response from backup proxy. Status Code: " + res.statusCode());
+                            "Unexpected response from backup proxy. Status Code: %s".formatted(res.statusCode()));
                 }
                 body = readMetadata(input);
             } catch (final IOException failure) {
@@ -280,7 +276,7 @@ public interface BackupProxyHttpClient {
 
         private void validateOkResponse(final int statusCode) {
             if (statusCode / 100 != 2) {
-                throw new NodelibraryException("Unexpected response from backup proxy. Status Code: " + statusCode);
+                throw new NodelibraryException("Unexpected response from backup proxy. Status Code: %s".formatted(statusCode));
             }
         }
 
@@ -299,21 +295,21 @@ public interface BackupProxyHttpClient {
                     continue;
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    throw new NodelibraryException("Interrupted while attempting to " + operation, e);
+                    throw new NodelibraryException("Interrupted while attempting to %s".formatted(operation), e);
                 } catch (final IOException e) {
                     lastFailure = e;
                     if (attempt == this.maxAttempts) {
-                        throw new NodelibraryException("Failed to " + operation, e);
+                        throw new NodelibraryException("Failed to %s".formatted(operation), e);
                     }
                 }
                 try {
                     TimeUnit.MILLISECONDS.sleep(this.backoffMillis(attempt));
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    throw new NodelibraryException("Interrupted while retrying " + operation, e);
+                    throw new NodelibraryException("Interrupted while retrying %s".formatted(operation), e);
                 }
             }
-            throw new NodelibraryException("Failed to " + operation, lastFailure);
+            throw new NodelibraryException("Failed to %s".formatted(operation), lastFailure);
         }
 
         private void sleepBeforeRetry(final HttpResponse<?> response, final int attempt, final String operation)
@@ -326,7 +322,7 @@ public interface BackupProxyHttpClient {
                 TimeUnit.MILLISECONDS.sleep(delay);
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new NodelibraryException("Interrupted while retrying " + operation, e);
+                throw new NodelibraryException("Interrupted while retrying %s".formatted(operation), e);
             }
         }
 

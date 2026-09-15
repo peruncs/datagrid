@@ -21,27 +21,23 @@ import java.util.stream.Collectors;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This backend stores backups as directories on a local filesystem volume.
- *
- * <p>A backup becomes visible only after its storage, metadata, manifest, and
- * ready marker have been written. The backend keeps user-uploaded storage in
- * a separate directory so it is not mistaken for a generated backup.</p>
- */
+/// This backend stores backups as directories on a local filesystem volume.
+///
+/// A backup becomes visible only after its storage, metadata, manifest, and
+/// ready marker have been written. The backend keeps user-uploaded storage in
+/// a separate directory so it is not mistaken for a generated backup.
 public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
-    /**
-     * Creates a filesystem backup backend.
-     *
-     * @param backupVolumePath backup volume path
-     * @return filesystem backup backend
-     */
+        /// Creates a filesystem backup backend.
+    ///
+    /// @param backupVolumePath backup volume path
+    /// @return filesystem backup backend
     static FilesystemVolumeBackupBackend New(
             final Path backupVolumePath
     ) {
         return new Default(notNull(backupVolumePath));
     }
 
-    /** Implements the filesystem backup marker and copy protocol. */
+        /// Implements the filesystem backup marker and copy protocol.
     class Default implements FilesystemVolumeBackupBackend {
         private static final Logger LOG = LoggerFactory.getLogger(FilesystemVolumeBackupBackend.class);
 
@@ -160,18 +156,16 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                 timestamp = Long.parseLong(backupName);
             } catch (final NumberFormatException e) {
                 throw new NodelibraryException(
-                        "Failed to parse backup timestamp for backup " + this.backupVolumePath.resolve(folderName), e
+                        "Failed to parse backup timestamp for backup %s".formatted(this.backupVolumePath.resolve(folderName)), e
                 );
             }
             return new BackupMetadata(timestamp, isManual);
         }
 
-        /**
-         * A backup directory is visible only after the final ready marker has
-         * been forced.  Requiring the storage directory and manifest as well
-         * prevents an interrupted copy from being selected as the latest
-         * recoverable backup.
-         */
+                /// A backup directory is visible only after the final ready marker has
+        /// been forced.  Requiring the storage directory and manifest as well
+        /// prevents an interrupted copy from being selected as the latest
+        /// recoverable backup.
         private boolean isCompleteBackup(final String folderName) {
             final Path root = this.backupVolumePath.resolve(folderName);
             return Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)
@@ -184,15 +178,15 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             try {
                 StorageFileOperations.ensureNoSymbolicLinks(destinationDir);
                 if (!Files.isDirectory(sourceDir, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new NodelibraryException("Backup source is not a directory: " + sourceDir);
+                    throw new NodelibraryException("Backup source is not a directory: %s".formatted(sourceDir));
                 }
                 if (Files.exists(destinationDir, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new NodelibraryException("Backup destination already contains storage: " + destinationDir);
+                    throw new NodelibraryException("Backup destination already contains storage: %s".formatted(destinationDir));
                 }
                 Files.createDirectories(destinationDir);
                 StorageFileOperations.ensureNoSymbolicLinks(destinationDir);
             } catch (final IOException e) {
-                throw new NodelibraryException("Failed to create backup destination " + destinationDir, e);
+                throw new NodelibraryException("Failed to create backup destination %s".formatted(destinationDir), e);
             }
             try (final var storageFiles = Files.walk(sourceDir)) {
                 storageFiles.forEach(f ->
@@ -202,7 +196,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                         final var destinationFile = destinationDir.resolve(sourceDir.relativize(f));
                         StorageFileOperations.ensureNoSymbolicLinks(destinationFile);
                         if (Files.isSymbolicLink(f)) {
-                            throw new IOException("Backup source contains a symbolic link: " + f);
+                            throw new IOException("Backup source contains a symbolic link: %s".formatted(f));
                         }
                         if (Files.isDirectory(f, LinkOption.NOFOLLOW_LINKS)) {
                             Files.createDirectories(destinationFile);
@@ -212,14 +206,14 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                             StorageFileOperations.ensureNoSymbolicLinks(destinationFile.getParent());
                             Files.copy(f, destinationFile, LinkOption.NOFOLLOW_LINKS);
                         } else {
-                            throw new IOException("Unsupported backup entry: " + f);
+                            throw new IOException("Unsupported backup entry: %s".formatted(f));
                         }
                     } catch (final IOException e) {
                         throw new NodelibraryException("Failed to copy file", e);
                     }
                 });
             } catch (final IOException e) {
-                throw new NodelibraryException("Failed to walk files at " + sourceDir, e);
+                throw new NodelibraryException("Failed to walk files at %s".formatted(sourceDir), e);
             }
         }
 
@@ -229,7 +223,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                 Files.createDirectories(destinationParent);
                 StorageFileOperations.ensureNoSymbolicLinks(destinationParent);
             } catch (final IOException failure) {
-                throw new NodelibraryException("Failed to create backup destination " + destinationParent, failure);
+                throw new NodelibraryException("Failed to create backup destination %s".formatted(destinationParent), failure);
             }
             final Path temporary;
             try {
@@ -258,7 +252,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             try (final var listStream = Files.list(this.backupVolumePath)) {
                 return listStream.map(p -> p.getFileName().toString()).sorted().collect(Collectors.toList());
             } catch (final IOException e) {
-                throw new NodelibraryException("Failed to iterate backup files at " + this.backupVolumePath, e);
+                throw new NodelibraryException("Failed to iterate backup files at %s".formatted(this.backupVolumePath), e);
             }
         }
     }

@@ -6,15 +6,13 @@ import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationHealth;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/** Neutral storage + replication readiness gate. */
+/// Neutral storage + replication readiness gate.
 public interface StorageNodeHealthCheck extends AutoCloseable {
-    /**
-     * Creates a health check.
-     *
-     * @param storageController Store controller
-     * @param replicationHealth replication health
-     * @return health check
-     */
+        /// Creates a health check.
+    ///
+    /// @param storageController Store controller
+    /// @param replicationHealth replication health
+    /// @return health check
     static StorageNodeHealthCheck New(
             final StorageController storageController,
             final ReplicationHealth replicationHealth
@@ -22,62 +20,48 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         return new Default(notNull(storageController), notNull(replicationHealth));
     }
 
-    /**
-     * Reports whether Store and replication are ready.
-     *
-     * @return {@code true} when ready
-     * @throws NodelibraryException if readiness cannot be checked
-     */
+        /// Reports whether Store and replication are ready.
+    ///
+    /// @return `true` when ready
+    /// @throws NodelibraryException if readiness cannot be checked
     boolean isReady() throws NodelibraryException;
 
-    /**
-     * Reports whether Store and replication are healthy.
-     *
-     * @return {@code true} when healthy
-     */
+        /// Reports whether Store and replication are healthy.
+    ///
+    /// @return `true` when healthy
     boolean isHealthy();
 
-    /**
-     * Returns the provider state used by monitoring and readiness diagnostics.
-     *
-     * @return provider state
-     */
+        /// Returns the provider state used by monitoring and readiness diagnostics.
+    ///
+    /// @return provider state
     default ReplicationHealth.State replicationState() {
         return isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING;
     }
 
-    /**
-     * Returns the provider's current Archive free-space estimate, or {@code -1}.
-     *
-     * @return free bytes
-     */
+        /// Returns the provider's current Archive free-space estimate, or `-1`.
+    ///
+    /// @return free bytes
     default long archiveUsableSpaceBytes() {
         return -1L;
     }
 
-    /**
-     * Returns the writer's last durable recording position, or {@code -1}.
-     *
-     * @return durable position
-     */
+        /// Returns the writer's last durable recording position, or `-1`.
+    ///
+    /// @return durable position
     default long writerDurablePosition() {
         return -1L;
     }
 
-    /**
-     * Returns the writer's last durable sequence, or {@code -1}.
-     *
-     * @return durable sequence
-     */
+        /// Returns the writer's last durable sequence, or `-1`.
+    ///
+    /// @return durable sequence
     default long writerDurableSequence() {
         return -1L;
     }
 
-    /**
-     * Returns the reader's last applied sequence, or {@code -1}.
-     *
-     * @return applied sequence
-     */
+        /// Returns the reader's last applied sequence, or `-1`.
+    ///
+    /// @return applied sequence
     default long appliedSequence() {
         return -1L;
     }
@@ -85,14 +69,12 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
     @Override
     void close();
 
-    /**
-     * Initializes the health checks.
-     *
-     * @throws NodelibraryException if initialization fails
-     */
+        /// Initializes the health checks.
+    ///
+    /// @throws NodelibraryException if initialization fails
     void init() throws NodelibraryException;
 
-    /** Combines Store readiness with provider health and lifecycle state. */
+        /// Combines Store readiness with provider health and lifecycle state.
     final class Default implements StorageNodeHealthCheck {
         private final StorageController storageController;
         private final ReplicationHealth replicationHealth;

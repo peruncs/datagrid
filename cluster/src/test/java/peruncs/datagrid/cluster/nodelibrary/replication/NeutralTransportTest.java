@@ -9,7 +9,7 @@ import java.util.concurrent.CountDownLatch;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Tests neutral transport behavior. */
+/// Tests neutral transport behavior.
 class NeutralTransportTest {
     private static Thread dictionaryThread(
             final String name,
@@ -31,7 +31,7 @@ class NeutralTransportTest {
         }, name);
     }
 
-    /** Verifies no op transport keeps core usable without any provider dependency. */
+        /// Verifies no op transport keeps core usable without any provider dependency.
     @Test
     void noOpTransportKeepsCoreUsableWithoutAnyProviderDependency() {
         final ClusterReplicationTransport transport = ClusterReplicationTransport.noOp();
@@ -45,7 +45,7 @@ class NeutralTransportTest {
         transport.close();
     }
 
-    /** Verifies caching distributor keeps dictionaries associated with writing threads. */
+        /// Verifies caching distributor keeps dictionaries associated with writing threads.
     @Test
     void cachingDistributorKeepsDictionariesAssociatedWithWritingThreads() throws Exception {
         final Map<String, String> dictionaries = new ConcurrentHashMap<>();
@@ -92,7 +92,7 @@ class NeutralTransportTest {
         assertEquals("dictionary-2", dictionaries.get("cluster-writer-2"));
     }
 
-    /** A restart dictionary queued by startup is consumed by the first Store thread. */
+        /// A restart dictionary queued by startup is consumed by the first Store thread.
     @Test
     void queuedDictionaryCrossesTheStartupThreadBoundary() {
         final ClusterStorageBinaryDataDistributor delegate = new ClusterStorageBinaryDataDistributor() {
@@ -125,7 +125,7 @@ class NeutralTransportTest {
         assertEquals(null, caching.consumeTypeDictionary());
     }
 
-    /** A restart snapshot replaces an incremental dictionary staged before startup completed. */
+        /// A restart snapshot replaces an incremental dictionary staged before startup completed.
     @Test
     void queuedDictionarySupersedesStaleThreadLocalDictionary() {
         final ClusterStorageBinaryDataDistributor delegate = new ClusterStorageBinaryDataDistributor() {

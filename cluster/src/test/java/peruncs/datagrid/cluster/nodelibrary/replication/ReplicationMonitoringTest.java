@@ -7,9 +7,9 @@ import peruncs.datagrid.cluster.nodelibrary.node.StorageNodeManager;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Tests replication monitoring behavior. */
+/// Tests replication monitoring behavior.
 class ReplicationMonitoringTest {
-    /** Verifies that Aeron transport state, lag, and readiness are exposed as Prometheus metrics. */
+        /// Verifies that Aeron transport state, lag, and readiness are exposed as Prometheus metrics.
     @Test
     void exposesAeronTransportStateLagAndReadinessAsPrometheusMetrics() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {

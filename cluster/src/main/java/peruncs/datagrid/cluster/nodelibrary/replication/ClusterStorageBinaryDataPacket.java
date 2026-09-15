@@ -11,26 +11,22 @@ import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This packet adds a monotonically increasing message index to a storage
- * packet.
- *
- * <p>The packet index identifies a fragment inside one message. The message
- * index identifies the complete message in the cluster stream, so readers can
- * resume after a backup without confusing fragments from different messages.</p>
- */
+/// This packet adds a monotonically increasing message index to a storage
+/// packet.
+///
+/// The packet index identifies a fragment inside one message. The message
+/// index identifies the complete message in the cluster stream, so readers can
+/// resume after a backup without confusing fragments from different messages.
 public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket {
-    /**
-     * Creates a packet with cluster message metadata.
-     *
-     * @param messageType   message kind
-     * @param messageLength complete message length
-     * @param packetIndex   packet index
-     * @param packetCount   packet count
-     * @param messageIndex  complete message index
-     * @param buffer        packet payload
-     * @return new packet
-     */
+        /// Creates a packet with cluster message metadata.
+    ///
+    /// @param messageType   message kind
+    /// @param messageLength complete message length
+    /// @param packetIndex   packet index
+    /// @param packetCount   packet count
+    /// @param messageIndex  complete message index
+    /// @param buffer        packet payload
+    /// @return new packet
     static ClusterStorageBinaryDataPacket New(
             final MessageType messageType,
             final int messageLength,
@@ -57,16 +53,14 @@ public interface ClusterStorageBinaryDataPacket extends StorageBinaryDataPacket 
         );
     }
 
-    /**
-     * Returns the complete message index.
-     *
-     * @return message index
-     */
+        /// Returns the complete message index.
+    ///
+    /// @return message index
     long messageIndex();
 
 }
 
-/** Package-private implementation of a cluster packet. */
+/// Package-private implementation of a cluster packet.
 final class ClusterStorageBinaryDataPacketDefault implements ClusterStorageBinaryDataPacket {
     private final MessageType messageType;
     private final int messageLength;

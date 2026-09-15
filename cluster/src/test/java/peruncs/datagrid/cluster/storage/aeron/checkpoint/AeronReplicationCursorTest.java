@@ -1,16 +1,15 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Verifies that a reader cursor cannot be mistaken for another recording. */
+/// Verifies that a reader cursor cannot be mistaken for another recording.
 class AeronReplicationCursorTest {
-    /** Verifies preservation of the self-describing replay boundary. */
+        /// Verifies preservation of the self-describing replay boundary.
     @Test
     void preservesTheSelfDescribingReplayBoundary() {
         final UUID clusterId = UUID.randomUUID();
@@ -49,7 +48,7 @@ class AeronReplicationCursorTest {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationCursor.decode(encoded));
     }
 
-    /** Verifies rejection of invalid replay identity and positions. */
+        /// Verifies rejection of invalid replay identity and positions.
     @Test
     void rejectsInvalidReplayIdentityAndPositions() {
         final UUID id = UUID.randomUUID();

@@ -11,16 +11,18 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Comparator;
 import java.util.Set;
 
-/**
- * Shared filesystem operations used by backup backends and node setup.
- *
- * <p>This class is public only because backup and node packages share it;
- * it is not application API.</p>
- */
+/// Shared filesystem operations used by backup backends and node setup.
+///
+/// This class is public only because backup and node packages share it;
+/// it is not application API.
 public final class StorageFileOperations {
     private StorageFileOperations() {
     }
 
+    /// Atomically moves restored storage into place, refusing to overwrite.
+    ///
+    /// @param source restored staging directory
+    /// @param destination live storage directory, which must not exist yet
     public static void installStorage(final Path source, final Path destination) {
         try {
             ensureNoSymbolicLinks(destination.getParent());
@@ -28,7 +30,7 @@ public final class StorageFileOperations {
             throw new NodelibraryException("Backup destination contains a symbolic link", failure);
         }
         if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
-            throw new NodelibraryException("Backup destination already contains storage: " + destination);
+            throw new NodelibraryException("Backup destination already contains storage: %s".formatted(destination));
         }
         try {
             Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE);
@@ -40,6 +42,10 @@ public final class StorageFileOperations {
         }
     }
 
+    /// Deletes a staging directory, suppressing cleanup failures into the primary one.
+    ///
+    /// @param path directory to delete
+    /// @param primaryFailure failure being handled, or `null` to throw cleanup failures directly
     public static void cleanup(final Path path, final Throwable primaryFailure) {
         try {
             deleteDirectory(path);
@@ -52,6 +58,10 @@ public final class StorageFileOperations {
         }
     }
 
+    /// Rejects paths containing user-controlled symbolic links.
+    ///
+    /// @param path path to check, or `null` for no check
+    /// @throws IOException if a link is found
     public static void ensureNoSymbolicLinks(final Path path) throws IOException {
         if (path == null) return;
         final Path absolute = path.toAbsolutePath().normalize();
@@ -59,7 +69,7 @@ public final class StorageFileOperations {
         for (final Path component : absolute) {
             current = current == null ? component : current.resolve(component);
             if (Files.isSymbolicLink(current) && !isSystemPrivateAlias(current)) {
-                throw new IOException("Path contains a symbolic link: " + current);
+                throw new IOException("Path contains a symbolic link: %s".formatted(current));
             }
         }
     }
@@ -82,6 +92,9 @@ public final class StorageFileOperations {
         }
     }
 
+    /// Returns directory attributes readable only by the owner.
+    ///
+    /// @return owner-only directory attributes
     public static FileAttribute<Set<PosixFilePermission>> ownerOnlyDirectoryAttributes() {
         return PosixFilePermissions.asFileAttribute(Set.of(
                 PosixFilePermission.OWNER_READ,
@@ -89,6 +102,10 @@ public final class StorageFileOperations {
                 PosixFilePermission.OWNER_EXECUTE));
     }
 
+    /// Forces directory metadata to stable storage.
+    ///
+    /// @param directory directory to force
+    /// @throws IOException if the filesystem refuses
     public static void forceDirectory(final Path directory) throws IOException {
         try (final FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
             channel.force(true);
@@ -97,6 +114,9 @@ public final class StorageFileOperations {
         }
     }
 
+    /// Deletes a directory tree idempotently; a missing root is not an error.
+    ///
+    /// @param path root to delete
     public static void deleteDirectory(final Path path) throws NodelibraryException {
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
             return;
@@ -107,14 +127,14 @@ public final class StorageFileOperations {
                 try {
                     Files.delete(file);
                 } catch (final IOException e) {
-                    throw new NodelibraryException("Failed to delete file at " + file, e);
+                    throw new NodelibraryException("Failed to delete file at %s".formatted(file), e);
                 }
             });
         } catch (final NoSuchFileException ignored) {
             /* A concurrent cleanup may remove the root after the existence check.
              * Deletion is intentionally idempotent for backup retry paths. */
         } catch (final IOException e) {
-            throw new NodelibraryException("Failed to iterate files at " + path, e);
+            throw new NodelibraryException("Failed to iterate files at %s".formatted(path), e);
         }
     }
 }

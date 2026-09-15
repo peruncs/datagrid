@@ -13,13 +13,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.zip.CRC32C;
 
-/**
- * Independent Archive recording scanner used by crash tests.
- *
- * <p>This class deliberately does not use the production reader or assembler.
- * It verifies the recording itself, so a reader that accidentally accepts a
- * malformed or duplicate terminal cannot make a crash test pass.</p>
- */
+/// Independent Archive recording scanner used by crash tests.
+///
+/// This class deliberately does not use the production reader or assembler.
+/// It verifies the recording itself, so a reader that accidentally accepts a
+/// malformed or duplicate terminal cannot make a crash test pass.
 public final class RecordingInspector {
     private static final int MAX_INSPECTED_PAYLOAD = 64 * 1024 * 1024;
 
@@ -39,16 +37,14 @@ public final class RecordingInspector {
                 archive.getStopPosition(recordingId));
     }
 
-    /**
-     * Inspects a recording prefix, including an active recording when the caller
-     * supplies a non-negative observed stop position. This is useful immediately
-     * after a writer crash, when the Archive has not yet marked the recording
-     * stopped but its committed prefix must still be checked.
-     *
-     * @param stopPosition prefix end returned by the caller, or a negative value
-     *                     to read the Archive stop position
-     * @return evidence for the inspected prefix
-     */
+        /// Inspects a recording prefix, including an active recording when the caller
+    /// supplies a non-negative observed stop position. This is useful immediately
+    /// after a writer crash, when the Archive has not yet marked the recording
+    /// stopped but its committed prefix must still be checked.
+    ///
+    /// @param stopPosition prefix end returned by the caller, or a negative value
+    ///                     to read the Archive stop position
+    /// @return evidence for the inspected prefix
     public static RecordingEvidence inspect(
             final AeronArchive archive,
             final long recordingId,
@@ -63,11 +59,9 @@ public final class RecordingInspector {
                 stopPosition, 20);
     }
 
-    /**
-     * Inspects a recording prefix with a caller-selected fragment limit. A limit
-     * of one is useful for proving that a fragmented data frame and its terminal
-     * marker are validated across separate poll calls.
-     */
+        /// Inspects a recording prefix with a caller-selected fragment limit. A limit
+    /// of one is useful for proving that a fragmented data frame and its terminal
+    /// marker are validated across separate poll calls.
     public static RecordingEvidence inspect(
             final AeronArchive archive,
             final long recordingId,
@@ -83,8 +77,7 @@ public final class RecordingInspector {
         final long start = archive.getStartPosition(recordingId);
         final long effectiveStop = stopPosition >= 0 ? stopPosition : archive.getStopPosition(recordingId);
         if (start < 0 || effectiveStop < start) {
-            throw new IllegalStateException("recording is not stopped: id=" + recordingId +
-                                            " start=" + start + " stop=" + effectiveStop);
+            throw new IllegalStateException("recording is not stopped: id=%s start=%s stop=%s".formatted(recordingId, start, effectiveStop));
         }
         final long length = effectiveStop - start;
         if (length == 0) {
@@ -122,11 +115,10 @@ public final class RecordingInspector {
             }
             final RuntimeException failure = callbackFailure.get();
             if (failure != null) {
-                throw new AssertionError("Archive envelope validation failed for recording " + recordingId, failure);
+                throw new AssertionError("Archive envelope validation failed for recording %s".formatted(recordingId), failure);
             }
             if (lastPosition.get() < effectiveStop) {
-                throw new AssertionError("Archive replay timed out at " + lastPosition.get() +
-                                         " of " + effectiveStop + " for recording " + recordingId);
+                throw new AssertionError("Archive replay timed out at %s of %s for recording %s".formatted(lastPosition.get(), effectiveStop, recordingId));
             }
             return evidence(recordingId, start, effectiveStop, transactions, dictionaries, terminals,
                     terminalCrc, terminalLengths, terminalChunks);
@@ -149,20 +141,20 @@ public final class RecordingInspector {
     ) {
         AeronReplicationEnvelope.decodeView(buffer, offset, length, view);
         if (!view.matches(clusterId) || view.epoch() != epoch) {
-            throw new IllegalStateException("recording envelope identity mismatch at sequence " + view.sequence());
+            throw new IllegalStateException("recording envelope identity mismatch at sequence %s".formatted(view.sequence()));
         }
         if (view.kind() == AeronReplicationEnvelope.Kind.COMMIT ||
             view.kind() == AeronReplicationEnvelope.Kind.ABORT) {
             final AeronReplicationEnvelope.Kind previous = terminals.putIfAbsent(view.sequence(), view.kind());
             if (previous != null) {
-                throw new IllegalStateException("multiple terminal envelopes for sequence " + view.sequence());
+                throw new IllegalStateException("multiple terminal envelopes for sequence %s".formatted(view.sequence()));
             }
             terminalCrc.put(view.sequence(), view.commitCrc32c());
             terminalLengths.put(view.sequence(), view.payloadLength());
             terminalChunks.put(view.sequence(), view.chunkCount());
             if (view.kind() == AeronReplicationEnvelope.Kind.COMMIT &&
                 (view.payloadLength() == 0 ? view.chunkCount() != 1 : view.chunkCount() <= 0)) {
-                throw new IllegalStateException("invalid commit metadata for sequence " + view.sequence());
+                throw new IllegalStateException("invalid commit metadata for sequence %s".formatted(view.sequence()));
             }
             if (view.kind() == AeronReplicationEnvelope.Kind.COMMIT && view.payloadLength() == 0) {
                 transactions.putIfAbsent(view.sequence(), new TransactionFrames(0, 1));
@@ -171,11 +163,10 @@ public final class RecordingInspector {
         }
         if (view.kind() == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY) {
             if (terminals.containsKey(view.sequence())) {
-                throw new IllegalStateException("dictionary follows terminal envelope for sequence " + view.sequence());
+                throw new IllegalStateException("dictionary follows terminal envelope for sequence %s".formatted(view.sequence()));
             }
             if (view.payloadLength() > MAX_INSPECTED_PAYLOAD) {
-                throw new IllegalStateException("recording payload exceeds inspection bound: " +
-                                                view.payloadLength());
+                throw new IllegalStateException("recording payload exceeds inspection bound: %s".formatted(view.payloadLength()));
             }
             final TransactionFrames frames = dictionaries.computeIfAbsent(view.sequence(), ignored ->
                     new TransactionFrames(view.payloadLength(), view.chunkCount()));
@@ -185,14 +176,13 @@ public final class RecordingInspector {
             return;
         }
         if (view.kind() != AeronReplicationEnvelope.Kind.STORE_BINARY) {
-            throw new IllegalStateException("unsupported envelope kind in recording: " + view.kind());
+            throw new IllegalStateException("unsupported envelope kind in recording: %s".formatted(view.kind()));
         }
         if (view.payloadLength() > MAX_INSPECTED_PAYLOAD) {
-            throw new IllegalStateException("recording payload exceeds inspection bound: " +
-                                            view.payloadLength());
+            throw new IllegalStateException("recording payload exceeds inspection bound: %s".formatted(view.payloadLength()));
         }
         if (terminals.containsKey(view.sequence())) {
-            throw new IllegalStateException("data follows terminal envelope for sequence " + view.sequence());
+            throw new IllegalStateException("data follows terminal envelope for sequence %s".formatted(view.sequence()));
         }
         final TransactionFrames frames = transactions.computeIfAbsent(view.sequence(), ignored ->
                 new TransactionFrames(view.payloadLength(), view.chunkCount()));
@@ -217,7 +207,7 @@ public final class RecordingInspector {
         for (final Map.Entry<Long, AeronReplicationEnvelope.Kind> entry : terminals.entrySet()) {
             if (entry.getValue() == AeronReplicationEnvelope.Kind.COMMIT &&
                 !transactions.containsKey(entry.getKey())) {
-                throw new IllegalStateException("commit has no data chunks for sequence " + entry.getKey());
+                throw new IllegalStateException("commit has no data chunks for sequence %s".formatted(entry.getKey()));
             }
         }
         for (final TransactionFrames dictionary : dictionaries.values()) {
@@ -227,8 +217,7 @@ public final class RecordingInspector {
         Collections.sort(sequences);
         for (int i = 1; i < sequences.size(); i++) {
             if (sequences.get(i) != sequences.get(i - 1) + 1) {
-                throw new IllegalStateException("recording terminal sequence gap between " +
-                                                sequences.get(i - 1) + " and " + sequences.get(i));
+                throw new IllegalStateException("recording terminal sequence gap between %s and %s".formatted(sequences.get(i - 1), sequences.get(i)));
             }
         }
         for (final Map.Entry<Long, TransactionFrames> entry : transactions.entrySet()) {
@@ -240,13 +229,13 @@ public final class RecordingInspector {
             final byte[] payload = frames.join();
             if (terminalLengths.get(entry.getKey()) != frames.payloadLength ||
                 terminalChunks.get(entry.getKey()) != frames.chunkCount) {
-                throw new IllegalStateException("terminal metadata mismatch for sequence " + entry.getKey());
+                throw new IllegalStateException("terminal metadata mismatch for sequence %s".formatted(entry.getKey()));
             }
             final int crc = crc(payload);
             payloadCrc.put(entry.getKey(), crc);
             final AeronReplicationEnvelope.Kind terminal = terminals.get(entry.getKey());
             if (terminal == AeronReplicationEnvelope.Kind.COMMIT && terminalCrc.get(entry.getKey()) != crc) {
-                throw new IllegalStateException("commit CRC mismatch for sequence " + entry.getKey());
+                throw new IllegalStateException("commit CRC mismatch for sequence %s".formatted(entry.getKey()));
             }
         }
         return new RecordingEvidence(recordingId, start, stop, terminals, payloadCrc, orphanBytes);
@@ -270,7 +259,7 @@ public final class RecordingInspector {
 
         private void put(final int offset, final byte[] payload) {
             if (this.chunks.putIfAbsent(offset, payload) != null) {
-                throw new IllegalStateException("duplicate data chunk at offset " + offset);
+                throw new IllegalStateException("duplicate data chunk at offset %s".formatted(offset));
             }
         }
 

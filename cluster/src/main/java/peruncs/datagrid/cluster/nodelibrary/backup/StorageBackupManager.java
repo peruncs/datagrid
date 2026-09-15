@@ -20,25 +20,21 @@ import java.util.function.Supplier;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This manager creates, lists, downloads, and deletes storage backups.
- *
- * <p>Backup creation is single-flight because it temporarily stops the
- * replication reader and captures the current message position. Read-only
- * listing and download operations do not wait for that lock.</p>
- */
+/// This manager creates, lists, downloads, and deletes storage backups.
+///
+/// Backup creation is single-flight because it temporarily stops the
+/// replication reader and captures the current message position. Read-only
+/// listing and download operations do not wait for that lock.
 public interface StorageBackupManager {
-    /**
-     * Creates a backup manager.
-     *
-     * @param storageConnection    Store connection
-     * @param maxBackupCount       maximum backup count
-     * @param storageBackupBackend backup backend
-     * @param cursorSupplier       replication cursor supplier
-     * @param dataClient           replication client
-     * @param retention            log retention policy
-     * @return backup manager
-     */
+        /// Creates a backup manager.
+    ///
+    /// @param storageConnection    Store connection
+    /// @param maxBackupCount       maximum backup count
+    /// @param storageBackupBackend backup backend
+    /// @param cursorSupplier       replication cursor supplier
+    /// @param dataClient           replication client
+    /// @param retention            log retention policy
+    /// @return backup manager
     static StorageBackupManager New(
             final StorageConnection storageConnection,
             final int maxBackupCount,
@@ -57,71 +53,62 @@ public interface StorageBackupManager {
         );
     }
 
-    /**
-     * Creates a storage backup.
-     *
-     * @param useManualSlot whether to use the manual slot
-     * @throws NodelibraryException if backup creation fails
-     */
+        /// Creates a storage backup.
+    ///
+    /// Backups are single-flight. A failed reader, or a reader stop stuck
+    /// in an unresolved state, aborts the backup — a merely non-running
+    /// reader is not trusted, because a timed-out stop can still own a live
+    /// polling thread. Old backups are pruned only after the new one is
+    /// durable, so a failed upload never destroys the last recoverable
+    /// backup; log retention then advances through the previous backup.
+    ///
+    /// @param useManualSlot whether to use the manual slot
+    /// @throws NodelibraryException if backup creation fails
     void createStorageBackup(boolean useManualSlot) throws NodelibraryException;
 
-    /**
-     * Downloads the latest backup.
-     *
-     * @param targetRootPath destination root
-     * @throws NodelibraryException if download fails
-     */
+        /// Downloads the latest backup.
+    ///
+    /// @param targetRootPath destination root
+    /// @throws NodelibraryException if download fails
     void downloadLatestBackup(Path targetRootPath) throws NodelibraryException;
 
-    /**
-     * Lists available backups.
-     *
-     * @return backup metadata
-     * @throws NodelibraryException if listing fails
-     */
+        /// Lists available backups.
+    ///
+    /// @return backup metadata
+    /// @throws NodelibraryException if listing fails
     List<BackupMetadata> listBackups() throws NodelibraryException;
 
-    /**
-     * Deletes one backup.
-     *
-     * @param backup backup to delete
-     * @throws NodelibraryException if deletion fails
-     */
+        /// Deletes one backup.
+    ///
+    /// @param backup backup to delete
+    /// @throws NodelibraryException if deletion fails
     void deleteBackup(BackupMetadata backup) throws NodelibraryException;
 
-    /**
-     * Downloads one backup.
-     *
-     * @param storageDestinationParentPath destination parent
-     * @param backup                       backup to download
-     * @throws NodelibraryException if download fails
-     */
+        /// Downloads one backup.
+    ///
+    /// @param storageDestinationParentPath destination parent
+    /// @param backup                       backup to download
+    /// @throws NodelibraryException if download fails
     void downloadBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodelibraryException;
 
-    /**
-     * Reports whether user storage exists.
-     *
-     * @return {@code true} when user storage exists
-     * @throws NodelibraryException if the check fails
-     */
+        /// Reports whether user storage exists.
+    ///
+    /// @return `true` when user storage exists
+    /// @throws NodelibraryException if the check fails
     boolean hasUserUploadedStorage() throws NodelibraryException;
 
-    /**
-     * Downloads user storage.
-     *
-     * @param storageDestinationParentPath destination parent
-     * @throws NodelibraryException if download fails
-     */
+        /// Downloads user storage.
+    ///
+    /// @param storageDestinationParentPath destination parent
+    /// @throws NodelibraryException if download fails
     void downloadUserUploadedStorage(Path storageDestinationParentPath) throws NodelibraryException;
 
-    /**
-     * Deletes user storage.
-     *
-     * @throws NodelibraryException if deletion fails
-     */
+        /// Deletes user storage.
+    ///
+    /// @throws NodelibraryException if deletion fails
     void deleteUserUploadedStorage() throws NodelibraryException;
 
-    /** Implements the stop, backup, retention, and resume sequence. */
+        /// Implements the stop, backup, retention, and resume sequence.
     class Default implements StorageBackupManager {
         private static final Logger LOG = LoggerFactory.getLogger(StorageBackupManager.class);
         private static final long STOP_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(1);
@@ -180,7 +167,7 @@ public interface StorageBackupManager {
                         outcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
                         outcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED) {
                         throw new IllegalStateException(
-                                "Cannot create backup while replication reader stop is unresolved: " + outcome);
+                                "Cannot create backup while replication reader stop is unresolved: %s".formatted(outcome));
                     }
                 }
 
@@ -322,24 +309,20 @@ public interface StorageBackupManager {
                 }
                 if (outcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
                     outcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED) {
-                    throw new IllegalStateException("Cannot create backup after replication reader stop " + outcome);
+                    throw new IllegalStateException("Cannot create backup after replication reader stop %s".formatted(outcome));
                 }
                 if (ReplicationRetry.expired(deadline)) {
-                    throw new IllegalStateException("Timed out waiting for replication reader boundary at " +
-                                                    this.dataClient.cursor() + " (last resolved sequence=" + result.sequence() +
-                                                    ", position=" + result.position() + ")");
+                    throw new IllegalStateException("Timed out waiting for replication reader boundary at %s (last resolved sequence=%s, position=%s)".formatted(this.dataClient.cursor(), result.sequence(), result.position()));
                 }
                 XThreads.sleep(100);
             }
         }
 
-        /**
-         * Retries a purge that is temporarily blocked by an active Archive replay.
-         * Replay ownership is intentionally not interrupted: the retention provider
-         * returns a deferred result, the bounded retry gives a short-lived replay a
-         * chance to finish, and a still-active replay is retained for the next backup
-         * cycle with an explicit warning.
-         */
+                /// Retries a purge that is temporarily blocked by an active Archive replay.
+        /// Replay ownership is intentionally not interrupted: the retention provider
+        /// returns a deferred result, the bounded retry gives a short-lived replay a
+        /// chance to finish, and a still-active replay is retained for the next backup
+        /// cycle with an explicit warning.
         private ReplicationLogRetention.MaintenanceResult deleteThroughWithReplayRetry(
                 final ReplicationCursor cursor) {
             ReplicationLogRetention.MaintenanceResult result = this.retention.deleteThrough(cursor);

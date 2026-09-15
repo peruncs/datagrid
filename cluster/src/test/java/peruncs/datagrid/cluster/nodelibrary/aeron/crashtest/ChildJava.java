@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.nodelibrary.aeron.crashtest;
 
-/** Shared class-path construction for forked crash-test children. */
+/// Shared class-path construction for forked crash-test children.
 final class ChildJava {
     private ChildJava() {
     }

@@ -1,13 +1,11 @@
 package peruncs.datagrid.cluster.storage.aeron.crashtest;
 
-/**
- * Named boundaries used by deterministic and forked crash tests.
- *
- * <p>Writer points are consumed by the provider child, reader points by the
- * reader child, and file phases by the corresponding fixture. A name in this
- * enum is not itself evidence that every process tier implements that point;
- * each child rejects points outside its supported scope.</p>
- */
+/// Named boundaries used by deterministic and forked crash tests.
+///
+/// Writer points are consumed by the provider child, reader points by the
+/// reader child, and file phases by the corresponding fixture. A name in this
+/// enum is not itself evidence that every process tier implements that point;
+/// each child rejects points outside its supported scope.
 public enum CrashPoint {
     BEFORE_PUBLICATION_CONNECTED,
     BEFORE_PREPARE,

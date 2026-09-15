@@ -2,19 +2,17 @@ package peruncs.datagrid.cluster.storage.aeron.wire;
 
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.aeron.wire.ReplicationWireException;
 
 import java.nio.ByteBuffer;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies envelope framing, bounds, and corruption detection. */
+/// Verifies envelope framing, bounds, and corruption detection.
 class AeronReplicationEnvelopeTest {
     private static final UUID CLUSTER = UUID.randomUUID();
 
-    /** Verifies round trip preserves opaque serializer bytes. */
+        /// Verifies round trip preserves opaque serializer bytes.
     @Test
     void roundTripPreservesOpaqueSerializerBytes() {
         final byte[] payload = new byte[]{0, 1, 2, 127, -1};
@@ -38,7 +36,7 @@ class AeronReplicationEnvelopeTest {
         assertArrayEquals(payload, decoded.payload());
     }
 
-    /** Verifies rejection of corrupt payload before delivery. */
+        /// Verifies rejection of corrupt payload before delivery.
     @Test
     void rejectsCorruptPayloadBeforeDelivery() {
         final byte[] encoded = AeronReplicationEnvelope.encode(
@@ -52,7 +50,7 @@ class AeronReplicationEnvelopeTest {
         ));
     }
 
-    /** Decision-bearing terminal fields are protected even when the payload is empty. */
+        /// Decision-bearing terminal fields are protected even when the payload is empty.
     @Test
     void rejectsTerminalKindMutationWithHeaderChecksum() {
         final byte[] encoded = AeronReplicationEnvelope.encode(
@@ -63,7 +61,7 @@ class AeronReplicationEnvelopeTest {
                 new UnsafeBuffer(encoded), 0, encoded.length));
     }
 
-    /** Verifies rejection of truncated and unknown version. */
+        /// Verifies rejection of truncated and unknown version.
     @Test
     void rejectsTruncatedAndUnknownVersion() {
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
@@ -82,7 +80,7 @@ class AeronReplicationEnvelopeTest {
         ));
     }
 
-    /** Verifies rejection of invalid chunk metadata and source bounds. */
+        /// Verifies rejection of invalid chunk metadata and source bounds.
     @Test
     void rejectsInvalidChunkMetadataAndSourceBounds() {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.encode(
@@ -107,7 +105,7 @@ class AeronReplicationEnvelopeTest {
         ));
     }
 
-    /** Verifies rejection of nulls negative fields and marker payloads. */
+        /// Verifies rejection of nulls negative fields and marker payloads.
     @Test
     void rejectsNullsNegativeFieldsAndMarkerPayloads() {
         assertThrows(NullPointerException.class, () -> AeronReplicationEnvelope.encode(
@@ -137,7 +135,7 @@ class AeronReplicationEnvelopeTest {
         ));
     }
 
-    /** Verifies rejection of logical payload bounds and reserved header byte. */
+        /// Verifies rejection of logical payload bounds and reserved header byte.
     @Test
     void rejectsLogicalPayloadBoundsAndReservedHeaderByte() {
         final byte[] encoded = AeronReplicationEnvelope.encode(
@@ -158,7 +156,7 @@ class AeronReplicationEnvelopeTest {
         ));
     }
 
-    /** Verifies rejection of truncated data payload declared by header. */
+        /// Verifies rejection of truncated data payload declared by header.
     @Test
     void rejectsTruncatedDataPayloadDeclaredByHeader() {
         final byte[] encoded = AeronReplicationEnvelope.encode(
@@ -171,7 +169,7 @@ class AeronReplicationEnvelopeTest {
         ));
     }
 
-    /** Verifies decodes at non zero offset without reading outside source. */
+        /// Verifies decodes at non zero offset without reading outside source.
     @Test
     void decodesAtNonZeroOffsetWithoutReadingOutsideSource() {
         final byte[] encoded = AeronReplicationEnvelope.encode(
@@ -189,7 +187,7 @@ class AeronReplicationEnvelopeTest {
         ));
     }
 
-    /** Verifies rejection of length larger than source without integer underflow. */
+        /// Verifies rejection of length larger than source without integer underflow.
     @Test
     void rejectsLengthLargerThanSourceWithoutIntegerUnderflow() {
         final byte[] encoded = AeronReplicationEnvelope.encode(
@@ -199,7 +197,7 @@ class AeronReplicationEnvelopeTest {
                 new UnsafeBuffer(encoded), 0, Integer.MAX_VALUE));
     }
 
-    /** Verifies envelope payload accessor is defensive. */
+        /// Verifies envelope payload accessor is defensive.
     @Test
     void envelopePayloadAccessorIsDefensive() {
         final byte[] encoded = AeronReplicationEnvelope.encode(
@@ -212,7 +210,7 @@ class AeronReplicationEnvelopeTest {
         assertArrayEquals(new byte[]{7}, envelope.payload());
     }
 
-    /** Verifies CRC calculation across heap, sliced, and direct Agrona buffers. */
+        /// Verifies CRC calculation across heap, sliced, and direct Agrona buffers.
     @Test
     void crcSupportsAllByteBufferRepresentations() {
         final byte[] expected = {4, 8, 15, 16, 23, 42};
@@ -234,7 +232,7 @@ class AeronReplicationEnvelopeTest {
                 AeronReplicationEnvelope.crc32c(new UnsafeBuffer(directBytes), 1, expected.length));
     }
 
-    /** Verifies the owned form rejects impossible public field combinations. */
+        /// Verifies the owned form rejects impossible public field combinations.
     @Test
     void ownedEnvelopeValidatesItsPublicFields() {
         assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(

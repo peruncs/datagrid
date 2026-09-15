@@ -6,23 +6,21 @@ import java.util.UUID;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 
-/**
- * The reader's durable place in one Archive recording.
- *
- * <p>The sequence is paired with the cluster, node, Store image, epoch, and
- * recording identities. A sequence by itself is unsafe after a restart because
- * a new recording may reuse it. The neutral cursor store persists this value;
- * this record carries the Aeron-specific position across the provider
- * boundary.</p>
- *
- * @param clusterId         replication cluster identity
- * @param nodeId            node that produced the cursor; replay may transfer it to another node
- * @param storeGeneration   Store image identity
- * @param epoch             writer epoch associated with the recording
- * @param recordingId       Aeron Archive recording identity
- * @param recordingPosition Archive position at the cursor
- * @param sequence          transaction sequence at the cursor
- */
+/// The reader's durable place in one Archive recording.
+///
+/// The sequence is paired with the cluster, node, Store image, epoch, and
+/// recording identities. A sequence by itself is unsafe after a restart because
+/// a new recording may reuse it. The neutral cursor store persists this value;
+/// this record carries the Aeron-specific position across the provider
+/// boundary.
+///
+/// @param clusterId         replication cluster identity
+/// @param nodeId            node that produced the cursor; replay may transfer it to another node
+/// @param storeGeneration   Store image identity
+/// @param epoch             writer epoch associated with the recording
+/// @param recordingId       Aeron Archive recording identity
+/// @param recordingPosition Archive position at the cursor
+/// @param sequence          transaction sequence at the cursor
 public record AeronReplicationCursor(
         UUID clusterId,
         UUID nodeId,
@@ -37,7 +35,7 @@ public record AeronReplicationCursor(
     private static final int PAYLOAD_LENGTH = Integer.BYTES + Short.BYTES * 2 + UUID_BYTES * 3 + Long.BYTES * 4;
     private static final int ENCODED_LENGTH = PAYLOAD_LENGTH + Integer.BYTES;
 
-    /** Validates the identities and position carried by the durable cursor. */
+        /// Validates the identities and position carried by the durable cursor.
     public AeronReplicationCursor {
         if (clusterId == null || nodeId == null || storeGeneration == null ||
             epoch < 0 || recordingId < 0 || recordingPosition < -1 || sequence < -1 || sequence == Long.MAX_VALUE) {
@@ -45,12 +43,10 @@ public record AeronReplicationCursor(
         }
     }
 
-    /**
-     * Decodes the sole supported Aeron provider-position format.
-     *
-     * @param encoded serialized cursor bytes
-     * @return decoded cursor
-     */
+        /// Decodes the sole supported Aeron provider-position format.
+    ///
+    /// @param encoded serialized cursor bytes
+    /// @return decoded cursor
     public static AeronReplicationCursor decode(final byte[] encoded) {
         if (encoded == null) throw new NullPointerException("encoded");
         if (encoded.length != ENCODED_LENGTH)
@@ -88,11 +84,9 @@ public record AeronReplicationCursor(
                 clusterId, nodeId, storeGeneration, epoch, recordingId, recordingPosition, sequence);
     }
 
-    /**
-     * Encodes the complete provider cursor identity for the neutral cursor store.
-     *
-     * @return serialized cursor bytes
-     */
+        /// Encodes the complete provider cursor identity for the neutral cursor store.
+    ///
+    /// @return serialized cursor bytes
     public byte[] encode() {
         final byte[] encoded = new byte[ENCODED_LENGTH];
         int offset = 0;

@@ -6,13 +6,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.stream.Collectors;
 
-/** Captures bounded, reproducible evidence when a process cell fails. */
+/// Captures bounded, reproducible evidence when a process cell fails.
 final class DiagnosticCollector {
     private DiagnosticCollector() {
     }
 
     static Path collect(final Path work, final String reason) throws IOException {
-        final Path evidence = work.resolveSibling(work.getFileName() + ".evidence");
+        final Path evidence = work.resolveSibling("%s.evidence".formatted(work.getFileName()));
         Files.createDirectories(evidence);
         Files.writeString(evidence.resolve("reason.txt"), reason + System.lineSeparator(),
                 StandardCharsets.UTF_8);
@@ -32,9 +32,9 @@ final class DiagnosticCollector {
             listing = paths.sorted().map(path ->
             {
                 try {
-                    return work.relativize(path) + "\t" + Files.size(path);
+                    return "%s\t%s".formatted(work.relativize(path), Files.size(path));
                 } catch (final IOException failure) {
-                    return work.relativize(path) + "\t<error:" + failure + ">";
+                    return "%s\t<error:%s>".formatted(work.relativize(path), failure);
                 }
             }).collect(Collectors.joining(System.lineSeparator()));
         }

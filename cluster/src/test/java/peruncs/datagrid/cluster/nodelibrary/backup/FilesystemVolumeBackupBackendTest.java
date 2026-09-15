@@ -29,7 +29,7 @@ class FilesystemVolumeBackupBackendTest {
         if (ready) Files.writeString(root.resolve("ready"), "");
     }
 
-    /** The manager passes the connection through; this test only verifies marker ordering. */
+        /// The manager passes the connection through; this test only verifies marker ordering.
     private static StorageConnection noOpStorageConnection() {
         return (StorageConnection) Proxy.newProxyInstance(
                 StorageConnection.class.getClassLoader(),

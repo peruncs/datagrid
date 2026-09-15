@@ -5,7 +5,6 @@ import org.eclipse.serializer.persistence.binary.types.ChunksBuffer;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.util.BufferSizeProviderIncremental;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataChunker;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -13,9 +12,9 @@ import java.util.ArrayList;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/** Tests storage binary data chunker behavior. */
+/// Tests storage binary data chunker behavior.
 class StorageBinaryDataChunkerTest {
-    /** Verifies chunks across source buffers without changing their positions. */
+        /// Verifies chunks across source buffers without changing their positions.
     @Test
     void chunksAcrossSourceBuffersWithoutChangingTheirPositions() {
         final ByteBuffer first = XMemory.toDirectByteBuffer(new byte[]{1, 2});
@@ -34,14 +33,14 @@ class StorageBinaryDataChunkerTest {
         assertEquals(5, chunks.get(0).messageLength());
     }
 
-    /** Verifies empty binary produces no packets. */
+        /// Verifies empty binary produces no packets.
     @Test
     void emptyBinaryProducesNoPackets() {
         final var binary = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[0]));
         assertEquals(0, StorageBinaryDataChunker.chunk(binary, 128).size());
     }
 
-    /** Verifies that streaming iteration does not materialize a second chunk list. */
+        /// Verifies that streaming iteration does not materialize a second chunk list.
     @Test
     void streamingForEachDoesNotMaterializeASecondChunkList() {
         final ByteBuffer source = XMemory.toDirectByteBuffer(new byte[]{1, 2, 3});
@@ -54,7 +53,7 @@ class StorageBinaryDataChunkerTest {
         assertEquals(0, source.position());
     }
 
-    /** Verifies channel-partitioned Store binaries are flattened in channel order. */
+        /// Verifies channel-partitioned Store binaries are flattened in channel order.
     @Test
     void chunksAllSerializerChannelsInOrder() {
         final ChunksBuffer[] channels = new ChunksBuffer[2];
@@ -83,7 +82,7 @@ class StorageBinaryDataChunkerTest {
         }
     }
 
-    /** The receiver fast path must collect exactly one array without a list copy. */
+        /// The receiver fast path must collect exactly one array without a list copy.
     @Test
     void bufferArrayPreservesAllChannelBuffers() {
         final ByteBuffer first = XMemory.toDirectByteBuffer(new byte[]{1});
@@ -97,7 +96,7 @@ class StorageBinaryDataChunkerTest {
         assertEquals(0, second.position());
     }
 
-    /** Import views normalize Serializer's position-as-length representation without mutating it. */
+        /// Import views normalize Serializer's position-as-length representation without mutating it.
     @Test
     void importArrayNormalizesChunksWrapperBuffers() {
         final ByteBuffer source = XMemory.allocateDirectNative(8);

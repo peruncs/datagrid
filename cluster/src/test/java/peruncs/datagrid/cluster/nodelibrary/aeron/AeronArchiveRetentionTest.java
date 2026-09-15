@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies retention authentication before any Archive operation is attempted. */
+/// Verifies retention authentication before any Archive operation is attempted.
 class AeronArchiveRetentionTest {
     private static final UUID CLUSTER = UUID.randomUUID();
     private static final UUID GENERATION = UUID.randomUUID();
@@ -102,7 +102,7 @@ class AeronArchiveRetentionTest {
     @Test
     void disabledRetentionDoesNotReadDormantState() {
         final Path state = Path.of(System.getProperty("java.io.tmpdir"),
-                "aeron-retention-disabled-" + UUID.randomUUID() + ".state");
+                "aeron-retention-disabled-%s.state".formatted(UUID.randomUUID()));
         try {
             assertDoesNotThrow(() -> Files.write(state, new byte[]{0x01, 0x02, 0x03}));
             final AeronArchiveRetention retention = retention(

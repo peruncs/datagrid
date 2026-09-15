@@ -10,13 +10,11 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.zip.CRC32C;
 
-/**
- * Fixed, CRC-protected milestone exchanged by the provider crash child.
- *
- * <p>The point table is intentionally the provider-process subset. Reader-only
- * points use {@code ReaderMilestone} in the Aeron module; the two tables are
- * not ordinal-compatible and must never be decoded interchangeably.</p>
- */
+/// Fixed, CRC-protected milestone exchanged by the provider crash child.
+///
+/// The point table is intentionally the provider-process subset. Reader-only
+/// points use `ReaderMilestone` in the Aeron module; the two tables are
+/// not ordinal-compatible and must never be decoded interchangeably.
 record ChildMilestone(String point, long sequence, long timestampNanos) {
     private static final int MAGIC = 0x4447434D;
     private static final short VERSION = 1;
@@ -44,7 +42,7 @@ record ChildMilestone(String point, long sequence, long timestampNanos) {
         crc.update(bytes, 0, BYTES - Integer.BYTES);
         buffer.putInt((int) crc.getValue()).flip();
         Files.createDirectories(path.toAbsolutePath().getParent());
-        final Path temporary = Files.createTempFile(path.getParent(), path.getFileName() + ".tmp-", null);
+        final Path temporary = Files.createTempFile(path.getParent(), "%s.tmp-".formatted(path.getFileName()), null);
         try {
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                 while (buffer.hasRemaining()) {
@@ -61,7 +59,7 @@ record ChildMilestone(String point, long sequence, long timestampNanos) {
         }
     }
 
-    /** Returns whether this provider-process schema can encode the named point. */
+        /// Returns whether this provider-process schema can encode the named point.
     static boolean supports(final String point) {
         for (final String supported : POINTS) if (supported.equals(point)) return true;
         return false;
@@ -69,7 +67,7 @@ record ChildMilestone(String point, long sequence, long timestampNanos) {
 
     static ChildMilestone read(final Path path) throws IOException {
         final byte[] bytes = Files.readAllBytes(path);
-        if (bytes.length != BYTES) throw new IOException("invalid milestone length=" + bytes.length);
+        if (bytes.length != BYTES) throw new IOException("invalid milestone length=%s".formatted(bytes.length));
         final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
         final int magic = buffer.getInt();
         final short version = buffer.getShort();
@@ -81,12 +79,12 @@ record ChildMilestone(String point, long sequence, long timestampNanos) {
         crc.update(bytes, 0, BYTES - Integer.BYTES);
         if (magic != MAGIC || version != VERSION || actual != (int) crc.getValue())
             throw new IOException("invalid milestone header or CRC");
-        if (point >= POINTS.length) throw new IOException("unknown milestone point=" + point);
+        if (point >= POINTS.length) throw new IOException("unknown milestone point=%s".formatted(point));
         return new ChildMilestone(POINTS[point], sequence, timestampNanos);
     }
 
     private static int code(final String point) {
         for (int i = 0; i < POINTS.length; i++) if (POINTS[i].equals(point)) return i;
-        throw new IllegalArgumentException("unknown crash point " + point);
+        throw new IllegalArgumentException("unknown crash point %s".formatted(point));
     }
 }

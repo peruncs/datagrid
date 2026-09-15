@@ -10,7 +10,7 @@ import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.locks.LockSupport;
 
-/** Forked production-provider driver-timeout probe. */
+/// Forked production-provider driver-timeout probe.
 public final class AeronProviderDriverFailureChildMain {
     private AeronProviderDriverFailureChildMain() {
     }

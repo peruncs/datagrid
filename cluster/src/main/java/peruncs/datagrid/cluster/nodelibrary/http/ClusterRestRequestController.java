@@ -17,19 +17,15 @@ import java.util.function.Supplier;
 import static org.eclipse.serializer.util.X.notNull;
 import static org.eclipse.serializer.util.X.unbox;
 
-/**
- * HTTP operation facade of the node. Implementations translate storage,
- * replication, and transport failures into the nodelibrary's HTTP exception
- * types.
- */
+/// HTTP operation facade of the node. Implementations translate storage,
+/// replication, and transport failures into the nodelibrary's HTTP exception
+/// types.
 public interface ClusterRestRequestController extends AutoCloseable {
-    /**
-     * Creates a controller for a storage node.
-     *
-     * @param storageNodeManager storage node manager
-     * @param properties         node properties
-     * @return request controller
-     */
+        /// Creates a controller for a storage node.
+    ///
+    /// @param storageNodeManager storage node manager
+    /// @param properties         node properties
+    /// @return request controller
     static ClusterRestRequestController StorageNode(
             final StorageNodeManager storageNodeManager,
             final NodelibraryPropertiesProvider properties
@@ -37,22 +33,18 @@ public interface ClusterRestRequestController extends AutoCloseable {
         return new StorageNode(notNull(storageNodeManager), notNull(properties));
     }
 
-    /**
-     * Creates a controller for a development node.
-     *
-     * @return request controller
-     */
+        /// Creates a controller for a development node.
+    ///
+    /// @return request controller
     static ClusterRestRequestController DevNode() {
         return new DevNode();
     }
 
-    /**
-     * Creates a controller for a backup node.
-     *
-     * @param backupNodeManager backup node manager
-     * @param properties        node properties
-     * @return request controller
-     */
+        /// Creates a controller for a backup node.
+    ///
+    /// @param backupNodeManager backup node manager
+    /// @param properties        node properties
+    /// @return request controller
     static ClusterRestRequestController BackupNode(
             final BackupNodeManager backupNodeManager,
             final NodelibraryPropertiesProvider properties
@@ -60,132 +52,102 @@ public interface ClusterRestRequestController extends AutoCloseable {
         return new BackupNode(notNull(backupNodeManager), notNull(properties));
     }
 
-    /**
-     * Reports whether the distributor is active.
-     *
-     * @return distributor state
-     * @throws HttpResponseException if the request fails
-     */
+        /// Reports whether the distributor is active.
+    ///
+    /// @return distributor state
+    /// @throws HttpResponseException if the request fails
     boolean getDistributor() throws HttpResponseException;
 
-    /**
-     * Starts distributor activation.
-     *
-     * @throws HttpResponseException if the request fails
-     */
+        /// Starts distributor activation.
+    ///
+    /// @throws HttpResponseException if the request fails
     void postActivateDistributorStart() throws HttpResponseException;
 
     // TODO: Rename to get statistics or monitoring etc.
 
-    /**
-     * Finishes distributor activation.
-     *
-     * @return whether activation finished
-     * @throws HttpResponseException if the request fails
-     */
+        /// Finishes distributor activation.
+    ///
+    /// @return whether activation finished
+    /// @throws HttpResponseException if the request fails
     boolean postActivateDistributorFinish() throws HttpResponseException;
 
-    /**
-     * Checks node health.
-     *
-     * @throws HttpResponseException if the request fails
-     */
+        /// Checks node health.
+    ///
+    /// @throws HttpResponseException if the request fails
     void getHealth() throws HttpResponseException;
 
-    /**
-     * Checks node readiness.
-     *
-     * @throws HttpResponseException if the request fails
-     */
+        /// Checks node readiness.
+    ///
+    /// @throws HttpResponseException if the request fails
     void getHealthReady() throws HttpResponseException;
 
-    /**
-     * Returns current storage size.
-     *
-     * @return storage size text
-     * @throws HttpResponseException if the request fails
-     */
+        /// Returns current storage size.
+    ///
+    /// @return storage size text
+    /// @throws HttpResponseException if the request fails
     String getStorageBytes() throws HttpResponseException;
 
-    /**
-     * Returns Prometheus metrics including provider id, state, sequence, and lag.
-     *
-     * @return metrics text
-     * @throws HttpResponseException if the request fails
-     */
+        /// Returns Prometheus metrics including provider id, state, sequence, and lag.
+    ///
+    /// @return metrics text
+    /// @throws HttpResponseException if the request fails
     default String getReplicationMetrics() throws HttpResponseException {
         return "";
     }
 
-    /**
-     * Starts a backup.
-     *
-     * @param body backup request body
-     * @throws HttpResponseException if the request fails
-     */
+        /// Starts a backup.
+    ///
+    /// @param body backup request body
+    /// @throws HttpResponseException if the request fails
     void postBackup(PostBackup.Body body) throws HttpResponseException;
 
-    /**
-     * Reports whether a backup is running.
-     *
-     * @return backup state
-     * @throws HttpResponseException if the request fails
-     */
+        /// Reports whether a backup is running.
+    ///
+    /// @return backup state
+    /// @throws HttpResponseException if the request fails
     boolean getBackup() throws HttpResponseException;
 
-    /**
-     * Stops or pauses updates.
-     *
-     * @throws HttpResponseException if the request fails
-     */
+        /// Stops or pauses updates.
+    ///
+    /// @throws HttpResponseException if the request fails
     void postUpdates() throws HttpResponseException;
 
-    /**
-     * Reports whether updates are active.
-     *
-     * @return update state
-     * @throws HttpResponseException if the request fails
-     */
+        /// Reports whether updates are active.
+    ///
+    /// @return update state
+    /// @throws HttpResponseException if the request fails
     boolean getUpdates() throws HttpResponseException;
 
-    /**
-     * Resumes updates.
-     *
-     * @throws HttpResponseException if the request fails
-     */
+        /// Resumes updates.
+    ///
+    /// @throws HttpResponseException if the request fails
     void postResumeUpdates() throws HttpResponseException;
 
-    /**
-     * Starts storage checks.
-     *
-     * @throws HttpResponseException if the request fails
-     */
+        /// Starts storage checks.
+    ///
+    /// @throws HttpResponseException if the request fails
     void postGc() throws HttpResponseException;
 
-    /**
-     * Reports whether storage checks are running.
-     *
-     * @return check state
-     * @throws HttpResponseException if the request fails
-     */
+        /// Reports whether storage checks are running.
+    ///
+    /// @return check state
+    /// @throws HttpResponseException if the request fails
     boolean getGc() throws HttpResponseException;
 
     @Override
     void close();
 
-    /** Shares validation, error mapping, and common monitoring requests. */
+        /// Shares validation, error mapping, and common monitoring requests.
     abstract class Abstract implements ClusterRestRequestController {
         private static final Logger LOG = LoggerFactory.getLogger(ClusterRestRequestController.class);
 
         private final ClusterNodeManager nodeManager;
         private final NodelibraryPropertiesProvider properties;
 
-        /**
-         * Creates the shared request controller.
-         *
-         * @param nodeManager node manager
-         * @param properties  node properties
-         */
+                /// Creates the shared request controller.
+        ///
+        /// @param nodeManager node manager
+        /// @param properties  node properties
         protected Abstract(final ClusterNodeManager nodeManager, final NodelibraryPropertiesProvider properties) {
             this.nodeManager = nodeManager;
             this.properties = properties;
@@ -248,6 +210,13 @@ public interface ClusterRestRequestController extends AutoCloseable {
             });
         }
 
+        /// Renders Prometheus gauges for replication state.
+        ///
+        /// Lag is clamped at zero and unknown positions report -1, so a
+        /// metrics scrape never fails just because the writer boundary is
+        /// currently unknowable.
+        ///
+        /// @return Prometheus exposition text
         @Override
         public String getReplicationMetrics() throws HttpResponseException {
             return this.handleRequest(() ->
@@ -262,36 +231,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
                 final String transport = metricLabel(this.nodeManager.getReplicationTransport());
                 final String state = this.nodeManager.getReplicationState().name().toLowerCase(java.util.Locale.ROOT);
                 return String.format(
-                        "# HELP cluster_replication_current_sequence Last committed sequence applied locally.\n" +
-                        "# TYPE cluster_replication_current_sequence gauge\n" +
-                        "cluster_replication_current_sequence{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_latest_sequence Latest writer sequence observed.\n" +
-                        "# TYPE cluster_replication_latest_sequence gauge\n" +
-                        "cluster_replication_latest_sequence{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_lag_transactions Transactions behind latest.\n" +
-                        "# TYPE cluster_replication_lag_transactions gauge\n" +
-                        "cluster_replication_lag_transactions{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_state Provider lifecycle state (one label is 1).\n" +
-                        "# TYPE cluster_replication_state gauge\n" +
-                        "cluster_replication_state{transport=\"%s\",state=\"%s\"} 1\n" +
-                        "# HELP cluster_replication_ready Whether the node is ready.\n" +
-                        "# TYPE cluster_replication_ready gauge\n" +
-                        "cluster_replication_ready{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_healthy Whether the node is healthy.\n" +
-                        "# TYPE cluster_replication_healthy gauge\n" +
-                        "cluster_replication_healthy{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_archive_usable_space_bytes Archive free bytes, or -1 when unavailable.\n" +
-                        "# TYPE cluster_replication_archive_usable_space_bytes gauge\n" +
-                        "cluster_replication_archive_usable_space_bytes{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_writer_durable_position Last terminal recording position, or -1.\n" +
-                        "# TYPE cluster_replication_writer_durable_position gauge\n" +
-                        "cluster_replication_writer_durable_position{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_writer_durable_sequence Last terminal writer sequence, or -1.\n" +
-                        "# TYPE cluster_replication_writer_durable_sequence gauge\n" +
-                        "cluster_replication_writer_durable_sequence{transport=\"%s\"} %d\n" +
-                        "# HELP cluster_replication_applied_sequence Last sequence applied by this node, or -1.\n" +
-                        "# TYPE cluster_replication_applied_sequence gauge\n" +
-                        "cluster_replication_applied_sequence{transport=\"%s\"} %d",
+                        "# HELP cluster_replication_current_sequence Last committed sequence applied locally.\n# TYPE cluster_replication_current_sequence gauge\ncluster_replication_current_sequence{transport=\"%s\"} %d\n# HELP cluster_replication_latest_sequence Latest writer sequence observed.\n# TYPE cluster_replication_latest_sequence gauge\ncluster_replication_latest_sequence{transport=\"%s\"} %d\n# HELP cluster_replication_lag_transactions Transactions behind latest.\n# TYPE cluster_replication_lag_transactions gauge\ncluster_replication_lag_transactions{transport=\"%s\"} %d\n# HELP cluster_replication_state Provider lifecycle state (one label is 1).\n# TYPE cluster_replication_state gauge\ncluster_replication_state{transport=\"%s\",state=\"%s\"} 1\n# HELP cluster_replication_ready Whether the node is ready.\n# TYPE cluster_replication_ready gauge\ncluster_replication_ready{transport=\"%s\"} %d\n# HELP cluster_replication_healthy Whether the node is healthy.\n# TYPE cluster_replication_healthy gauge\ncluster_replication_healthy{transport=\"%s\"} %d\n# HELP cluster_replication_archive_usable_space_bytes Archive free bytes, or -1 when unavailable.\n# TYPE cluster_replication_archive_usable_space_bytes gauge\ncluster_replication_archive_usable_space_bytes{transport=\"%s\"} %d\n# HELP cluster_replication_writer_durable_position Last terminal recording position, or -1.\n# TYPE cluster_replication_writer_durable_position gauge\ncluster_replication_writer_durable_position{transport=\"%s\"} %d\n# HELP cluster_replication_writer_durable_sequence Last terminal writer sequence, or -1.\n# TYPE cluster_replication_writer_durable_sequence gauge\ncluster_replication_writer_durable_sequence{transport=\"%s\"} %d\n# HELP cluster_replication_applied_sequence Last sequence applied by this node, or -1.\n# TYPE cluster_replication_applied_sequence gauge\ncluster_replication_applied_sequence{transport=\"%s\"} %d",
                         transport, current, transport, latest, transport, lag, transport, state,
                         transport, this.nodeManager.isReady() ? 1 : 0,
                         transport, this.nodeManager.isHealthy() ? 1 : 0,
@@ -341,12 +281,10 @@ public interface ClusterRestRequestController extends AutoCloseable {
             throw new BadRequestException();
         }
 
-        /**
-         * Runs a request and maps failures to HTTP exceptions.
-         *
-         * @param request request action
-         * @throws HttpResponseException if the request fails
-         */
+                /// Runs a request and maps failures to HTTP exceptions.
+        ///
+        /// @param request request action
+        /// @throws HttpResponseException if the request fails
         protected void handleRequest(final Runnable request) throws HttpResponseException {
             try {
                 request.run();
@@ -361,14 +299,12 @@ public interface ClusterRestRequestController extends AutoCloseable {
             }
         }
 
-        /**
-         * Runs a value request and maps failures to HTTP exceptions.
-         *
-         * @param <T>     result type
-         * @param request request action
-         * @return request result
-         * @throws HttpResponseException if the request fails
-         */
+                /// Runs a value request and maps failures to HTTP exceptions.
+        ///
+        /// @param <T>     result type
+        /// @param request request action
+        /// @return request result
+        /// @throws HttpResponseException if the request fails
         protected <T> T handleRequest(final Supplier<T> request) throws HttpResponseException {
             try {
                 return request.get();
@@ -384,7 +320,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         }
     }
 
-    /** Serves requests for a node that can become the distributor. */
+        /// Serves requests for a node that can become the distributor.
     final class StorageNode extends Abstract {
         private static final Logger LOG = LoggerFactory.getLogger(StorageNode.class);
         private final StorageNodeManager storageNodeManager;
@@ -421,7 +357,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         }
     }
 
-    /** Serves requests for a node that reads from a backup. */
+        /// Serves requests for a node that reads from a backup.
     final class BackupNode extends Abstract {
         private static final Logger LOG = LoggerFactory.getLogger(BackupNode.class);
         private final BackupNodeManager backupNodeManager;
@@ -471,10 +407,8 @@ public interface ClusterRestRequestController extends AutoCloseable {
         }
     }
 
-    /**
-     * Dev Nodes are just dummy implementations so that the nodelibrary can be
-     * tested and run in local development environments.
-     */
+        /// Dev Nodes are just dummy implementations so that the nodelibrary can be
+    /// tested and run in local development environments.
     final class DevNode implements ClusterRestRequestController {
         private DevNode() {
         }

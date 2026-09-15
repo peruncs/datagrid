@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.nodelibrary.backup;
 
-/** File names shared by local and network backup archives. */
+/// File names shared by local and network backup archives.
 final class BackupFileNames {
     static final String STORAGE = "storage";
     static final String MANIFEST = "manifest";

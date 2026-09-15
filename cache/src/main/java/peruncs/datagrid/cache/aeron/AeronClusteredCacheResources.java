@@ -16,23 +16,21 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Owns the Aeron client, optional embedded driver, publication, and
- * subscription shared by one clustered-cache provider.
- *
- * <p>All access is synchronized. The client and driver connect lazily on first
- * use, so a provider can be constructed from configuration but only pays for
- * Aeron when a cache sender or receiver is actually requested. When an
- * embedded driver has no configured directory it creates its own private,
- * auto-generated directory, and the Aeron client follows
- * {@link MediaDriver#aeronDirectoryName()}; when a directory is configured it
- * must be exclusive to this provider, because sharing a driver directory
- * corrupts the driver.</p>
- *
- * <p>The resources are single-lifecycle: after both the publication and the
- * subscription are closed, the shared client is released and the resources
- * cannot be used again. Create a new provider for a new lifecycle.</p>
- */
+/// Owns the Aeron client, optional embedded driver, publication, and
+/// subscription shared by one clustered-cache provider.
+///
+/// All access is synchronized. The client and driver connect lazily on first
+/// use, so a provider can be constructed from configuration but only pays for
+/// Aeron when a cache sender or receiver is actually requested. When an
+/// embedded driver has no configured directory it creates its own private,
+/// auto-generated directory, and the Aeron client follows
+/// [MediaDriver#aeronDirectoryName()]; when a directory is configured it
+/// must be exclusive to this provider, because sharing a driver directory
+/// corrupts the driver.
+///
+/// The resources are single-lifecycle: after both the publication and the
+/// subscription are closed, the shared client is released and the resources
+/// cannot be used again. Create a new provider for a new lifecycle.
 final class AeronClusteredCacheResources implements AutoCloseable {
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusteredCacheResources.class.getName());
@@ -51,15 +49,13 @@ final class AeronClusteredCacheResources implements AutoCloseable {
     private Subscription subscription;
     private boolean closed;
 
-    /**
-     * Creates the resource owner with no connection yet.
-     *
-     * @param aeronDirectory      Aeron driver directory, or {@code null} to use Aeron's directory
-     * @param channel             Aeron channel shared by all participants
-     * @param streamId            Aeron stream id shared by all participants
-     * @param driverTimeoutMillis maximum time the Aeron client waits for a driver
-     * @param embeddedDriver      whether to launch a private embedded MediaDriver for this provider
-     */
+        /// Creates the resource owner with no connection yet.
+    ///
+    /// @param aeronDirectory      Aeron driver directory, or `null` to use Aeron's directory
+    /// @param channel             Aeron channel shared by all participants
+    /// @param streamId            Aeron stream id shared by all participants
+    /// @param driverTimeoutMillis maximum time the Aeron client waits for a driver
+    /// @param embeddedDriver      whether to launch a private embedded MediaDriver for this provider
     AeronClusteredCacheResources(
             final String aeronDirectory,
             final String channel,
@@ -74,7 +70,7 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         this.embeddedDriver = embeddedDriver;
     }
 
-    /** Aggregates a close failure with an earlier one. */
+        /// Aggregates a close failure with an earlier one.
     private static Throwable append(final Throwable current, final Throwable additional) {
         if (current == null) {
             return additional;
@@ -85,7 +81,7 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         return current;
     }
 
-    /** Converts an aggregated close failure into a throwable runtime failure. */
+        /// Converts an aggregated close failure into a throwable runtime failure.
     private static RuntimeException rethrowAsRuntime(final Throwable failure) {
         if (failure instanceof final Error error) {
             throw error;
@@ -96,7 +92,7 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         return new IllegalStateException("Aeron resource close failed", failure);
     }
 
-    /** Returns whether this owner was created with the given configuration. */
+        /// Returns whether this owner was created with the given configuration.
     boolean matches(final String channel, final int streamId, final String directory,
                     final long driverTimeoutMillis, final boolean embeddedDriver) {
         return this.channel.equals(channel) && this.streamId == streamId
@@ -104,18 +100,14 @@ final class AeronClusteredCacheResources implements AutoCloseable {
                && this.driverTimeoutMillis == driverTimeoutMillis && this.embeddedDriver == embeddedDriver;
     }
 
-    /** Returns the bound configuration for diagnostics. */
+        /// Returns the bound configuration for diagnostics.
     String describe() {
-        return "channel=" + this.channel + ", streamId=" + this.streamId +
-               ", directory=" + this.aeronDirectory + ", driverTimeoutMillis=" + this.driverTimeoutMillis +
-               ", embeddedDriver=" + this.embeddedDriver;
+        return "channel=%s, streamId=%s, directory=%s, driverTimeoutMillis=%s, embeddedDriver=%s".formatted(this.channel, this.streamId, this.aeronDirectory, this.driverTimeoutMillis, this.embeddedDriver);
     }
 
-    /**
-     * Returns the shared publication, connecting Aeron if needed.
-     *
-     * @return the shared publication
-     */
+        /// Returns the shared publication, connecting Aeron if needed.
+    ///
+    /// @return the shared publication
     synchronized ConcurrentPublication publication() {
         this.ensureConnected();
         if (this.publication == null) {
@@ -124,11 +116,9 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         return this.publication;
     }
 
-    /**
-     * Returns the shared subscription, connecting Aeron if needed.
-     *
-     * @return the shared subscription
-     */
+        /// Returns the shared subscription, connecting Aeron if needed.
+    ///
+    /// @return the shared subscription
     synchronized Subscription subscription() {
         this.ensureConnected();
         if (this.subscription == null) {
@@ -137,7 +127,7 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         return this.subscription;
     }
 
-    /** Closes the publication; releases Aeron when no other resource remains open. */
+        /// Closes the publication; releases Aeron when no other resource remains open.
     synchronized void closePublication() {
         final ConcurrentPublication current = this.publication;
         if (current != null) {
@@ -147,7 +137,7 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         this.closeIfUnused();
     }
 
-    /** Closes the subscription; releases Aeron when no other resource remains open. */
+        /// Closes the subscription; releases Aeron when no other resource remains open.
     synchronized void closeSubscription() {
         final Subscription current = this.subscription;
         if (current != null) {
@@ -213,17 +203,17 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         }
     }
 
-    /** Returns the first terminal driver/client failure, if one was reported. */
+        /// Returns the first terminal driver/client failure, if one was reported.
     synchronized RuntimeException failure() {
         return this.failure.get();
     }
 
-    /** Returns whether this owner has completed its terminal close. */
+        /// Returns whether this owner has completed its terminal close.
     synchronized boolean isClosed() {
         return this.closed;
     }
 
-    /** Retains the first transport failure so senders and receivers can fail closed. */
+        /// Retains the first transport failure so senders and receivers can fail closed.
     private void recordFailure(final Throwable failure) {
         final RuntimeException normalized = failure instanceof RuntimeException runtime
                 ? runtime : new IllegalStateException("Aeron clustered-cache transport failed", failure);
@@ -238,10 +228,8 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         }
     }
 
-    /**
-     * Releases the Aeron client and any embedded driver, aggregating close
-     * failures. Idempotent; the resources are terminal after this call.
-     */
+        /// Releases the Aeron client and any embedded driver, aggregating close
+    /// failures. Idempotent; the resources are terminal after this call.
     @Override
     public synchronized void close() {
         if (this.closed) {
@@ -280,7 +268,7 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         this.closed = true;
     }
 
-    /** Creates a private driver directory with owner-only permissions. */
+        /// Creates a private driver directory with owner-only permissions.
     private void ensureDirectory() {
         if (this.aeronDirectory == null) {
             return;
@@ -289,28 +277,28 @@ final class AeronClusteredCacheResources implements AutoCloseable {
         try {
             if (Files.isSymbolicLink(path) || Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
                                               !Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
-                throw new IOException("Aeron driver path is not a real directory: " + path);
+                throw new IOException("Aeron driver path is not a real directory: %s".formatted(path));
             }
             try {
                 Files.createDirectories(path,
                         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
             } catch (final UnsupportedOperationException ignored) {
                 LOGGER.log(System.Logger.Level.WARNING,
-                        "Aeron clustered-cache driver directory does not support POSIX permissions: " + path);
+                        "Aeron clustered-cache driver directory does not support POSIX permissions: %s".formatted(path));
                 Files.createDirectories(path);
             }
             try {
                 Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"));
             } catch (final UnsupportedOperationException ignored) {
                 LOGGER.log(System.Logger.Level.WARNING,
-                        "Aeron clustered-cache driver directory permissions cannot be hardened on this filesystem: " + path);
+                        "Aeron clustered-cache driver directory permissions cannot be hardened on this filesystem: %s".formatted(path));
             }
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot create or protect Aeron driver directory " + path, failure);
+            throw new IllegalStateException("cannot create or protect Aeron driver directory %s".formatted(path), failure);
         }
     }
 
-    /** Deletes only the private directory generated by this resource owner. */
+        /// Deletes only the private directory generated by this resource owner.
     private void deleteGeneratedDirectory() {
         if (!this.generatedAeronDirectory || this.resolvedAeronDirectory == null) return;
         final Path generated = Paths.get(this.resolvedAeronDirectory);
@@ -323,20 +311,19 @@ final class AeronClusteredCacheResources implements AutoCloseable {
             }
             this.generatedAeronDirectory = false;
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot delete generated Aeron directory " + generated, failure);
+            throw new IllegalStateException("cannot delete generated Aeron directory %s".formatted(generated), failure);
         }
     }
 
-    /** Restricts a driver directory to the owner, including a generated one. */
+        /// Restricts a driver directory to the owner, including a generated one.
     private void hardenDirectory(final String directory) {
         try {
             Files.setPosixFilePermissions(Paths.get(directory), PosixFilePermissions.fromString("rwx------"));
         } catch (final UnsupportedOperationException ignored) {
             LOGGER.log(System.Logger.Level.WARNING,
-                    "Aeron clustered-cache generated driver directory permissions cannot be hardened on this filesystem: " +
-                    directory);
+                    "Aeron clustered-cache generated driver directory permissions cannot be hardened on this filesystem: %s".formatted(directory));
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot protect Aeron driver directory " + directory, failure);
+            throw new IllegalStateException("cannot protect Aeron driver directory %s".formatted(directory), failure);
         }
     }
 

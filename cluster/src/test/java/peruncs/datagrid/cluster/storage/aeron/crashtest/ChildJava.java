@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.crashtest;
 
-/** Shared class-path construction for Aeron crash-test child JVMs. */
+/// Shared class-path construction for Aeron crash-test child JVMs.
 final class ChildJava {
     private ChildJava() {
     }

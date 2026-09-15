@@ -3,31 +3,27 @@ package peruncs.datagrid.cluster.nodelibrary.replication;
 import java.util.Arrays;
 import java.util.UUID;
 
-/**
- * Durable Aeron replication position.
- *
- * <p>{@code logicalSequence} is the Data Grid ordering value. The opaque
- * {@code providerPosition} is interpreted only by the Aeron transport (for
- * example an Aeron recording id/position pair).</p>
- *
- * @param transport        selected provider id
- * @param storeGeneration  immutable Store image identity, or {@code null} when the provider has none
- * @param logicalSequence  last fully resolved transaction, or {@code -1} before the first one
- * @param providerPosition provider-specific position bytes
- */
+/// Durable Aeron replication position.
+///
+/// `logicalSequence` is the Data Grid ordering value. The opaque
+/// `providerPosition` is interpreted only by the Aeron transport (for
+/// example an Aeron recording id/position pair).
+///
+/// @param transport        selected provider id
+/// @param storeGeneration  immutable Store image identity, or `null` when the provider has none
+/// @param logicalSequence  last fully resolved transaction, or `-1` before the first one
+/// @param providerPosition provider-specific position bytes
 public record ReplicationCursor(
         String transport,
         UUID storeGeneration,
         long logicalSequence,
         byte[] providerPosition) {
-    /**
-     * Validates and copies the provider position.
-     *
-     * @param transport        selected provider id
-     * @param storeGeneration  Store generation
-     * @param logicalSequence  last resolved transaction
-     * @param providerPosition provider position bytes
-     */
+        /// Validates and copies the provider position.
+    ///
+    /// @param transport        selected provider id
+    /// @param storeGeneration  Store generation
+    /// @param logicalSequence  last resolved transaction
+    /// @param providerPosition provider position bytes
     public ReplicationCursor {
         if (transport == null || transport.isBlank()) {
             throw new IllegalArgumentException("transport must not be blank");
@@ -38,11 +34,9 @@ public record ReplicationCursor(
         providerPosition = providerPosition == null ? new byte[0] : providerPosition.clone();
     }
 
-    /**
-     * Returns a copy of the provider position.
-     *
-     * @return provider position copy
-     */
+        /// Returns a copy of the provider position.
+    ///
+    /// @return provider position copy
     public byte[] providerPosition() {
         return this.providerPosition.clone();
     }

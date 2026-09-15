@@ -1,24 +1,20 @@
 package peruncs.datagrid.cluster.storage.types;
 
-/**
- * Monotonic-clock helpers shared by bounded transport retry loops.
- *
- * <p>Replication code must use a monotonic deadline. A wall-clock deadline
- * can move backwards during clock correction and can turn a bounded retry into
- * an unbounded wait. The helpers also saturate addition so a very large,
- * explicitly configured timeout cannot wrap into an already-expired deadline.</p>
- */
+/// Monotonic-clock helpers shared by bounded transport retry loops.
+///
+/// Replication code must use a monotonic deadline. A wall-clock deadline
+/// can move backwards during clock correction and can turn a bounded retry into
+/// an unbounded wait. The helpers also saturate addition so a very large,
+/// explicitly configured timeout cannot wrap into an already-expired deadline.
 public final class ReplicationRetry {
     private ReplicationRetry() {
     }
 
-    /**
-     * Returns a deadline measured by {@link System#nanoTime()}.
-     *
-     * @param timeoutNanos positive retry budget
-     * @return saturated monotonic deadline
-     * @throws IllegalArgumentException when the budget is not positive
-     */
+        /// Returns a deadline measured by [System#nanoTime()].
+    ///
+    /// @param timeoutNanos positive retry budget
+    /// @return saturated monotonic deadline
+    /// @throws IllegalArgumentException when the budget is not positive
     public static long deadlineNanos(final long timeoutNanos) {
         if (timeoutNanos <= 0L) throw new IllegalArgumentException("timeoutNanos must be positive");
         if (timeoutNanos == Long.MAX_VALUE) return Long.MAX_VALUE;
@@ -29,12 +25,10 @@ public final class ReplicationRetry {
         }
     }
 
-    /**
-     * Returns the non-negative time left before a deadline.
-     *
-     * @param deadlineNanos saturated deadline returned by this class
-     * @return remaining nanoseconds, or zero after expiry
-     */
+        /// Returns the non-negative time left before a deadline.
+    ///
+    /// @param deadlineNanos saturated deadline returned by this class
+    /// @return remaining nanoseconds, or zero after expiry
     public static long remainingNanos(final long deadlineNanos) {
         if (deadlineNanos == Long.MAX_VALUE) return Long.MAX_VALUE;
         final long now = System.nanoTime();
@@ -49,12 +43,10 @@ public final class ReplicationRetry {
         }
     }
 
-    /**
-     * Returns whether the supplied monotonic deadline has expired.
-     *
-     * @param deadlineNanos saturated deadline returned by this class
-     * @return {@code true} when no retry time remains
-     */
+        /// Returns whether the supplied monotonic deadline has expired.
+    ///
+    /// @param deadlineNanos saturated deadline returned by this class
+    /// @return `true` when no retry time remains
     public static boolean expired(final long deadlineNanos) {
         return remainingNanos(deadlineNanos) == 0L;
     }

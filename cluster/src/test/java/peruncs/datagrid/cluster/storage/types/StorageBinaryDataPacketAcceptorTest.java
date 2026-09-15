@@ -1,9 +1,6 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacket;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacketAcceptor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -12,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage.MessageType.DATA;
 
-/** Verifies the packet boundary used by the logical-message commit policy. */
+/// Verifies the packet boundary used by the logical-message commit policy.
 class StorageBinaryDataPacketAcceptorTest {
     private static StorageBinaryDataPacket packet(final int index, final int count, final byte[] bytes) {
         return StorageBinaryDataPacket.New(DATA, 2, index, count, ByteBuffer.wrap(bytes));

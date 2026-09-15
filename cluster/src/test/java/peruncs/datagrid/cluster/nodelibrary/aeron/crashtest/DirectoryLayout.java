@@ -6,13 +6,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 
-/**
- * Isolates every process crash cell and owns its loopback port reservations.
- *
- * <p>Port probes are held only for the lifetime of this layout. The crash
- * profile therefore runs cells sequentially; enabling parallel forks requires
- * child-side bind retries.</p>
- */
+/// Isolates every process crash cell and owns its loopback port reservations.
+///
+/// Port probes are held only for the lifetime of this layout. The crash
+/// profile therefore runs cells sequentially; enabling parallel forks requires
+/// child-side bind retries.
 final class DirectoryLayout implements AutoCloseable {
     private final Path root;
     private final int livePort;

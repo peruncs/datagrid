@@ -2,14 +2,13 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Tests authentication, encoding, and monotonicity of retention watermarks. */
+/// Tests authentication, encoding, and monotonicity of retention watermarks.
 class AeronAuthenticatedWatermarkTest {
     private static final UUID CLUSTER = UUID.randomUUID();
     private static final UUID GENERATION = UUID.randomUUID();
@@ -93,7 +92,7 @@ class AeronAuthenticatedWatermarkTest {
                 AeronAuthenticatedWatermark.sign(READER_ONE, UUID.randomUUID(), GENERATION, 3, 17, 3, 300, SECRET)));
     }
 
-    /** Sequence values must remain incrementable by the writer and validator. */
+        /// Sequence values must remain incrementable by the writer and validator.
     @Test
     void rejectsSequenceThatWouldOverflowNextReservation() {
         assertThrows(IllegalArgumentException.class, () -> new AeronAuthenticatedWatermark(

@@ -6,7 +6,7 @@ import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Verifies fatal node errors remain under the embedding application's control. */
+/// Verifies fatal node errors remain under the embedding application's control.
 class GlobalErrorHandlingTest {
     @Test
     void rethrowsRuntimeFailuresWithoutTerminatingTheJvm() {

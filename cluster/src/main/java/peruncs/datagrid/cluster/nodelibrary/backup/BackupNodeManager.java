@@ -11,23 +11,19 @@ import peruncs.datagrid.cluster.nodelibrary.store.StorageDiskSpaceReader;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This manager exposes node health while coordinating backups and replication.
- *
- * <p>A backup stops the reader at a safe message boundary, creates the backup,
- * and then resumes reading. Callers must not close the storage while either
- * operation is active.</p>
- */
+/// This manager exposes node health while coordinating backups and replication.
+///
+/// A backup stops the reader at a safe message boundary, creates the backup,
+/// and then resumes reading. Callers must not close the storage while either
+/// operation is active.
 public interface BackupNodeManager extends ClusterNodeManager {
-    /**
-     * Creates a backup manager for the supplied collaborators.
-     *
-     * @param storageBackupTaskExecutor backup task executor
-     * @param dataClient                replication data client
-     * @param storageController         storage controller
-     * @param storageDiskSpaceReader    storage space reader
-     * @return backup manager
-     */
+        /// Creates a backup manager for the supplied collaborators.
+    ///
+    /// @param storageBackupTaskExecutor backup task executor
+    /// @param dataClient                replication data client
+    /// @param storageController         storage controller
+    /// @param storageDiskSpaceReader    storage space reader
+    /// @return backup manager
     static BackupNodeManager New(
             final StorageBackupTaskExecutor storageBackupTaskExecutor,
             final ClusterStorageBinaryDataClient dataClient,
@@ -42,39 +38,31 @@ public interface BackupNodeManager extends ClusterNodeManager {
         );
     }
 
-    /** Stops the reader at the latest safe message boundary. */
+        /// Stops the reader at the latest safe message boundary.
     void stopReadingAtLatestMessage();
 
-    /**
-     * Resumes the reader after backup work.
-     *
-     * @throws NodelibraryException if the reader cannot resume
-     */
+        /// Resumes the reader after backup work.
+    ///
+    /// @throws NodelibraryException if the reader cannot resume
     void resumeReading() throws NodelibraryException;
 
-    /**
-     * Reports whether the reader is active.
-     *
-     * @return {@code true} when the reader is active
-     */
+        /// Reports whether the reader is active.
+    ///
+    /// @return `true` when the reader is active
     boolean isReading();
 
-    /**
-     * Creates a storage backup.
-     *
-     * @param useManualSlot whether to use the manual backup slot
-     * @throws NodelibraryException if backup creation fails
-     */
+        /// Creates a storage backup.
+    ///
+    /// @param useManualSlot whether to use the manual backup slot
+    /// @throws NodelibraryException if backup creation fails
     void createStorageBackup(final boolean useManualSlot) throws NodelibraryException;
 
-    /**
-     * Reports whether a backup is running.
-     *
-     * @return {@code true} when backup work is active
-     */
+        /// Reports whether a backup is running.
+    ///
+    /// @return `true` when backup work is active
     boolean isBackupRunning();
 
-    /** Coordinates backup work with the replication reader and storage controller. */
+        /// Coordinates backup work with the replication reader and storage controller.
     final class Default implements BackupNodeManager {
         private static final Logger LOG = LoggerFactory.getLogger(BackupNodeManager.class);
 

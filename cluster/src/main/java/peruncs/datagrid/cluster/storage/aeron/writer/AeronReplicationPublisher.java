@@ -14,14 +14,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongUnaryOperator;
 import java.util.zip.CRC32C;
 
-/**
- * Publishes one ordered transaction at a time.
- *
- * <p>Data chunks are prepared first. A commit marker makes the complete
- * transaction visible; an abort marker closes a rejected or abandoned one.
- * The publisher stages frames in one direct buffer so a large Store binary is
- * not flattened into a second heap copy.</p>
- */
+/// Publishes one ordered transaction at a time.
+///
+/// Data chunks are prepared first. A commit marker makes the complete
+/// transaction visible; an abort marker closes a rejected or abandoned one.
+/// The publisher stages frames in one direct buffer so a large Store binary is
+/// not flattened into a second heap copy.
 final class AeronReplicationPublisher implements AutoCloseable {
     private static final Cleaner CLEANER = Cleaner.create();
     private static final UnsafeBuffer EMPTY_BUFFER = new UnsafeBuffer();
@@ -154,30 +152,28 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return length;
     }
 
-    /** Publishes one transaction and its terminal commit marker. */
+        /// Publishes one transaction and its terminal commit marker.
     synchronized long publishTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers) {
         this.ensureNoSequenceReservation();
         return this.commit(this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length));
     }
 
-    /**
-     * Publishes dictionary and Store-data chunks and returns a token whose commit
-     * marker is pending. The caller must commit or close the token. If publishing
-     * fails after a sequence is reserved, the publisher attempts an abort and
-     * then fails closed so a later write cannot skip the damaged sequence.
-     * This low-level overload is reserved for direct publisher users; coordinator
-     * writes must use the explicit-sequence overload so their durable fence and
-     * publication cannot diverge.
-     *
-     * @param dictionary  optional type dictionary bytes
-     * @param dataBuffers Store binary buffers; positions are not changed
-     * @return a token that must be committed or closed
-     */
+        /// Publishes dictionary and Store-data chunks and returns a token whose commit
+    /// marker is pending. The caller must commit or close the token. If publishing
+    /// fails after a sequence is reserved, the publisher attempts an abort and
+    /// then fails closed so a later write cannot skip the damaged sequence.
+    /// This low-level overload is reserved for direct publisher users; coordinator
+    /// writes must use the explicit-sequence overload so their durable fence and
+    /// publication cannot diverge.
+    ///
+    /// @param dictionary  optional type dictionary bytes
+    /// @param dataBuffers Store binary buffers; positions are not changed
+    /// @return a token that must be committed or closed
     synchronized PreparedTransaction prepareTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers) {
         return this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length);
     }
 
-    /** Prepares a transaction using only the populated prefix of a reusable buffer array. */
+        /// Prepares a transaction using only the populated prefix of a reusable buffer array.
     private synchronized PreparedTransaction prepareTransaction(final byte[] dictionary,
                                                                 final ByteBuffer[] dataBuffers, final int bufferCount) {
         this.ensureOpen();
@@ -204,30 +200,28 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return this.prepareReserved(dictionary, dataBuffers, bufferCount, sequence, dataLength, dataChunks, -1, false);
     }
 
-    /**
-     * Completes preparation for a sequence reserved before a durable fence was
-     * written. The explicit sequence prevents a crash between the fence write
-     * and publication from leaving two different sequence numbers in the log.
-     * The metadata must describe the same buffers; it is checked again before
-     * publication so a caller cannot reuse a fence for different data.
-     * This explicit reservation is part of the durable-fence contract and must
-     * not be replaced with an independent sequence allocation.
-     *
-     * @param dictionary       optional type dictionary bytes
-     * @param dataBuffers      Store binary buffers whose positions are not changed
-     * @param reservedSequence sequence returned by {@link #reserveSequence()}
-     * @param metadata         length, chunk count, and CRC captured for the fence
-     * @return a token that must be committed or closed
-     * @throws IllegalStateException    if the reservation is no longer current
-     * @throws IllegalArgumentException if the metadata does not match the buffers
-     */
+        /// Completes preparation for a sequence reserved before a durable fence was
+    /// written. The explicit sequence prevents a crash between the fence write
+    /// and publication from leaving two different sequence numbers in the log.
+    /// The metadata must describe the same buffers; it is checked again before
+    /// publication so a caller cannot reuse a fence for different data.
+    /// This explicit reservation is part of the durable-fence contract and must
+    /// not be replaced with an independent sequence allocation.
+    ///
+    /// @param dictionary       optional type dictionary bytes
+    /// @param dataBuffers      Store binary buffers whose positions are not changed
+    /// @param reservedSequence sequence returned by [#reserveSequence()]
+    /// @param metadata         length, chunk count, and CRC captured for the fence
+    /// @return a token that must be committed or closed
+    /// @throws IllegalStateException    if the reservation is no longer current
+    /// @throws IllegalArgumentException if the metadata does not match the buffers
     synchronized PreparedTransaction prepareTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers,
                                                         final long reservedSequence, final TransactionMetadata metadata) {
         return this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length,
                 reservedSequence, metadata);
     }
 
-    /** Completes preparation with an explicit sequence and populated buffer count. */
+        /// Completes preparation with an explicit sequence and populated buffer count.
     synchronized PreparedTransaction prepareTransaction(final byte[] dictionary, final ByteBuffer[] dataBuffers,
                                                         final int bufferCount, final long reservedSequence, final TransactionMetadata metadata) {
         this.ensureOpen();
@@ -315,29 +309,25 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-    /** Returns metadata for the most recent failed prepare, if any. */
+        /// Returns metadata for the most recent failed prepare, if any.
     synchronized FailedPrepare failedPrepare() {
         return this.failedPrepare;
     }
 
-    /**
-     * Returns the next unreserved sequence for diagnostics and recovery checks.
-     * This method does not reserve the value; use {@link #reserveSequence()} when
-     * a durable fence must carry the same sequence as a later publication.
-     */
+        /// Returns the next unreserved sequence for diagnostics and recovery checks.
+    /// This method does not reserve the value; use [#reserveSequence()] when
+    /// a durable fence must carry the same sequence as a later publication.
     synchronized long nextSequence() {
         return this.nextSequence;
     }
 
-    /**
-     * Reserves the next sequence so a durable fence and its later publication
-     * share one sequence number. The reservation must either be used by the
-     * explicit-sequence preparation method or released after a local rejection.
-     * A caller must not publish another transaction while this reservation is
-     * outstanding.
-     *
-     * @return the sequence reserved for the next explicit-sequence preparation
-     */
+        /// Reserves the next sequence so a durable fence and its later publication
+    /// share one sequence number. The reservation must either be used by the
+    /// explicit-sequence preparation method or released after a local rejection.
+    /// A caller must not publish another transaction while this reservation is
+    /// outstanding.
+    ///
+    /// @return the sequence reserved for the next explicit-sequence preparation
     synchronized long reserveSequence() {
         this.ensureOpen();
         this.ensureNoPendingTransaction();
@@ -353,7 +343,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return sequence;
     }
 
-    /** Releases a reservation when the local Store rejects the fenced write. */
+        /// Releases a reservation when the local Store rejects the fenced write.
     synchronized void releaseReservedSequence(final long sequence) {
         if (sequence < 0 || sequence == Long.MAX_VALUE || this.reservedSequence != sequence ||
             this.nextSequence != sequence + 1) {
@@ -363,12 +353,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.reservedSequence = -1L;
     }
 
-    /**
-     * Abandons a reservation after local Store acceptance when publication cannot
-     * even be prepared. The sequence remains consumed and the caller must have
-     * persisted an in-flight uncertainty marker; rewinding it would let a later
-     * write reuse a sequence whose local bytes already exist.
-     */
+        /// Abandons a reservation after local Store acceptance when publication cannot
+    /// even be prepared. The sequence remains consumed and the caller must have
+    /// persisted an in-flight uncertainty marker; rewinding it would let a later
+    /// write reuse a sequence whose local bytes already exist.
     synchronized void abandonReservedSequence(final long sequence) {
         if (sequence < 0 || sequence == Long.MAX_VALUE || this.reservedSequence != sequence ||
             this.nextSequence != sequence + 1) {
@@ -378,12 +366,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.failed = true;
     }
 
-    /** Returns whether a durable fence currently owns the next sequence. */
+        /// Returns whether a durable fence currently owns the next sequence.
     synchronized boolean hasSequenceReservation() {
         return this.reservedSequence != -1L;
     }
 
-    /** Computes transaction metadata for the populated prefix of a reusable buffer array. */
+        /// Computes transaction metadata for the populated prefix of a reusable buffer array.
     synchronized TransactionMetadata transactionMetadata(final ByteBuffer[] dataBuffers, final int bufferCount) {
         final long length = totalRemaining(dataBuffers, bufferCount);
         if (length > this.configuration.maxTransactionBytes()) {
@@ -394,14 +382,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 this.computeDataCrc(dataBuffers, bufferCount, dataLength));
     }
 
-    /**
-     * Publishes Store data directly from the caller's buffer sequence.
-     *
-     * <p>The returned value is the CRC32C of the complete logical Store binary.
-     * The coordinator uses it in the commit marker. The earlier fence CRC remains
-     * a separate pass because it is the recovery evidence written before local
-     * Store acceptance.</p>
-     */
+        /// Publishes Store data directly from the caller's buffer sequence.
+    ///
+    /// The returned value is the CRC32C of the complete logical Store binary.
+    /// The coordinator uses it in the commit marker. The earlier fence CRC remains
+    /// a separate pass because it is the recovery evidence written before local
+    /// Store acceptance.
     private int publishDataChunks(final long sequence, final ByteBuffer[] sources, final int sourceCount, final int length) {
         final CRC32C crc = this.dataCrc;
         crc.reset();
@@ -460,7 +446,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return (int) crc.getValue();
     }
 
-    /** Updates CRC32C using absolute reads without mutating caller state. */
+        /// Updates CRC32C using absolute reads without mutating caller state.
     private void updateCrc(final CRC32C crc, final ByteBuffer source,
                            final int offset, final int length) {
         for (int copied = 0; copied < length; ) {
@@ -471,7 +457,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-    /** Publishes the commit marker and waits for the configured durability boundary. */
+        /// Publishes the commit marker and waits for the configured durability boundary.
     long commit(final PreparedTransaction transaction) {
         final long commitPosition;
         synchronized (this) {
@@ -516,7 +502,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-    /** Publishes an abort marker after the local Store rejects the transaction. */
+        /// Publishes an abort marker after the local Store rejects the transaction.
     long abort(final PreparedTransaction transaction) {
         final long offeredPosition;
         synchronized (this) {
@@ -610,7 +596,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.offerer.offer(this.envelopeBuffer, encodedLength);
     }
 
-    /** Replays an abort callback after a publication failure, retaining callback failures. */
+        /// Replays an abort callback after a publication failure, retaining callback failures.
     private void invokeAbortActionAfterFailure(final PreparedTransaction transaction, final Throwable failure) {
         final long abortPosition;
         synchronized (this) {
@@ -629,7 +615,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 commitCrc32c, EMPTY_BUFFER, 0, 0);
     }
 
-    /** Advances the next sequence when an external cursor or promotion supplies a newer index. */
+        /// Advances the next sequence when an external cursor or promotion supplies a newer index.
     synchronized void synchronizeNextSequence(final long next) {
         if (next < 0) throw new IllegalArgumentException("next sequence must be non-negative");
         this.ensureNoPendingTransaction();
@@ -658,17 +644,17 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-    /** Returns whether an uncommitted prepared transaction owns this publisher. */
+        /// Returns whether an uncommitted prepared transaction owns this publisher.
     synchronized boolean hasPendingTransaction() {
         return this.pendingTransaction != null && !this.pendingTransaction.terminal;
     }
 
-    /** Returns whether publication resources have completed their terminal close. */
+        /// Returns whether publication resources have completed their terminal close.
     synchronized boolean isClosed() {
         return this.closed;
     }
 
-    /** Claims the publisher for its single write coordinator. */
+        /// Claims the publisher for its single write coordinator.
     synchronized void claimCoordinator(final AeronReplicationWriteCoordinator coordinator) {
         this.ensureOpen();
         if (this.coordinatorOwner != null && this.coordinatorOwner != coordinator) {
@@ -677,33 +663,31 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.coordinatorOwner = coordinator;
     }
 
-    /** Releases the coordinator claim during owner disposal. */
+        /// Releases the coordinator claim during owner disposal.
     synchronized void releaseCoordinator(final AeronReplicationWriteCoordinator coordinator) {
         if (this.coordinatorOwner == coordinator) this.coordinatorOwner = null;
     }
 
-    /** Prevents further writes after an external durability or checkpoint failure. */
+        /// Prevents further writes after an external durability or checkpoint failure.
     synchronized void failClosed() {
         this.failed = true;
     }
 
-    /** Returns whether a publication failure made this writer fail closed. */
+        /// Returns whether a publication failure made this writer fail closed.
     synchronized boolean isFailed() {
         return this.failed;
     }
 
-    /** Aborts a pending transaction when possible and releases the publication. */
+        /// Aborts a pending transaction when possible and releases the publication.
     @Override
     public void close() {
         this.closeInternal(true);
     }
 
-    /**
-     * Releases the publication without manufacturing an ABORT marker. This is
-     * used only when the Store has already accepted the transaction: the durable
-     * in-flight fence must remain unresolved so restart fails closed instead of
-     * pretending that a local acceptance was rejected.
-     */
+        /// Releases the publication without manufacturing an ABORT marker. This is
+    /// used only when the Store has already accepted the transaction: the durable
+    /// in-flight fence must remain unresolved so restart fails closed instead of
+    /// pretending that a local acceptance was rejected.
     void closeWithoutAbort() {
         this.closeInternal(false);
     }
@@ -839,7 +823,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-    /** Cleaner action deliberately contains no reference to the publisher. */
+        /// Cleaner action deliberately contains no reference to the publisher.
     private static final class DirectBufferCleanup implements Runnable {
         private final ByteBuffer buffer;
         private final AtomicBoolean freed = new AtomicBoolean();
@@ -854,15 +838,15 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-    /** Metadata retained while a transaction moves through writer states. */
+        /// Metadata retained while a transaction moves through writer states.
     record TransactionMetadata(int dataLength, int dataChunkCount, int crc32c) {
     }
 
-    /** Source metadata retained when preparing a transaction fails. */
+        /// Source metadata retained when preparing a transaction fails.
     record FailedPrepare(long sequence, int dataLength, int dataChunkCount, int crc32c) {
     }
 
-    /** Closeable handle that aborts an unfinished prepared transaction. */
+        /// Closeable handle that aborts an unfinished prepared transaction.
     static final class PreparedTransaction implements AutoCloseable {
         private final AeronReplicationPublisher owner;
         private final long sequence;
@@ -896,20 +880,18 @@ final class AeronReplicationPublisher implements AutoCloseable {
             return this.dataChunkCount;
         }
 
-        /** Returns the CRC32C of the Store binary carried by this transaction. */
+                /// Returns the CRC32C of the Store binary carried by this transaction.
         int dataCrc32c() {
             return this.crc32c;
         }
 
-        /**
-         * Registers a callback for an abort whose publication has been attempted.
-         * The callback runs synchronously on the caller that completes the abort; a
-         * late registration is invoked immediately when the publisher already
-         * completed that path. A position of {@code -1} means the marker was offered
-         * but its durable Archive position is unknown.
-         *
-         * @param action receives the recorded abort position
-         */
+                /// Registers a callback for an abort whose publication has been attempted.
+        /// The callback runs synchronously on the caller that completes the abort; a
+        /// late registration is invoked immediately when the publisher already
+        /// completed that path. A position of `-1` means the marker was offered
+        /// but its durable Archive position is unknown.
+        ///
+        /// @param action receives the recorded abort position
         void onAbort(final java.util.function.LongConsumer action) {
             if (action == null) throw new NullPointerException("action");
             boolean invoke;
@@ -938,12 +920,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
             action.accept(position);
         }
 
-        /**
-         * Detaches this token without emitting an abort marker. This is used only
-         * after the local Store accepted data but a later step failed: an abort would
-         * contradict the accepted Store state, so the publisher is failed closed and
-         * the durable uncertainty fence is left for restart recovery.
-         */
+                /// Detaches this token without emitting an abort marker. This is used only
+        /// after the local Store accepted data but a later step failed: an abort would
+        /// contradict the accepted Store state, so the publisher is failed closed and
+        /// the durable uncertainty fence is left for restart recovery.
         void abandonWithoutAbort() {
             synchronized (this.owner) {
                 if (this.terminal) return;
@@ -953,10 +933,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
             }
         }
 
-        /**
-         * Aborts an abandoned transaction so its sequence is terminated in the log.
-         * Closing after commit or abort has no effect.
-         */
+                /// Aborts an abandoned transaction so its sequence is terminated in the log.
+        /// Closing after commit or abort has no effect.
         @Override
         public void close() {
             synchronized (this.owner) {

@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32C;
 
-/** Forked reader used by the reader crash matrix. It never self-terminates. */
+/// Forked reader used by the reader crash matrix. It never self-terminates.
 public final class ReaderCrashChildMain {
     private static final UUID CLUSTER_ID = UUID.nameUUIDFromBytes("reader-crash-cluster".getBytes(StandardCharsets.UTF_8));
     private static final long EPOCH = 2L;
@@ -43,16 +43,15 @@ public final class ReaderCrashChildMain {
         final String mode = System.getProperty("dg.reader.mode", "phase1");
         final String point = System.getProperty("dg.reader.barrier", "NONE");
         if (!"NONE".equals(point) && !ReaderMilestone.supports(point)) {
-            throw new IllegalArgumentException("unsupported or unencodable reader crash point: " + point);
+            throw new IllegalArgumentException("unsupported or unencodable reader crash point: %s".formatted(point));
         }
         final Path uncertainty = base.resolve("reader.reader-inflight");
         if ("phase2".equals(mode) && Files.exists(uncertainty)) {
             try {
                 final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(uncertainty);
-                writeOutcome(control, "RESEED_REQUIRED", "reader Store import is uncertain at sequence " +
-                                                         checkpoint.transactionSequence() + ": " + uncertainty);
+                writeOutcome(control, "RESEED_REQUIRED", "reader Store import is uncertain at sequence %s: %s".formatted(checkpoint.transactionSequence(), uncertainty));
             } catch (final IOException failure) {
-                writeOutcome(control, "RESEED_REQUIRED", "cannot read reader uncertainty marker: " + failure);
+                writeOutcome(control, "RESEED_REQUIRED", "cannot read reader uncertainty marker: %s".formatted(failure));
             }
             return;
         }
@@ -141,7 +140,7 @@ public final class ReaderCrashChildMain {
             buffer.putInt((int) crc.getValue()).flip();
             final Path parent = path.toAbsolutePath().getParent();
             Files.createDirectories(parent);
-            final Path temporary = Files.createTempFile(parent, path.getFileName() + ".tmp-", null);
+            final Path temporary = Files.createTempFile(parent, "%s.tmp-".formatted(path.getFileName()), null);
             try {
                 if ("DURING_CURSOR_FILE_WRITE".equals(point)) {
                     barrier(control, point, sequence, position);
@@ -210,7 +209,7 @@ public final class ReaderCrashChildMain {
         try {
             final Path parent = path.toAbsolutePath().getParent();
             Files.createDirectories(parent);
-            final Path temporary = Files.createTempFile(parent, path.getFileName() + ".tmp-", null);
+            final Path temporary = Files.createTempFile(parent, "%s.tmp-".formatted(path.getFileName()), null);
             try {
                 try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                     final ByteBuffer bytes = StandardCharsets.UTF_8.encode(value);
@@ -238,16 +237,13 @@ public final class ReaderCrashChildMain {
             case "RESEED_REQUIRED" -> "RESEED_REQUIRED";
             default -> "FAILED";
         };
-        final String value = "HEALTH=" + health +
-                             System.lineSeparator() +
-                             (error == null ? "" : "ERROR=" + error.replace('\n', ' ') + System.lineSeparator()) +
-                             "OUTCOME=" + outcome + System.lineSeparator();
+        final String value = "HEALTH=%s%s%sOUTCOME=%s%s".formatted(health, System.lineSeparator(), (error == null ? "" : "ERROR=%s%s".formatted(error.replace('\n', ' '), System.lineSeparator())), outcome, System.lineSeparator());
         atomicText(control.resolve("outcome"), value);
     }
 
     private static String required(final String name) {
         final String value = System.getProperty(name);
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("missing -D" + name);
+        if (value == null || value.isBlank()) throw new IllegalArgumentException("missing -D%s".formatted(name));
         return value;
     }
 

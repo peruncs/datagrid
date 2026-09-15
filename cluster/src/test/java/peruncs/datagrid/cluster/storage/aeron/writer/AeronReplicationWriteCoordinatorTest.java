@@ -11,7 +11,6 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.aeron.writer.*;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
@@ -26,9 +25,9 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies checkpoint transitions and fail-closed writer coordination. */
+/// Verifies checkpoint transitions and fail-closed writer coordination.
 class AeronReplicationWriteCoordinatorTest {
-    /** A publisher has one owner so dictionaries and reservations cannot diverge. */
+        /// A publisher has one owner so dictionaries and reservations cannot diverge.
     @Test
     void rejectsMultipleCoordinatorsForOnePublisher() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -41,7 +40,7 @@ class AeronReplicationWriteCoordinatorTest {
         first.dispose();
     }
 
-    /** Coordinator ownership prevents callers from bypassing the fenced path. */
+        /// Coordinator ownership prevents callers from bypassing the fenced path.
     @Test
     void coordinatorOwnedPublisherRejectsUnfencedPreparation() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -55,7 +54,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Rejects a new transaction when the Archive free-space admission guard is closed. */
+        /// Rejects a new transaction when the Archive free-space admission guard is closed.
     @Test
     void rejectsWritesBelowArchiveCapacityThreshold() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -96,7 +95,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Verifies reporting of prepare commit and abort checkpoint states. */
+        /// Verifies reporting of prepare commit and abort checkpoint states.
     @Test
     void reportsPrepareCommitAndAbortCheckpointStates() {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
@@ -130,7 +129,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Verifies enqueue then archive does not publish before local enqueue. */
+        /// Verifies enqueue then archive does not publish before local enqueue.
     @Test
     void enqueueThenArchiveDoesNotPublishBeforeLocalEnqueue() {
         final List<String> events = new ArrayList<>();
@@ -170,7 +169,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Verifies enqueue prepare failure records the failed transaction dimensions. */
+        /// Verifies enqueue prepare failure records the failed transaction dimensions.
     @Test
     void enqueuePrepareFailureRecordsTheFailedTransactionDimensions() {
         final AtomicInteger offers = new AtomicInteger();
@@ -212,7 +211,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Verifies local rejection emits abort and never commits. */
+        /// Verifies local rejection emits abort and never commits.
     @Test
     void localRejectionEmitsAbortAndNeverCommits() {
         final List<String> events = new ArrayList<>();
@@ -241,7 +240,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** A rejected transaction retains its dictionary for the next successful commit. */
+        /// A rejected transaction retains its dictionary for the next successful commit.
     @Test
     void rejectedTransactionRetainsDictionaryForRetry() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
@@ -275,7 +274,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Verifies an ENQUEUE local rejection removes only the fence and never advances a sequence. */
+        /// Verifies an ENQUEUE local rejection removes only the fence and never advances a sequence.
     @Test
     void enqueueLocalRejectionDoesNotCreateSyntheticTerminalSequence() {
         final List<String> events = new ArrayList<>();
@@ -292,7 +291,7 @@ class AeronReplicationWriteCoordinatorTest {
             @Override
             public void onState(final AeronReplicationCheckpoint.State state, final long sequence,
                                 final int length, final int chunks, final int crc, final long position) {
-                events.add(state + ":" + sequence);
+                events.add("%s:%s".formatted(state, sequence));
             }
 
             @Override
@@ -319,7 +318,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** A post-acceptance failure retains the enqueue fence instead of fabricating an abort. */
+        /// A post-acceptance failure retains the enqueue fence instead of fabricating an abort.
     @Test
     void enqueuePostAcceptanceFailureLeavesUncertainFence() {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
@@ -361,7 +360,7 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-    /** A post-acceptance archive-first failure retains uncertainty and emits no contradictory abort. */
+        /// A post-acceptance archive-first failure retains uncertainty and emits no contradictory abort.
     @Test
     void archivePostAcceptanceFailureLeavesUncertainWithoutAbort() {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
@@ -404,7 +403,7 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-    /** Verifies a failed fence cleanup still releases its reserved sequence. */
+        /// Verifies a failed fence cleanup still releases its reserved sequence.
     @Test
     void enqueueFenceCleanupReleasesSequenceWhenCheckpointCleanupFails() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -437,7 +436,7 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-    /** Verifies commit failure is marked uncertain and coordinator cannot pretend success. */
+        /// Verifies commit failure is marked uncertain and coordinator cannot pretend success.
     @Test
     void commitFailureIsMarkedUncertainAndCoordinatorCannotPretendSuccess() {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
@@ -458,7 +457,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Verifies persistence target consumes dictionary from shared distributor. */
+        /// Verifies persistence target consumes dictionary from shared distributor.
     @Test
     void persistenceTargetConsumesDictionaryFromSharedDistributor() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
@@ -503,7 +502,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** A dictionary transferred from a shared source survives local rejection. */
+        /// A dictionary transferred from a shared source survives local rejection.
     @Test
     void sharedDictionarySourceIsRetainedAcrossRejectedStoreWrite() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
@@ -553,7 +552,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** All Serializer channels, not only the channel-zero view, are published. */
+        /// All Serializer channels, not only the channel-zero view, are published.
     @Test
     void collectsEverySerializerChannelForReplication() {
         final ChunksBuffer[] channels = new ChunksBuffer[4];
@@ -579,7 +578,7 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-    /** Verifies ignored distribution writes locally without offering aeron frames. */
+        /// Verifies ignored distribution writes locally without offering aeron frames.
     @Test
     void ignoredDistributionWritesLocallyWithoutOfferingAeronFrames() {
         final AtomicInteger offers = new AtomicInteger();
@@ -608,7 +607,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** Verifies committed sequence callback does not advance on uncertain commit. */
+        /// Verifies committed sequence callback does not advance on uncertain commit.
     @Test
     void committedSequenceCallbackDoesNotAdvanceOnUncertainCommit() {
         final AtomicInteger offers = new AtomicInteger();
@@ -634,7 +633,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-    /** A fatal JVM error never triggers a second checkpoint write from cleanup. */
+        /// A fatal JVM error never triggers a second checkpoint write from cleanup.
     @Test
     void fatalCommitErrorDoesNotWriteAnUncertaintyMarker() {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();

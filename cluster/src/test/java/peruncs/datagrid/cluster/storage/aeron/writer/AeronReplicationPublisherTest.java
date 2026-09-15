@@ -4,9 +4,6 @@ import io.aeron.Publication;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronOfferRetryer;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationPublisher;
-import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -17,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies ordered publication, retry deadlines, and abandoned transactions. */
+/// Verifies ordered publication, retry deadlines, and abandoned transactions.
 class AeronReplicationPublisherTest {
     private static final UUID CLUSTER = UUID.randomUUID();
 
@@ -36,7 +33,7 @@ class AeronReplicationPublisherTest {
                 .build();
     }
 
-    /** Verifies retries back pressure and preserves source position. */
+        /// Verifies retries back pressure and preserves source position.
     @Test
     void retriesBackPressureAndPreservesSourcePosition() {
         final AtomicInteger calls = new AtomicInteger();
@@ -55,7 +52,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies times out and fails closed after persistent back pressure. */
+        /// Verifies times out and fails closed after persistent back pressure.
     @Test
     void timesOutAndFailsClosedAfterPersistentBackPressure() {
         try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
@@ -69,7 +66,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies timeout diagnostics identify the Aeron status and connectivity. */
+        /// Verifies timeout diagnostics identify the Aeron status and connectivity.
     @Test
     void timeoutDiagnosticsIdentifyNotConnectedPublication() {
         final AeronReplicationConfiguration configuration = configuration(1_000_000L);
@@ -91,7 +88,7 @@ class AeronReplicationPublisherTest {
         assertTrue(failure.getMessage().contains("connected=false"));
     }
 
-    /** Verifies closed and max position statuses are fatal. */
+        /// Verifies closed and max position statuses are fatal.
     @Test
     void closedAndMaxPositionStatusesAreFatal() {
         for (final long status : new long[]{Publication.CLOSED, Publication.MAX_POSITION_EXCEEDED}) {
@@ -105,7 +102,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies rejection of message limit larger than configuration. */
+        /// Verifies rejection of message limit larger than configuration.
     @Test
     void rejectsMessageLimitLargerThanConfiguration() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -115,7 +112,7 @@ class AeronReplicationPublisherTest {
                 configuration, CLUSTER, 1, 0));
     }
 
-    /** Verifies emits dictionary chunks before data and commit. */
+        /// Verifies emits dictionary chunks before data and commit.
     @Test
     void emitsDictionaryChunksBeforeDataAndCommit() {
         final List<byte[]> messages = new ArrayList<>();
@@ -151,7 +148,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies publishes across multiple source buffers without changing their positions. */
+        /// Verifies publishes across multiple source buffers without changing their positions.
     @Test
     void publishesAcrossMultipleSourceBuffersWithoutChangingTheirPositions() {
         final List<byte[]> messages = new ArrayList<>();
@@ -175,7 +172,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies closing an abandoned prepared transaction publishes an abort marker. */
+        /// Verifies closing an abandoned prepared transaction publishes an abort marker.
     @Test
     void closingAnAbandonedPreparedTransactionPublishesAnAbortMarker() {
         final List<byte[]> messages = new ArrayList<>();
@@ -198,7 +195,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies publisher shutdown aborts an outstanding token and invokes its abort callback. */
+        /// Verifies publisher shutdown aborts an outstanding token and invokes its abort callback.
     @Test
     void publisherShutdownInvokesPendingAbortCallback() {
         final AtomicInteger abortCallbacks = new AtomicInteger();
@@ -220,7 +217,7 @@ class AeronReplicationPublisherTest {
         assertTrue(abortPosition.get() >= 0);
     }
 
-    /** A transient abort offer failure keeps the token retryable and never emits two aborts. */
+        /// A transient abort offer failure keeps the token retryable and never emits two aborts.
     @Test
     void closeCanRetryPendingAbortAfterNotConnectedFailure() {
         final AtomicInteger offers = new AtomicInteger();
@@ -241,7 +238,7 @@ class AeronReplicationPublisherTest {
         assertEquals(0L, prepared.sequence());
     }
 
-    /** Verifies a direct publisher abort invokes the same callback as shutdown abort. */
+        /// Verifies a direct publisher abort invokes the same callback as shutdown abort.
     @Test
     void directAbortInvokesPendingAbortCallback() {
         final AtomicInteger abortCallbacks = new AtomicInteger();
@@ -256,7 +253,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** A publisher cannot overwrite an outstanding token with a second reservation. */
+        /// A publisher cannot overwrite an outstanding token with a second reservation.
     @Test
     void rejectsSecondPreparedTransactionUntilTheFirstIsTerminal() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
@@ -272,7 +269,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies a crash after token creation cannot publish a duplicate abort on shutdown. */
+        /// Verifies a crash after token creation cannot publish a duplicate abort on shutdown.
     @Test
     void prepareCrashDoesNotPublishDuplicateAbortOnShutdown() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
@@ -301,7 +298,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies publishes an explicit empty store chunk. */
+        /// Verifies publishes an explicit empty store chunk.
     @Test
     void publishesAnExplicitEmptyStoreChunk() {
         final List<byte[]> messages = new ArrayList<>();
@@ -324,7 +321,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies rejection of transaction larger than configured limit before offering. */
+        /// Verifies rejection of transaction larger than configured limit before offering.
     @Test
     void rejectsTransactionLargerThanConfiguredLimitBeforeOffering() {
         final AtomicInteger offers = new AtomicInteger();
@@ -342,7 +339,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies failed commit leaves publisher failed closed. */
+        /// Verifies failed commit leaves publisher failed closed.
     @Test
     void failedCommitLeavesPublisherFailedClosed() {
         final AtomicInteger offers = new AtomicInteger();
@@ -357,7 +354,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies partial prepare failure is terminal and cannot skip the reserved sequence. */
+        /// Verifies partial prepare failure is terminal and cannot skip the reserved sequence.
     @Test
     void partialPrepareFailureIsTerminalAndCannotSkipTheReservedSequence() {
         final AtomicInteger offers = new AtomicInteger();
@@ -373,7 +370,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies abort failure fails closed after prepared chunks were published. */
+        /// Verifies abort failure fails closed after prepared chunks were published.
     @Test
     void abortFailureFailsClosedAfterPreparedChunksWerePublished() {
         final AtomicInteger offers = new AtomicInteger();
@@ -388,7 +385,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies close is idempotent and prevents further offers. */
+        /// Verifies close is idempotent and prevents further offers.
     @Test
     void closeIsIdempotentAndPreventsFurtherOffers() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
@@ -401,7 +398,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies commit waits for and returns archive recorded position. */
+        /// Verifies commit waits for and returns archive recorded position.
     @Test
     void commitWaitsForAndReturnsArchiveRecordedPosition() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
@@ -414,7 +411,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Verifies sequence exhaustion is detected before the next reservation wraps. */
+        /// Verifies sequence exhaustion is detected before the next reservation wraps.
     @Test
     void sequenceExhaustionIsDetectedBeforeWraparound() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
@@ -428,7 +425,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** A durable reservation cannot be bypassed by an independent publisher call. */
+        /// A durable reservation cannot be bypassed by an independent publisher call.
     @Test
     void reservationMustBeConsumedOrReleasedBeforeAnotherPublication() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
@@ -448,7 +445,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-    /** Explicit preparation consumes exactly the reservation returned by reserveSequence. */
+        /// Explicit preparation consumes exactly the reservation returned by reserveSequence.
     @Test
     void explicitPreparationConsumesTheMatchingReservation() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);

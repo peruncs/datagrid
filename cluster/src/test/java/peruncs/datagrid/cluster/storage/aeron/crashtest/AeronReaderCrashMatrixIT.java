@@ -26,7 +26,7 @@ import java.util.concurrent.locks.LockSupport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Exercises reader restart boundaries with a real child process and Archive. */
+/// Exercises reader restart boundaries with a real child process and Archive.
 class AeronReaderCrashMatrixIT {
     private static final UUID CLUSTER_ID = UUID.nameUUIDFromBytes("reader-crash-cluster".getBytes(StandardCharsets.UTF_8));
     private static final long EPOCH = 2L;
@@ -47,25 +47,25 @@ class AeronReaderCrashMatrixIT {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         return new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
-                "-Ddg.reader.base=" + base,
-                "-Ddg.reader.mode=" + mode,
-                "-Ddg.reader.barrier=" + point,
-                "-Ddg.reader.recordingId=" + recordingId,
-                "-Ddg.reader.controlChannel=" + controlChannel,
-                "-Ddg.reader.controlResponseChannel=" + CONTROL_RESPONSE_CHANNEL,
-                "-Ddg.reader.liveChannel=" + LIVE_CHANNEL,
-                "-Ddg.reader.replayChannel=" + REPLAY_CHANNEL,
-                "-Ddg.reader.aeronDirectory=" + aeronDirectory,
+                "-Ddg.reader.base=%s".formatted(base),
+                "-Ddg.reader.mode=%s".formatted(mode),
+                "-Ddg.reader.barrier=%s".formatted(point),
+                "-Ddg.reader.recordingId=%s".formatted(recordingId),
+                "-Ddg.reader.controlChannel=%s".formatted(controlChannel),
+                "-Ddg.reader.controlResponseChannel=%s".formatted(CONTROL_RESPONSE_CHANNEL),
+                "-Ddg.reader.liveChannel=%s".formatted(LIVE_CHANNEL),
+                "-Ddg.reader.replayChannel=%s".formatted(REPLAY_CHANNEL),
+                "-Ddg.reader.aeronDirectory=%s".formatted(aeronDirectory),
                 "-Ddg.reader.sharedDriver=true",
                 ReaderCrashChildMain.class.getName())
-                .redirectOutput(control.resolve(mode + "-stdout.log").toFile())
-                .redirectError(control.resolve(mode + "-stderr.log").toFile())
+                .redirectOutput(control.resolve("%s-stdout.log".formatted(mode)).toFile())
+                .redirectError(control.resolve("%s-stderr.log".formatted(mode)).toFile())
                 .start();
     }
 
     private static byte[] payload(final int sequence) {
         final byte[] result = new byte[64];
-        final byte[] value = ("reader-crash:" + sequence).getBytes(StandardCharsets.UTF_8);
+        final byte[] value = ("reader-crash:%s".formatted(sequence)).getBytes(StandardCharsets.UTF_8);
         for (int i = 0; i < result.length; i++) result[i] = value[i % value.length];
         return result;
     }
@@ -85,20 +85,16 @@ class AeronReaderCrashMatrixIT {
         while (!Files.exists(path) && System.nanoTime() < deadline) {
             if (!process.isAlive()) {
                 final Path control = path.getParent();
-                throw new AssertionError("child exited before " + path + "\n" +
-                                         readIfExists(control.resolve("phase1-stderr.log")) + "\n" +
-                                         readIfExists(control.resolve("phase1-stdout.log")) + "\nclasspath=" +
-                                         System.getProperty("java.class.path") + "\nmodulepath=" +
-                                         System.getProperty("jdk.module.path"));
+                throw new AssertionError("child exited before %s\n%s\n%s\nclasspath=%s\nmodulepath=%s".formatted(path, readIfExists(control.resolve("phase1-stderr.log")), readIfExists(control.resolve("phase1-stdout.log")), System.getProperty("java.class.path"), System.getProperty("jdk.module.path")));
             }
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10L));
         }
-        assertTrue(Files.exists(path), "timed out waiting for " + path);
+        assertTrue(Files.exists(path), "timed out waiting for %s".formatted(path));
     }
 
     private static String readIfExists(final Path path) {
         try {
-            return Files.exists(path) ? Files.readString(path) : "<missing " + path + ">";
+            return Files.exists(path) ? Files.readString(path) : "<missing %s>".formatted(path);
         } catch (final IOException failure) {
             return failure.toString();
         }
@@ -126,43 +122,43 @@ class AeronReaderCrashMatrixIT {
         if (failure != null) throw failure;
     }
 
-    /** Verifies replay before import leaves uncertain marker and requires reseed. */
+        /// Verifies replay before import leaves uncertain marker and requires reseed.
     @Test
     void replayBeforeImportLeavesUncertainMarkerAndRequiresReseed() throws Exception {
         this.assertReseed("REPLAY_BEFORE_FIRST_IMPORT", false);
     }
 
-    /** Verifies import boundary leaves uncertain marker and requires reseed. */
+        /// Verifies import boundary leaves uncertain marker and requires reseed.
     @Test
     void importBoundaryLeavesUncertainMarkerAndRequiresReseed() throws Exception {
         this.assertReseed("DURING_STORE_IMPORT", false);
     }
 
-    /** Verifies an injected Store import failure leaves the reader uncertain. */
+        /// Verifies an injected Store import failure leaves the reader uncertain.
     @Test
     void importFailureLeavesUncertainMarkerAndRequiresReseed() throws Exception {
         this.assertReseed("DURING_STORE_IMPORT_FAILURE", false);
     }
 
-    /** Verifies import before cursor boundary leaves store record and requires reseed. */
+        /// Verifies import before cursor boundary leaves store record and requires reseed.
     @Test
     void importBeforeCursorBoundaryLeavesStoreRecordAndRequiresReseed() throws Exception {
         this.assertReseed("AFTER_STORE_IMPORT_BEFORE_CURSOR_WRITE", true);
     }
 
-    /** Verifies a crash during cursor encoding retains the uncertainty marker. */
+        /// Verifies a crash during cursor encoding retains the uncertainty marker.
     @Test
     void cursorWriteFailureLeavesUncertainMarkerAndRequiresReseed() throws Exception {
         this.assertReseed("DURING_CURSOR_FILE_WRITE", true);
     }
 
-    /** Verifies a crash after cursor force but before replacement retains the prior cursor. */
+        /// Verifies a crash after cursor force but before replacement retains the prior cursor.
     @Test
     void cursorRenameWindowLeavesUncertainMarkerAndRequiresReseed() throws Exception {
         this.assertReseed("AFTER_CURSOR_TEMP_WRITE_BEFORE_RENAME", true);
     }
 
-    /** Verifies a crash after cursor replacement but before directory sync is fail-closed. */
+        /// Verifies a crash after cursor replacement but before directory sync is fail-closed.
     @Test
     void cursorDirectorySyncWindowLeavesUncertainMarkerAndRequiresReseed() throws Exception {
         this.assertReseed("AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC", true);
@@ -174,7 +170,7 @@ class AeronReaderCrashMatrixIT {
         final int controlPort = freePort();
         final Path mediaDirectory = base.resolve("archive-aeron");
         final Path archiveDirectory = base.resolve("archive");
-        final String controlChannel = "aeron:udp?endpoint=localhost:" + controlPort;
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
                 .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
@@ -207,7 +203,7 @@ class AeronReaderCrashMatrixIT {
                 final Path milestonePath = base.resolve("control/milestone.reached");
                 awaitFile(milestonePath, child);
                 final ReaderMilestone milestone = ReaderMilestone.read(milestonePath);
-                assertEquals(point, milestone.point(), "unexpected reader milestone " + milestone);
+                assertEquals(point, milestone.point(), "unexpected reader milestone %s".formatted(milestone));
                 assertTrue(milestone.sequence() >= 0, "reader milestone has no sequence");
                 child.destroyForcibly();
                 assertTrue(child.waitFor(10, TimeUnit.SECONDS), "reader child did not exit after kill");
@@ -223,7 +219,7 @@ class AeronReaderCrashMatrixIT {
                 assertEquals(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, checkpoint.state());
                 assertEquals(milestone.sequence(), checkpoint.transactionSequence());
                 assertEquals(milestone.position(), checkpoint.recordingPosition());
-                assertEquals(Files.exists(base.resolve("reader.store")), expectStoreRecord, "unexpected Store fixture state for " + point);
+                assertEquals(Files.exists(base.resolve("reader.store")), expectStoreRecord, "unexpected Store fixture state for %s".formatted(point));
             }
         } finally {
             if (child != null && child.isAlive()) child.destroyForcibly();

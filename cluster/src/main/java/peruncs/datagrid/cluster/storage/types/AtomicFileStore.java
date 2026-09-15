@@ -10,16 +10,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiConsumer;
 
-/**
- * Writes small replication metadata files with forced temporary replacement.
- * The operation fails when the filesystem cannot provide atomic rename or
- * directory synchronization; callers must choose a filesystem with those
- * durability primitives for replication metadata.
- */
+/// Writes small replication metadata files with forced temporary replacement.
+/// The operation fails when the filesystem cannot provide atomic rename or
+/// directory synchronization; callers must choose a filesystem with those
+/// durability primitives for replication metadata.
 public final class AtomicFileStore {
-    /** Selects checkpoint-specific crash-test phases. */
+        /// Selects checkpoint-specific crash-test phases.
     public static final String PHASE_CHECKPOINT = "CHECKPOINT";
-    /** Selects cursor-specific crash-test phases. */
+        /// Selects cursor-specific crash-test phases.
     public static final String PHASE_CURSOR = "CURSOR";
     private static final System.Logger LOGGER = System.getLogger(AtomicFileStore.class.getName());
     private static final ThreadLocal<BiConsumer<String, Path>> TEST_HOOK = new ThreadLocal<>();
@@ -29,17 +27,15 @@ public final class AtomicFileStore {
     private AtomicFileStore() {
     }
 
-    /**
-     * Installs a thread-confined crash-test hook; production callers must leave
-     * it unset. A blocking hook belongs only in a forked child because file
-     * writes may run while a provider monitor is held.
-     */
+        /// Installs a thread-confined crash-test hook; production callers must leave
+    /// it unset. A blocking hook belongs only in a forked child because file
+    /// writes may run while a provider monitor is held.
     static void setTestHook(final BiConsumer<String, Path> hook) {
         if (hook == null) TEST_HOOK.remove();
         else TEST_HOOK.set(hook);
     }
 
-    /** Clears the package-local crash-test hook. */
+        /// Clears the package-local crash-test hook.
     static void clearTestHook() {
         TEST_HOOK.remove();
     }
@@ -49,31 +45,29 @@ public final class AtomicFileStore {
         if (hook != null) hook.accept(phase, path);
     }
 
-    /**
-     * Writes a file through a forced sibling temporary file and replacement.
-     *
-     * <p>The {@code phase} parameter selects the crash-test hook names.
-     * When {@code null} the generic names {@code BEFORE_TEMP_WRITE},
-     * {@code DURING_FILE_WRITE}, {@code AFTER_TEMP_WRITE_BEFORE_RENAME},
-     * and {@code AFTER_RENAME_BEFORE_DIRECTORY_SYNC} are used. Checkpoint
-     * and cursor stores pass {@link #PHASE_CHECKPOINT} or {@link #PHASE_CURSOR}.</p>
-     *
-     * @param path    destination path
-     * @param encoder callback that writes the complete encoded contents
-     * @param phase   crash-test hook phase name, or {@code null} for generic names
-     * @throws IOException if writing or replacement fails
-     */
+        /// Writes a file through a forced sibling temporary file and replacement.
+    ///
+    /// The `phase` parameter selects the crash-test hook names.
+    /// When `null` the generic names `BEFORE_TEMP_WRITE`,
+    /// `DURING_FILE_WRITE`, `AFTER_TEMP_WRITE_BEFORE_RENAME`,
+    /// and `AFTER_RENAME_BEFORE_DIRECTORY_SYNC` are used. Checkpoint
+    /// and cursor stores pass [#PHASE_CHECKPOINT] or [#PHASE_CURSOR].
+    ///
+    /// @param path    destination path
+    /// @param encoder callback that writes the complete encoded contents
+    /// @param phase   crash-test hook phase name, or `null` for generic names
+    /// @throws IOException if writing or replacement fails
     public static void write(final Path path, final Encoder encoder, final String phase) throws IOException {
         if (phase != null && !PHASE_CHECKPOINT.equals(phase) && !PHASE_CURSOR.equals(phase)) {
-            throw new IllegalArgumentException("unsupported AtomicFileStore phase: " + phase);
+            throw new IllegalArgumentException("unsupported AtomicFileStore phase: %s".formatted(phase));
         }
-        final String beforePhase = phase != null ? "BEFORE_" + phase + "_TEMP_WRITE" : "BEFORE_TEMP_WRITE";
-        final String duringPhase = phase != null ? "DURING_" + phase + "_FILE_WRITE" : "DURING_FILE_WRITE";
+        final String beforePhase = phase != null ? "BEFORE_%s_TEMP_WRITE".formatted(phase) : "BEFORE_TEMP_WRITE";
+        final String duringPhase = phase != null ? "DURING_%s_FILE_WRITE".formatted(phase) : "DURING_FILE_WRITE";
         final String afterTempPhase = phase != null
-                ? "AFTER_" + phase + "_TEMP_WRITE_BEFORE_RENAME"
+                ? "AFTER_%s_TEMP_WRITE_BEFORE_RENAME".formatted(phase)
                 : "AFTER_TEMP_WRITE_BEFORE_RENAME";
         final String afterRenamePhase = phase != null
-                ? "AFTER_" + phase + "_RENAME_BEFORE_DIRECTORY_SYNC"
+                ? "AFTER_%s_RENAME_BEFORE_DIRECTORY_SYNC".formatted(phase)
                 : "AFTER_RENAME_BEFORE_DIRECTORY_SYNC";
         write(path, encoder, beforePhase, duringPhase, afterTempPhase, afterRenamePhase);
     }
@@ -84,16 +78,16 @@ public final class AtomicFileStore {
         final Path absolute = path.toAbsolutePath();
         final Path parent = absolute.getParent();
         if (parent == null) {
-            throw new IOException("Metadata path has no parent directory: " + path);
+            throw new IOException("Metadata path has no parent directory: %s".formatted(path));
         }
         Files.createDirectories(parent);
         Path temporary;
         try {
-            temporary = Files.createTempFile(parent, absolute.getFileName() + ".tmp-", null, OWNER_ONLY);
+            temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null, OWNER_ONLY);
         } catch (final UnsupportedOperationException ignored) {
             LOGGER.log(System.Logger.Level.WARNING,
-                    "POSIX permissions are unavailable for replication metadata temporary file " + absolute);
-            temporary = Files.createTempFile(parent, absolute.getFileName() + ".tmp-", null);
+                    "POSIX permissions are unavailable for replication metadata temporary file %s".formatted(absolute));
+            temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null);
         }
         try {
             testPoint(beforePhase, absolute);
@@ -106,7 +100,7 @@ public final class AtomicFileStore {
             try {
                 Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (final AtomicMoveNotSupportedException failure) {
-                throw new IOException("Atomic replacement is unavailable for replication metadata " + absolute, failure);
+                throw new IOException("Atomic replacement is unavailable for replication metadata %s".formatted(absolute), failure);
             }
             testPoint(afterRenamePhase, absolute);
             forceDirectory(parent);
@@ -115,50 +109,44 @@ public final class AtomicFileStore {
                 Files.deleteIfExists(temporary);
             } catch (final IOException | RuntimeException cleanupFailure) {
                 LOGGER.log(System.Logger.Level.WARNING,
-                        "Unable to remove temporary replication metadata file " + temporary, cleanupFailure);
+                        "Unable to remove temporary replication metadata file %s".formatted(temporary), cleanupFailure);
             }
         }
     }
 
-    /**
-     * Writes a file through a forced sibling temporary file and replacement.
-     * Uses generic phase names for the crash-test hook.
-     *
-     * @param path    destination path
-     * @param encoder callback that writes the complete encoded contents
-     * @throws IOException if writing or replacement fails
-     */
+        /// Writes a file through a forced sibling temporary file and replacement.
+    /// Uses generic phase names for the crash-test hook.
+    ///
+    /// @param path    destination path
+    /// @param encoder callback that writes the complete encoded contents
+    /// @throws IOException if writing or replacement fails
     public static void write(final Path path, final Encoder encoder) throws IOException {
         write(path, encoder, null);
     }
 
-    /**
-     * Writes raw bytes through the atomic replacement protocol.
-     *
-     * @param path  destination path
-     * @param bytes complete file contents
-     * @throws IOException if writing or replacement fails
-     */
+        /// Writes raw bytes through the atomic replacement protocol.
+    ///
+    /// @param path  destination path
+    /// @param bytes complete file contents
+    /// @throws IOException if writing or replacement fails
     public static void writeBytes(final Path path, final byte[] bytes) throws IOException {
         if (bytes == null) throw new NullPointerException("bytes");
         write(path, channel -> writeFully(channel, java.nio.ByteBuffer.wrap(bytes)));
     }
 
-    /**
-     * Verifies that the directory containing {@code path} supports the complete
-     * atomic metadata protocol without changing the target file.
-     *
-     * @param path representative metadata path
-     * @throws IOException if temporary replacement or directory synchronization is unavailable
-     */
+        /// Verifies that the directory containing `path` supports the complete
+    /// atomic metadata protocol without changing the target file.
+    ///
+    /// @param path representative metadata path
+    /// @throws IOException if temporary replacement or directory synchronization is unavailable
     public static void verify(final Path path) throws IOException {
         final Path absolute = path.toAbsolutePath();
         final Path parent = absolute.getParent();
         if (parent == null) {
-            throw new IOException("Metadata path has no parent directory: " + path);
+            throw new IOException("Metadata path has no parent directory: %s".formatted(path));
         }
         Files.createDirectories(parent);
-        final Path probe = parent.resolve(absolute.getFileName() + ".probe-" + UUID.randomUUID());
+        final Path probe = parent.resolve("%s.probe-%s".formatted(absolute.getFileName(), UUID.randomUUID()));
         try {
             write(probe, channel -> writeFully(channel, java.nio.ByteBuffer.wrap(new byte[]{1})));
         } catch (final IOException | RuntimeException | Error failure) {
@@ -177,29 +165,25 @@ public final class AtomicFileStore {
         forceDirectory(parent);
     }
 
-    /**
-     * Deletes a metadata file and forces the parent directory when the file was
-     * present. This is used for short-lived in-flight recovery records: removing
-     * the record must be durable just like replacing the terminal checkpoint.
-     *
-     * @param path file to remove
-     * @throws IOException if the file or its parent directory cannot be synced
-     */
+        /// Deletes a metadata file and forces the parent directory when the file was
+    /// present. This is used for short-lived in-flight recovery records: removing
+    /// the record must be durable just like replacing the terminal checkpoint.
+    ///
+    /// @param path file to remove
+    /// @throws IOException if the file or its parent directory cannot be synced
     public static void delete(final Path path) throws IOException {
         delete(path, true);
     }
 
-    /**
-     * Deletes a metadata file and optionally forces its parent directory.
-     *
-     * <p>Callers may omit the directory force only for fail-closed markers whose
-     * stale presence is safe after a crash. A stale marker causes reseeding; it
-     * must never make an uncheckpointed Store import appear durable.</p>
-     *
-     * @param path                 file to remove
-     * @param forceParentDirectory whether to force the parent directory after removal
-     * @throws IOException if the file or, when requested, its parent directory cannot be synced
-     */
+        /// Deletes a metadata file and optionally forces its parent directory.
+    ///
+    /// Callers may omit the directory force only for fail-closed markers whose
+    /// stale presence is safe after a crash. A stale marker causes reseeding; it
+    /// must never make an uncheckpointed Store import appear durable.
+    ///
+    /// @param path                 file to remove
+    /// @param forceParentDirectory whether to force the parent directory after removal
+    /// @throws IOException if the file or, when requested, its parent directory cannot be synced
     public static void delete(final Path path, final boolean forceParentDirectory) throws IOException {
         final Path absolute = path.toAbsolutePath();
         if (Files.deleteIfExists(absolute)) {
@@ -214,7 +198,7 @@ public final class AtomicFileStore {
         try (FileChannel channel = FileChannel.open(parent, StandardOpenOption.READ)) {
             channel.force(true);
         } catch (final UnsupportedOperationException failure) {
-            throw new IOException("Directory fsync is unavailable for replication metadata " + parent, failure);
+            throw new IOException("Directory fsync is unavailable for replication metadata %s".formatted(parent), failure);
         }
     }
 
@@ -224,17 +208,13 @@ public final class AtomicFileStore {
         }
     }
 
-    /**
-     * Writes one complete metadata file to an open channel.
-     */
+        /// Writes one complete metadata file to an open channel.
     @FunctionalInterface
     public interface Encoder {
-        /**
-         * Writes the encoded bytes.
-         *
-         * @param channel open destination channel
-         * @throws IOException if writing fails
-         */
+                /// Writes the encoded bytes.
+        ///
+        /// @param channel open destination channel
+        /// @throws IOException if writing fails
         void write(FileChannel channel) throws IOException;
     }
 }

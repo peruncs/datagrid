@@ -17,34 +17,30 @@ import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageReceiver;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Map;
 
-/**
- * This region factory adds clustered invalidation to the Store cache factory.
- *
- * <p>During preparation it creates one serializer, Aeron provider, receiver,
- * and listener configuration for the session factory. During release it closes
- * those resources before the base factory releases the local caches.</p>
- */
+/// This region factory adds clustered invalidation to the Store cache factory.
+///
+/// During preparation it creates one serializer, Aeron provider, receiver,
+/// and listener configuration for the session factory. During release it closes
+/// those resources before the base factory releases the local caches.
 public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     private static final System.Logger LOGGER =
             System.getLogger(ClusteredCacheRegionFactory.class.getName());
 
-    /** Listener configuration created during session-factory preparation. */
+        /// Listener configuration created during session-factory preparation.
     private ClusteredCacheEntryListenerConfiguration cacheEntryListenerConfiguration;
-    /** Receiver created during session-factory preparation. */
+        /// Receiver created during session-factory preparation.
     private AeronClusteredCacheMessageReceiver cacheMessageReceiver;
-    /** Local cache manager used by the message acceptor. */
+        /// Local cache manager used by the message acceptor.
     private CacheManager cacheManager;
 
-    /** Creates a factory with Hibernate's default cache key strategy. */
+        /// Creates a factory with Hibernate's default cache key strategy.
     public ClusteredCacheRegionFactory() {
         this(DefaultCacheKeysFactory.INSTANCE);
     }
 
-    /**
-     * Creates a factory with an explicit Hibernate cache key strategy.
-     *
-     * @param cacheKeysFactory cache key strategy
-     */
+        /// Creates a factory with an explicit Hibernate cache key strategy.
+    ///
+    /// @param cacheKeysFactory cache key strategy
     public ClusteredCacheRegionFactory(final CacheKeysFactory cacheKeysFactory) {
         super(cacheKeysFactory);
     }
@@ -58,15 +54,13 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
                 comProvider.provideUpdateTimestampsCacheMessageSender(properties, serializer));
     }
 
-    /**
-     * Prepares the clustered resources for one session factory. The Aeron
-     * provider is created and its receiver is started before local cache
-     * events are redirected to it. A failure releases any partially created
-     * resource.
-     *
-     * @param settings   session factory settings
-     * @param properties Hibernate cache properties
-     */
+        /// Prepares the clustered resources for one session factory. The Aeron
+    /// provider is created and its receiver is started before local cache
+    /// events are redirected to it. A failure releases any partially created
+    /// resource.
+    ///
+    /// @param settings   session factory settings
+    /// @param properties Hibernate cache properties
     @Override
     protected void prepareForUse(final SessionFactoryOptions settings, final Map properties) {
         super.prepareForUse(settings, properties);
@@ -116,7 +110,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
                 this.cacheEntryListenerConfiguration;
         if (listenerConfiguration == null) {
             throw new CacheException(
-                    "Clustered cache resources are not prepared; cannot create the timestamps region " + regionName);
+                    "Clustered cache resources are not prepared; cannot create the timestamps region %s".formatted(regionName));
         }
         final String defaultedRegionName = this.defaultRegionName(
                 regionName,
@@ -129,12 +123,10 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         return new FailClosedStorageAccess(StorageAccess.New(cache), this::ensureClusteredHealthy);
     }
 
-    /**
-     * Prevents Hibernate from serving or mutating a timestamps cache after the
-     * invalidation broadcast has stopped. A volatile broadcast cannot repair a
-     * cache after a receiver gap, so continuing locally would silently serve
-     * stale query results.
-     */
+        /// Prevents Hibernate from serving or mutating a timestamps cache after the
+    /// invalidation broadcast has stopped. A volatile broadcast cannot repair a
+    /// cache after a receiver gap, so continuing locally would silently serve
+    /// stale query results.
     private void ensureClusteredHealthy() {
         final AeronClusteredCacheMessageReceiver receiver = this.cacheMessageReceiver;
         if (receiver == null) {
@@ -149,17 +141,15 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         }
     }
 
-    /**
-     * Resolves the serializer type provider from a Hibernate setting.
-     *
-     * <p>The provider class must expose a public no-argument constructor;
-     * private or package-private constructors are rejected.</p>
-     *
-     * @param settings   session factory settings used for class loading
-     * @param properties Hibernate cache properties
-     * @return resolved serializer type provider
-     * @throws CacheException when the provider class cannot be instantiated
-     */
+        /// Resolves the serializer type provider from a Hibernate setting.
+    ///
+    /// The provider class must expose a public no-argument constructor;
+    /// private or package-private constructors are rejected.
+    ///
+    /// @param settings   session factory settings used for class loading
+    /// @param properties Hibernate cache properties
+    /// @return resolved serializer type provider
+    /// @throws CacheException when the provider class cannot be instantiated
     @SuppressWarnings("unchecked")
     protected SerializationTypesProvider resolveSerializationTypesProvider(
             final SessionFactoryOptions settings,
@@ -179,8 +169,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
             if (setting instanceof Class<?> candidate) {
                 if (!SerializationTypesProvider.class.isAssignableFrom(candidate)) {
                     throw new CacheException(
-                            "Configured serialization types provider does not implement " +
-                            SerializationTypesProvider.class.getName() + ": " + candidate.getName());
+                            "Configured serialization types provider does not implement %s: %s".formatted(SerializationTypesProvider.class.getName(), candidate.getName()));
                 }
                 typesProviderClass = (Class<? extends SerializationTypesProvider>) candidate;
             } else {
@@ -189,7 +178,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
             return typesProviderClass.getConstructor().newInstance();
         } catch (final ClassNotFoundException | InstantiationException | IllegalAccessException | NoSuchMethodException |
                        InvocationTargetException e) {
-            throw new CacheException("Could not instantiate SerializationTypesProvider: " + setting, e);
+            throw new CacheException("Could not instantiate SerializationTypesProvider: %s".formatted(setting), e);
         }
     }
 
@@ -221,13 +210,11 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         }
     }
 
-    /**
-     * Disposes the clustered resources, tolerating a partial preparation. Every
-     * resource is released even when an earlier dispose fails; the first failure
-     * is rethrown afterwards.
-     *
-     * @throws Throwable the first dispose failure, with later failures suppressed
-     */
+        /// Disposes the clustered resources, tolerating a partial preparation. Every
+    /// resource is released even when an earlier dispose fails; the first failure
+    /// is rethrown afterwards.
+    ///
+    /// @throws Throwable the first dispose failure, with later failures suppressed
     private void disposeClusteredResources() throws Throwable {
         Throwable failure = null;
         final ClusteredCacheEntryListenerConfiguration listenerConfiguration =
@@ -261,7 +248,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         }
     }
 
-    /** Storage access that refuses all cache operations after receiver failure. */
+        /// Storage access that refuses all cache operations after receiver failure.
     static final class FailClosedStorageAccess implements StorageAccess {
         private final StorageAccess delegate;
         private final Runnable healthCheck;

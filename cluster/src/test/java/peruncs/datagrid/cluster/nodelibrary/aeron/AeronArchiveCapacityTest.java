@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies Archive capacity caching and fail-closed write admission. */
+/// Verifies Archive capacity caching and fail-closed write admission.
 class AeronArchiveCapacityTest {
     @Test
     void reservesAtLeastOneSegmentAndCachesTheFilesystemProbe() {

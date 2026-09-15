@@ -7,18 +7,14 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * Persistence target decorator that mirrors each accepted Store binary to the
- * Aeron distributor.
- */
+/// Persistence target decorator that mirrors each accepted Store binary to the
+/// Aeron distributor.
 public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binary> {
-    /**
-     * Creates a target that mirrors local writes to a distributor.
-     *
-     * @param delegate    local persistence target
-     * @param distributor destination for committed binaries
-     * @return distributing target
-     */
+        /// Creates a target that mirrors local writes to a distributor.
+    ///
+    /// @param delegate    local persistence target
+    /// @param distributor destination for committed binaries
+    /// @return distributing target
     static StorageBinaryTargetDistributing New(
             final PersistenceTarget<Binary> delegate,
             final StorageBinaryDataDistributor distributor
@@ -29,7 +25,7 @@ public interface StorageBinaryTargetDistributing extends PersistenceTarget<Binar
         );
     }
 
-    /** Delegates a local Store write before publishing the same binary. */
+        /// Delegates a local Store write before publishing the same binary.
     class Default implements StorageBinaryTargetDistributing {
         private final PersistenceTarget<Binary> delegate;
         private final StorageBinaryDataDistributor distributor;

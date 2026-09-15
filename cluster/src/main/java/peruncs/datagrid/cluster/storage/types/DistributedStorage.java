@@ -9,26 +9,22 @@ import peruncs.datagrid.cluster.storage.internal.DistributedStorageConfigurator;
 
 import java.util.function.UnaryOperator;
 
-/**
- * This utility installs distributed writing into an embedded Store foundation.
- *
- * <p>The configured foundation keeps its normal local target and type
- * dictionary, then wraps both so committed binary data and type definitions
- * reach the supplied distributor. The utility changes the foundation in place
- * and returns it for fluent setup.</p>
- */
+/// This utility installs distributed writing into an embedded Store foundation.
+///
+/// The configured foundation keeps its normal local target and type
+/// dictionary, then wraps both so committed binary data and type definitions
+/// reach the supplied distributor. The utility changes the foundation in place
+/// and returns it for fluent setup.
 public final class DistributedStorage {
     private DistributedStorage() {
         throw new UnsupportedOperationException();
     }
 
-    /**
-     * Adds distributed writing to an embedded storage foundation.
-     *
-     * @param foundation  foundation to configure
-     * @param distributor destination for committed data
-     * @return the configured foundation
-     */
+        /// Adds distributed writing to an embedded storage foundation.
+    ///
+    /// @param foundation  foundation to configure
+    /// @param distributor destination for committed data
+    /// @return the configured foundation
     public static EmbeddedStorageFoundation<?> configureWriting(
             final EmbeddedStorageFoundation<?> foundation,
             final StorageBinaryDataDistributor distributor
@@ -41,14 +37,12 @@ public final class DistributedStorage {
         return foundation;
     }
 
-    /**
-     * Adds distributed writing with a custom local target wrapper.
-     *
-     * @param foundation    foundation to configure
-     * @param distributor   destination for committed data
-     * @param targetFactory wrapper for the local persistence target
-     * @return the configured foundation
-     */
+        /// Adds distributed writing with a custom local target wrapper.
+    ///
+    /// @param foundation    foundation to configure
+    /// @param distributor   destination for committed data
+    /// @param targetFactory wrapper for the local persistence target
+    /// @return the configured foundation
     public static EmbeddedStorageFoundation<?> configureWriting(
             final EmbeddedStorageFoundation<?> foundation,
             final StorageBinaryDataDistributor distributor,

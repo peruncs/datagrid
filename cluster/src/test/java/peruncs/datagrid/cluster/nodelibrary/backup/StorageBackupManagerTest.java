@@ -14,7 +14,7 @@ import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies the backup manager's stop, durability, retention, and resume protocol. */
+/// Verifies the backup manager's stop, durability, retention, and resume protocol.
 class StorageBackupManagerTest {
     private static final ReplicationCursor CURSOR =
             new ReplicationCursor("test", null, 7L, new byte[]{1, 2, 3});
@@ -29,7 +29,7 @@ class StorageBackupManagerTest {
                 storageConnection(), maxBackupCount, backend, () -> CURSOR, client, retention);
     }
 
-    /** A proxy keeps this orchestration test independent of Store implementation details. */
+        /// A proxy keeps this orchestration test independent of Store implementation details.
     private static StorageConnection storageConnection() {
         return (StorageConnection) Proxy.newProxyInstance(
                 StorageConnection.class.getClassLoader(),

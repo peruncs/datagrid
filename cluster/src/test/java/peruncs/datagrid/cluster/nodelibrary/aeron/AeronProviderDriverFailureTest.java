@@ -10,14 +10,14 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Proves the production provider overrides Aeron's process-exiting timeout handler. */
+/// Proves the production provider overrides Aeron's process-exiting timeout handler.
 class AeronProviderDriverFailureTest {
     @Test
     void deadOwnedDriverFailsHealthWithoutExitingTheJvm(@TempDir final Path root) throws Exception {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
         final Process child = new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
-                "-cp", classpath, "-Ddg.driver.failure.root=" + root,
+                "-cp", classpath, "-Ddg.driver.failure.root=%s".formatted(root),
                 AeronProviderDriverFailureChildMain.class.getName()).redirectErrorStream(true).start();
         try {
             assertTrue(child.waitFor(15, TimeUnit.SECONDS), "provider driver-timeout child did not exit");

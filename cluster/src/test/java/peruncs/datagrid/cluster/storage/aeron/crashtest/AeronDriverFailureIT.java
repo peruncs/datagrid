@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Regression test for Aeron's default DriverTimeoutException exit policy. */
+/// Regression test for Aeron's default DriverTimeoutException exit policy.
 class AeronDriverFailureIT {
     private static void deleteTree(final Path root) throws IOException {
         try (var paths = Files.walk(root)) {
@@ -28,7 +28,7 @@ class AeronDriverFailureIT {
              * not reflective test plumbing. */
             final Process child = new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                     "-cp", ChildJava.classpath(),
-                    "-Ddg.driver.failure.root=" + root, AeronDriverFailureChildMain.class.getName())
+                    "-Ddg.driver.failure.root=%s".formatted(root), AeronDriverFailureChildMain.class.getName())
                     .redirectErrorStream(true).start();
             assertTrue(child.waitFor(15, TimeUnit.SECONDS), "driver failure child did not exit");
             final String output = new String(child.getInputStream().readAllBytes());

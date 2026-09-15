@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.reader;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.aeron.reader.AeronReaderLifecycle;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -10,9 +9,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies that reader shutdown stops polling before closing its subscription. */
+/// Verifies that reader shutdown stops polling before closing its subscription.
 class AeronReaderLifecycleTest {
-    /** Verifies subscription cleanup when the polling thread is interrupted while waiting. */
+        /// Verifies subscription cleanup when the polling thread is interrupted while waiting.
     @Test
     void closesSubscriptionWhenPollingThreadWaitIsInterrupted() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -37,7 +36,7 @@ class AeronReaderLifecycleTest {
         org.junit.jupiter.api.Assertions.assertTrue(closed.get());
     }
 
-    /** Verifies subscription cleanup even when the close callback fails. */
+        /// Verifies subscription cleanup even when the close callback fails.
     @Test
     void closesSubscriptionEvenWhenTheCloseCallbackFails() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -54,7 +53,7 @@ class AeronReaderLifecycleTest {
         assertFalse(active.get());
     }
 
-    /** A timeout retains ownership so a later disposal can finish cleanup safely. */
+        /// A timeout retains ownership so a later disposal can finish cleanup safely.
     @Test
     void timeoutLeavesSubscriptionOpenForRetry() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -95,7 +94,7 @@ class AeronReaderLifecycleTest {
         }
     }
 
-    /** An interrupted disposer keeps subscription ownership for a later retry. */
+        /// An interrupted disposer keeps subscription ownership for a later retry.
     @Test
     void interruptedDisposalDoesNotCloseSubscription()
             throws Exception {
@@ -143,7 +142,7 @@ class AeronReaderLifecycleTest {
         assertTrue(closed.get());
     }
 
-    /** A live polling thread must always provide the latch that owns its exit. */
+        /// A live polling thread must always provide the latch that owns its exit.
     @Test
     void rejectsMissingExitLatchForLivePollingThread() {
         final Thread pollingThread = new Thread(() -> {
@@ -153,7 +152,7 @@ class AeronReaderLifecycleTest {
                 }, 1L));
     }
 
-    /** Verifies shared polling loop stops only after an idle poll. */
+        /// Verifies shared polling loop stops only after an idle poll.
     @Test
     void sharedPollingLoopStopsOnlyAfterAnIdlePoll() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -168,7 +167,7 @@ class AeronReaderLifecycleTest {
         assertEquals(2, polls.get());
     }
 
-    /** Verifies shared polling loop reports archive tail timeout. */
+        /// Verifies shared polling loop reports archive tail timeout.
     @Test
     void sharedPollingLoopReportsArchiveTailTimeout() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -181,7 +180,7 @@ class AeronReaderLifecycleTest {
         assertTrue(timedOut.get());
     }
 
-    /** Verifies a timeout callback failure still publishes the stopped state. */
+        /// Verifies a timeout callback failure still publishes the stopped state.
     @Test
     void pollingLoopClearsActiveWhenTimeoutCallbackFails() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -200,7 +199,7 @@ class AeronReaderLifecycleTest {
         assertFalse(active.get());
     }
 
-    /** Verifies an assembler failure stops polling before another fragment is consumed. */
+        /// Verifies an assembler failure stops polling before another fragment is consumed.
     @Test
     void pollingLoopStopsWhenAssemblerFails() {
         final AtomicBoolean active = new AtomicBoolean(true);

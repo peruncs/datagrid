@@ -4,17 +4,17 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies that archive gaps and tails select the documented recovery policy. */
+/// Verifies that archive gaps and tails select the documented recovery policy.
 class AeronCrashRecoveryPolicyTest {
     private static final AeronWriterBoundary BOUNDARY = new AeronWriterBoundary(1, 7, 100);
 
-    /** Verifies exact archive prefix can be extended. */
+        /// Verifies exact archive prefix can be extended.
     @Test
     void exactArchivePrefixCanBeExtended() {
         assertDoesNotThrow(() -> BOUNDARY.validateArchiveStop(100));
     }
 
-    /** Verifies archive ahead fails closed as reseed required. */
+        /// Verifies archive ahead fails closed as reseed required.
     @Test
     void archiveAheadFailsClosedAsReseedRequired() {
         final IllegalStateException failure = assertThrows(IllegalStateException.class,
@@ -22,7 +22,7 @@ class AeronCrashRecoveryPolicyTest {
         assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
     }
 
-    /** Verifies archive behind fails closed as reseed required. */
+        /// Verifies archive behind fails closed as reseed required.
     @Test
     void archiveBehindFailsClosedAsReseedRequired() {
         final IllegalStateException failure = assertThrows(IllegalStateException.class,
@@ -30,7 +30,7 @@ class AeronCrashRecoveryPolicyTest {
         assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
     }
 
-    /** Verifies active recording cannot be extended from checkpoint. */
+        /// Verifies active recording cannot be extended from checkpoint.
     @Test
     void activeRecordingCannotBeExtendedFromCheckpoint() {
         final IllegalStateException failure = assertThrows(IllegalStateException.class,

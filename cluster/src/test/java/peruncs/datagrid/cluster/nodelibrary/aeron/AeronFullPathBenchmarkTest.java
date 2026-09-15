@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Smoke-checks that the full-path benchmark measures every production stage. */
+/// Smoke-checks that the full-path benchmark measures every production stage.
 class AeronFullPathBenchmarkTest {
     @Test
     void measuresStoreArchiveReaderImportAndCursorPath() throws Exception {

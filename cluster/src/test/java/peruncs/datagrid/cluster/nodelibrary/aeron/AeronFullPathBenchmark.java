@@ -3,9 +3,9 @@ package peruncs.datagrid.cluster.nodelibrary.aeron;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import peruncs.datagrid.cluster.nodelibrary.replication.*;
+import peruncs.datagrid.cluster.storage.types.DistributedStorage;
 import peruncs.datagrid.cluster.storage.types.ObjectGraphUpdateHandler;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.cluster.storage.types.DistributedStorage;
 
 import java.lang.management.BufferPoolMXBean;
 import java.lang.management.ManagementFactory;
@@ -19,11 +19,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
-/**
- * Test-only full-path benchmark: real four-channel Store writer, embedded
- * Archive, replay/live reader, Store import/materialization, and atomic cursor.
- * It deliberately has no production instrumentation or benchmark dependency.
- */
+/// Test-only full-path benchmark: real four-channel Store writer, embedded
+/// Archive, replay/live reader, Store import/materialization, and atomic cursor.
+/// It deliberately has no production instrumentation or benchmark dependency.
 public final class AeronFullPathBenchmark {
     private AeronFullPathBenchmark() {
     }
@@ -38,8 +36,7 @@ public final class AeronFullPathBenchmark {
             else if (argument.startsWith("--iterations=")) iterations = Integer.parseInt(argument.substring(13));
         }
         final Result result = measure(payload, warmup, iterations);
-        System.out.printf("payload=%d iterations=%d tx/s=%.1f MiB/s=%.1f p50-us=%.1f p99-us=%.1f " +
-                          "heap-bytes/tx=%s direct-delta=%d mapped-delta=%d%n", result.payloadBytes(), result.iterations(),
+        System.out.printf("payload=%d iterations=%d tx/s=%.1f MiB/s=%.1f p50-us=%.1f p99-us=%.1f heap-bytes/tx=%s direct-delta=%d mapped-delta=%d%n", result.payloadBytes(), result.iterations(),
                 result.transactionsPerSecond(), result.mebibytesPerSecond(), result.p50Nanos() / 1_000.0,
                 result.p99Nanos() / 1_000.0, result.heapBytesPerTransaction() < 0 ? "unavailable" :
                         Long.toString(result.heapBytesPerTransaction()), result.directMemoryDelta(), result.mappedMemoryDelta());
@@ -154,7 +151,7 @@ public final class AeronFullPathBenchmark {
         final long target = transport.positionProvider("store").latestSequence();
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (resolved.get() < target && System.nanoTime() < deadline) LockSupport.parkNanos(50_000L);
-        if (resolved.get() != target) throw new IllegalStateException("reader did not apply sequence " + target);
+        if (resolved.get() != target) throw new IllegalStateException("reader did not apply sequence %s".formatted(target));
     }
 
     private static void awaitLive(final ClusterStorageBinaryDataClient client) {

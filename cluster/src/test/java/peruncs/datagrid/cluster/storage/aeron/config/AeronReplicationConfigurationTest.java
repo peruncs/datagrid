@@ -1,15 +1,14 @@
 package peruncs.datagrid.cluster.storage.aeron.config;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.ReplicationLimits;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Pins the validation that keeps writer and reader framing compatible. */
+/// Pins the validation that keeps writer and reader framing compatible.
 class AeronReplicationConfigurationTest {
-    /** Verifies that defaults expose Aeron and Data Grid limits. */
+        /// Verifies that defaults expose Aeron and Data Grid limits.
     @Test
     void defaultsExposeAeronAndDataGridLimits() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.defaults();
@@ -19,7 +18,7 @@ class AeronReplicationConfigurationTest {
         assertEquals(ReplicationDurabilityMode.ARCHIVE_FIRST, configuration.durabilityMode());
     }
 
-    /** Verifies rejection of chunk that cannot fit one aeron message. */
+        /// Verifies rejection of chunk that cannot fit one aeron message.
     @Test
     void rejectsChunkThatCannotFitOneAeronMessage() {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
@@ -28,7 +27,7 @@ class AeronReplicationConfigurationTest {
                 .build());
     }
 
-    /** Verifies acceptance of tuned values when the invariant holds. */
+        /// Verifies acceptance of tuned values when the invariant holds.
     @Test
     void acceptsTunedValuesWhenTheInvariantHolds() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -40,7 +39,7 @@ class AeronReplicationConfigurationTest {
         assertEquals(4 * 1024 * 1024, configuration.maxMessageLength());
     }
 
-    /** Verifies that all tunable limits are read from properties. */
+        /// Verifies that all tunable limits are read from properties.
     @Test
     void readsAllTunableLimitsFromProperties() {
         final java.util.Properties properties = new java.util.Properties();
@@ -65,7 +64,7 @@ class AeronReplicationConfigurationTest {
         assertEquals(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, configuration.durabilityMode());
     }
 
-    /** Verifies rejection of invalid term mtu chunk and timeout values. */
+        /// Verifies rejection of invalid term mtu chunk and timeout values.
     @Test
     void rejectsInvalidTermMtuChunkAndTimeoutValues() {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
@@ -90,7 +89,7 @@ class AeronReplicationConfigurationTest {
                 .termLength(1 << 30).chunkSize(20 * 1024 * 1024).maxTransactionBytes(20 * 1024 * 1024).build());
     }
 
-    /** Verifies that the packet-count limit is inclusive and rejects its first overflow. */
+        /// Verifies that the packet-count limit is inclusive and rejects its first overflow.
     @Test
     void validatesMaximumPacketCount() {
         assertDoesNotThrow(() -> AeronReplicationConfiguration.builder()
@@ -103,7 +102,7 @@ class AeronReplicationConfigurationTest {
                 .build());
     }
 
-    /** Verifies rejection of invalid properties before aeron starts. */
+        /// Verifies rejection of invalid properties before aeron starts.
     @Test
     void rejectsInvalidPropertiesBeforeAeronStarts() {
         final java.util.Properties properties = new java.util.Properties();
@@ -112,7 +111,7 @@ class AeronReplicationConfigurationTest {
         assertThrows(NullPointerException.class, () -> AeronReplicationConfiguration.from(null));
     }
 
-    /** The Store API has no durable-first callback, so the mode is not part of the Aeron contract. */
+        /// The Store API has no durable-first callback, so the mode is not part of the Aeron contract.
     @Test
     void rejectsRemovedLocalDurableFirstMode() {
         final java.util.Properties properties = new java.util.Properties();
@@ -120,7 +119,7 @@ class AeronReplicationConfigurationTest {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.from(properties));
     }
 
-    /** Verifies reporting of invalid numeric properties with their key. */
+        /// Verifies reporting of invalid numeric properties with their key.
     @Test
     void reportsInvalidNumericPropertiesWithTheirKey() {
         final java.util.Properties properties = new java.util.Properties();
@@ -130,7 +129,7 @@ class AeronReplicationConfigurationTest {
         assertTrue(failure.getMessage().contains(AeronReplicationConfiguration.MTU_LENGTH_PROPERTY));
     }
 
-    /** Unknown Aeron-prefixed settings must not be silently ignored. */
+        /// Unknown Aeron-prefixed settings must not be silently ignored.
     @Test
     void rejectsUnknownAeronProperties() {
         final java.util.Properties properties = new java.util.Properties();

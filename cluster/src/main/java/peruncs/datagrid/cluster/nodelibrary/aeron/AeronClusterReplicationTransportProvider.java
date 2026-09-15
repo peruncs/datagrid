@@ -38,21 +38,19 @@ import java.util.function.UnaryOperator;
 
 import static java.lang.System.Logger.Level.WARNING;
 
-/**
- * Creates the Aeron cluster replication transport.
- *
- * <p>The returned transport creates its driver and Archive lazily. The
- * transport owns those shared resources and releases them from
- * {@link ClusterReplicationTransport#close()}; individual readers and
- * distributors do not close the runtime.</p>
- */
+/// Creates the Aeron cluster replication transport.
+///
+/// The returned transport creates its driver and Archive lazily. The
+/// transport owns those shared resources and releases them from
+/// [ClusterReplicationTransport#close()]; individual readers and
+/// distributors do not close the runtime.
 public final class AeronClusterReplicationTransportProvider {
     /* Test-only, thread-confined seam used by the forked crash harness. */
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusterReplicationTransportProvider.class.getName());
     private static final ThreadLocal<BiConsumer<String, Long>> CRASH_HOOK = new ThreadLocal<>();
     private static final ThreadLocal<Long> CHECKPOINT_SEQUENCE = new ThreadLocal<>();
-    /** Creates a provider that reads Aeron settings when a transport is created. */
+        /// Creates a provider that reads Aeron settings when a transport is created.
     public AeronClusterReplicationTransportProvider() {
     }
 
@@ -83,7 +81,10 @@ public final class AeronClusterReplicationTransportProvider {
         aeronTransport.stopDriver();
     }
 
-    /** Creates a transport with settings read from the node properties. */
+        /// Creates a transport with settings read from the node properties.
+    ///
+    /// @param properties node configuration
+    /// @return Aeron replication transport
     public ClusterReplicationTransport create(final NodelibraryPropertiesProvider properties) {
         final Transport transport = new Transport(AeronSettings.fromEnvironment(properties));
         /* Probe metadata durability before any synchronized runtime startup path. */
@@ -91,15 +92,15 @@ public final class AeronClusterReplicationTransportProvider {
         return transport;
     }
 
-    /** Owns the Aeron resources for one node and one transport lifecycle. */
+        /// Owns the Aeron resources for one node and one transport lifecycle.
     private static final class Transport implements ClusterReplicationTransport {
         private final AeronSettings settings;
         private final AeronArchiveCapacity archiveCapacity;
         private final AtomicLong nextSequence = new AtomicLong();
         private final AtomicLong readerRecordingId = new AtomicLong(Aeron.NULL_VALUE);
-        /** Recording identity selected at writer startup; retained when RecordingPos is briefly unavailable. */
+                /// Recording identity selected at writer startup; retained when RecordingPos is briefly unavailable.
         private final AtomicLong writerRecordingId = new AtomicLong();
-        /** First asynchronous MediaDriver failure; health must not hide it. */
+                /// First asynchronous MediaDriver failure; health must not hide it.
         private final AtomicReference<RuntimeException> driverFailure = new AtomicReference<>();
         private final AtomicLong rejectedWatermarks = new AtomicLong();
         /* A reader can publish its last durable cursor while the writer is still
@@ -108,7 +109,7 @@ public final class AeronClusterReplicationTransportProvider {
         private final java.util.concurrent.ConcurrentHashMap<UUID, AeronAuthenticatedWatermark>
                 deferredWatermarks = new java.util.concurrent.ConcurrentHashMap<>();
         private final ThreadLocal<Boolean> deliveryCallback = new ThreadLocal<>();
-        /** One transport-owned copy; avoids cloning the configured HMAC key for every cursor. */
+                /// One transport-owned copy; avoids cloning the configured HMAC key for every cursor.
         private byte[] retentionSecret;
         private volatile AeronRuntime runtime;
         private volatile AeronArchiveReplicationPublisher writer;
@@ -182,7 +183,7 @@ public final class AeronClusterReplicationTransportProvider {
             if (parent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
             if (Files.isSymbolicLink(this.settings.checkpointPath())) {
                 throw new IllegalArgumentException(
-                        "Aeron checkpoint path must not be a symbolic link: " + this.settings.checkpointPath());
+                        "Aeron checkpoint path must not be a symbolic link: %s".formatted(this.settings.checkpointPath()));
             }
             /* Apply the same production permission policy before the capability probe
              * creates any temporary metadata files.  Otherwise a non-POSIX filesystem
@@ -196,7 +197,7 @@ public final class AeronClusterReplicationTransportProvider {
             }
         }
 
-        /** Claims the provider's single configured replication stream. */
+                /// Claims the provider's single configured replication stream.
         private void claimStream(final String streamName) {
             if (streamName == null || streamName.isBlank()) {
                 throw new IllegalArgumentException("Aeron replication stream name must not be blank");
@@ -205,7 +206,7 @@ public final class AeronClusterReplicationTransportProvider {
                 this.distributorStream = streamName;
             } else if (!this.distributorStream.equals(streamName)) {
                 throw new IllegalArgumentException(
-                        "Aeron transport is configured for stream " + this.distributorStream + ", not " + streamName);
+                        "Aeron transport is configured for stream %s, not %s".formatted(this.distributorStream, streamName));
             }
         }
 
@@ -214,6 +215,18 @@ public final class AeronClusterReplicationTransportProvider {
             return "aeron";
         }
 
+        /// Returns the distributor for the provider's single replication stream.
+        ///
+        /// The returned handle carries dictionaries and lifecycle control
+        /// only: data publication is deliberately unavailable through it and
+        /// flows exclusively through the persistence-target factory, where
+        /// local Store acceptance and checkpoint fencing are one serialized
+        /// operation. Asynchronous distribution is rejected, and a second
+        /// stream name is rejected — one provider owns exactly one stream.
+        ///
+        /// @param streamName logical stream name, claimed on first use
+        /// @param asynchronous must be `false`
+        /// @return binary distributor
         @Override
         public synchronized ClusterStorageBinaryDataDistributor distributor(
                 final String streamName,
@@ -268,6 +281,25 @@ public final class AeronClusterReplicationTransportProvider {
             );
         }
 
+        /// Creates the reader-side client starting at the supplied durable cursor.
+        ///
+        /// A writer never reads, not even against an external Archive: it gets
+        /// a no-op client instead, because a second subscription against its
+        /// own recording would break the one-writer topology and leak a
+        /// half-initialized reader into the writer's health path. A new call
+        /// disposes and replaces any existing reader. The starting cursor is
+        /// validated strictly — wrong transport, unexpected provider state on
+        /// an uninitialized cursor, generation mismatch, or a sequence without
+        /// a recording position all fail fast — and a resolved cursor
+        /// re-advertises its watermark immediately so a restarted writer can
+        /// rebuild its retention quorum without waiting for new traffic.
+        ///
+        /// @param packetAcceptor destination for received packets
+        /// @param streamName logical stream name
+        /// @param cursorListener callback after data is applied
+        /// @param startingCursor durable starting cursor
+        /// @param commitPosition whether reader positions are committed
+        /// @return binary data client
         @Override
         public synchronized ClusterStorageBinaryDataClient client(
                 final ClusterStorageBinaryDataPacketAcceptor packetAcceptor,
@@ -301,7 +333,7 @@ public final class AeronClusterReplicationTransportProvider {
                     ? new ReplicationCursor("aeron", null, -1, new byte[0]) : startingCursor;
             final boolean aeronCursor = "aeron".equalsIgnoreCase(cursor.transport());
             if (!aeronCursor && !"none".equalsIgnoreCase(cursor.transport())) {
-                throw new IllegalArgumentException("cursor belongs to transport " + cursor.transport());
+                throw new IllegalArgumentException("cursor belongs to transport %s".formatted(cursor.transport()));
             }
             if (!aeronCursor && cursor.providerPosition().length != 0) {
                 throw new IllegalArgumentException("an uninitialized cursor cannot carry Aeron provider state");
@@ -386,7 +418,7 @@ public final class AeronClusterReplicationTransportProvider {
                     this.settings.nodeId(), this.settings.storeGeneration(), this.settings.epoch());
         }
 
-        /** Decodes and validates the sole supported self-describing Aeron cursor. */
+                /// Decodes and validates the sole supported self-describing Aeron cursor.
         private long cursorPosition(final ReplicationCursor cursor, final long expectedRecordingId) {
             final byte[] positionBytes = cursor.providerPosition();
             if (positionBytes.length == 0) return -1L;
@@ -413,22 +445,21 @@ public final class AeronClusterReplicationTransportProvider {
                         "Aeron recording discovery requires alias= on ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL");
             }
             final AtomicLong discovered = new AtomicLong(Aeron.NULL_VALUE);
-            final int count = this.listRecordingsForUri("alias=" + alias, this.settings.streamId(),
+            final int count = this.listRecordingsForUri("alias=%s".formatted(alias), this.settings.streamId(),
                     (controlSessionId, correlationId, recordingId, startTimestamp,
                      stopTimestamp, startPosition, stopPosition, initialTermId, segmentFileLength,
                      termBufferLength, mtuLength, sessionId, streamId, strippedChannel, originalChannel,
                      sourceIdentity) -> discovered.set(recordingId));
             if (count != 1 || discovered.get() < 0) {
                 throw new IllegalStateException(
-                        "Aeron recording discovery requires exactly one alias=" + alias +
-                        " recording for stream " + this.settings.streamId() + "; found " + count);
+                        "Aeron recording discovery requires exactly one alias=%s recording for stream %s; found %s".formatted(alias, this.settings.streamId(), count));
             }
             return discovered.get();
         }
 
         private Path readerUncertaintyPath() {
             return this.settings.checkpointPath().resolveSibling(
-                    this.settings.checkpointPath().getFileName() + ".reader-inflight");
+                    "%s.reader-inflight".formatted(this.settings.checkpointPath().getFileName()));
         }
 
         private void rejectUncertainReaderImport(final long recordingId) {
@@ -443,17 +474,16 @@ public final class AeronClusterReplicationTransportProvider {
                     checkpoint.recordingId() != recordingId ||
                     checkpoint.writerEpoch() != this.settings.epoch()) {
                     throw reseedRequired(
-                            "reader import marker identity does not match Aeron configuration: " + path,
+                            "reader import marker identity does not match Aeron configuration: %s".formatted(path),
                             null);
                 }
-                throw reseedRequired("reader Store import is uncertain at sequence " +
-                                     checkpoint.transactionSequence() + "; manual reseed is required: " + path, null);
+                throw reseedRequired("reader Store import is uncertain at sequence %s; manual reseed is required: %s".formatted(checkpoint.transactionSequence(), path), null);
             } catch (final NoSuchFileException absent) {
                 /* The marker may be removed by a prior reader shutdown between the
                  * existence check and this open.  Absence is the safe state; only a
                  * present but unreadable marker requires reseeding. */
             } catch (final IOException failure) {
-                throw reseedRequired("cannot read uncertain reader import marker; manual reseed is required: " + path,
+                throw reseedRequired("cannot read uncertain reader import marker; manual reseed is required: %s".formatted(path),
                         failure);
             }
         }
@@ -474,7 +504,7 @@ public final class AeronClusterReplicationTransportProvider {
                                 settings.epoch(), sequence, position, dataLength, dataChunkCount, crc32c);
                         AeronReplicationCheckpointStore.write(path, checkpoint);
                     } catch (final IOException failure) {
-                        throw reseedRequired("cannot persist uncertain reader import marker: " + path, failure);
+                        throw reseedRequired("cannot persist uncertain reader import marker: %s".formatted(path), failure);
                     } finally {
                         exitDeliveryCallback();
                     }
@@ -489,7 +519,7 @@ public final class AeronClusterReplicationTransportProvider {
                          * a stale marker fails closed and requests a reseed after a crash. */
                         AtomicFileStore.delete(path, false);
                     } catch (final IOException failure) {
-                        throw reseedRequired("cannot clear uncertain reader import marker: " + path, failure);
+                        throw reseedRequired("cannot clear uncertain reader import marker: %s".formatted(path), failure);
                     } finally {
                         exitDeliveryCallback();
                     }
@@ -515,6 +545,13 @@ public final class AeronClusterReplicationTransportProvider {
             return this.positionProvider;
         }
 
+        /// Returns the authenticated Archive retention controller.
+        ///
+        /// Without a shared retention secret and an embedded Archive there is
+        /// nothing safe to delete, so retention reports unsupported and history
+        /// is preserved rather than risking an unauthenticated purge.
+        ///
+        /// @return retention controller
         @Override
         public synchronized ReplicationLogRetention retention() {
             this.ensureOpen();
@@ -586,7 +623,7 @@ public final class AeronClusterReplicationTransportProvider {
                     this.settings::archiveSegmentFileLength,
                     () -> this.watermarkChannel != null && this.watermarkChannel.available(),
                     this.settings.checkpointPath().resolveSibling(
-                            this.settings.checkpointPath().getFileName() + ".retention"));
+                            "%s.retention".formatted(this.settings.checkpointPath().getFileName())));
         }
 
         private void publishReaderWatermark(final CursorSnapshot snapshot, final long recordingId) {
@@ -631,7 +668,7 @@ public final class AeronClusterReplicationTransportProvider {
                                 final long count = this.rejectedWatermarks.incrementAndGet();
                                 if ((count & (count - 1)) == 0) {
                                     LOGGER.log(WARNING,
-                                            "Rejected Aeron reader watermark count=" + count, rejected);
+                                            "Rejected Aeron reader watermark count=%s".formatted(count), rejected);
                                 }
                             }
                         }, this.settings.replication().offerTimeoutNanos());
@@ -642,7 +679,7 @@ public final class AeronClusterReplicationTransportProvider {
             }
         }
 
-        /** Replays authenticated reader progress received during writer recovery. */
+                /// Replays authenticated reader progress received during writer recovery.
         private void drainDeferredWatermarks() {
             if (this.deferredWatermarks.isEmpty() || !this.writerReady() || this.retention == null) {
                 return;
@@ -659,17 +696,15 @@ public final class AeronClusterReplicationTransportProvider {
                     this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
                     final long count = this.rejectedWatermarks.incrementAndGet();
                     if ((count & (count - 1)) == 0) {
-                        LOGGER.log(WARNING, "Rejected deferred Aeron reader watermark count=" + count, failure);
+                        LOGGER.log(WARNING, "Rejected deferred Aeron reader watermark count=%s".formatted(count), failure);
                     }
                 }
             }
         }
 
-        /**
-         * Stops the writer-side watermark worker before any writer/retention resource
-         * is closed. The worker invokes retention callbacks and must never race a
-         * transport shutdown while the writer monitor is being dismantled.
-         */
+                /// Stops the writer-side watermark worker before any writer/retention resource
+        /// is closed. The worker invokes retention callbacks and must never race a
+        /// transport shutdown while the writer monitor is being dismantled.
         private RuntimeException closeWatermarkChannel() {
             if (this.watermarkChannel == null) return null;
             try {
@@ -718,11 +753,9 @@ public final class AeronClusterReplicationTransportProvider {
                    this.writerRecoveryState == null && this.writer != null && !this.writer.isFailed();
         }
 
-        /**
-         * Reports current writer readiness without starting the runtime. Lifecycle
-         * startup belongs to an explicit client or write operation, not a health
-         * probe.
-         */
+                /// Reports current writer readiness without starting the runtime. Lifecycle
+        /// startup belongs to an explicit client or write operation, not a health
+        /// probe.
 
         private synchronized ReplicationHealth.State writerCheckpointState() {
             if (this.driverFailure.get() != null) {
@@ -774,8 +807,7 @@ public final class AeronClusterReplicationTransportProvider {
                                 this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
                                 this.settings.epoch(), initialSequence));
                     } catch (final RuntimeException failure) {
-                        throw reseedRequired("cannot extend configured recording " + recordingId +
-                                             " after restart; the Archive recording is not safely reusable", failure);
+                        throw reseedRequired("cannot extend configured recording %s after restart; the Archive recording is not safely reusable".formatted(recordingId), failure);
                     }
                 } else {
                     if (checkpoint != null && checkpoint.transactionSequence() >= 0) {
@@ -798,8 +830,7 @@ public final class AeronClusterReplicationTransportProvider {
                                 this.getStartPosition(this.writerRecordingId.get());
                     } catch (final ArchiveException failure) {
                         if (failure.errorCode() != ArchiveException.UNKNOWN_RECORDING) {
-                            throw reseedRequired("cannot inspect new Aeron recording " +
-                                                 this.writerRecordingId.get(), failure);
+                            throw reseedRequired("cannot inspect new Aeron recording %s".formatted(this.writerRecordingId.get()), failure);
                         }
                         /* A fresh recording may not expose its catalog position until the
                          * first image is connected. Keep the boundary sequence explicit and
@@ -864,14 +895,14 @@ public final class AeronClusterReplicationTransportProvider {
             return checkpoint;
         }
 
-        /** Reads and validates checkpoint state without changing live transport state. */
+                /// Reads and validates checkpoint state without changing live transport state.
         private AeronReplicationCheckpoint readWriterCheckpoint() {
             final Path inFlightPath = this.inFlightCheckpointPath();
             final AeronReplicationCheckpoint inFlight = this.readOptionalCheckpoint(inFlightPath);
             if (inFlight != null) {
                 final AeronReplicationCheckpoint terminal = this.readOptionalCheckpoint(this.settings.checkpointPath());
                 if (terminal == null) {
-                    throw reseedRequired("in-flight writer transaction has no terminal checkpoint: " + inFlightPath, null);
+                    throw reseedRequired("in-flight writer transaction has no terminal checkpoint: %s".formatted(inFlightPath), null);
                 }
                 this.validateWriterCheckpointIdentity(inFlight);
                 this.validateWriterCheckpointIdentity(terminal);
@@ -891,8 +922,7 @@ public final class AeronClusterReplicationTransportProvider {
                         throw reseedRequired("cannot clear covered in-flight writer checkpoint", failure);
                     }
                 } else {
-                    throw reseedRequired("in-flight writer transaction is not covered by a terminal checkpoint " +
-                                         inFlightPath, null);
+                    throw reseedRequired("in-flight writer transaction is not covered by a terminal checkpoint %s".formatted(inFlightPath), null);
                 }
             }
             final AeronReplicationCheckpoint checkpoint = this.readOptionalCheckpoint(this.settings.checkpointPath());
@@ -901,9 +931,7 @@ public final class AeronClusterReplicationTransportProvider {
             if (checkpoint.state() != AeronReplicationCheckpoint.State.COMMITTED &&
                 checkpoint.state() != AeronReplicationCheckpoint.State.REJECTED) {
                 throw new ReseedRequiredException(
-                        "writer checkpoint is not restartable (state=" + checkpoint.state() +
-                        ", sequence=" + checkpoint.transactionSequence() + ", path=" +
-                        this.settings.checkpointPath() + ")");
+                        "writer checkpoint is not restartable (state=%s, sequence=%s, path=%s)".formatted(checkpoint.state(), checkpoint.transactionSequence(), this.settings.checkpointPath()));
             }
             return checkpoint;
         }
@@ -914,7 +942,7 @@ public final class AeronClusterReplicationTransportProvider {
             } catch (final NoSuchFileException absent) {
                 return null;
             } catch (final IOException failure) {
-                throw reseedRequired("cannot read Aeron writer checkpoint " + path, failure);
+                throw reseedRequired("cannot read Aeron writer checkpoint %s".formatted(path), failure);
             }
         }
 
@@ -938,13 +966,11 @@ public final class AeronClusterReplicationTransportProvider {
             }
         }
 
-        /**
-         * Verifies the Archive stop-position boundary against the durable writer
-         * checkpoint. Extending beyond the last persisted terminal checkpoint can
-         * reuse a sequence already present in the Archive, so this scalar fence
-         * fails closed until explicit tail replay/truncation is implemented. It
-         * does not scan envelope frames or prove that an orphan tail is replayable.
-         */
+                /// Verifies the Archive stop-position boundary against the durable writer
+        /// checkpoint. Extending beyond the last persisted terminal checkpoint can
+        /// reuse a sequence already present in the Archive, so this scalar fence
+        /// fails closed until explicit tail replay/truncation is implemented. It
+        /// does not scan envelope frames or prove that an orphan tail is replayable.
         private void validateRecordingBoundary(final long recordingId,
                                                final AeronReplicationCheckpoint checkpoint) {
             if (checkpoint == null) {
@@ -959,7 +985,7 @@ public final class AeronClusterReplicationTransportProvider {
             try {
                 stopPosition = this.getStopPosition(recordingId);
             } catch (final RuntimeException failure) {
-                throw reseedRequired("cannot inspect recording tail " + recordingId, failure);
+                throw reseedRequired("cannot inspect recording tail %s".formatted(recordingId), failure);
             }
             new AeronWriterBoundary(checkpoint.transactionSequence(), recordingId,
                     checkpoint.recordingPosition()).validateArchiveStop(stopPosition);
@@ -978,7 +1004,7 @@ public final class AeronClusterReplicationTransportProvider {
             } catch (final ReseedRequiredException failure) {
                 throw failure;
             } catch (final RuntimeException failure) {
-                throw reseedRequired("cannot inspect empty recording boundary " + recordingId, failure);
+                throw reseedRequired("cannot inspect empty recording boundary %s".formatted(recordingId), failure);
             }
         }
 
@@ -1012,7 +1038,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         private Path inFlightCheckpointPath() {
             final Path path = this.settings.checkpointPath();
-            return path.resolveSibling(path.getFileName() + ".inflight");
+            return path.resolveSibling("%s.inflight".formatted(path.getFileName()));
         }
 
         private void writeCheckpoint(final Path path, final AeronReplicationCheckpoint.State state,
@@ -1232,6 +1258,16 @@ public final class AeronClusterReplicationTransportProvider {
             this.deliveryCallback.remove();
         }
 
+        /// Shuts the transport down in dependency order: reader, write
+        /// coordinator, writer, watermark channel, retention, and finally the
+        /// shared Aeron runtime.
+        ///
+        /// Each stage runs only after the previous one is fully gone, and a
+        /// stage that fails leaves the transport retryable instead of torn
+        /// down beneath live threads — closing the runtime early would turn a
+        /// retryable abort into a use-after-close. All failures are aggregated
+        /// and thrown together. Never call this from inside a reader delivery
+        /// callback.
         @Override
         public synchronized void close() {
             this.ensureNotDeliveryCallback();
@@ -1337,7 +1373,7 @@ public final class AeronClusterReplicationTransportProvider {
         }
     }
 
-    /** Adapts complete Aeron data to the neutral packet acceptor. */
+        /// Adapts complete Aeron data to the neutral packet acceptor.
     private record ReceiverAdapter(Transport owner, ClusterStorageBinaryDataPacketAcceptor packetAcceptor)
             implements StorageBinaryDataReceiver {
         public void receiveTypeDictionary(final String value) {
@@ -1385,7 +1421,7 @@ public final class AeronClusterReplicationTransportProvider {
         }
     }
 
-    /** Adds the neutral message-position view to the Aeron client. */
+        /// Adds the neutral message-position view to the Aeron client.
     private record ClientAdapter(
             StorageBinaryDataClientAeronArchive delegate,
             long recordingId,

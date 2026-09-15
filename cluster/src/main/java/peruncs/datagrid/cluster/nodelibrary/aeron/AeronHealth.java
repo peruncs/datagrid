@@ -9,7 +9,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
-/** Cached health view for one Aeron provider client and storage controller. */
+/// Cached health view for one Aeron provider client and storage controller.
 final class AeronHealth implements ReplicationHealth {
     private final StorageControllerAdapter storage;
     private final ClusterStorageBinaryDataClient client;
@@ -99,6 +99,15 @@ final class AeronHealth implements ReplicationHealth {
                                     && this.client.isRunning() && (!requireLive || this.client.isLive()));
     }
 
+    /// Reports the replication lifecycle state.
+    ///
+    /// Writers have no reader client by design, so a missing client is
+    /// starting rather than failed; only driver, watermark, checkpoint, or
+    /// client failures report failed. A writer without Archive capacity
+    /// reports degraded instead of failed so it stays scrutable while
+    /// refusing new writes.
+    ///
+    /// @return current replication state
     @Override
     public ReplicationHealth.State state() {
         if (!this.active || this.closed.getAsBoolean() || this.driverFailed.getAsBoolean() ||

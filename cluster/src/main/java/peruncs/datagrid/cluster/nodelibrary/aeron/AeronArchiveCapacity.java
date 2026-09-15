@@ -5,7 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.LongSupplier;
 
-/** Cached Archive free-space view and writer admission policy. */
+/// Cached Archive free-space view and writer admission policy.
 final class AeronArchiveCapacity {
     private static final long CACHE_NANOS = 250_000_000L;
 

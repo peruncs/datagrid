@@ -4,9 +4,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies that the storage limit gate recovers without boundary flapping. */
+/// Verifies that the storage limit gate recovers without boundary flapping.
 class StorageLimitGateTest {
-    /** Usage must fall below the hysteresis release point before writes reopen. */
+        /// Usage must fall below the hysteresis release point before writes reopen.
     @Test
     void releasesOnlyAfterUsageLeavesHysteresisBand() {
         final StorageLimitGate gate = StorageLimitGate.New(10);
@@ -21,13 +21,13 @@ class StorageLimitGateTest {
         assertFalse(gate.limitReached());
     }
 
-    /** A fresh gate accepts writes. */
+        /// A fresh gate accepts writes.
     @Test
     void startsBelowLimit() {
         assertFalse(StorageLimitGate.New(10).limitReached());
     }
 
-    /** Usage below the limit never trips the gate. */
+        /// Usage below the limit never trips the gate.
     @Test
     void ignoresUsageBelowLimit() {
         final StorageLimitGate gate = StorageLimitGate.New(10);
@@ -37,7 +37,7 @@ class StorageLimitGateTest {
         assertFalse(gate.limitReached());
     }
 
-    /** The gate exposes its configured limit for log messages. */
+        /// The gate exposes its configured limit for log messages.
     @Test
     void exposesConfiguredLimit() {
         final StorageLimitGate gate = StorageLimitGate.New(10);
@@ -46,7 +46,7 @@ class StorageLimitGateTest {
         assertEquals(10_000_000_000L, gate.limitBytes());
     }
 
-    /** A non-positive limit is rejected. */
+        /// A non-positive limit is rejected.
     @Test
     void rejectsNonPositiveLimit() {
         assertThrows(IllegalArgumentException.class, () -> StorageLimitGate.New(0));

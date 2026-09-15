@@ -9,7 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
-/** Child process that holds a checkpoint write open until the parent kills it. */
+/// Child process that holds a checkpoint write open until the parent kills it.
 public final class AeronCrashChildMain {
     private AeronCrashChildMain() {
     }
@@ -36,7 +36,7 @@ public final class AeronCrashChildMain {
         }
         if ("recover".equals(System.getProperty("dg.crash.mode"))) {
             final String value = Files.readString(checkpoint, StandardCharsets.UTF_8);
-            Files.writeString(control.resolve("outcome"), "OUTCOME=" + value,
+            Files.writeString(control.resolve("outcome"), "OUTCOME=%s".formatted(value),
                     StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
                     StandardOpenOption.WRITE);
             return;
@@ -57,7 +57,7 @@ public final class AeronCrashChildMain {
     }
 
     private static void mark(final Path path) throws java.io.IOException {
-        final Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+        final Path temporary = path.resolveSibling("%s.tmp".formatted(path.getFileName()));
         Files.writeString(temporary, "ready", StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
         try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {

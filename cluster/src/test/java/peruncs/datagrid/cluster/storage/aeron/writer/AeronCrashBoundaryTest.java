@@ -7,13 +7,9 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationPublisher;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryTargetDistributing;
-import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
-import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashBarrier;
+import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPoint;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
@@ -26,7 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Verifies the writer's terminal-state rules at injected crash boundaries. */
+/// Verifies the writer's terminal-state rules at injected crash boundaries.
 class AeronCrashBoundaryTest {
     private final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
             .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).offerTimeoutNanos(5_000_000L).build();
@@ -36,7 +32,7 @@ class AeronCrashBoundaryTest {
         CrashHook.clear();
     }
 
-    /** Verifies prepared tail failure always publishes abort and fails closed. */
+        /// Verifies prepared tail failure always publishes abort and fails closed.
     @Test
     void preparedTailFailureAlwaysPublishesAbortAndFailsClosed() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
@@ -54,7 +50,7 @@ class AeronCrashBoundaryTest {
         publisher.close();
     }
 
-    /** Verifies ambiguous commit fails closed without publishing a second terminal marker. */
+        /// Verifies ambiguous commit fails closed without publishing a second terminal marker.
     @Test
     void ambiguousCommitFailsClosedWithoutPublishingASecondTerminalMarker() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
@@ -72,7 +68,7 @@ class AeronCrashBoundaryTest {
         publisher.close();
     }
 
-    /** Verifies enqueue fence is created before local write. */
+        /// Verifies enqueue fence is created before local write.
     @Test
     void enqueueFenceIsCreatedBeforeLocalWrite() {
         final AtomicInteger localWrites = new AtomicInteger();
@@ -114,7 +110,7 @@ class AeronCrashBoundaryTest {
         }
     }
 
-    /** Verifies a recorded commit whose terminal checkpoint was not written leaves the refusal fence. */
+        /// Verifies a recorded commit whose terminal checkpoint was not written leaves the refusal fence.
     @Test
     void recordedCommitBeforeCheckpointIsConvertedToUncertainty() {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();

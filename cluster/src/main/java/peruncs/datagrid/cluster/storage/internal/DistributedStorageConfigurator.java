@@ -13,13 +13,11 @@ import java.util.function.UnaryOperator;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This dispatcher wraps Store components with distributed-writing behavior.
- *
- * <p>Persistence targets distribute committed binary data, and type dictionary
- * exporters distribute type definitions. Other objects pass through unchanged
- * so the normal Store foundation keeps its existing behavior.</p>
- */
+/// This dispatcher wraps Store components with distributed-writing behavior.
+///
+/// Persistence targets distribute committed binary data, and type dictionary
+/// exporters distribute type definitions. Other objects pass through unchanged
+/// so the normal Store foundation keeps its existing behavior.
 public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
     private final StorageBinaryDataDistributor distributor;
     private final UnaryOperator<PersistenceTarget<Binary>> targetFactory;
@@ -36,7 +34,7 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
         this(distributor, targetFactory, null);
     }
 
-    /** Creates a configurator that preserves an already installed dispatcher. */
+        /// Creates a configurator that preserves an already installed dispatcher.
     public DistributedStorageConfigurator(
             final StorageBinaryDataDistributor distributor,
             final UnaryOperator<PersistenceTarget<Binary>> targetFactory,
@@ -76,7 +74,7 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
         return dispatched;
     }
 
-    /** Combines the two Store extension contracts when one subject implements both. */
+        /// Combines the two Store extension contracts when one subject implements both.
     private static final class TargetAndDictionaryExporter
             implements PersistenceTarget<Binary>, PersistenceTypeDictionaryExporter {
         private final PersistenceTarget<Binary> target;

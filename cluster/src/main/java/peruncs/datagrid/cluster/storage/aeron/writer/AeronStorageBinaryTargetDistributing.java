@@ -3,21 +3,19 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfer;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * Store target that couples local acceptance to Aeron replication.
- *
- * <p>The selected durability mode decides which side is attempted first. A
- * failed terminal step records an uncertain state and stops further writes;
- * this is safer than allowing the local Store and Archive to drift silently.</p>
- */
+/// Store target that couples local acceptance to Aeron replication.
+///
+/// The selected durability mode decides which side is attempted first. A
+/// failed terminal step records an uncertain state and stops further writes;
+/// this is safer than allowing the local Store and Archive to drift silently.
 public final class AeronStorageBinaryTargetDistributing implements PersistenceTarget<Binary> {
     private final PersistenceTarget<Binary> delegate;
     private final AeronReplicationWriteCoordinator coordinator;
@@ -25,30 +23,26 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
     private final LongConsumer committedSequence;
     private final BooleanSupplier distributionEnabled;
 
-    /**
-     * Creates a target with replication enabled for every write.
-     *
-     * @param delegate    local Store target
-     * @param coordinator Aeron transaction coordinator
-     */
+        /// Creates a target with replication enabled for every write.
+    ///
+    /// @param delegate    local Store target
+    /// @param coordinator Aeron transaction coordinator
     public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
                                                 final AeronReplicationWriteCoordinator coordinator) {
         this(delegate, coordinator, null, ignored -> {
         }, () -> true);
     }
 
-    /**
-     * Creates a target with the provider-owned dictionary, sequence and admission
-     * callbacks.  The callbacks are deliberately supplied by the provider so that
-     * local Store acceptance and the Aeron checkpoint transition remain one owner-
-     * serialized operation.
-     *
-     * @param delegate            local Store target
-     * @param coordinator         Aeron transaction coordinator
-     * @param dictionarySource    source of staged type dictionaries
-     * @param committedSequence   callback for the committed sequence
-     * @param distributionEnabled predicate that enables replication
-     */
+        /// Creates a target with the provider-owned dictionary, sequence and admission
+    /// callbacks.  The callbacks are deliberately supplied by the provider so that
+    /// local Store acceptance and the Aeron checkpoint transition remain one owner-
+    /// serialized operation.
+    ///
+    /// @param delegate            local Store target
+    /// @param coordinator         Aeron transaction coordinator
+    /// @param dictionarySource    source of staged type dictionaries
+    /// @param committedSequence   callback for the committed sequence
+    /// @param distributionEnabled predicate that enables replication
     public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
                                                 final AeronReplicationWriteCoordinator coordinator, final StorageBinaryDataDistributor dictionarySource,
                                                 final LongConsumer committedSequence, final BooleanSupplier distributionEnabled) {
@@ -59,7 +53,7 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
         this.distributionEnabled = notNull(distributionEnabled);
     }
 
-    /** Writes locally and completes the matching Aeron transaction. */
+        /// Writes locally and completes the matching Aeron transaction.
     @Override
     public void write(final Binary data) throws PersistenceExceptionTransfer {
         this.coordinator.executeWriteAtomically(() -> writeInternal(data));
@@ -180,13 +174,13 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
         }
     }
 
-    /** Commits a prepared transaction and preserves the fail-closed uncertainty marker. */
+        /// Commits a prepared transaction and preserves the fail-closed uncertainty marker.
     private void commitAndNotify(final AeronReplicationPublisher.PreparedTransaction prepared) {
         this.coordinator.commitOrMarkUncertain(prepared);
         this.committedSequence.accept(prepared.sequence());
     }
 
-    /** Returns whether the local persistence target can accept a write. */
+        /// Returns whether the local persistence target can accept a write.
     @Override
     public boolean isWritable() {
         return this.delegate.isWritable() && this.coordinator.isWritable();

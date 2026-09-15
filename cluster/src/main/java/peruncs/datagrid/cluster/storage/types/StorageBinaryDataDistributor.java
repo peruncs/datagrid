@@ -6,43 +6,33 @@ import org.eclipse.serializer.typing.Disposable;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * Sink for Store binary data and optional type dictionaries. The Aeron
- * implementation transports the bytes; callers only require that dictionary
- * data precede the matching binary transaction.
- */
+/// Sink for Store binary data and optional type dictionaries. The Aeron
+/// implementation transports the bytes; callers only require that dictionary
+/// data precede the matching binary transaction.
 public interface StorageBinaryDataDistributor extends Disposable {
-    /**
-     * Creates a distributor that stages the latest type dictionary per thread.
-     *
-     * @param delegate destination distributor
-     * @return caching decorator
-     */
+        /// Creates a distributor that stages the latest type dictionary per thread.
+    ///
+    /// @param delegate destination distributor
+    /// @return caching decorator
     static StorageBinaryDataDistributor Caching(final StorageBinaryDataDistributor delegate) {
         return new StorageBinaryDataDistributor.Caching(
                 notNull(delegate)
         );
     }
 
-    /**
-     * Publishes one complete Store binary.
-     *
-     * @param data binary to publish
-     */
+        /// Publishes one complete Store binary.
+    ///
+    /// @param data binary to publish
     void distributeData(Binary data);
 
-    /**
-     * Publishes a type dictionary needed by later Store data.
-     *
-     * @param typeDictionaryData assembled type dictionary
-     */
+        /// Publishes a type dictionary needed by later Store data.
+    ///
+    /// @param typeDictionaryData assembled type dictionary
     void distributeTypeDictionary(String typeDictionaryData);
 
-    /**
-     * Returns and clears a dictionary staged for the next binary transaction.
-     *
-     * @return staged dictionary, or {@code null}
-     */
+        /// Returns and clears a dictionary staged for the next binary transaction.
+    ///
+    /// @return staged dictionary, or `null`
     default String consumeTypeDictionary() {
         return null;
     }
@@ -52,7 +42,7 @@ public interface StorageBinaryDataDistributor extends Disposable {
      * traffic.
      */
 
-    /** Stages a type dictionary until the matching binary is published. */
+        /// Stages a type dictionary until the matching binary is published.
     class Caching implements StorageBinaryDataDistributor {
         private final StorageBinaryDataDistributor delegate;
         /*

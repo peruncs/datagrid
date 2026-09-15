@@ -13,13 +13,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage.MessageType.DATA;
 
-/** Verifies that the cluster acceptor forwards packets and lifecycle to the merger. */
+/// Verifies that the cluster acceptor forwards packets and lifecycle to the merger.
 class ClusterStorageBinaryDataPacketAcceptorTest {
     private static StorageBinaryDataPacket packet(final int index, final int count, final byte[] bytes) {
         return StorageBinaryDataPacket.New(DATA, 2, index, count, ByteBuffer.wrap(bytes));
     }
 
-    /** A complete message reaches the merger. */
+        /// A complete message reaches the merger.
     @Test
     void forwardsCompleteMessageToMerger() {
         final MergerFake merger = new MergerFake();
@@ -31,7 +31,7 @@ class ClusterStorageBinaryDataPacketAcceptorTest {
         assertEquals(1, merger.received.get());
     }
 
-    /** Dispose releases the acceptor and the merger. */
+        /// Dispose releases the acceptor and the merger.
     @Test
     void disposeDisposesMerger() {
         final MergerFake merger = new MergerFake();
@@ -44,7 +44,7 @@ class ClusterStorageBinaryDataPacketAcceptorTest {
         acceptor.dispose();
     }
 
-    /** Records merger callbacks. */
+        /// Records merger callbacks.
     private static final class MergerFake implements ClusterStorageBinaryDataMerger {
         private final AtomicInteger received = new AtomicInteger();
         private final AtomicBoolean disposed = new AtomicBoolean(false);

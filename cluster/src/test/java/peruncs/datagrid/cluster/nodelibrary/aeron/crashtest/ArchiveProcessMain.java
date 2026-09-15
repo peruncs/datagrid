@@ -13,7 +13,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 
-/** Separate Archive/MediaDriver process used by the external-topology cell. */
+/// Separate Archive/MediaDriver process used by the external-topology cell.
 public final class ArchiveProcessMain {
     private ArchiveProcessMain() {
     }
@@ -53,10 +53,10 @@ public final class ArchiveProcessMain {
             }
         } catch (final Exception failure) {
             final IllegalStateException outcomeFailure = new IllegalStateException(
-                    "RESEED_REQUIRED: Archive catalog is not safely reusable: " + failure.getMessage(), failure);
+                    "RESEED_REQUIRED: Archive catalog is not safely reusable: %s".formatted(failure.getMessage()), failure);
             try {
                 atomicWrite(control.resolve("archive-outcome"),
-                        "OUTCOME=RESEED_REQUIRED\nERROR=" + outcomeFailure.getMessage() + "\n");
+                        "OUTCOME=RESEED_REQUIRED\nERROR=%s\n".formatted(outcomeFailure.getMessage()));
             } catch (final RuntimeException writeFailure) {
                 outcomeFailure.addSuppressed(writeFailure);
             }
@@ -64,7 +64,7 @@ public final class ArchiveProcessMain {
         } catch (final Error failure) {
             try {
                 atomicWrite(control.resolve("archive-outcome"),
-                        "OUTCOME=FAIL_CLOSED\nERROR=" + failure.getMessage() + "\n");
+                        "OUTCOME=FAIL_CLOSED\nERROR=%s\n".formatted(failure.getMessage()));
             } catch (final RuntimeException writeFailure) {
                 failure.addSuppressed(writeFailure);
             }
@@ -75,7 +75,7 @@ public final class ArchiveProcessMain {
     private static void atomicWrite(final Path destination, final String value) {
         try {
             Files.createDirectories(destination.toAbsolutePath().getParent());
-            final Path temporary = Files.createTempFile(destination.getParent(), destination.getFileName() + ".tmp-", null);
+            final Path temporary = Files.createTempFile(destination.getParent(), "%s.tmp-".formatted(destination.getFileName()), null);
             try {
                 try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                     final var bytes = StandardCharsets.UTF_8.encode(value);
@@ -92,13 +92,13 @@ public final class ArchiveProcessMain {
                 Files.deleteIfExists(temporary);
             }
         } catch (final Exception failure) {
-            throw new IllegalStateException("cannot write Archive control file " + destination, failure);
+            throw new IllegalStateException("cannot write Archive control file %s".formatted(destination), failure);
         }
     }
 
     private static String required(final String name) {
         final String value = System.getProperty(name);
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("missing -D" + name);
+        if (value == null || value.isBlank()) throw new IllegalArgumentException("missing -D%s".formatted(name));
         return value;
     }
 }

@@ -13,40 +13,32 @@ import java.util.concurrent.TimeUnit;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This executor runs backups and storage checks without blocking a request.
- *
- * <p>At most one backup thread is active. A concurrent request is rejected
- * explicitly instead of being silently discarded, so callers can retry or
- * report the busy state to an operator.</p>
- */
+/// This executor runs backups and storage checks without blocking a request.
+///
+/// At most one backup thread is active. A concurrent request is rejected
+/// explicitly instead of being silently discarded, so callers can retry or
+/// report the busy state to an operator.
 public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
-    /**
-     * Creates a backup task executor.
-     *
-     * @param connection    Store connection
-     * @param backupManager backup manager
-     * @return task executor
-     */
+        /// Creates a backup task executor.
+    ///
+    /// @param connection    Store connection
+    /// @param backupManager backup manager
+    /// @return task executor
     static StorageBackupTaskExecutor New(final StorageConnection connection, final StorageBackupManager backupManager) {
         return new Default(notNull(connection), notNull(backupManager));
     }
 
-    /**
-     * Starts a backup task.
-     *
-     * @param useManualSlot whether to use the manual slot
-     */
+        /// Starts a backup task.
+    ///
+    /// @param useManualSlot whether to use the manual slot
     void runBackup(boolean useManualSlot);
 
-    /**
-     * Reports whether a backup task is running.
-     *
-     * @return {@code true} when running
-     */
+        /// Reports whether a backup task is running.
+    ///
+    /// @return `true` when running
     boolean isRunningBackup();
 
-    /** Provides one backup thread and the inherited storage-check thread. */
+        /// Provides one backup thread and the inherited storage-check thread.
     final class Default extends StorageTaskExecutor.Abstract implements StorageBackupTaskExecutor {
         private static final Logger LOG = LoggerFactory.getLogger(StorageBackupTaskExecutor.class);
         private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
@@ -89,6 +81,12 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             return this.backupTask != null && !this.backupTask.isDone();
         }
 
+        /// Stops the backup executor, cancelling a running backup first.
+        ///
+        /// A second call is a no-op once closing was requested. An
+        /// overrunning backup is interrupted after a bounded wait, and any
+        /// failure is aggregated with the inherited storage-check shutdown
+        /// instead of masking it.
         @Override
         public void close() {
             final Future<?> task;
@@ -103,7 +101,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             try {
                 if (!this.backupExecutor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                     failure = new IllegalStateException(
-                            "Storage backup did not stop within " + CLOSE_TIMEOUT_MILLIS + " ms");
+                            "Storage backup did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
                 }
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();

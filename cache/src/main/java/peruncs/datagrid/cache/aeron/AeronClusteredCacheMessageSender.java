@@ -18,27 +18,25 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/**
- * Publishes clustered-cache invalidations on one Aeron publication.
- *
- * <p>This sender is synchronous and fails the local cache operation when the
- * invalidation cannot be accepted. A listener callback offers the frame and waits
- * until the publication accepts it, retrying transient back pressure and reconnection
- * with an idle strategy for at most the configured publish timeout. A closed
- * or exhausted publication fails immediately, and a timeout fails with
- * {@link CacheEntryListenerException}. Nothing is silently dropped.</p>
- *
- * <p>Observability: published and offer-retry counters are package-private
- * test seams; the public surface is the dispose debug log. The sequence is
- * shared per node identity when {@code node-id} is configured, and per
- * provider otherwise, so receivers never see false gaps when several providers
- * share one node id.</p>
- */
+/// Publishes clustered-cache invalidations on one Aeron publication.
+///
+/// This sender is synchronous and fails the local cache operation when the
+/// invalidation cannot be accepted. A listener callback offers the frame and waits
+/// until the publication accepts it, retrying transient back pressure and reconnection
+/// with an idle strategy for at most the configured publish timeout. A closed
+/// or exhausted publication fails immediately, and a timeout fails with
+/// [CacheEntryListenerException]. Nothing is silently dropped.
+///
+/// Observability: published and offer-retry counters are package-private
+/// test seams; the public surface is the dispose debug log. The sequence is
+/// shared per node identity when `node-id` is configured, and per
+/// provider otherwise, so receivers never see false gaps when several providers
+/// share one node id.
 public abstract class AeronClusteredCacheMessageSender
         implements CacheEntryCreatedListener<Object, Object>, CacheEntryUpdatedListener<Object, Object>, Disposable {
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusteredCacheMessageSender.class.getName());
-    /** A scratch buffer larger than this is released after the frame is offered. */
+        /// A scratch buffer larger than this is released after the frame is offered.
     private static final int MAX_RETAINED_SCRATCH_BYTES = 64 * 1024;
     private static final long DISPOSE_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5L);
     private final AeronClusteredCacheResources resources;
@@ -94,17 +92,15 @@ public abstract class AeronClusteredCacheMessageSender
         this.maxPayloadBytes = maxPayloadBytes;
     }
 
-    /**
-     * Creates the sender that turns timestamp cache events into cluster messages.
-     *
-     * @param resources           shared Aeron resources for this node
-     * @param senderId            sender identity used so the node ignores its own frames
-     * @param sequence            sequence source shared by every sender of this identity
-     * @param serializer          serializer shared with the receiver
-     * @param publishTimeoutNanos maximum time to wait for the publication to accept a frame
-     * @param maxPayloadBytes     maximum accepted serialized payload size
-     * @return timestamp-cache sender
-     */
+        /// Creates the sender that turns timestamp cache events into cluster messages.
+    ///
+    /// @param resources           shared Aeron resources for this node
+    /// @param senderId            sender identity used so the node ignores its own frames
+    /// @param sequence            sequence source shared by every sender of this identity
+    /// @param serializer          serializer shared with the receiver
+    /// @param publishTimeoutNanos maximum time to wait for the publication to accept a frame
+    /// @param maxPayloadBytes     maximum accepted serialized payload size
+    /// @return timestamp-cache sender
     static AeronClusteredCacheMessageSender UpdateTimestamps(
             final AeronClusteredCacheResources resources,
             final byte[] senderId,
@@ -119,11 +115,9 @@ public abstract class AeronClusteredCacheMessageSender
                 publishTimeoutNanos, maxPayloadBytes);
     }
 
-    /**
-     * Returns the publish deadline, saturating at {@link Long#MAX_VALUE} so an
-     * extreme configured timeout cannot overflow the addition and fail
-     * immediately.
-     */
+        /// Returns the publish deadline, saturating at [Long#MAX_VALUE] so an
+    /// extreme configured timeout cannot overflow the addition and fail
+    /// immediately.
     private static long saturatingDeadline(final long timeoutNanos) {
         final long now = System.nanoTime();
         try {
@@ -133,17 +127,22 @@ public abstract class AeronClusteredCacheMessageSender
         }
     }
 
-    /** Returns the remaining wait budget without overflowing a saturated deadline. */
+        /// Returns the remaining wait budget without overflowing a saturated deadline.
     private static long remainingNanos(final long deadline) {
         if (deadline == Long.MAX_VALUE) return Long.MAX_VALUE;
         final long remaining = deadline - System.nanoTime();
         return Math.max(remaining, 0L);
     }
 
-    /** Converts one cache event into a cluster update message. */
+        /// Converts one cache event into a cluster update message.
+    ///
+    /// @param event source cache event
+    /// @return timestamp update message for the event
     protected abstract TimestampsRegionUpdateMessage createMessage(CacheEntryEvent<?, ?> event);
 
-    /** Serializes and publishes each event in order. */
+        /// Serializes and publishes each event in order.
+    ///
+    /// @param events cache events to publish
     protected void handleEvents(final Iterable<CacheEntryEvent<?, ?>> events)
             throws CacheEntryListenerException {
         for (final CacheEntryEvent<?, ?> event : events) {
@@ -160,7 +159,7 @@ public abstract class AeronClusteredCacheMessageSender
     private void publish(final byte[] payload) {
         if (payload == null || payload.length > this.maxPayloadBytes) {
             throw new CacheEntryListenerException(
-                    "Aeron clustered-cache payload exceeds the configured limit of " + this.maxPayloadBytes);
+                    "Aeron clustered-cache payload exceeds the configured limit of %s".formatted(this.maxPayloadBytes));
         }
         final RuntimeException terminal = this.failure.get();
         if (terminal != null) {
@@ -220,10 +219,8 @@ public abstract class AeronClusteredCacheMessageSender
         }
     }
 
-    /**
-     * Returns the sender-owned off-heap buffer that fits the given payload,
-     * growing (and releasing the previous) buffer when needed.
-     */
+        /// Returns the sender-owned off-heap buffer that fits the given payload,
+    /// growing (and releasing the previous) buffer when needed.
     private UnsafeBuffer scratchFor(final int payloadLength) {
         final int required = AeronClusteredCacheMessageCodec.HEADER_LENGTH + payloadLength;
         UnsafeBuffer buffer = this.scratch;
@@ -235,7 +232,7 @@ public abstract class AeronClusteredCacheMessageSender
         return buffer;
     }
 
-    /** Releases the sender-owned off-heap scratch buffer. */
+        /// Releases the sender-owned off-heap scratch buffer.
     private void releaseScratch() {
         final UnsafeBuffer buffer = this.scratch;
         if (buffer != null) {
@@ -244,7 +241,7 @@ public abstract class AeronClusteredCacheMessageSender
         }
     }
 
-    /** Releases the scratch buffer after publication quiescence. */
+        /// Releases the scratch buffer after publication quiescence.
     private void releaseAllScratch() {
         this.releaseScratch();
     }
@@ -271,11 +268,9 @@ public abstract class AeronClusteredCacheMessageSender
         return publication;
     }
 
-    /**
-     * Offers a frame, waiting for connection and back pressure up to the
-     * publish timeout. The caller is a synchronous JCache listener, so this
-     * method either succeeds or throws; it never returns without publishing.
-     */
+        /// Offers a frame, waiting for connection and back pressure up to the
+    /// publish timeout. The caller is a synchronous JCache listener, so this
+    /// method either succeeds or throws; it never returns without publishing.
     private void offer(final ConcurrentPublication publication, final UnsafeBuffer buffer, final int length) {
         final long deadline = saturatingDeadline(this.publishTimeoutNanos);
         try {
@@ -314,15 +309,14 @@ public abstract class AeronClusteredCacheMessageSender
                 if (result != Publication.NOT_CONNECTED && result != Publication.BACK_PRESSURED &&
                     result != Publication.ADMIN_ACTION) {
                     final CacheEntryListenerException terminal = new CacheEntryListenerException(
-                            "Aeron clustered-cache publication returned an unknown offer result: " + result);
+                            "Aeron clustered-cache publication returned an unknown offer result: %s".formatted(result));
                     this.failure.compareAndSet(null, terminal);
                     throw terminal;
                 }
                 this.offerRetries.increment();
                 if (System.nanoTime() >= deadline) {
                     throw new CacheEntryListenerException(
-                            "Aeron clustered-cache publication did not accept the invalidation within " +
-                            (this.publishTimeoutNanos / 1_000_000L) + " ms (result=" + result + ")");
+                            "Aeron clustered-cache publication did not accept the invalidation within %s ms (result=%s)".formatted((this.publishTimeoutNanos / 1_000_000L), result));
                 }
                 /* idle(0): a positive count means "work was done" and resets the
                  * strategy without parking, which would busy-spin for the whole
@@ -334,6 +328,12 @@ public abstract class AeronClusteredCacheMessageSender
         }
     }
 
+        /// Disposes the sender, waiting for in-flight publishes to quiesce first.
+    ///
+    /// The wait is bounded: when publishes do not drain before the disposal
+    /// timeout, disposal fails and resets so it can be retried — the sender
+    /// is not left half-closed. Only a fully completed disposal releases the
+    /// scratch buffer and the shared sequence lease. Disposal is idempotent.
     @Override
     public void dispose() {
         boolean quiescent = false;
@@ -373,31 +373,30 @@ public abstract class AeronClusteredCacheMessageSender
                 }
             }
         }
-        LOGGER.log(System.Logger.Level.DEBUG, "Disposed Aeron clustered-cache sender: published=" +
-                                              this.published.sum() + ", offerRetries=" + this.offerRetries.sum());
+        LOGGER.log(System.Logger.Level.DEBUG, "Disposed Aeron clustered-cache sender: published=%s, offerRetries=%s".formatted(this.published.sum(), this.offerRetries.sum()));
     }
 
-    /** Package-private test seam for the published counter. */
+        /// Package-private test seam for the published counter.
     long published() {
         return this.published.sum();
     }
 
-    /** Package-private test seam for the offer-retry counter. */
+        /// Package-private test seam for the offer-retry counter.
     long offerRetries() {
         return this.offerRetries.sum();
     }
 
-    /** Package-private test seam for native scratch ownership. */
+        /// Package-private test seam for native scratch ownership.
     int scratchBufferCount() {
         return this.scratch == null ? 0 : 1;
     }
 
-    /** Returns whether this single-use sender has completed disposal. */
+        /// Returns whether this single-use sender has completed disposal.
     boolean isDisposed() {
         return this.disposed;
     }
 
-    /** Converts timestamp cache events into cluster update messages. */
+        /// Converts timestamp cache events into cluster update messages.
     private static final class UpdateTimestamps extends AeronClusteredCacheMessageSender
             implements CacheEntryCreatedListener<Object, Object>, CacheEntryUpdatedListener<Object, Object> {
         private UpdateTimestamps(

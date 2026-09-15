@@ -9,7 +9,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Forked probe proving a dead driver is reported through the Aeron error handler. */
+/// Forked probe proving a dead driver is reported through the Aeron error handler.
 public final class AeronDriverFailureChildMain {
     private AeronDriverFailureChildMain() {
     }
@@ -41,8 +41,7 @@ public final class AeronDriverFailureChildMain {
                 return;
             }
             final Throwable observed = failure.get();
-            Files.writeString(control.resolve("outcome"), "FAILURE=" +
-                                                          (observed == null ? "unknown" : observed.getClass().getName()));
+            Files.writeString(control.resolve("outcome"), "FAILURE=%s".formatted((observed == null ? "unknown" : observed.getClass().getName())));
         }
     }
 }

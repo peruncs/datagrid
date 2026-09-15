@@ -12,40 +12,34 @@ import java.util.concurrent.TimeUnit;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This executor runs storage maintenance work away from the caller thread.
- *
- * <p>Only one check task may run at a time. A later request while that task is
- * active is ignored, and the next request can start after the previous thread
- * has finished.</p>
- */
+/// This executor runs storage maintenance work away from the caller thread.
+///
+/// Only one check task may run at a time. A later request while that task is
+/// active is ignored, and the next request can start after the previous thread
+/// has finished.
 public interface StorageTaskExecutor extends AutoCloseable {
-    /**
-     * Creates a storage task executor.
-     *
-     * @param connection Store connection
-     * @return task executor
-     */
+        /// Creates a storage task executor.
+    ///
+    /// @param connection Store connection
+    /// @return task executor
     static StorageTaskExecutor New(final StorageConnection connection) {
         return new Default(notNull(connection));
     }
 
-    /** Starts a storage check task. */
+        /// Starts a storage check task.
     void runChecks();
 
-    /**
-     * Reports whether a storage check is running.
-     *
-     * @return {@code true} when running
-     */
+        /// Reports whether a storage check is running.
+    ///
+    /// @return `true` when running
     boolean isRunningChecks();
 
-    /** Stops outstanding maintenance work and releases executor state. */
+        /// Stops outstanding maintenance work and releases executor state.
     @Override
     default void close() {
     }
 
-    /** Implements the single-flight storage-check state machine. */
+        /// Implements the single-flight storage-check state machine.
     class Abstract implements StorageTaskExecutor {
         private static final Logger LOG = LoggerFactory.getLogger(Abstract.class);
         private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
@@ -55,11 +49,9 @@ public interface StorageTaskExecutor extends AutoCloseable {
         private Future<?> checksTask;
         private boolean closed;
 
-        /**
-         * Creates the shared executor state.
-         *
-         * @param connection Store connection
-         */
+                /// Creates the shared executor state.
+        ///
+        /// @param connection Store connection
         protected Abstract(final StorageConnection connection) {
             this.connection = connection;
             this.executor = Executors.newSingleThreadExecutor(task ->
@@ -97,7 +89,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
             try {
                 if (!this.executor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                     throw new IllegalStateException(
-                            "Storage checks did not stop within " + CLOSE_TIMEOUT_MILLIS + " ms");
+                            "Storage checks did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
                 }
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
@@ -116,7 +108,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
         }
     }
 
-    /** Provides the standard storage-check executor. */
+        /// Provides the standard storage-check executor.
     final class Default extends Abstract implements StorageTaskExecutor {
         private Default(final StorageConnection connection) {
             super(connection);

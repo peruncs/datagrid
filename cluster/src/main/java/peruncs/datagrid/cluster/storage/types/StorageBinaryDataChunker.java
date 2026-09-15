@@ -10,18 +10,16 @@ import java.util.function.Consumer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/** Splits a Store binary into transport-sized packets without mutating its buffers. */
+/// Splits a Store binary into transport-sized packets without mutating its buffers.
 public final class StorageBinaryDataChunker {
     private StorageBinaryDataChunker() {
     }
 
-    /**
-     * Copies a binary into packets no larger than {@code maxPacketSize}.
-     *
-     * @param data          source Store binary
-     * @param maxPacketSize maximum packet payload size, in bytes
-     * @return packets in source order
-     */
+        /// Copies a binary into packets no larger than `maxPacketSize`.
+    ///
+    /// @param data          source Store binary
+    /// @param maxPacketSize maximum packet payload size, in bytes
+    /// @return packets in source order
     public static List<Chunk> chunk(final Binary data, final int maxPacketSize) {
         notNull(data);
         if (maxPacketSize <= 0) throw new IllegalArgumentException("maxPacketSize must be positive");
@@ -30,15 +28,13 @@ public final class StorageBinaryDataChunker {
         return chunks;
     }
 
-    /**
-     * Visits transport chunks in source order. The packet count is derived from
-     * the immutable binary length, so this method does not buffer the complete
-     * message before invoking the consumer.
-     *
-     * @param data          source Store binary
-     * @param maxPacketSize maximum packet payload size, in bytes
-     * @param consumer      callback for each chunk
-     */
+        /// Visits transport chunks in source order. The packet count is derived from
+    /// the immutable binary length, so this method does not buffer the complete
+    /// message before invoking the consumer.
+    ///
+    /// @param data          source Store binary
+    /// @param maxPacketSize maximum packet payload size, in bytes
+    /// @param consumer      callback for each chunk
     public static void forEach(final Binary data, final int maxPacketSize, final Consumer<Chunk> consumer) {
         notNull(consumer);
         notNull(data);
@@ -85,12 +81,10 @@ public final class StorageBinaryDataChunker {
         return length[0];
     }
 
-    /**
-     * Collects duplicate source views in channel order.
-     *
-     * @param data source Store binary
-     * @return duplicate views in channel order
-     */
+        /// Collects duplicate source views in channel order.
+    ///
+    /// @param data source Store binary
+    /// @return duplicate views in channel order
     public static List<ByteBuffer> buffers(final Binary data) {
         notNull(data);
         final List<ByteBuffer> buffers = new ArrayList<>();
@@ -105,24 +99,20 @@ public final class StorageBinaryDataChunker {
         return buffers;
     }
 
-    /**
-     * Returns duplicate source views in channel order.
-     *
-     * @param data source Store binary
-     * @return duplicate views in channel order
-     */
+        /// Returns duplicate source views in channel order.
+    ///
+    /// @param data source Store binary
+    /// @return duplicate views in channel order
     public static ByteBuffer[] bufferArray(final Binary data) {
         return buffers(data).toArray(ByteBuffer[]::new);
     }
 
-    /**
-     * Creates a {@link ChunksWrapper} from borrowed packet buffers without
-     * changing those buffers. The wrapper format stores each logical length in
-     * the buffer position, while packet data exposes it as the remaining range.
-     *
-     * @param buffers borrowed direct packet buffers
-     * @return read-only wrapper over duplicate buffer views
-     */
+        /// Creates a [ChunksWrapper] from borrowed packet buffers without
+    /// changing those buffers. The wrapper format stores each logical length in
+    /// the buffer position, while packet data exposes it as the remaining range.
+    ///
+    /// @param buffers borrowed direct packet buffers
+    /// @return read-only wrapper over duplicate buffer views
     public static ChunksWrapper wrap(final Iterable<ByteBuffer> buffers) {
         notNull(buffers);
         final List<ByteBuffer> normalized = new ArrayList<>();
@@ -137,15 +127,13 @@ public final class StorageBinaryDataChunker {
         return ChunksWrapper.New(normalized.toArray(ByteBuffer[]::new));
     }
 
-    /**
-     * Returns the original direct buffers of an owned binary and normalizes them
-     * in place for Store import. This method is only for a caller that has
-     * already taken ownership of the binary and therefore may transfer release
-     * responsibility for the returned buffers.
-     *
-     * @param data owned binary
-     * @return original direct buffers, positioned at zero
-     */
+        /// Returns the original direct buffers of an owned binary and normalizes them
+    /// in place for Store import. This method is only for a caller that has
+    /// already taken ownership of the binary and therefore may transfer release
+    /// responsibility for the returned buffers.
+    ///
+    /// @param data owned binary
+    /// @return original direct buffers, positioned at zero
     public static ByteBuffer[] ownedArray(final Binary data) {
         notNull(data);
         final List<ByteBuffer> buffers = new ArrayList<>();
@@ -173,14 +161,12 @@ public final class StorageBinaryDataChunker {
         return buffers.toArray(ByteBuffer[]::new);
     }
 
-    /**
-     * Returns import-ready duplicate views with position zero. Serializer's
-     * {@link ChunksWrapper} stores its logical length in the source position;
-     * ordinary binaries expose the remaining bytes instead.
-     *
-     * @param data source Store binary
-     * @return import-ready duplicate views
-     */
+        /// Returns import-ready duplicate views with position zero. Serializer's
+    /// [ChunksWrapper] stores its logical length in the source position;
+    /// ordinary binaries expose the remaining bytes instead.
+    ///
+    /// @param data source Store binary
+    /// @return import-ready duplicate views
     public static ByteBuffer[] importArray(final Binary data) {
         notNull(data);
         final ByteBuffer[] source = bufferArray(data);
@@ -200,21 +186,19 @@ public final class StorageBinaryDataChunker {
         return result;
     }
 
-    /**
-     * One transport packet and its position in the source binary.
-     *
-     * <p>The payload is owned by the chunk and is not copied by the accessor.
-     * Consumers must treat it as read-only and must not retain or mutate it after
-     * their packet operation completes. This avoids a second copy at every Aeron
-     * hand-off.</p>
-     *
-     * @param bytes         packet payload owned by this chunk
-     * @param index         zero-based packet index
-     * @param count         packet count for the complete message
-     * @param messageLength complete message length in bytes
-     */
+        /// One transport packet and its position in the source binary.
+    ///
+    /// The payload is owned by the chunk and is not copied by the accessor.
+    /// Consumers must treat it as read-only and must not retain or mutate it after
+    /// their packet operation completes. This avoids a second copy at every Aeron
+    /// hand-off.
+    ///
+    /// @param bytes         packet payload owned by this chunk
+    /// @param index         zero-based packet index
+    /// @param count         packet count for the complete message
+    /// @param messageLength complete message length in bytes
     public record Chunk(byte[] bytes, int index, int count, int messageLength) {
-        /** Validates packet ownership and positional metadata at construction time. */
+                /// Validates packet ownership and positional metadata at construction time.
         public Chunk {
             if (bytes == null || bytes.length == 0)
                 throw new IllegalArgumentException("chunk payload must not be empty");
@@ -223,7 +207,7 @@ public final class StorageBinaryDataChunker {
         }
     }
 
-    /** Streams source channels into fixed-size packet payloads. */
+        /// Streams source channels into fixed-size packet payloads.
     private static final class PacketWriter {
         private final int maxPacketSize;
         private final int messageLength;

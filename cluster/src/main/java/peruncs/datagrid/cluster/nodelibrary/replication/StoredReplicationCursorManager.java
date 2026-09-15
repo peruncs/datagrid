@@ -10,48 +10,40 @@ import java.nio.file.Path;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This manager persists the last replication cursor accepted by a node.
- *
- * <p>The stored position is the restart boundary. A successful write means a
- * later reader may resume from that position; a failed write leaves the
- * boundary uncertain and must be treated as a startup error.</p>
- */
+/// This manager persists the last replication cursor accepted by a node.
+///
+/// The stored position is the restart boundary. A successful write means a
+/// later reader may resume from that position; a failed write leaves the
+/// boundary uncertain and must be treated as a startup error.
 public interface StoredReplicationCursorManager extends AutoCloseable {
-    /**
-     * Creates a forced binary cursor manager for a native path.
-     *
-     * <p>Cursor reads and writes use the shared atomic cursor-file protocol. If a
-     * write fails, the caller must retain uncertainty and fail closed rather than
-     * treating the import as checkpointed.</p>
-     *
-     * @param cursorPath metadata path
-     * @return atomic replication-cursor manager
-     */
+        /// Creates a forced binary cursor manager for a native path.
+    ///
+    /// Cursor reads and writes use the shared atomic cursor-file protocol. If a
+    /// write fails, the caller must retain uncertainty and fail closed rather than
+    /// treating the import as checkpointed.
+    ///
+    /// @param cursorPath metadata path
+    /// @return atomic replication-cursor manager
     static StoredReplicationCursorManager NewAtomic(final Path cursorPath) {
         return new Default(notNull(cursorPath));
     }
 
-    /**
-     * Returns the last stored replication cursor.
-     *
-     * @return stored replication cursor
-     * @throws NodelibraryException if reading fails
-     */
+        /// Returns the last stored replication cursor.
+    ///
+    /// @return stored replication cursor
+    /// @throws NodelibraryException if reading fails
     ReplicationCursor get() throws NodelibraryException;
 
-    /**
-     * Stores a replication cursor as the restart boundary.
-     *
-     * @param cursor replication cursor
-     * @throws NodelibraryException if writing fails
-     */
+        /// Stores a replication cursor as the restart boundary.
+    ///
+    /// @param cursor replication cursor
+    /// @throws NodelibraryException if writing fails
     void set(ReplicationCursor cursor) throws NodelibraryException;
 
     @Override
     void close();
 
-    /** Persists replication cursors with one forced binary backend. */
+        /// Persists replication cursors with one forced binary backend.
     final class Default implements StoredReplicationCursorManager {
         private static final Logger LOG = LoggerFactory.getLogger(StoredReplicationCursorManager.class);
 
@@ -107,7 +99,7 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
                 LOG.debug("New replication cursor file has been created.");
                 this.cursor = new ReplicationCursor("none", null, -1, new byte[0]);
             } catch (final IOException failure) {
-                throw new NodelibraryException("Failed to read binary replication cursor " + this.path, failure);
+                throw new NodelibraryException("Failed to read binary replication cursor %s".formatted(this.path), failure);
             }
 
             this.initialized = true;

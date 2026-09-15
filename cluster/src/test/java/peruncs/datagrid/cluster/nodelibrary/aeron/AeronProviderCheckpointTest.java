@@ -23,7 +23,7 @@ import java.util.concurrent.locks.LockSupport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Verifies provider restart uses the Archive position in the writer checkpoint. */
+/// Verifies provider restart uses the Archive position in the writer checkpoint.
 class AeronProviderCheckpointTest {
     private static int freePort() throws Exception {
         try (ServerSocket socket = new ServerSocket(0)) {
@@ -31,12 +31,12 @@ class AeronProviderCheckpointTest {
         }
     }
 
-    /** Verifies persistence target writes committed writer checkpoint. */
+        /// Verifies persistence target writes committed writer checkpoint.
     @Test
     void persistenceTargetWritesCommittedWriterCheckpoint() throws Exception {
         final Path directory = Files.createTempDirectory("datagrid-aeron-provider-");
-        final Path archive = directory.resolveSibling(directory.getFileName() + ".archive");
-        final Path checkpointDirectory = directory.resolveSibling(directory.getFileName() + ".checkpoint");
+        final Path archive = directory.resolveSibling("%s.archive".formatted(directory.getFileName()));
+        final Path checkpointDirectory = directory.resolveSibling("%s.checkpoint".formatted(directory.getFileName()));
         final Path checkpoint = checkpointDirectory.resolve("writer.checkpoint");
         final int controlPort = freePort();
         final int livePort = freePort();
@@ -58,12 +58,12 @@ class AeronProviderCheckpointTest {
                     case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID" -> clusterId;
                     case "ECLIPSE_DATAGRID_AERON_NODE_ID" -> UUID.nameUUIDFromBytes(directory.toString().getBytes()).toString();
                     case "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> UUID.nameUUIDFromBytes(
-                            ("generation:" + directory).getBytes()).toString();
+                            ("generation:%s".formatted(directory)).getBytes()).toString();
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> directory.toString();
                     case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> archive.toString();
                     case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> checkpoint.toString();
-                    case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> "aeron:udp?control=localhost:" + livePort + "|control-mode=dynamic|fc=max";
-                    case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:" + controlPort;
+                    case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> "aeron:udp?control=localhost:%s|control-mode=dynamic|fc=max".formatted(livePort);
+                    case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
                     case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
                          "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
                     case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH" -> "1048576";
@@ -110,7 +110,7 @@ class AeronProviderCheckpointTest {
             final AtomicInteger receivedFrames = new AtomicInteger();
             try (Aeron subscriberAeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(directory.toString()));
                  final Subscription subscriber = subscriberAeron.addSubscription(
-                         "aeron:udp?endpoint=localhost:0|control=localhost:" + livePort + "|control-mode=dynamic", 1001)) {
+                         "aeron:udp?endpoint=localhost:0|control=localhost:%s|control-mode=dynamic".formatted(livePort), 1001)) {
                 final long connectDeadline = System.nanoTime() + 10_000_000_000L;
                 while (!subscriber.isConnected() && System.nanoTime() < connectDeadline) {
                     LockSupport.parkNanos(1_000_000L);

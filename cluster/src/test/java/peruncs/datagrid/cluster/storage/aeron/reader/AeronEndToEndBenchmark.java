@@ -3,18 +3,15 @@ package peruncs.datagrid.cluster.storage.aeron.reader;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.reader.TransactionAssembler;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.util.UUID;
 
-/**
- * Test-only end-to-end application-path benchmark. It measures envelope
- * encoding, direct-buffer assembly, CRC validation, and complete-binary handoff
- * without adding a benchmark dependency or production instrumentation.
- */
+/// Test-only end-to-end application-path benchmark. It measures envelope
+/// encoding, direct-buffer assembly, CRC validation, and complete-binary handoff
+/// without adding a benchmark dependency or production instrumentation.
 public final class AeronEndToEndBenchmark {
     private AeronEndToEndBenchmark() {
     }
@@ -32,8 +29,7 @@ public final class AeronEndToEndBenchmark {
         }
         final Result result = measure(payload, chunk, warmup, iterations);
         System.out.printf(
-                "payload=%d chunks=%d iterations=%d ns/tx=%.1f MiB/s=%.1f " +
-                "assembledBytes/tx=%d allocatedBytes/tx=%s%n",
+                "payload=%d chunks=%d iterations=%d ns/tx=%.1f MiB/s=%.1f assembledBytes/tx=%d allocatedBytes/tx=%s%n",
                 result.payloadLength(), result.chunkCount(), result.iterations(),
                 result.nanosecondsPerTransaction(), result.mebibytesPerSecond(),
                 result.assembledBytesPerTransaction(),
@@ -41,7 +37,7 @@ public final class AeronEndToEndBenchmark {
                         Long.toString(result.allocatedBytesPerTransaction()));
     }
 
-    /** Measures the complete application framing and reader assembly path. */
+        /// Measures the complete application framing and reader assembly path.
     static Result measure(final int payloadLength, final int chunkSize, final int warmup, final int iterations) {
         if (payloadLength <= 0 || chunkSize <= 0 || warmup < 0 || iterations <= 0)
             throw new IllegalArgumentException("invalid end-to-end benchmark parameters");

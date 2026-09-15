@@ -13,24 +13,20 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.UUID;
 
-/**
- * Persists restart records without coupling them to the wire format.
- *
- * <p>A new record is forced to a temporary file before it replaces the old
- * one. Reads validate the complete record and its checksum. A failed write
- * therefore leaves the previous restart boundary available.</p>
- */
+/// Persists restart records without coupling them to the wire format.
+///
+/// A new record is forced to a temporary file before it replaces the old
+/// one. Reads validate the complete record and its checksum. A failed write
+/// therefore leaves the previous restart boundary available.
 public final class AeronReplicationCheckpointStore {
     private AeronReplicationCheckpointStore() {
     }
 
-    /**
-     * Replaces {@code path} only after the complete record is on disk.
-     *
-     * @param path       checkpoint file
-     * @param checkpoint record to persist
-     * @throws IOException if the record cannot be written or forced to disk
-     */
+        /// Replaces `path` only after the complete record is on disk.
+    ///
+    /// @param path       checkpoint file
+    /// @param checkpoint record to persist
+    /// @throws IOException if the record cannot be written or forced to disk
     public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException {
         if (path == null || checkpoint == null) throw new NullPointerException("path and checkpoint");
         /* The encoded bytes are intentionally owned by this invocation. A callback
@@ -72,13 +68,11 @@ public final class AeronReplicationCheckpointStore {
         return bytes;
     }
 
-    /**
-     * Reads a record and rejects a torn, corrupt, or incompatible file.
-     *
-     * @param path checkpoint file
-     * @return validated checkpoint
-     * @throws IOException if the file is missing, truncated, or invalid
-     */
+        /// Reads a record and rejects a torn, corrupt, or incompatible file.
+    ///
+    /// @param path checkpoint file
+    /// @return validated checkpoint
+    /// @throws IOException if the file is missing, truncated, or invalid
     public static AeronReplicationCheckpoint read(final Path path) throws IOException {
         final byte[] bytes = readFixedRecord(path);
         final int expected = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
@@ -116,7 +110,7 @@ public final class AeronReplicationCheckpointStore {
                 path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             final long size = channel.size();
             if (size != AeronReplicationCheckpoint.ENCODED_BYTES)
-                throw new IOException("invalid Aeron checkpoint length=" + size);
+                throw new IOException("invalid Aeron checkpoint length=%s".formatted(size));
             final byte[] bytes = new byte[AeronReplicationCheckpoint.ENCODED_BYTES];
             final ByteBuffer target = ByteBuffer.wrap(bytes);
             while (target.hasRemaining()) {

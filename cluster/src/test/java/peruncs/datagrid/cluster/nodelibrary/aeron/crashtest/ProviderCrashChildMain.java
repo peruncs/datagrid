@@ -27,10 +27,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.zip.CRC32C;
 
-/**
- * Forked provider process for deterministic writer crash cells. The parent
- * kills this process after the exact milestone; this class never self-kills.
- */
+/// Forked provider process for deterministic writer crash cells. The parent
+/// kills this process after the exact milestone; this class never self-kills.
 public final class ProviderCrashChildMain {
     private static final java.util.Set<String> SUPPORTED_POINTS = java.util.Set.of(
             "BEFORE_PUBLICATION_CONNECTED", "BEFORE_PREPARE", "AFTER_DICTIONARY_CHUNKS", "AFTER_DATA_CHUNKS", "AFTER_PREPARE",
@@ -59,7 +57,7 @@ public final class ProviderCrashChildMain {
         final String mode = System.getProperty("dg.crash.mode", "phase1");
         final String point = System.getProperty("dg.crash.barrier", "NONE");
         if (!SUPPORTED_POINTS.contains(point) || (!"NONE".equals(point) && !ChildMilestone.supports(point))) {
-            throw new IllegalArgumentException("unsupported or unencodable provider crash point: " + point);
+            throw new IllegalArgumentException("unsupported or unencodable provider crash point: %s".formatted(point));
         }
         final ReplicationDurabilityMode durability = ReplicationDurabilityMode.valueOf(
                 System.getProperty("dg.crash.durability", ReplicationDurabilityMode.ARCHIVE_FIRST.name()));
@@ -72,7 +70,7 @@ public final class ProviderCrashChildMain {
             runPhase2(base, control, durability, point);
             return;
         }
-        throw new IllegalArgumentException("unknown dg.crash.mode: " + mode);
+        throw new IllegalArgumentException("unknown dg.crash.mode: %s".formatted(mode));
     }
 
     private static void runPhase1(final Path base, final Path control, final String point,
@@ -87,7 +85,7 @@ public final class ProviderCrashChildMain {
             }
             if (!"NONE".equals(point) && !Files.exists(control.resolve("milestone.reached"))) {
                 writeOutcome(control, "HARNESS_ERROR", runtime.checkpoint(),
-                        "crash barrier was armed but never reached: " + point);
+                        "crash barrier was armed but never reached: %s".formatted(point));
                 return;
             }
             writeOutcome(control, "CONTINUE", runtime.checkpoint(), null);
@@ -123,7 +121,7 @@ public final class ProviderCrashChildMain {
     }
 
     private static byte[] transactionPayload(final int sequence) {
-        final byte[] payload = ("dg-crash:" + sequence).getBytes(StandardCharsets.UTF_8);
+        final byte[] payload = ("dg-crash:%s".formatted(sequence)).getBytes(StandardCharsets.UTF_8);
         final byte[] result = new byte[64];
         final byte[] digest = digest(payload);
         for (int i = 0; i < result.length; i++) result[i] = digest[i % digest.length];
@@ -200,13 +198,13 @@ public final class ProviderCrashChildMain {
     }
 
     private static void mark(final Path path, final String value) {
-        atomicWrite(path, value + "\n");
+        atomicWrite(path, "%s\n".formatted(value));
     }
 
     private static void atomicWrite(final Path destination, final String value) {
         try {
             Files.createDirectories(destination.toAbsolutePath().getParent());
-            final Path temporary = Files.createTempFile(destination.getParent(), destination.getFileName() + ".tmp-", null);
+            final Path temporary = Files.createTempFile(destination.getParent(), "%s.tmp-".formatted(destination.getFileName()), null);
             try {
                 try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                     final ByteBuffer bytes = StandardCharsets.UTF_8.encode(value);
@@ -222,7 +220,7 @@ public final class ProviderCrashChildMain {
                 Files.deleteIfExists(temporary);
             }
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot write crash-matrix control file " + destination, failure);
+            throw new IllegalStateException("cannot write crash-matrix control file %s".formatted(destination), failure);
         }
     }
 
@@ -288,7 +286,7 @@ public final class ProviderCrashChildMain {
         try {
             ChildMilestone.write(path, point, sequence);
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot write crash milestone " + path, failure);
+            throw new IllegalStateException("cannot write crash milestone %s".formatted(path), failure);
         }
     }
 
@@ -308,13 +306,12 @@ public final class ProviderCrashChildMain {
     private static String writerLiveChannel() {
         final int port = Integer.getInteger("dg.crash.livePort", 40123);
         return Boolean.getBoolean("dg.crash.externalArchive")
-                ? "aeron:udp?endpoint=localhost:" + port
-                : "aeron:udp?control=localhost:" + port + "|control-mode=dynamic|fc=max";
+                ? "aeron:udp?endpoint=localhost:%s".formatted(port)
+                : "aeron:udp?control=localhost:%s|control-mode=dynamic|fc=max".formatted(port);
     }
 
     private static String subscriberLiveChannel() {
-        return "aeron:udp?endpoint=localhost:0|control=localhost:" +
-               Integer.getInteger("dg.crash.livePort", 40123) + "|control-mode=dynamic";
+        return "aeron:udp?endpoint=localhost:0|control=localhost:%s|control-mode=dynamic".formatted(Integer.getInteger("dg.crash.livePort", 40123));
     }
 
     private static final class ChildRuntime implements AutoCloseable {
@@ -378,7 +375,7 @@ public final class ProviderCrashChildMain {
 
         private void write(final byte[] payload) {
             if (this.subscriberFailure != null)
-                throw new IllegalStateException("subscriber failed: " + this.subscriberFailure, this.subscriberFailure);
+                throw new IllegalStateException("subscriber failed: %s".formatted(this.subscriberFailure), this.subscriberFailure);
             final ClusterStorageBinaryDataDistributor distributor = this.transport.distributor(STREAM, false);
             if (this.writes > 0 && "AFTER_DICTIONARY_CHUNKS".equals(this.barrierPoint)) {
                 distributor.distributeTypeDictionary("crash.Type");
@@ -400,7 +397,7 @@ public final class ProviderCrashChildMain {
                 sleep();
             }
             if (this.subscriberFailure != null)
-                throw new IllegalStateException("subscriber failed: " + this.subscriberFailure, this.subscriberFailure);
+                throw new IllegalStateException("subscriber failed: %s".formatted(this.subscriberFailure), this.subscriberFailure);
             if (!this.subscriberReady.get()) throw new IllegalStateException("subscriber did not start");
         }
 
@@ -434,7 +431,7 @@ public final class ProviderCrashChildMain {
             try {
                 final int rejectedSequence = Integer.getInteger("dg.crash.rejectSequence", -1);
                 if (Boolean.getBoolean("dg.crash.rejectLocal") && this.sequence == rejectedSequence) {
-                    throw new IllegalStateException("injected local Store rejection at sequence " + this.sequence);
+                    throw new IllegalStateException("injected local Store rejection at sequence %s".formatted(this.sequence));
                 }
                 Files.createDirectories(this.path.toAbsolutePath().getParent());
                 try (FileChannel channel = FileChannel.open(this.path, StandardOpenOption.CREATE,
@@ -479,8 +476,8 @@ public final class ProviderCrashChildMain {
             this.base = base;
             this.durability = durability;
             this.externalArchive = Boolean.getBoolean("dg.crash.externalArchive");
-            this.nodeId = UUID.nameUUIDFromBytes(("node:" + base).getBytes(StandardCharsets.UTF_8));
-            this.generation = UUID.nameUUIDFromBytes(("generation:" + base).getBytes(StandardCharsets.UTF_8));
+            this.nodeId = UUID.nameUUIDFromBytes(("node:%s".formatted(base)).getBytes(StandardCharsets.UTF_8));
+            this.generation = UUID.nameUUIDFromBytes(("generation:%s".formatted(base)).getBytes(StandardCharsets.UTF_8));
         }
 
         @Override
@@ -569,7 +566,7 @@ public final class ProviderCrashChildMain {
                 case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> this.base.resolve("archive").toString();
                 case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> this.base.resolve("checkpoint/writer.checkpoint").toString();
                 case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> writerLiveChannel();
-                case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:" + Integer.getInteger("dg.crash.controlPort", 40124);
+                case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(Integer.getInteger("dg.crash.controlPort", 40124));
                 case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
                      "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
                 case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH" -> "1048576";

@@ -9,32 +9,26 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This reader measures the bytes currently used by a storage directory.
- *
- * <p>A running Store may remove a file while the directory is being visited.
- * Implementations therefore treat that individual file as unavailable and
- * continue the measurement.</p>
- */
+/// This reader measures the bytes currently used by a storage directory.
+///
+/// A running Store may remove a file while the directory is being visited.
+/// Implementations therefore treat that individual file as unavailable and
+/// continue the measurement.
 public interface StorageDiskSpaceReader {
-    /**
-     * Creates a disk-space reader.
-     *
-     * @param storageDir storage directory
-     * @return disk-space reader
-     */
+        /// Creates a disk-space reader.
+    ///
+    /// @param storageDir storage directory
+    /// @return disk-space reader
     static StorageDiskSpaceReader New(final ADirectory storageDir) {
         return new Default(notNull(storageDir));
     }
 
-    /**
-     * Reads used bytes in the storage directory.
-     *
-     * @return used bytes
-     */
+        /// Reads used bytes in the storage directory.
+    ///
+    /// @return used bytes
     long readUsedDiskSpaceBytes();
 
-    /** Recursively measures the configured Store directory. */
+        /// Recursively measures the configured Store directory.
     class Default implements StorageDiskSpaceReader {
         private static final Logger LOG = LoggerFactory.getLogger(StorageDiskSpaceReader.class);
         private static final long CACHE_NANOS = 5_000_000_000L;

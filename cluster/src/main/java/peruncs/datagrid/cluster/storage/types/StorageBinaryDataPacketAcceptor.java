@@ -7,59 +7,49 @@ import java.util.function.Consumer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/** Reassembles ordered packets and forwards complete messages to a receiver. */
+/// Reassembles ordered packets and forwards complete messages to a receiver.
 public interface StorageBinaryDataPacketAcceptor extends Consumer<List<StorageBinaryDataPacket>> {
-    /**
-     * Creates an acceptor for one receiver.
-     *
-     * @param receiver destination for complete messages
-     * @return packet acceptor
-     */
+        /// Creates an acceptor for one receiver.
+    ///
+    /// @param receiver destination for complete messages
+    /// @return packet acceptor
     static StorageBinaryDataPacketAcceptor New(final StorageBinaryDataReceiver receiver) {
         return new StorageBinaryDataPacketAcceptor.Default(
                 notNull(receiver)
         );
     }
 
-    /**
-     * Reports whether no partial message is currently retained.
-     *
-     * <p>Consumers use this boundary to commit transport offsets only after a
-     * complete message has been accepted. Implementations that do not retain
-     * state may keep the default.</p>
-     *
-     * @return {@code true} when the next packet starts a new message
-     */
+        /// Reports whether no partial message is currently retained.
+    ///
+    /// Consumers use this boundary to commit transport offsets only after a
+    /// complete message has been accepted. Implementations that do not retain
+    /// state may keep the default.
+    ///
+    /// @return `true` when the next packet starts a new message
     default boolean isAtMessageBoundary() {
         return true;
     }
 
-    /**
-     * Forwards a packet batch to the reassembler.
-     *
-     * @param packet packet batch
-     */
+        /// Forwards a packet batch to the reassembler.
+    ///
+    /// @param packet packet batch
     @Override
     void accept(final List<StorageBinaryDataPacket> packet);
 
-    /**
-     * Releases a retained partial message, if any.
-     *
-     * <p>The default implementation retains nothing.</p>
-     */
+        /// Releases a retained partial message, if any.
+    ///
+    /// The default implementation retains nothing.
     default void dispose() {
     }
 
-    /** Reassembles packets and forwards complete messages to a receiver. */
+        /// Reassembles packets and forwards complete messages to a receiver.
     class Default implements StorageBinaryDataPacketAcceptor {
         private final StorageBinaryDataReceiver receiver;
         private StorageBinaryDataMessage message;
 
-        /**
-         * Creates an acceptor for one receiver.
-         *
-         * @param receiver destination for complete messages
-         */
+                /// Creates an acceptor for one receiver.
+        ///
+        /// @param receiver destination for complete messages
         protected Default(final StorageBinaryDataReceiver receiver) {
             super();
             this.receiver = receiver;

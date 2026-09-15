@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -11,7 +10,7 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Tests atomic file store behavior. */
+/// Tests atomic file store behavior.
 class AtomicFileStoreTest {
     private static void write(final java.nio.channels.FileChannel channel, final String value)
             throws java.io.IOException {
@@ -34,7 +33,7 @@ class AtomicFileStoreTest {
         }
     }
 
-    /** Verifies failed replacement leaves previous file intact. */
+        /// Verifies failed replacement leaves previous file intact.
     @Test
     void failedReplacementLeavesPreviousFileIntact() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
@@ -64,7 +63,7 @@ class AtomicFileStoreTest {
         }
     }
 
-    /** Verifies crash during temporary write leaves previous file intact. */
+        /// Verifies crash during temporary write leaves previous file intact.
     @Test
     void crashDuringTemporaryWriteLeavesPreviousFileIntact() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
@@ -83,7 +82,7 @@ class AtomicFileStoreTest {
         }
     }
 
-    /** Verifies crash after temporary force before rename leaves previous file intact. */
+        /// Verifies crash after temporary force before rename leaves previous file intact.
     @Test
     void crashAfterTemporaryForceBeforeRenameLeavesPreviousFileIntact() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
@@ -102,7 +101,7 @@ class AtomicFileStoreTest {
         }
     }
 
-    /** Verifies crash after rename leaves the new complete file visible. */
+        /// Verifies crash after rename leaves the new complete file visible.
     @Test
     void crashAfterRenameLeavesTheNewCompleteFileVisible() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-store-");

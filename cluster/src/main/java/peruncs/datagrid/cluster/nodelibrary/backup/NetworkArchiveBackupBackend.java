@@ -26,21 +26,17 @@ import java.util.regex.Pattern;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/**
- * This backend exports backups locally and stores them through a backup proxy.
- *
- * <p>The scratch directory holds temporary archives. The proxy is the durable
- * boundary, so a backup is usable only after its archive and replication
- * metadata have both been uploaded.</p>
- */
+/// This backend exports backups locally and stores them through a backup proxy.
+///
+/// The scratch directory holds temporary archives. The proxy is the durable
+/// boundary, so a backup is usable only after its archive and replication
+/// metadata have both been uploaded.
 public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
-    /**
-     * Creates a network-backed backup backend.
-     *
-     * @param storageExportScratchSpacePath local scratch directory
-     * @param backupProxyHttpClient         remote backup client
-     * @return network backup backend
-     */
+        /// Creates a network-backed backup backend.
+    ///
+    /// @param storageExportScratchSpacePath local scratch directory
+    /// @param backupProxyHttpClient         remote backup client
+    /// @return network backup backend
     static NetworkArchiveBackupBackend New(
             final Path storageExportScratchSpacePath,
             final BackupProxyHttpClient backupProxyHttpClient
@@ -48,7 +44,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
         return new Default(notNull(storageExportScratchSpacePath), notNull(backupProxyHttpClient));
     }
 
-    /** Implements backup export, upload, download, and cleanup. */
+        /// Implements backup export, upload, download, and cleanup.
     final class Default implements NetworkArchiveBackupBackend {
         private static final Logger LOG = LoggerFactory.getLogger(NetworkArchiveBackupBackend.class);
         private static final String USER_UPLOADED_STORAGE_S3_KEY = BackupFileNames.USER_UPLOADED_STORAGE + ".tar.xz";
@@ -109,7 +105,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                     result.add(this.parseMetadata(metadata));
                 } catch (final IllegalArgumentException failure) {
                     throw new NodelibraryException(
-                            "Failed to parse backup metadata for remote key " + metadata.name(), failure);
+                            "Failed to parse backup metadata for remote key %s".formatted(metadata.name()), failure);
                 }
             }
             result.sort(Comparator.comparingLong(BackupMetadata::timestamp));
@@ -122,13 +118,21 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
             }
             final String name = metadata.name();
             final Matcher matcher = BACKUP_NAME.matcher(name);
-            if (!matcher.matches()) throw new IllegalArgumentException("Invalid remote backup name: " + name);
+            if (!matcher.matches()) throw new IllegalArgumentException("Invalid remote backup name: %s".formatted(name));
             return new BackupMetadata(
                     Long.parseLong(matcher.group(1)),
                     matcher.group(2) != null
             );
         }
 
+        /// Reads the replication cursor stored in an earlier backup's manifest.
+        ///
+        /// The manifest is downloaded into a scratch directory that is always
+        /// cleaned afterwards — a failed cleanup only warns, since the cursor
+        /// was already decoded. No backup means no cursor, not an error.
+        ///
+        /// @param skip how many recent backups to skip
+        /// @return decoded cursor, or empty when there is no earlier backup
         @Override
         public Optional<ReplicationCursor> getCursorFromPreviousBackup(final int skip) throws NodelibraryException {
             LOG.trace("Getting backup metadata info of latest-{}", skip);
@@ -148,7 +152,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                 this.http.download(archiveFileName, archiveFilePath);
                 manifestContent = this.readManifest(archiveFilePath);
             } catch (final IOException failure) {
-                throw new NodelibraryException("Failed to read backup manifest from " + archiveFileName, failure);
+                throw new NodelibraryException("Failed to read backup manifest from %s".formatted(archiveFileName), failure);
             } finally {
                 try {
                     StorageFileOperations.deleteDirectory(scratchSpacePath);
@@ -160,7 +164,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
             try {
                 return Optional.of(ReplicationCursorStore.decode(manifestContent));
             } catch (final IOException failure) {
-                throw new NodelibraryException("Failed to decode backup cursor from " + archiveFileName, failure);
+                throw new NodelibraryException("Failed to decode backup cursor from %s".formatted(archiveFileName), failure);
             }
         }
 
@@ -169,6 +173,18 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
             this.http.delete(this.toArchiveFileName(backup));
         }
 
+        /// Exports a full backup into scratch space, then compresses and uploads it.
+        ///
+        /// The cursor manifest and the ready marker are written atomically
+        /// next to the export, so only complete backups are ever selectable.
+        /// The uploaded archive is the remote visibility boundary: scratch
+        /// space and the local archive file are always removed afterwards,
+        /// because leftovers would retain an entire backup between requests
+        /// and could mix files after a crash.
+        ///
+        /// @param connection live Store connection to export from
+        /// @param cursor replication boundary the backup covers
+        /// @param backup backup identity
         @Override
         public void createAndUploadBackup(
                 final StorageConnection connection,
@@ -361,7 +377,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
             }
         }
 
-        /** Extracts only archives with safe relative, non-link entries. */
+                /// Extracts only archives with safe relative, non-link entries.
         private void extractArchive(
                 final Path destination,
                 final Path archive,
@@ -384,7 +400,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                         }
                         if (!safeArchiveName(entry.getName()) || entry.isSymbolicLink() || entry.isLink() ||
                             (!entry.isDirectory() && !entry.isFile())) {
-                            throw new NodelibraryException("Backup archive contains an unsafe entry: " + entry.getName());
+                            throw new NodelibraryException("Backup archive contains an unsafe entry: %s".formatted(entry.getName()));
                         }
                         final Path target = root.resolve(entry.getName()).normalize();
                         if (!target.startsWith(root)) {
@@ -485,7 +501,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
                 for (final Path path : paths.toList()) {
                     if (Files.isSymbolicLink(path) || (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
                                                        !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))) {
-                        throw new NodelibraryException("Backup archive contains an unsupported extracted entry: " + path);
+                        throw new NodelibraryException("Backup archive contains an unsupported extracted entry: %s".formatted(path));
                     }
                 }
                 if (!Files.isDirectory(root.resolve(BackupFileNames.STORAGE), LinkOption.NOFOLLOW_LINKS)) {
@@ -503,7 +519,7 @@ public interface NetworkArchiveBackupBackend extends StorageBackupBackend {
 
 
         private String toArchiveFileName(final BackupMetadata backup) {
-            return backup.timestamp() + (backup.manualSlot() ? ".manual" : "") + ".tar.xz";
+            return "%s.tar.xz".formatted(backup.timestamp() + (backup.manualSlot() ? ".manual" : ""));
         }
 
     }

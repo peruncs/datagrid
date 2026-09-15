@@ -12,7 +12,7 @@ import java.util.concurrent.locks.LockSupport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Verifies that losing the external Archive forces a writer reseed. */
+/// Verifies that losing the external Archive forces a writer reseed.
 class ExternalArchiveCrashIT {
     private static Process launchArchive(final Path base, final int controlPort) throws IOException {
         return launchArchive(base, controlPort, false);
@@ -27,9 +27,9 @@ class ExternalArchiveCrashIT {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         return new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
-                "-Ddg.archive.base=" + base,
-                "-Ddg.archive.reseed=" + reseed,
-                "-Ddg.archive.controlChannel=aeron:udp?endpoint=localhost:" + controlPort,
+                "-Ddg.archive.base=%s".formatted(base),
+                "-Ddg.archive.reseed=%s".formatted(reseed),
+                "-Ddg.archive.controlChannel=aeron:udp?endpoint=localhost:%s".formatted(controlPort),
                 "-Ddg.archive.replayChannel=aeron:udp?endpoint=localhost:0",
                 ArchiveProcessMain.class.getName())
                 .redirectOutput(base.resolve("control/archive.log").toFile())
@@ -46,13 +46,13 @@ class ExternalArchiveCrashIT {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         return new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
-                "-Ddg.crash.base=" + base,
-                "-Ddg.crash.mode=" + mode,
-                "-Ddg.crash.barrier=" + point,
+                "-Ddg.crash.base=%s".formatted(base),
+                "-Ddg.crash.mode=%s".formatted(mode),
+                "-Ddg.crash.barrier=%s".formatted(point),
                 "-Ddg.crash.externalArchive=true",
-                "-Ddg.crash.durability=" + ReplicationDurabilityMode.ARCHIVE_FIRST,
-                "-Ddg.crash.livePort=" + livePort,
-                "-Ddg.crash.controlPort=" + controlPort,
+                "-Ddg.crash.durability=%s".formatted(ReplicationDurabilityMode.ARCHIVE_FIRST),
+                "-Ddg.crash.livePort=%s".formatted(livePort),
+                "-Ddg.crash.controlPort=%s".formatted(controlPort),
                 ProviderCrashChildMain.class.getName())
                 .redirectOutput(base.resolve("control/phase1.log").toFile())
                 .redirectErrorStream(true).start();
@@ -65,15 +65,14 @@ class ExternalArchiveCrashIT {
             if (!process.isAlive()) {
                 final boolean archiveControlFile = path.getFileName().toString().startsWith("archive-");
                 final Path log = path.getParent().resolve(archiveControlFile ? "archive.log" : "phase1.log");
-                throw new AssertionError("process exited before " + path + ": " +
-                                         (Files.exists(log) ? Files.readString(log) : "no process log"));
+                throw new AssertionError("process exited before %s: %s".formatted(path, (Files.exists(log) ? Files.readString(log) : "no process log")));
             }
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10L));
         }
-        assertTrue(Files.exists(path), "timed out waiting for " + path);
+        assertTrue(Files.exists(path), "timed out waiting for %s".formatted(path));
     }
 
-    /** Verifies archive loss during commit wait requires reseed. */
+        /// Verifies archive loss during commit wait requires reseed.
     @Test
     void archiveLossDuringCommitWaitRequiresReseed() throws Exception {
         try (DirectoryLayout layout = DirectoryLayout.create()) {
@@ -117,7 +116,7 @@ class ExternalArchiveCrashIT {
         }
     }
 
-    /** Verifies stale archive catalog is never extended silently. */
+        /// Verifies stale archive catalog is never extended silently.
     @Test
     void staleArchiveCatalogIsNeverExtendedSilently() throws Exception {
         try (DirectoryLayout layout = DirectoryLayout.create()) {
@@ -145,7 +144,7 @@ class ExternalArchiveCrashIT {
                     final String archiveOutcome = Files.exists(base.resolve("control/archive-outcome"))
                             ? Files.readString(base.resolve("control/archive-outcome")) : "";
                     assertTrue(archiveOutcome.startsWith("OUTCOME=RESEED_REQUIRED\n"),
-                            archiveOutcome + "\n" + startupFailure.getMessage());
+                            "%s\n%s".formatted(archiveOutcome, startupFailure.getMessage()));
                     return;
                 }
                 recoveredWriter = launchWriter(base, "phase2", "NONE",

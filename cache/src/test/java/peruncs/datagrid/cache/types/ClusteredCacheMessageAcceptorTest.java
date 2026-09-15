@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies the acceptor applies only newer timestamps and tolerates bad state. */
+/// Verifies the acceptor applies only newer timestamps and tolerates bad state.
 class ClusteredCacheMessageAcceptorTest {
     private static ClusteredCacheMessageAcceptor acceptor(final StubCache cache) {
         final StubCacheManager manager = new StubCacheManager();
@@ -114,7 +114,7 @@ class ClusteredCacheMessageAcceptorTest {
                         Thread.currentThread().interrupt();
                     }
                 }
-            }, "clustered-cache-acceptor-test-" + i);
+            }, "clustered-cache-acceptor-test-%s".formatted(i));
             threads[i].start();
         }
         start.countDown();
@@ -168,7 +168,7 @@ class ClusteredCacheMessageAcceptorTest {
                 "the atomic max operation must preserve the greatest local timestamp");
     }
 
-    /** Cache manager stub that only answers {@link #getCache(String)}. */
+        /// Cache manager stub that only answers [#getCache(String)].
     private static final class StubCacheManager implements org.eclipse.store.cache.types.CacheManager {
         private final Map<String, StubCache> caches = new HashMap<>();
 
@@ -249,7 +249,7 @@ class ClusteredCacheMessageAcceptorTest {
         }
     }
 
-    /** Cache stub with a working {@link #get} and {@link #putSilent}. */
+        /// Cache stub with a working [#get] and [#putSilent].
     private static final class StubCache implements org.eclipse.store.cache.types.Cache<Object, Object> {
         private final String name;
         private final Map<Object, Object> entries = new ConcurrentHashMap<>();

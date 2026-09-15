@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises the deployed reader-to-writer progress stream without reflection. */
+/// Exercises the deployed reader-to-writer progress stream without reflection.
 class AeronWatermarkChannelTest {
     private static byte[] watermarkBytes() {
         final byte[] bytes = new byte[116];

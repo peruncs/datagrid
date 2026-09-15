@@ -1,21 +1,17 @@
 package peruncs.datagrid.cluster.storage.aeron.wire;
 
 import org.agrona.concurrent.UnsafeBuffer;
-import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
 import java.util.UUID;
 
-/**
- * Reproducible, dependency-free benchmark for the Aeron envelope staging path.
- *
- * <p>Run from the module test class path with
- * {@code java ... AeronEnvelopeBenchmark --iterations=5000 --sizes=65536,1048576
- * --chunk-size=16384}. The output reports chunk count, throughput, bytes copied,
- * and (when the JVM exposes it) bytes allocated by the benchmark thread. Archive
- * offers and forced checkpoint writes remain a separate environment benchmark.</p>
- */
+/// Reproducible, dependency-free benchmark for the Aeron envelope staging path.
+///
+/// Run from the module test class path with
+/// `java ... AeronEnvelopeBenchmark --iterations=5000 --sizes=65536,1048576 --chunk-size=16384`. The output reports chunk count, throughput, bytes copied,
+/// and (when the JVM exposes it) bytes allocated by the benchmark thread. Archive
+/// offers and forced checkpoint writes remain a separate environment benchmark.
 public final class AeronEnvelopeBenchmark {
     private AeronEnvelopeBenchmark() {
     }
@@ -40,15 +36,14 @@ public final class AeronEnvelopeBenchmark {
             if (payloadLength <= 0) throw new IllegalArgumentException("size must be positive");
             final BenchmarkResult result = measure(clusterId, 1, payloadLength, chunkSize, warmup, iterations);
             System.out.printf(
-                    "payload=%d chunks=%d chunkSize=%d iterations=%d ns/tx=%.1f MiB/s=%.1f " +
-                    "copiedBytes/tx=%d allocatedBytes/tx=%s%n",
+                    "payload=%d chunks=%d chunkSize=%d iterations=%d ns/tx=%.1f MiB/s=%.1f copiedBytes/tx=%d allocatedBytes/tx=%s%n",
                     payloadLength, result.chunkCount(), chunkSize, iterations, result.nanosecondsPerTransaction(),
                     result.mebibytesPerSecond(), result.copiedBytesPerTransaction(),
                     result.allocatedBytesPerTransaction() < 0 ? "unavailable" : Long.toString(result.allocatedBytesPerTransaction()));
         }
     }
 
-    /** Measures one payload size using the same per-chunk framing as the writer. */
+        /// Measures one payload size using the same per-chunk framing as the writer.
     static BenchmarkResult measure(
             final UUID clusterId,
             final long epoch,

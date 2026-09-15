@@ -9,16 +9,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
-/** Shared polling and shutdown rules for the Aeron readers. */
+/// Shared polling and shutdown rules for the Aeron readers.
 final class AeronReaderLifecycle {
     private AeronReaderLifecycle() {
     }
 
-    /**
-     * Runs the subscription duty cycle used by both readers. Keeping idle and
-     * stop-at-tail handling here prevents the test reader and the production
-     * reader from acquiring different lifecycle semantics.
-     */
+        /// Runs the subscription duty cycle used by both readers. Keeping idle and
+    /// stop-at-tail handling here prevents the test reader and the production
+    /// reader from acquiring different lifecycle semantics.
     static void runPollingLoop(
             final AtomicBoolean active,
             final BooleanSupplier stopPolling,
@@ -58,16 +56,14 @@ final class AeronReaderLifecycle {
         }
     }
 
-    /**
-     * Stops polling, waits up to five seconds for a different polling thread, and
-     * closes the subscription only after that thread has exited. On timeout the
-     * subscription remains open so the caller can retry without a use-after-close.
-     *
-     * @param active            reader running flag
-     * @param thread            reader polling thread, or {@code null}
-     * @param stopped           latch released by the polling thread on exit
-     * @param closeSubscription callback that closes the reader subscription
-     */
+        /// Stops polling, waits up to five seconds for a different polling thread, and
+    /// closes the subscription only after that thread has exited. On timeout the
+    /// subscription remains open so the caller can retry without a use-after-close.
+    ///
+    /// @param active            reader running flag
+    /// @param thread            reader polling thread, or `null`
+    /// @param stopped           latch released by the polling thread on exit
+    /// @param closeSubscription callback that closes the reader subscription
     static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,
@@ -78,10 +74,8 @@ final class AeronReaderLifecycle {
                 java.util.concurrent.TimeUnit.SECONDS.toNanos(5L));
     }
 
-    /**
-     * Variant with an explicit wait budget used by deterministic lifecycle tests.
-     * Production callers should use the five-second overload above.
-     */
+        /// Variant with an explicit wait budget used by deterministic lifecycle tests.
+    /// Production callers should use the five-second overload above.
     static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,

@@ -8,7 +8,7 @@ import javax.cache.event.EventType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Verifies the timestamp message validation shared by every transport sender. */
+/// Verifies the timestamp message validation shared by every transport sender.
 class TimestampsRegionUpdateMessageTest {
     @Test
     void validMessageIsAccepted() {

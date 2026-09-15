@@ -16,7 +16,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Set;
 import java.util.UUID;
 
-/** Atomic cursor file used by lifecycle implementations. */
+/// Atomic cursor file used by lifecycle implementations.
 public final class ReplicationCursorStore {
     private static final int MAGIC = 0x44474352; // DGCR
     private static final short VERSION = 1;
@@ -37,26 +37,22 @@ public final class ReplicationCursorStore {
     private ReplicationCursorStore() {
     }
 
-    /**
-     * Writes a CRC-protected cursor using a forced temporary file and replace.
-     *
-     * @param path   cursor path
-     * @param cursor cursor to store
-     * @throws IOException if the cursor cannot be stored
-     */
+        /// Writes a CRC-protected cursor using a forced temporary file and replace.
+    ///
+    /// @param path   cursor path
+    /// @param cursor cursor to store
+    /// @throws IOException if the cursor cannot be stored
     public static void write(final Path path, final ReplicationCursor cursor) throws IOException {
         final ByteBuffer encoded = ByteBuffer.wrap(encode(cursor));
         AtomicFileStore.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[]{encoded}),
                 AtomicFileStore.PHASE_CURSOR);
     }
 
-    /**
-     * Reads and validates a persisted cursor, rejecting truncation and bit-rot.
-     *
-     * @param path cursor path
-     * @return stored cursor
-     * @throws IOException if the cursor is missing or invalid
-     */
+        /// Reads and validates a persisted cursor, rejecting truncation and bit-rot.
+    ///
+    /// @param path cursor path
+    /// @return stored cursor
+    /// @throws IOException if the cursor is missing or invalid
     public static ReplicationCursor read(final Path path) throws IOException {
         try (SeekableByteChannel channel = Files.newByteChannel(path,
                 Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
@@ -72,7 +68,11 @@ public final class ReplicationCursorStore {
         }
     }
 
-    /** Encodes the cursor format used both by cursor files and backup manifests. */
+        /// Encodes the cursor format used both by cursor files and backup manifests.
+    ///
+    /// @param cursor cursor to encode
+    /// @return encoded bytes with trailing CRC
+    /// @throws IOException if the cursor does not fit the format limits
     public static byte[] encode(final ReplicationCursor cursor) throws IOException {
         final byte[] transport = cursor.transport().getBytes(StandardCharsets.UTF_8);
         if (transport.length > MAX_TRANSPORT_BYTES) throw new IOException("transport name is too long");
@@ -91,7 +91,11 @@ public final class ReplicationCursorStore {
         return encoded.array();
     }
 
-    /** Decodes and validates a cursor file or backup manifest. */
+        /// Decodes and validates a cursor file or backup manifest.
+    ///
+    /// @param bytes encoded cursor with trailing CRC
+    /// @return decoded cursor
+    /// @throws IOException if the bytes are truncated, corrupt, or malformed
     public static ReplicationCursor decode(final byte[] bytes) throws IOException {
         if (bytes.length < FIXED_BYTES) {
             throw new IOException("truncated replication cursor");

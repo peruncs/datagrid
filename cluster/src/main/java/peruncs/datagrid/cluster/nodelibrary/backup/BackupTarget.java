@@ -1,20 +1,18 @@
 package peruncs.datagrid.cluster.nodelibrary.backup;
 
 
-/** Identifies the local or remote place from which a backup is served. */
+/// Identifies the local or remote place from which a backup is served.
 public enum BackupTarget {
-    /** Backup served by the hosted service. */
+        /// Backup served by the hosted service.
     SAAS,
-    /** Backup served by the local installation. */
+        /// Backup served by the local installation.
     ONPREM;
 
-    /**
-     * Tries to parse the string into the appropriate backup target. If it fails
-     * {@code null} is returned.
-     *
-     * @param s target name
-     * @return parsed target, or {@code null}
-     */
+        /// Tries to parse the string into the appropriate backup target. If it fails
+    /// `null` is returned.
+    ///
+    /// @param s target name
+    /// @return parsed target, or `null`
     public static BackupTarget parse(final String s) {
         if (s == null) {
             return null;

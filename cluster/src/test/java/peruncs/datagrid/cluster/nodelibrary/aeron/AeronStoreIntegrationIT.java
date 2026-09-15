@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises the Aeron target with a real four-channel Embedded Store across a restart. */
+/// Exercises the Aeron target with a real four-channel Embedded Store across a restart.
 class AeronStoreIntegrationIT {
     private static ReplicationCursor latest(final ClusterReplicationTransport transport) throws Exception {
         final ReplicationPositionProvider positionProvider = transport.positionProvider("store");
@@ -127,7 +127,7 @@ class AeronStoreIntegrationIT {
                 }
                 if (client.failure() != null) throw client.failure();
                 assertEquals(target.logicalSequence(), client.cursor().logicalSequence(),
-                        role + " did not reach the writer boundary");
+                        "%s did not reach the writer boundary".formatted(role));
                 acceptor.awaitApplied();
                 client.stopAtLatestMessage();
                 final long stopDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
@@ -135,23 +135,23 @@ class AeronStoreIntegrationIT {
                     java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
                 }
                 assertEquals(StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY,
-                        client.stopOutcome(), role + " did not stop at a resolved transaction boundary");
+                        client.stopOutcome(), "%s did not stop at a resolved transaction boundary".formatted(role));
             } finally {
                 client.dispose();
                 acceptor.dispose();
                 reader.shutdown();
             }
             assertEquals(target.logicalSequence(), cursorManager.get().logicalSequence(),
-                    role + " did not persist its atomic cursor");
+                    "%s did not persist its atomic cursor".formatted(role));
         }
 
         final EmbeddedStorageManager restarted = foundation(storePath).start();
         try {
             final Root imported = restarted.root();
-            assertTrue(imported.values.contains(expectedValue), role + " Store missed " + expectedValue);
+            assertTrue(imported.values.contains(expectedValue), "%s Store missed %s".formatted(role, expectedValue));
             if (expectDictionary) {
                 assertEquals("dictionary-update", imported.objects.get(0).value,
-                        role + " did not materialize the newly introduced type");
+                        "%s did not materialize the newly introduced type".formatted(role));
             }
         } finally {
             restarted.shutdown();
@@ -165,7 +165,7 @@ class AeronStoreIntegrationIT {
         {
             if (title.equals(article.title) && body.equals(article.body)) found.set(true);
         });
-        assertTrue(found.get(), "reader Store graph missed " + title);
+        assertTrue(found.get(), "reader Store graph missed %s".formatted(title));
     }
 
     private static void assertGraphMissing(final ReaderNode reader, final String title) {
@@ -174,24 +174,24 @@ class AeronStoreIntegrationIT {
         imported.articles.iterate(article -> {
             if (title.equals(article.title)) found.set(true);
         });
-        assertFalse(found.get(), "reader Store graph retained deleted " + title);
+        assertFalse(found.get(), "reader Store graph retained deleted %s".formatted(title));
     }
 
     private static void assertIndexState(
             final IndexRoot imported, final String title, final String body, final float[] vector) {
         assertNotNull(imported.articles, "reader Store root lost its indexed GigaMap");
         final LuceneIndex<IndexedArticle> text = luceneIndex(imported.articles);
-        assertEquals(1, text.query("body:" + body).size(),
-                "reader Lucene index missed " + body + " (articles=" + imported.articles.size() + ")");
+        assertEquals(1, text.query("body:%s".formatted(body)).size(),
+                "reader Lucene index missed %s (articles=%s)".formatted(body, imported.articles.size()));
         final VectorIndices<IndexedArticle> vectors = imported.articles.index().get(VectorIndices.Category());
         final VectorSearchResult<IndexedArticle> nearest = vectors.get("articles").search(vector, 1);
-        assertEquals(1, nearest.size(), "reader JVector index missed " + body);
+        assertEquals(1, nearest.size(), "reader JVector index missed %s".formatted(body));
         assertEquals(title, nearest.toList().get(0).entity().title);
     }
 
     private static void assertIndexMissing(final IndexRoot imported, final String title) {
         final LuceneIndex<IndexedArticle> text = luceneIndex(imported.articles);
-        assertEquals(0, text.query("title:" + title).size(), "reader Lucene index retained deleted " + title);
+        assertEquals(0, text.query("title:%s".formatted(title)).size(), "reader Lucene index retained deleted %s".formatted(title));
     }
 
     private static String forkStoreChild(
@@ -201,18 +201,18 @@ class AeronStoreIntegrationIT {
         final String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
         final Process child = new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", classpath,
-                "-Ddg.aeron.store.root=" + root,
-                "-Ddg.aeron.store.cluster=" + clusterId,
-                "-Ddg.aeron.store.node=" + nodeId,
-                "-Ddg.aeron.store.generation=" + generation,
+                "-Ddg.aeron.store.root=%s".formatted(root),
+                "-Ddg.aeron.store.cluster=%s".formatted(clusterId),
+                "-Ddg.aeron.store.node=%s".formatted(nodeId),
+                "-Ddg.aeron.store.generation=%s".formatted(generation),
                 AeronStoreProcessChildMain.class.getName(), mode)
                 .redirectErrorStream(true).start();
         if (!child.waitFor(60, TimeUnit.SECONDS)) {
             child.destroyForcibly();
-            throw new AssertionError("Store process child timed out: " + mode);
+            throw new AssertionError("Store process child timed out: %s".formatted(mode));
         }
         final String output = new String(child.getInputStream().readAllBytes());
-        assertEquals(0, child.exitValue(), mode + " child failed: " + output);
+        assertEquals(0, child.exitValue(), "%s child failed: %s".formatted(mode, output));
         return Files.readString(root.resolve("control").resolve(mode));
     }
 
@@ -223,7 +223,7 @@ class AeronStoreIntegrationIT {
     private static int dictionaryCount(final String marker) {
         final String prefix = "dictionaries=";
         final int start = marker.indexOf(prefix);
-        if (start < 0) throw new AssertionError("child did not report dictionary publications: " + marker);
+        if (start < 0) throw new AssertionError("child did not report dictionary publications: %s".formatted(marker));
         final int end = marker.indexOf(';', start + prefix.length());
         return Integer.parseInt(marker.substring(start + prefix.length(), end < 0 ? marker.length() : end).trim());
     }
@@ -316,14 +316,12 @@ class AeronStoreIntegrationIT {
                     case "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE" -> "4096";
                     case "ECLIPSE_DATAGRID_AERON_EXTERNAL_ARCHIVE" -> Boolean.toString(!"writer".equals(role));
                     case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> "writer".equals(role)
-                            ? "aeron:udp?control=localhost:" + livePort +
-                              "|control-mode=dynamic|fc=max|alias=datagrid-" + clusterId
-                            : "aeron:udp?endpoint=localhost:0|control=localhost:" + livePort +
-                              "|control-mode=dynamic|alias=datagrid-" + clusterId;
-                    case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:" + controlPort;
+                            ? "aeron:udp?control=localhost:%s|control-mode=dynamic|fc=max|alias=datagrid-%s".formatted(livePort, clusterId)
+                            : "aeron:udp?endpoint=localhost:0|control=localhost:%s|control-mode=dynamic|alias=datagrid-%s".formatted(livePort, clusterId);
+                    case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
                     case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
                          "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
-                    case "ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL" -> "aeron:udp?endpoint=localhost:" + watermarkPort;
+                    case "ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(watermarkPort);
                     case "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET" -> retentionSecret;
                     case "ECLIPSE_DATAGRID_AERON_RETENTION_READERS" -> retentionReaders.stream()
                             .sorted().map(UUID::toString).collect(java.util.stream.Collectors.joining(","));
@@ -499,7 +497,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
-    /** Verifies one writer broadcasts the same Store transaction to two live reader nodes. */
+        /// Verifies one writer broadcasts the same Store transaction to two live reader nodes.
     @Test
     void oneWriterBroadcastsToConcurrentOrdinaryAndBackupReaders() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-concurrent-readers-");
@@ -570,13 +568,11 @@ class AeronStoreIntegrationIT {
         }
     }
 
-    /**
-     * Exercises the production-shaped topology: one writer, three independent
-     * readers, four Store channels, and indexes that are rebuilt from the
-     * replicated object graph.  One reader is stopped and restarted from its
-     * durable cursor while the other two continue consuming, which makes a
-     * reader lifecycle race visible instead of testing only a happy-path replay.
-     */
+        /// Exercises the production-shaped topology: one writer, three independent
+    /// readers, four Store channels, and indexes that are rebuilt from the
+    /// replicated object graph.  One reader is stopped and restarted from its
+    /// durable cursor while the other two continue consuming, which makes a
+    /// reader lifecycle race visible instead of testing only a happy-path replay.
     @Test
     @Timeout(value = 90, unit = TimeUnit.SECONDS)
     void oneWriterReplicatesRealStoreIndexesToThreeReadersAcrossRestart() throws Exception {
@@ -606,7 +602,7 @@ class AeronStoreIntegrationIT {
             configureIndexes(initial.articles);
             for (int i = 0; i < 32; i++) {
                 initial.articles.add(new IndexedArticle(
-                        "seed-" + i, "seed-vector-" + i, new float[]{i + 1.0f, 1.0f, 0.0f}));
+                        "seed-%s".formatted(i), "seed-vector-%s".formatted(i), new float[]{i + 1.0f, 1.0f, 0.0f}));
             }
             final long mutableId = initial.articles.add(
                     new IndexedArticle("mutable-seed", "mutable-old", new float[]{0.0f, 1.0f, 1.0f}));
@@ -648,8 +644,8 @@ class AeronStoreIntegrationIT {
 
                 final IndexRoot writerRoot = (IndexRoot) writer.root();
                 for (int update = 0; update < convergenceNanos.length; update++) {
-                    final String suffix = "reader-broadcast-" + update;
-                    final String body = "readerbroadcast" + update;
+                    final String suffix = "reader-broadcast-%s".formatted(update);
+                    final String body = "readerbroadcast%s".formatted(update);
                     final float[] vector = new float[]{update + 1.0f, 0.0f, 1.0f};
                     writerRoot.articles.add(new IndexedArticle(suffix, body, vector));
                     if (update == 2) {
@@ -731,7 +727,7 @@ class AeronStoreIntegrationIT {
         try {
             final Root value = new Root();
             value.values.addAll(List.of("one", "two", "three", "four"));
-            for (int i = 0; i < 512; i++) value.objects.add(new NewType("channel-object-" + i));
+            for (int i = 0; i < 512; i++) value.objects.add(new NewType("channel-object-%s".formatted(i)));
             final AtomicBoolean sawFourChannels = new AtomicBoolean();
             long firstSequence;
             try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(properties)) {
@@ -758,7 +754,7 @@ class AeronStoreIntegrationIT {
                     /* A handful of objects can all hash to channel zero.  Store many
                      * independent entities in one commit to force the configured
                      * four-channel storer to emit every channel in that transaction. */
-                    for (final NewType object : value.objects) object.value = object.value + "-updated";
+                    for (final NewType object : value.objects) object.value = "%s-updated".formatted(object.value);
                     manager.storeAll(value.objects);
                 } finally {
                     manager.shutdown();
@@ -850,7 +846,7 @@ class AeronStoreIntegrationIT {
             final String dictionary = forkStoreChild(root, clusterId, nodeId, generation, "dictionary");
             assertTrue(sequence(dictionary) > sequence(restart), dictionary);
             assertTrue(dictionaryCount(dictionary) >= 2,
-                    "a rejected real-Store write must resend its dictionary on retry: " + dictionary);
+                    "a rejected real-Store write must resend its dictionary on retry: %s".formatted(dictionary));
         } finally {
             delete(root);
         }

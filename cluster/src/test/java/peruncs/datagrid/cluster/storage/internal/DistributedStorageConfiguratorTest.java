@@ -5,12 +5,11 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.internal.DistributedStorageConfigurator;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
-/** Verifies that one Store object implementing both extension SPIs keeps both contracts. */
+/// Verifies that one Store object implementing both extension SPIs keeps both contracts.
 class DistributedStorageConfiguratorTest {
     @Test
     void preservesTargetAndDictionaryExporterContracts() {

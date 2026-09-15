@@ -16,11 +16,9 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Small, latest-value Aeron control stream carrying durable reader progress to
- * the writer. Missing or superseded messages are safe: retention requires the
- * latest watermark from every active reader and watermarks are monotonic.
- */
+/// Small, latest-value Aeron control stream carrying durable reader progress to
+/// the writer. Missing or superseded messages are safe: retention requires the
+/// latest watermark from every active reader and watermarks are monotonic.
 final class AeronWatermarkChannel implements AutoCloseable {
     private final Receiver receiver;
     private final long closeTimeoutNanos;
@@ -113,16 +111,13 @@ final class AeronWatermarkChannel implements AutoCloseable {
         return current;
     }
 
-    /**
-     * Copies an encoded watermark into channel-owned storage, replacing an older
-     * unsent value with the latest durable progress. The caller may reuse or
-     * mutate its array as soon as this method returns.
-     */
+        /// Copies an encoded watermark into channel-owned storage, replacing an older
+    /// unsent value with the latest durable progress. The caller may reuse or
+    /// mutate its array as soon as this method returns.
     synchronized void publish(final byte[] encoded) {
         if (encoded == null) throw new NullPointerException("encoded");
         if (encoded.length != AeronAuthenticatedWatermark.ENCODED_LENGTH)
-            throw new IllegalArgumentException("Aeron watermark encoding must contain exactly " +
-                                               AeronAuthenticatedWatermark.ENCODED_LENGTH + " bytes");
+            throw new IllegalArgumentException("Aeron watermark encoding must contain exactly %s bytes".formatted(AeronAuthenticatedWatermark.ENCODED_LENGTH));
         final RuntimeException terminal = this.failure.get();
         if (terminal != null) throw new IllegalStateException("Aeron watermark channel failed", terminal);
         if (!this.running.get() || this.closing)
@@ -139,7 +134,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         System.arraycopy(encoded, 0, this.pending, 0, encoded.length);
     }
 
-    /** Encodes the latest watermark into a channel-owned hand-off buffer. */
+        /// Encodes the latest watermark into a channel-owned hand-off buffer.
     synchronized void publishEncoded(
             final UUID readerId, final UUID clusterId, final UUID storeGeneration,
             final long writerEpoch, final long recordingId, final long sequence,
@@ -211,9 +206,9 @@ final class AeronWatermarkChannel implements AutoCloseable {
                             }
                         } else if (result == Publication.CLOSED || result == Publication.MAX_POSITION_EXCEEDED) {
                             throw new IllegalStateException(
-                                    "Aeron watermark publication became terminal: " + result);
+                                    "Aeron watermark publication became terminal: %s".formatted(result));
                         } else {
-                            throw new IllegalStateException("unknown Aeron watermark offer result: " + result);
+                            throw new IllegalStateException("unknown Aeron watermark offer result: %s".formatted(result));
                         }
                     }
                 }
@@ -230,6 +225,13 @@ final class AeronWatermarkChannel implements AutoCloseable {
         }
     }
 
+    /// Shuts the watermark worker down, flushing the last durable position first.
+    ///
+    /// A bounded wait lets a pending watermark publish; if it cannot flush,
+    /// closing fails instead of silently dropping the reader's final
+    /// boundary. An interrupted or timed-out close resets so it can be
+    /// retried, and in-flight values left behind fail the close rather than
+    /// vanishing.
     @Override
     public void close() {
         final RuntimeException initialFailure;
@@ -346,7 +348,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         }
     }
 
-    /** Returns whether the worker and both Aeron endpoints have been closed. */
+        /// Returns whether the worker and both Aeron endpoints have been closed.
     synchronized boolean isClosed() {
         return this.closed;
     }

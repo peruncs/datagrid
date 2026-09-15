@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Smoke-tests the reproducible end-to-end allocation benchmark without machine-dependent limits. */
+/// Smoke-tests the reproducible end-to-end allocation benchmark without machine-dependent limits.
 class AeronEndToEndBenchmarkTest {
     @Test
     void assemblesEveryByteAndReportsThroughput() {

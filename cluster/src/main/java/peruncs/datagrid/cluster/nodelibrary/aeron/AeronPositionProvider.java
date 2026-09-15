@@ -12,17 +12,15 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
-/**
- * Cached Aeron writer-boundary view. A reader's applied cursor is deliberately
- * not exposed as the latest log position because it cannot prove the writer's
- * durable boundary without a control channel.
- *
- * <p>Callers must invoke {@link #init()} before querying a writer. Initialization
- * establishes the writer-side runtime; {@link #latest()} only reads the
- * already-published boundary and never starts transport resources implicitly.
- * Readers remain unavailable because they cannot establish a writer boundary
- * locally.</p>
- */
+/// Cached Aeron writer-boundary view. A reader's applied cursor is deliberately
+/// not exposed as the latest log position because it cannot prove the writer's
+/// durable boundary without a control channel.
+///
+/// Callers must invoke [#init()] before querying a writer. Initialization
+/// establishes the writer-side runtime; [#latest()] only reads the
+/// already-published boundary and never starts transport resources implicitly.
+/// Readers remain unavailable because they cannot establish a writer boundary
+/// locally.
 final class AeronPositionProvider implements ReplicationPositionProvider {
     private final BooleanSupplier writer;
     private final BooleanSupplier initialized;

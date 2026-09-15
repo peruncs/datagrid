@@ -15,14 +15,14 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Direct validation tests for configuration combinations that must fail before runtime startup. */
+/// Direct validation tests for configuration combinations that must fail before runtime startup.
 class AeronSettingsTest {
     private static NodelibraryPropertiesProvider properties(final Map<String, String> overrides) {
         return properties(overrides, false);
     }
 
     private static NodelibraryPropertiesProvider properties(final Map<String, String> overrides, final boolean production) {
-        final Path root = Path.of(System.getProperty("java.io.tmpdir"), "aeron-settings-" + UUID.randomUUID());
+        final Path root = Path.of(System.getProperty("java.io.tmpdir"), "aeron-settings-%s".formatted(UUID.randomUUID()));
         final UUID cluster = UUID.randomUUID();
         final UUID node = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
@@ -129,7 +129,7 @@ class AeronSettingsTest {
     void rejectsDuplicateRetentionReaders() {
         final String reader = UUID.randomUUID().toString();
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", reader + "," + reader
+                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", "%s,%s".formatted(reader, reader)
         ))));
     }
 

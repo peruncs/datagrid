@@ -10,7 +10,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies the fixed clustered-cache frame format and its bounds checks. */
+/// Verifies the fixed clustered-cache frame format and its bounds checks.
 class AeronClusteredCacheMessageCodecTest {
     private static final byte[] SENDER_ID = uuidBytes(UUID.fromString("12345678-1234-1234-1234-123456789abc"));
 

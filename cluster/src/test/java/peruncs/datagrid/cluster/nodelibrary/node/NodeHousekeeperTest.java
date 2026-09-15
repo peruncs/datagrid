@@ -13,7 +13,7 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies housekeeper tasks, scheduling rules and lifecycle. */
+/// Verifies housekeeper tasks, scheduling rules and lifecycle.
 class NodeHousekeeperTest {
     private static void awaitCondition(
             final BooleanSupplier condition,
@@ -29,7 +29,7 @@ class NodeHousekeeperTest {
         }
     }
 
-    /** The backup task delegates to the automatic slot when idle. */
+        /// The backup task delegates to the automatic slot when idle.
     @Test
     void backupWorkRunsBackupWhenIdle() {
         final BackupFake backups = new BackupFake();
@@ -41,7 +41,7 @@ class NodeHousekeeperTest {
         assertFalse(backups.manualSlot.get());
     }
 
-    /** A backup while another one runs is skipped instead of queued. */
+        /// A backup while another one runs is skipped instead of queued.
     @Test
     void backupWorkSkipsWhenBusy() {
         final BackupFake backups = new BackupFake();
@@ -53,7 +53,7 @@ class NodeHousekeeperTest {
         assertEquals(1, backups.backupRequests.get());
     }
 
-    /** A busy rejection without a running backup surfaces the failure. */
+        /// A busy rejection without a running backup surfaces the failure.
     @Test
     void backupWorkRethrowsWhenNothingIsRunning() {
         final BackupFake backups = new BackupFake();
@@ -63,7 +63,7 @@ class NodeHousekeeperTest {
         assertThrows(IllegalStateException.class, task::run);
     }
 
-    /** The limit task records measurements in the gate. */
+        /// The limit task records measurements in the gate.
     @Test
     void limitCheckWorkUpdatesGate() {
         final AtomicLong usedBytes = new AtomicLong(10_000_000_000L);
@@ -82,7 +82,7 @@ class NodeHousekeeperTest {
         assertFalse(gate.limitReached());
     }
 
-    /** Invalid registrations are rejected before anything runs. */
+        /// Invalid registrations are rejected before anything runs.
     @Test
     void rejectsInvalidSchedule() {
         try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
@@ -113,7 +113,7 @@ class NodeHousekeeperTest {
         }
     }
 
-    /** Registration ends once the housekeeper has started. */
+        /// Registration ends once the housekeeper has started.
     @Test
     void rejectsScheduleAfterStart() {
         try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
@@ -130,7 +130,7 @@ class NodeHousekeeperTest {
         }
     }
 
-    /** Tasks fire repeatedly and stop after close. */
+        /// Tasks fire repeatedly and stop after close.
     @Test
     void firesPeriodicallyAndStopsOnClose() throws InterruptedException {
         final AtomicInteger runs = new AtomicInteger();
@@ -149,7 +149,7 @@ class NodeHousekeeperTest {
         housekeeper.close();
     }
 
-    /** A failing task is logged while the remaining tasks keep running. */
+        /// A failing task is logged while the remaining tasks keep running.
     @Test
     void failingTaskDoesNotStopOthers() throws InterruptedException {
         final AtomicInteger runs = new AtomicInteger();
@@ -165,7 +165,7 @@ class NodeHousekeeperTest {
         }
     }
 
-    /** A slow run postpones its own next run instead of overlapping it. */
+        /// A slow run postpones its own next run instead of overlapping it.
     @Test
     void slowRunDoesNotOverlapItself() throws InterruptedException {
         final AtomicInteger concurrent = new AtomicInteger();
@@ -191,7 +191,7 @@ class NodeHousekeeperTest {
         assertEquals(1, maxConcurrent.get());
     }
 
-    /** Controllable backup executor double. */
+        /// Controllable backup executor double.
     private static final class BackupFake implements StorageBackupTaskExecutor {
         private final AtomicInteger backupRequests = new AtomicInteger();
         private final AtomicBoolean manualSlot = new AtomicBoolean(true);

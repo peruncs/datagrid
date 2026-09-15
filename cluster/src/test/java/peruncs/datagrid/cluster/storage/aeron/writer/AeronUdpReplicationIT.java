@@ -11,9 +11,6 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationPublisher;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryTargetDistributing;
 import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeron;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
@@ -25,7 +22,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Verifies live UDP delivery, reconnect, and multi-buffer transactions. */
+/// Verifies live UDP delivery, reconnect, and multi-buffer transactions.
 class AeronUdpReplicationIT {
     private static int freePort() throws Exception {
         try (ServerSocket socket = new ServerSocket(0)) {
@@ -43,7 +40,7 @@ class AeronUdpReplicationIT {
         }
     }
 
-    /** Verifies fragments large transaction and delivers after commit. */
+        /// Verifies fragments large transaction and delivers after commit.
     @Test
     void fragmentsLargeTransactionAndDeliversAfterCommit() throws Exception {
         final int port = freePort();
@@ -54,7 +51,7 @@ class AeronUdpReplicationIT {
                 .maxTransactionBytes(256 * 1024)
                 .offerTimeoutNanos(10_000_000_000L)
                 .build();
-        final String channel = "aeron:udp?endpoint=localhost:" + port + "|term-length=1048576|mtu=1024";
+        final String channel = "aeron:udp?endpoint=localhost:%s|term-length=1048576|mtu=1024".formatted(port);
         final UUID clusterId = UUID.randomUUID();
         final RecordingReceiver receiver = new RecordingReceiver();
 
@@ -115,7 +112,7 @@ class AeronUdpReplicationIT {
         }
     }
 
-    /** Verifies local enqueue failure publishes abort and reader does not apply. */
+        /// Verifies local enqueue failure publishes abort and reader does not apply.
     @Test
     void localEnqueueFailurePublishesAbortAndReaderDoesNotApply() throws Exception {
         final int port = freePort();
@@ -126,7 +123,7 @@ class AeronUdpReplicationIT {
                 .maxTransactionBytes(64 * 1024)
                 .offerTimeoutNanos(10_000_000_000L)
                 .build();
-        final String channel = "aeron:udp?endpoint=localhost:" + port + "|term-length=1048576|mtu=1024";
+        final String channel = "aeron:udp?endpoint=localhost:%s|term-length=1048576|mtu=1024".formatted(port);
         final UUID clusterId = UUID.randomUUID();
         final RecordingReceiver receiver = new RecordingReceiver();
 
@@ -165,17 +162,15 @@ class AeronUdpReplicationIT {
         }
     }
 
-    /** Verifies dynamic MDC uses max flow control and reconnects. */
+        /// Verifies dynamic MDC uses max flow control and reconnects.
     @Test
     void dynamicMdcUsesMaxFlowControlAndReconnects() throws Exception {
         final int controlPort = freePort();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(1024 * 1024).mtuLength(1024).chunkSize(16 * 1024).maxTransactionBytes(128 * 1024)
                 .offerTimeoutNanos(10_000_000_000L).build();
-        final String publicationChannel = "aeron:udp?control=localhost:" + controlPort +
-                                          "|control-mode=dynamic|fc=max|term-length=1048576|mtu=1024";
-        final String subscriptionChannel = "aeron:udp?control=localhost:" + controlPort +
-                                           "|control-mode=dynamic|fc=max|term-length=1048576|mtu=1024";
+        final String publicationChannel = "aeron:udp?control=localhost:%s|control-mode=dynamic|fc=max|term-length=1048576|mtu=1024".formatted(controlPort);
+        final String subscriptionChannel = "aeron:udp?control=localhost:%s|control-mode=dynamic|fc=max|term-length=1048576|mtu=1024".formatted(controlPort);
         final UUID clusterId = UUID.randomUUID();
         final RecordingReceiver receiver = new RecordingReceiver();
         try (MediaDriver driver = MediaDriver.launchEmbedded(new MediaDriver.Context()
