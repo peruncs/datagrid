@@ -22,11 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class ClusteredCacheRemoteUpdateSuppressionTest {
     @Test
     void remoteUpdateThroughRealCacheIsNotRebroadcast() {
-        final var provider = new org.eclipse.store.cache.types.CachingProvider();
-        try {
+        try (final var provider = new org.eclipse.store.cache.types.CachingProvider()) {
             final var manager = provider.getCacheManager();
             final var cache = manager.createCache("timestamps",
-                    new MutableConfiguration<Object, Object>().setTypes(Object.class, Object.class));
+                    new MutableConfiguration<>().setTypes(Object.class, Object.class));
             final var sender = AeronClusteredCacheMessageSender.New(
                     null,
                     new byte[16],
@@ -45,8 +44,6 @@ class ClusteredCacheRemoteUpdateSuppressionTest {
             assertEquals(42L, cache.get("table"));
             assertEquals(0L, sender.published(),
                     "a suppressed remote update must never reach the sender");
-        } finally {
-            provider.close();
         }
     }
 }

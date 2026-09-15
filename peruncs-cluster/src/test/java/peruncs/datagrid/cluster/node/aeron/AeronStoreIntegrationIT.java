@@ -147,7 +147,7 @@ class AeronStoreIntegrationIT {
             final Root imported = restarted.root();
             assertTrue(imported.values.contains(expectedValue), "%s Store missed %s".formatted(role, expectedValue));
             if (expectDictionary) {
-                assertEquals("dictionary-update", imported.objects.get(0).value,
+                assertEquals("dictionary-update", imported.objects.getFirst().value,
                         "%s did not materialize the newly introduced type".formatted(role));
             }
         } finally {
@@ -183,7 +183,7 @@ class AeronStoreIntegrationIT {
         final VectorIndices<IndexedArticle> vectors = imported.articles.index().get(VectorIndices.Category());
         final VectorSearchResult<IndexedArticle> nearest = vectors.get("articles").search(vector, 1);
         assertEquals(1, nearest.size(), "reader JVector index missed %s".formatted(body));
-        assertEquals(title, nearest.toList().get(0).entity().title);
+        assertEquals(title, nearest.toList().getFirst().entity().title);
     }
 
     private static void assertIndexMissing(final IndexRoot imported, final String title) {
@@ -399,7 +399,7 @@ class AeronStoreIntegrationIT {
                     final VectorSearchResult<IndexedArticle> nearest = vectors.get("articles")
                             .search(new float[]{1.0f, 0.0f, 0.0f}, 4);
                     assertEquals(1, nearest.size(), "JVector state did not follow the Aeron transaction");
-                    assertEquals("Aeron", nearest.toList().get(0).entity().title);
+                    assertEquals("Aeron", nearest.toList().getFirst().entity().title);
                 }
             } finally {
                 writer.shutdown();
@@ -542,8 +542,8 @@ class AeronStoreIntegrationIT {
                 backup.await(firstTarget);
                 assertTrue(ordinary.root().values.contains("concurrent-broadcast"));
                 assertTrue(backup.root().values.contains("concurrent-broadcast"));
-                assertEquals("concurrent-dictionary", ordinary.root().objects.get(0).value);
-                assertEquals("concurrent-dictionary", backup.root().objects.get(0).value);
+                assertEquals("concurrent-dictionary", ordinary.root().objects.getFirst().value);
+                assertEquals("concurrent-dictionary", backup.root().objects.getFirst().value);
                 assertEquals(firstTarget.logicalSequence(), ordinary.persistedCursor().logicalSequence());
                 assertEquals(firstTarget.logicalSequence(), backup.persistedCursor().logicalSequence());
 
@@ -639,7 +639,7 @@ class AeronStoreIntegrationIT {
                 }
                 for (final ReaderNode reader : readers) reader.awaitLive();
 
-                final IndexRoot writerRoot = (IndexRoot) writer.root();
+                final IndexRoot writerRoot = writer.root();
                 for (int update = 0; update < convergenceNanos.length; update++) {
                     final String suffix = "reader-broadcast-%s".formatted(update);
                     final String body = "readerbroadcast%s".formatted(update);

@@ -79,18 +79,20 @@ class AeronAuthenticatedWatermarkTest {
 
     @Test
     void validatorRejectsRollbackAndIdentityConfusion() {
-        final AeronAuthenticatedWatermark.Validator validator = new AeronAuthenticatedWatermark.Validator(SECRET);
-        validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET));
-        validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET));
-        assertThrows(IllegalStateException.class, () -> validator.accept(
-                AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 101, SECRET)));
-        validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 2, 200, SECRET));
-        assertThrows(IllegalStateException.class, () -> validator.accept(
-                AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 3, 199, SECRET)));
-        assertThrows(IllegalStateException.class, () -> validator.accept(
-                AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 99, SECRET)));
-        assertThrows(IllegalStateException.class, () -> validator.accept(
-                AeronAuthenticatedWatermark.sign(READER_ONE, UUID.randomUUID(), GENERATION, 3, 17, 3, 300, SECRET)));
+        try (final AeronAuthenticatedWatermark.Validator validator =
+                new AeronAuthenticatedWatermark.Validator(SECRET)) {
+            validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET));
+            validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET));
+            assertThrows(IllegalStateException.class, () -> validator.accept(
+                    AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 101, SECRET)));
+            validator.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 2, 200, SECRET));
+            assertThrows(IllegalStateException.class, () -> validator.accept(
+                    AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 3, 199, SECRET)));
+            assertThrows(IllegalStateException.class, () -> validator.accept(
+                    AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 99, SECRET)));
+            assertThrows(IllegalStateException.class, () -> validator.accept(
+                    AeronAuthenticatedWatermark.sign(READER_ONE, UUID.randomUUID(), GENERATION, 3, 17, 3, 300, SECRET)));
+        }
     }
 
         /// Sequence values must remain incrementable by the writer and validator.
@@ -120,18 +122,19 @@ class AeronAuthenticatedWatermarkTest {
 
     @Test
     void quorumRequiresEveryReaderAndAggregatesLeastProgress() {
-        final AeronAuthenticatedWatermark.Quorum quorum =
-                new AeronAuthenticatedWatermark.Quorum(java.util.Set.of(READER_ONE, READER_TWO), SECRET);
-        quorum.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 8, 800, SECRET));
-        assertThrows(IllegalStateException.class, quorum::aggregate);
-        assertEquals(java.util.Set.of(READER_TWO), quorum.missingReaders());
-        quorum.accept(AeronAuthenticatedWatermark.sign(READER_TWO, CLUSTER, GENERATION, 3, 17, 7, 700, SECRET));
-        final AeronAuthenticatedWatermark aggregate = quorum.aggregate();
-        assertEquals(7, aggregate.sequence());
-        assertEquals(700, aggregate.position());
-        assertTrue(quorum.missingReaders().isEmpty());
-        assertThrows(SecurityException.class, () -> quorum.accept(
-                AeronAuthenticatedWatermark.sign(UUID.randomUUID(), CLUSTER, GENERATION, 3, 17, 9, 900, SECRET)));
+        try (final AeronAuthenticatedWatermark.Quorum quorum =
+                new AeronAuthenticatedWatermark.Quorum(java.util.Set.of(READER_ONE, READER_TWO), SECRET)) {
+            quorum.accept(AeronAuthenticatedWatermark.sign(READER_ONE, CLUSTER, GENERATION, 3, 17, 8, 800, SECRET));
+            assertThrows(IllegalStateException.class, quorum::aggregate);
+            assertEquals(java.util.Set.of(READER_TWO), quorum.missingReaders());
+            quorum.accept(AeronAuthenticatedWatermark.sign(READER_TWO, CLUSTER, GENERATION, 3, 17, 7, 700, SECRET));
+            final AeronAuthenticatedWatermark aggregate = quorum.aggregate();
+            assertEquals(7, aggregate.sequence());
+            assertEquals(700, aggregate.position());
+            assertTrue(quorum.missingReaders().isEmpty());
+            assertThrows(SecurityException.class, () -> quorum.accept(
+                    AeronAuthenticatedWatermark.sign(UUID.randomUUID(), CLUSTER, GENERATION, 3, 17, 9, 900, SECRET)));
+        }
     }
 
     @Test
@@ -146,24 +149,26 @@ class AeronAuthenticatedWatermarkTest {
 
     @Test
     void validatorRejectsRestoringAnIdentityMismatchedToken() {
-        final AeronAuthenticatedWatermark.Validator validator =
-                new AeronAuthenticatedWatermark.Validator(SECRET);
-        final AeronAuthenticatedWatermark token = AeronAuthenticatedWatermark.sign(
-                READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET);
-        assertThrows(SecurityException.class, () -> validator.restore(READER_TWO, token));
+        try (final AeronAuthenticatedWatermark.Validator validator =
+                new AeronAuthenticatedWatermark.Validator(SECRET)) {
+            final AeronAuthenticatedWatermark token = AeronAuthenticatedWatermark.sign(
+                    READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET);
+            assertThrows(SecurityException.class, () -> validator.restore(READER_TWO, token));
+        }
     }
 
     @Test
     void quorumRejectsRestoringUnknownOrRetiredReaders() {
-        final AeronAuthenticatedWatermark.Quorum quorum =
-                new AeronAuthenticatedWatermark.Quorum(java.util.Set.of(READER_ONE, READER_TWO), SECRET);
-        final AeronAuthenticatedWatermark token = AeronAuthenticatedWatermark.sign(
-                READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET);
-        assertThrows(IllegalArgumentException.class,
-                () -> quorum.restore(UUID.randomUUID(), token));
-        quorum.retire(READER_ONE);
-        assertThrows(IllegalStateException.class, () -> quorum.restore(READER_ONE, token));
-        assertDoesNotThrow(() -> quorum.restore(READER_ONE, null));
+        try (final AeronAuthenticatedWatermark.Quorum quorum =
+                new AeronAuthenticatedWatermark.Quorum(java.util.Set.of(READER_ONE, READER_TWO), SECRET)) {
+            final AeronAuthenticatedWatermark token = AeronAuthenticatedWatermark.sign(
+                    READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET);
+            assertThrows(IllegalArgumentException.class,
+                    () -> quorum.restore(UUID.randomUUID(), token));
+            quorum.retire(READER_ONE);
+            assertThrows(IllegalStateException.class, () -> quorum.restore(READER_ONE, token));
+            assertDoesNotThrow(() -> quorum.restore(READER_ONE, null));
+        }
     }
 
     @Test

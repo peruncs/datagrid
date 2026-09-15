@@ -146,7 +146,7 @@ public final class AeronEnvelopeBenchmark {
                 !bean.isThreadAllocatedMemorySupported()) return unavailable();
             try {
                 if (!bean.isThreadAllocatedMemoryEnabled()) bean.setThreadAllocatedMemoryEnabled(true);
-                final long threadId = Thread.currentThread().getId();
+                final long threadId = Thread.currentThread().threadId();
                 return new AllocationCounter(bean, threadId, bean.getThreadAllocatedBytes(threadId));
             } catch (final UnsupportedOperationException | SecurityException ignored) {
                 return unavailable();

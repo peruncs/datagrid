@@ -211,7 +211,7 @@ record AeronSettings(
         }
         final byte[] retentionSecret = retentionSecret(properties);
         final Set<UUID> retentionReaders = retentionReaders(properties);
-        if ("writer".equals(role) && (retentionSecret != null) != !retentionReaders.isEmpty()) {
+        if ("writer".equals(role) && (retentionSecret != null) == retentionReaders.isEmpty()) {
             throw new IllegalArgumentException(
                     "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET and ECLIPSE_DATAGRID_AERON_RETENTION_READERS must be configured together");
         }

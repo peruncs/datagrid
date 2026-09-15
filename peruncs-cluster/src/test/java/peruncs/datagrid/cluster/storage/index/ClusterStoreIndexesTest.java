@@ -87,7 +87,7 @@ class ClusterStoreIndexesTest {
             assertEquals(0, text.query("body:message").size());
             final VectorSearchResult<Article> result = vector.search(new float[]{1, 0, 0}, 10);
             assertEquals(1, result.size());
-            assertEquals("Aeron", result.toList().get(0).entity().title);
+            assertEquals("Aeron", result.toList().getFirst().entity().title);
         }
 
         VECTORIZE_CALLS.set(0);
@@ -104,7 +104,7 @@ class ClusterStoreIndexesTest {
             final VectorSearchResult<Article> result = reloadedVectors.get("article-vectors")
                     .search(new float[]{1, 0, 0}, 10);
             assertEquals(1, result.size());
-            assertEquals("Aeron", result.toList().get(0).entity().title);
+            assertEquals("Aeron", result.toList().getFirst().entity().title);
             assertEquals(0, VECTORIZE_CALLS.get(), "computed vectors must be loaded from Store state");
         }
     }

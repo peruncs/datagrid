@@ -139,7 +139,7 @@ public final class AeronEndToEndBenchmark {
                 return new AllocationCounter(null, -1L, -1L);
             try {
                 if (!bean.isThreadAllocatedMemoryEnabled()) bean.setThreadAllocatedMemoryEnabled(true);
-                final long id = Thread.currentThread().getId();
+                final long id = Thread.currentThread().threadId();
                 return new AllocationCounter(bean, id, bean.getThreadAllocatedBytes(id));
             } catch (final UnsupportedOperationException | SecurityException ignored) {
                 return new AllocationCounter(null, -1L, -1L);

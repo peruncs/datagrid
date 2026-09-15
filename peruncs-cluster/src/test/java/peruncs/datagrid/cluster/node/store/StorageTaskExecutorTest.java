@@ -59,7 +59,7 @@ class StorageTaskExecutorTest {
             while (executor.isRunningChecks() && System.nanoTime() < deadline) {
                 Thread.sleep(10L);
             }
-            assertTrue(gated.checks.get() == 1, "expected exactly one check task");
+            assertEquals(1, gated.checks.get(), "expected exactly one check task");
         }
     }
 

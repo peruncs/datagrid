@@ -246,20 +246,22 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     @Override
     protected void releaseFromUse() {
         Throwable failure = null;
-        boolean clusteredResourcesReleased = false;
         try {
             this.disposeClusteredResources();
-            clusteredResourcesReleased = true;
         } catch (final Throwable e) {
             LOGGER.log(System.Logger.Level.ERROR, "Failed to dispose clustered cache resources.", e);
             failure = e;
         }
-        if (clusteredResourcesReleased) try {
+        /* The local CacheManager and its regions must be released even when a
+         * clustered resource failed to close, so the base release always runs. */
+        try {
             super.releaseFromUse();
         } catch (final Throwable releaseFailure) {
             if (failure == null) failure = releaseFailure;
             else if (failure != releaseFailure) failure.addSuppressed(releaseFailure);
         }
+        /* A re-prepared factory must not consult the manager released above. */
+        this.cacheManager = null;
         if (failure instanceof final Error error) {
             throw error;
         }

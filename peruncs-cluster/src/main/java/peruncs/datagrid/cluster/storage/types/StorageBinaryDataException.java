@@ -1,7 +1,10 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import java.io.Serial;
+
 /// Signals an invalid or unusable assembled Store replication message.
 public class StorageBinaryDataException extends IllegalStateException {
+    @Serial
     private static final long serialVersionUID = 1L;
 
         /// Creates an exception with a message.

@@ -101,7 +101,7 @@ class StorageBinaryImportIntegrationTest {
 
             final EmbeddedStorageManager resumedWriter = startExisting(sourcePath, capture);
             final Root resumedRoot = resumedWriter.root();
-            final Entry entry = resumedRoot.entries.get(0);
+            final Entry entry = resumedRoot.entries.getFirst();
             resumedWriter.store(resumedRoot.entries);
             entry.value = "updated";
             resumedWriter.store(entry);
@@ -155,7 +155,7 @@ class StorageBinaryImportIntegrationTest {
             {
                 channelCount[0]++;
                 for (final ByteBuffer buffer : chunk.buffers()) {
-                    copy.add(copy(List.of(buffer)).get(0));
+                    copy.add(copy(List.of(buffer)).getFirst());
                 }
             });
             this.maximumChannelCount = Math.max(this.maximumChannelCount, channelCount[0]);

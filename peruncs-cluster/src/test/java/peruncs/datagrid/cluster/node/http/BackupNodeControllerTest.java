@@ -22,6 +22,14 @@ class BackupNodeControllerTest {
                     if (method.getName().equals("createStorageBackup")) {
                         throw new BackupBusyException("Storage backup is already running");
                     }
+                    if (method.getDeclaringClass() == Object.class) {
+                        return switch (method.getName()) {
+                            case "equals" -> proxy == args[0];
+                            case "hashCode" -> System.identityHashCode(proxy);
+                            case "toString" -> "busyBackupNodeManager";
+                            default -> throw new AssertionError("unexpected Object method " + method.getName());
+                        };
+                    }
                     final Class<?> result = method.getReturnType();
                     if (result == boolean.class) return false;
                     return null;

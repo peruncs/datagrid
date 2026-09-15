@@ -7,6 +7,8 @@ import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
@@ -51,6 +53,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
      * COMMITTING_UNCERTAIN. */
     private boolean commitMarkerPublished;
     private boolean commitInProgress;
+    /* Signalled whenever commitInProgress is cleared. Shutdown and Archive
+     * maintenance wait on it (bounded) instead of failing while a commit that
+     * already released the write lock is still awaiting its Archive position. */
+    private final Condition commitDone = this.writeLock.newCondition();
 
     AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher) {
         this(publisher, ReplicationDurabilityMode.ARCHIVE_FIRST,
@@ -445,7 +451,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         if (maintenance == null) throw new NullPointerException("maintenance");
         this.writeLock.lock();
         try {
-            this.ensureNotCommitting();
+            this.awaitNoCommit();
             if (this.localAcceptanceFence != null || this.publisher.hasPendingTransaction()) {
                 throw new IllegalStateException("cannot run Archive maintenance while a transaction is pending");
             }
@@ -564,7 +570,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         } finally {
             if (!writeLockHeld) this.writeLock.unlock();
         }
-        /* publisher.commit() offers the marker under its own short monitor and
+        /* publisher.commit() offers the marker outside its state monitor and
          * waits for the Archive acknowledgement afterwards. Do not retain the
          * write lock during that potentially slow wait; commitInProgress keeps
          * other writers out until the terminal state below is recorded. */
@@ -591,6 +597,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                 this.commitMarkerPublished = false;
             } finally {
                 this.commitInProgress = false;
+                this.commitDone.signalAll();
                 if (!writeLockHeld) this.writeLock.unlock();
             }
         } catch (final RuntimeException | Error failure) {
@@ -604,6 +611,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             if (!commitLockHeld) this.writeLock.lock();
             try {
                 this.commitInProgress = false;
+                this.commitDone.signalAll();
             } finally {
                 if (!writeLockHeld) this.writeLock.unlock();
             }
@@ -691,6 +699,33 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
+        /// Waits, bounded, for an in-flight commit to finish.
+    ///
+    /// Shutdown and Archive maintenance must not fail merely because a commit
+    /// released the write lock and is still awaiting its Archive position; the
+    /// wait is bounded by the recorded-position timeout so a stuck commit
+    /// cannot hang shutdown forever. Call with the write lock held.
+    private void awaitNoCommit() {
+        if (!this.commitInProgress) {
+            return;
+        }
+        final long deadline = System.nanoTime() + this.publisher.recordedPositionTimeoutNanos();
+        while (this.commitInProgress) {
+            final long remaining = deadline - System.nanoTime();
+            if (remaining <= 0L) {
+                throw new IllegalStateException(
+                        "Aeron commit did not finish within the recorded-position timeout");
+            }
+            try {
+                this.commitDone.await(remaining, TimeUnit.NANOSECONDS);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "interrupted while waiting for the Aeron commit to finish", interrupted);
+            }
+        }
+    }
+
         /// Closes the publisher owned by this coordinator.
     @Override
     public void close() {
@@ -708,7 +743,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     private void disposeLocked() {
-        this.ensureNotCommitting();
+        this.awaitNoCommit();
         /* ENQUEUE_THEN_ARCHIVE may be interrupted after the Store accepted data
          * but before the Archive terminal marker was published.  Never turn that
          * local acceptance into an ABORT during shutdown: close the publication

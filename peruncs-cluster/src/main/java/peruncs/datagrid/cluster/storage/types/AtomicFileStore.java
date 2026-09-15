@@ -1,8 +1,11 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import peruncs.datagrid.cluster.node.store.StorageFileOperations;
+
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -92,6 +95,12 @@ public final class AtomicFileStore {
         }
         rejectSymbolicLinks(absolute);
         Files.createDirectories(parent);
+        /* Re-verify the parent immediately before creating the temp file: the
+         * earlier rejection cannot prevent a component swap between the check
+         * and this use. */
+        if (!Files.readAttributes(parent, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isDirectory()) {
+            throw new IOException("Metadata parent is not a real directory: %s".formatted(parent));
+        }
         Path temporary;
         try {
             temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null, OWNER_ONLY);
@@ -171,8 +180,15 @@ public final class AtomicFileStore {
             }
             throw failure;
         }
-        Files.deleteIfExists(probe);
-        forceDirectory(parent);
+        /* The probe succeeded, so a cleanup failure must not turn a supported
+         * filesystem into a reported capability failure. */
+        try {
+            Files.deleteIfExists(probe);
+            forceDirectory(parent);
+        } catch (final IOException | RuntimeException cleanupFailure) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Unable to remove atomic-metadata probe %s".formatted(probe), cleanupFailure);
+        }
     }
 
         /// Deletes a metadata file and forces the parent directory when the file was
@@ -215,29 +231,9 @@ public final class AtomicFileStore {
 
     private static void rejectSymbolicLinks(final Path path) throws IOException {
         for (Path current = path.toAbsolutePath(); current != null; current = current.getParent()) {
-            if (Files.isSymbolicLink(current) && !isSystemPrivateAlias(current)) {
+            if (Files.isSymbolicLink(current) && !StorageFileOperations.isSystemPrivateAlias(current)) {
                 throw new IOException("Replication metadata path must not contain a symbolic link: " + current);
             }
-        }
-    }
-
-        /// Reports the macOS system symlinks (`/tmp`, `/var`, `/etc`) that point
-    /// into `/private`. Only a root-level link whose target is the matching
-    /// self-named `/private` entry qualifies; creating such a link requires
-    /// privileges outside the threat model, and everything else still fails
-    /// closed. The shape mirrors the OS convention instead of a fixed name
-    /// list so future system aliases keep working.
-    private static boolean isSystemPrivateAlias(final Path path) {
-        final Path root = path.getRoot();
-        if (root == null || !root.equals(path.getParent())) return false;
-        final Path name = path.getFileName();
-        if (name == null) return false;
-        try {
-            final Path target = Files.readSymbolicLink(path);
-            return target.equals(Path.of("private").resolve(name)) ||
-                   target.equals(Path.of("/private").resolve(name));
-        } catch (final IOException ignored) {
-            return false;
         }
     }
 

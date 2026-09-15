@@ -151,7 +151,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
             final ByteBuffer[] sourceBuffers = StorageBinaryDataChunker
                     .importArray(data);
-            final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, sourceBuffers);
+            /* Serialize the Store import with deferred materialization: both
+             * mutate the same persistence and type-handler state, and importing
+             * during a materialization can expose a partially imported
+             * transaction. This is the same exclusion the dictionary path uses. */
+            final ByteBuffer[] ownedBuffers = this.materialization.write(
+                    () -> StorageBinaryDataImporter.importOwned(this.storage, sourceBuffers));
             /* scheduleMaterialization owns cleanup on every rejection.  Releasing here
              * as well would double-free buffers when the worker has already drained its
              * queue after a terminal failure. */
@@ -172,7 +177,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 throw new IllegalStateException("Storage binary merger is disposed");
             }
             try {
-                StorageBinaryDataImporter.importDirect(this.storage, buffers);
+                /* Same exclusion as the borrowed-copy path: the Store import must
+                 * not interleave with a deferred materialization. */
+                this.materialization.write(() ->
+                {
+                    StorageBinaryDataImporter.importDirect(this.storage, buffers);
+                });
             } catch (final RuntimeException | Error failure) {
                 /* Ownership has not transferred to the deferred-materialization
                  * queue when Store import fails. The Aeron callback contract still
@@ -290,7 +300,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                          * release nothing here. Latch the terminal failure so no
                          * further batches are admitted; the worker drains or fails
                          * on its own while dispose() still joins it. */
-                        throw this.fail("Timed out waiting for import data task", e);
+                        throw this.recordFailure("Timed out waiting for import data task", e);
                     } catch (final ExecutionException e) {
                         final RuntimeException mergerFailure = this.failure.get();
                         if (mergerFailure != null) {
@@ -394,7 +404,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     /* The structured scope closes only after its child terminates;
                      * its finally block remains the sole owner of these buffers. */
                     if (!(this.disposed && Thread.currentThread().isInterrupted())) {
-                        this.fail("Interrupted while applying Store data", interrupted);
+                        this.recordFailure("Interrupted while applying Store data", interrupted);
                     }
                     throw new IllegalStateException("Interrupted while applying Store data", interrupted);
                 } catch (final StructuredTaskScope.FailedException failure) {
@@ -402,19 +412,19 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     final IllegalStateException terminal = new IllegalStateException(
                             "Timed out or failed while applying Store data",
                             failure.getCause() == null ? failure : failure.getCause());
-                    this.fail(terminal.getMessage(), terminal);
+                    this.recordFailure(terminal.getMessage(), terminal);
                     throw terminal;
                 } catch (final StructuredTaskScope.TimeoutException failure) {
                     /* The structured scope owns the child until it terminates. Do not
                      * free direct buffers while materialization may still use them. */
                     final IllegalStateException terminal = new IllegalStateException(
                             "Timed out while applying Store data", failure);
-                    this.fail(terminal.getMessage(), terminal);
+                    this.recordFailure(terminal.getMessage(), terminal);
                     throw terminal;
                 } catch (final RuntimeException | Error failure) {
                     release.run();
                     if (failure instanceof RuntimeException runtime) {
-                        this.fail("Store graph update failed", runtime);
+                        this.recordFailure("Store graph update failed", runtime);
                     }
                     throw failure;
                 }
@@ -526,11 +536,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                      * Persist newly registered remote definitions now, before the transaction's
                      * binary is imported, so a restart can resolve every imported type id. */
                     this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
-                } catch (final RuntimeException failure) {
-                    this.fail("Store type dictionary update failed", failure);
-                    throw failure;
-                } catch (final Error failure) {
-                    this.fail("Store type dictionary update failed", failure);
+                } catch (final RuntimeException | Error failure) {
+                    this.recordFailure("Store type dictionary update failed", failure);
                     throw failure;
                 }
             });
@@ -626,7 +633,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 pending.get(APPLY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
-                this.fail("Interrupted while waiting for imported Store data materialization", e);
+                this.recordFailure("Interrupted while waiting for imported Store data materialization", e);
                 this.releaseCachedData();
                 throw new StorageBinaryDataException("Interrupted while waiting for imported Store data materialization", e);
             } catch (final ExecutionException e) {
@@ -634,12 +641,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 if (mergerFailure != null) {
                     throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
                 }
-                final RuntimeException terminal = this.fail(
+                final RuntimeException terminal = this.recordFailure(
                         "Failed to materialize imported Store data", e.getCause() == null ? e : e.getCause());
                 this.releaseCachedData();
                 throw terminal;
             } catch (final TimeoutException e) {
-                final RuntimeException terminal = this.fail(
+                final RuntimeException terminal = this.recordFailure(
                         "Timed out waiting for imported Store data materialization", e);
                 /* Only queued buffers are safe to release here. The callback represented by
                  * pending may still own the batch whose wait timed out. */
@@ -648,7 +655,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
         }
 
-        private RuntimeException fail(final String message, final Throwable cause) {
+        /* Records the first failure and returns it; later failures are dropped so
+         * concurrent paths cannot overwrite the root cause. Callers throw the
+         * result themselves, which is why this method only records. */
+        private RuntimeException recordFailure(final String message, final Throwable cause) {
             final RuntimeException terminal = new IllegalStateException(message, cause);
             this.failure.compareAndSet(null, terminal);
             return this.failure.get();

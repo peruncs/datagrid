@@ -306,7 +306,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
 
         @Override
-        @SuppressWarnings("unchecked")
         public Lazy<T> root() throws NodeLibraryException {
             return this.delegate.root();
         }
@@ -573,7 +572,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
 
         @Override
-        @SuppressWarnings("unchecked")
         public Lazy<T> root() {
             return this.delegate.root();
         }
@@ -768,7 +766,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
 
                 /// Registers binary types through the cluster manager boundary.
-        private final class ClusterPersistenceRegistererAdapter implements PersistenceRegisterer {
+        private static final class ClusterPersistenceRegistererAdapter implements PersistenceRegisterer {
             private final PersistenceRegisterer delegate;
 
             private ClusterPersistenceRegistererAdapter(final PersistenceRegisterer delegate) {

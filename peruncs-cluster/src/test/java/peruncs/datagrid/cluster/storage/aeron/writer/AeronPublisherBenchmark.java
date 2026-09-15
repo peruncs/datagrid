@@ -146,7 +146,7 @@ public final class AeronPublisherBenchmark {
                 !bean.isThreadAllocatedMemorySupported()) return new AllocationCounter(null, -1, -1);
             try {
                 if (!bean.isThreadAllocatedMemoryEnabled()) bean.setThreadAllocatedMemoryEnabled(true);
-                final long threadId = Thread.currentThread().getId();
+                final long threadId = Thread.currentThread().threadId();
                 return new AllocationCounter(bean, threadId, bean.getThreadAllocatedBytes(threadId));
             } catch (final UnsupportedOperationException | SecurityException ignored) {
                 return new AllocationCounter(null, -1, -1);

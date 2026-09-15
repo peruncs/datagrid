@@ -364,8 +364,8 @@ public final class AeronReplicationEnvelope {
     }
 
         /// Computes the same checksum directly from an Agrona buffer range.
-    /// A caller-owned context must be bound with [#withChecksumContext(ChecksumContext,
-    /// Supplier)]. This requirement keeps the direct-buffer path allocation-free.
+    /// A caller-owned context must be bound with [#withChecksumContext(ChecksumContext, Supplier)].
+    /// This requirement keeps the direct-buffer path allocation-free.
     public static int crc32c(final DirectBuffer payload, final int offset, final int length) {
         if (payload == null || offset < 0 || length < 0 || offset > payload.capacity() - length) {
             throw new IllegalArgumentException("invalid CRC32C range");

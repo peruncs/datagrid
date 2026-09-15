@@ -22,10 +22,25 @@ class StorageNodeManagerRolesTest {
         final StorageNodeManager manager = StorageNodeManager.New(
                 stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
                 stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron");
+                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron", StorageNodeManager.Role.READER);
 
         assertFalse(manager.isDistributor());
         assertFalse(manager instanceof PromotableStorageNodeManager);
+    }
+
+        /// A fixed writer reports itself as the distributor and derives its
+        /// health from the distributor instead of a reader health check.
+    @Test
+    void writerManagerIsDistributor() throws Exception {
+        final StorageNodeManager manager = StorageNodeManager.New(
+                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
+                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
+                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron",
+                StorageNodeManager.Role.DISTRIBUTOR);
+
+        assertTrue(manager.isDistributor());
+        assertTrue(manager.isReady(), "a distributor must not depend on a reader health check");
+        assertTrue(manager.isHealthy(), "a distributor must not depend on a reader health check");
     }
 
         /// Aeron roles are fixed at transport creation, so the promotable
@@ -56,7 +71,7 @@ class StorageNodeManagerRolesTest {
         final StorageNodeManager manager = StorageNodeManager.New(
                 stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
                 stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron");
+                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron", StorageNodeManager.Role.READER);
         final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager);
 
         final HttpResponseException start = assertThrows(

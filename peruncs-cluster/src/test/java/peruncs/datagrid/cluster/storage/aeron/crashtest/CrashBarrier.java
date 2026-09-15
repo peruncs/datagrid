@@ -46,23 +46,11 @@ public final class CrashBarrier implements AutoCloseable {
         this.release();
     }
 
-        /// Exception used only by in-process crash tests.
+        /// Exception used only by in-process crash tests. The crash site stays in
+    /// the message; no accessor is needed because tests only assert the type.
     public static final class SimulatedCrash extends RuntimeException {
-        private final CrashPoint point;
-        private final long sequence;
-
         public SimulatedCrash(final CrashPoint point, final long sequence) {
             super("simulated crash at %s sequence=%s".formatted(point, sequence));
-            this.point = point;
-            this.sequence = sequence;
-        }
-
-        public CrashPoint point() {
-            return this.point;
-        }
-
-        public long sequence() {
-            return this.sequence;
         }
     }
 }

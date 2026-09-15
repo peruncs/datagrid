@@ -7,6 +7,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Comparator;
+import java.util.Locale;
 
 /// Shared filesystem operations used by backup backends and node setup.
 ///
@@ -129,9 +130,10 @@ public final class StorageFileOperations {
     public static boolean deleteRegularFile(final Path path) throws IOException {
         if (path == null) throw new NullPointerException("path is required");
         ensureNoSymbolicLinks(path);
-        final BasicFileAttributes before;
         try {
-            before = regularAttributes(path);
+            /* Validates the path is a regular file with a stable identity; the
+             * attributes themselves are not needed, only the parent re-check below. */
+            regularAttributes(path);
         } catch (final NoSuchFileException missing) {
             return false;
         }
@@ -171,11 +173,17 @@ public final class StorageFileOperations {
         }
     }
 
-    /* macOS exposes /var, /tmp and a few other system directories through
-     * root-level links into /private. Those aliases are outside an application's
-     * configured backup root and are not user-controlled descendants. Keep the
-     * check strict for every other symbolic link. */
-    private static boolean isSystemPrivateAlias(final Path path) {
+    /// Reports the macOS system symlinks (`/tmp`, `/var`, `/etc`) that point
+    /// into `/private`. Only a root-level link whose target is the matching
+    /// self-named `/private` entry qualifies; creating such a link requires
+    /// privileges outside the threat model, and everything else still fails
+    /// closed. The allowlist is gated on macOS: on other operating systems a
+    /// `private/<name>` target is not a system alias and must be rejected.
+    ///
+    /// @param path link to inspect
+    /// @return `true` for a macOS system `/private` alias
+    public static boolean isSystemPrivateAlias(final Path path) {
+        if (!isMacOs()) return false;
         final Path root = path.getRoot();
         if (root == null || !root.equals(path.getParent())) return false;
         final Path name = path.getFileName();
@@ -187,6 +195,10 @@ public final class StorageFileOperations {
         } catch (final IOException failure) {
             return false;
         }
+    }
+
+    private static boolean isMacOs() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac");
     }
 
     private static Object stableFileKey(final Path path) throws IOException {

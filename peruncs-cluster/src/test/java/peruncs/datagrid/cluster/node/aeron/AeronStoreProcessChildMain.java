@@ -88,8 +88,8 @@ public final class AeronStoreProcessChildMain {
                     try {
                         final Root value = manager.root();
                         if (mode.equals("restart")) {
-                            value.objects.get(0).value += "-restart";
-                            manager.store(value.objects.get(0));
+                            value.objects.getFirst().value += "-restart";
+                            manager.store(value.objects.getFirst());
                         } else {
                             /* Retry a genuinely new entity type.  Reusing StoreType would only
                              * exercise data retry; it would not prove that a dictionary emitted by

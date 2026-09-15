@@ -100,9 +100,9 @@ public interface ClusterRestRequestController extends AutoCloseable {
     /// @throws HttpResponseException if the request fails
     void postUpdates() throws HttpResponseException;
 
-        /// Reports whether updates are active.
+        /// Reports whether updates are paused.
     ///
-    /// @return update state
+    /// @return `true` when the replication reader is stopped for backup work
     /// @throws HttpResponseException if the request fails
     boolean getUpdates() throws HttpResponseException;
 

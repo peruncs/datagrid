@@ -45,15 +45,18 @@ final class NodeHousekeeper implements AutoCloseable {
     }
 
     private static void runGuarded(final ScheduledTask scheduled) {
-        LOGGER.log(System.Logger.Level.INFO, "Running housekeeper task '%s'".formatted(scheduled.name()));
+        LOGGER.log(System.Logger.Level.DEBUG, "Running housekeeper task '%s'".formatted(scheduled.name()));
         try {
             scheduled.task().run();
             LOGGER.log(System.Logger.Level.DEBUG, "Finished housekeeper task '%s'".formatted(scheduled.name()));
         } catch (final RuntimeException failure) {
             LOGGER.log(System.Logger.Level.ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
         } catch (final Error failure) {
+            /* Do not rethrow into the scheduled executor: an escaping Error
+             * silently cancels that periodic task forever, so a transient
+             * maintenance failure would disable the schedule. The failure is
+             * logged and the next run proceeds. */
             LOGGER.log(System.Logger.Level.ERROR, "Fatal housekeeper task '%s' failure".formatted(scheduled.name()), failure);
-            throw failure;
         }
     }
 

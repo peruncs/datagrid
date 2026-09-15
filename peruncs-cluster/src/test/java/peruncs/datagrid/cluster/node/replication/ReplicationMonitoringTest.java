@@ -115,14 +115,11 @@ class ReplicationMonitoringTest {
             }
         };
 
-        final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager);
-        try {
+        try (final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager)) {
             final var metrics = controller.getReplicationMetrics();
             assertEquals(7, metrics.currentSequence());
             assertEquals(-1, metrics.latestSequence());
             assertEquals(-1, metrics.lagTransactions());
-        } finally {
-            controller.close();
         }
     }
 }

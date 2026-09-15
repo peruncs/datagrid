@@ -20,18 +20,21 @@ public interface BackupNodeManager extends ClusterNodeManager {
     /// @param dataClient                replication data client
     /// @param storageController         storage controller
     /// @param storageDiskSpaceReader    storage space reader
+    /// @param replicationTransport      selected transport id for monitoring
     /// @return backup manager
     static BackupNodeManager New(
             final StorageBackupTaskExecutor storageBackupTaskExecutor,
             final StorageBinaryDataClient dataClient,
             final StorageController storageController,
-            final StorageDiskSpaceReader storageDiskSpaceReader
+            final StorageDiskSpaceReader storageDiskSpaceReader,
+            final String replicationTransport
     ) {
         return new Default(
                 notNull(storageBackupTaskExecutor),
                 notNull(dataClient),
                 notNull(storageController),
-                notNull(storageDiskSpaceReader)
+                notNull(storageDiskSpaceReader),
+                replicationTransport
         );
     }
 
@@ -67,17 +70,35 @@ public interface BackupNodeManager extends ClusterNodeManager {
         private final StorageBinaryDataClient dataClient;
         private final StorageController storageController;
         private final StorageDiskSpaceReader storageDiskSpaceReader;
+        private final String replicationTransport;
 
         private Default(
                 final StorageBackupTaskExecutor storageBackupTaskExecutor,
                 final StorageBinaryDataClient dataClient,
                 final StorageController storageController,
-                final StorageDiskSpaceReader storageDiskSpaceReader
+                final StorageDiskSpaceReader storageDiskSpaceReader,
+                final String replicationTransport
         ) {
             this.tasks = storageBackupTaskExecutor;
             this.dataClient = dataClient;
             this.storageController = storageController;
             this.storageDiskSpaceReader = storageDiskSpaceReader;
+            if (replicationTransport == null || replicationTransport.isBlank()) {
+                throw new IllegalArgumentException("replicationTransport must not be blank");
+            }
+            this.replicationTransport = replicationTransport;
+        }
+
+        @Override
+        public String getReplicationTransport() {
+            return this.replicationTransport;
+        }
+
+        @Override
+        public long getCurrentSequence() {
+            /* A backup node is an active reader; report its applied cursor
+             * instead of the -1 placeholder a non-replicated node would use. */
+            return this.dataClient.cursor().logicalSequence();
         }
 
         @Override

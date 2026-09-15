@@ -271,7 +271,9 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
         this.stopAtLatest = false;
         this.stopDeadlineNanos.set(0L);
         this.live = false;
-        this.stopOutcome.set(StorageBinaryDataClient.StopOutcome.RUNNING);
+        /* Preserve any terminal outcome: a restart after STOPPED/RESOLVED_BOUNDARY
+         * becomes RUNNING, but a failed or timed-out reader never looks healthy. */
+        this.updateOutcome(StorageBinaryDataClient.StopOutcome.RUNNING);
         this.stopped = new CountDownLatch(1);
         this.thread = Thread.ofVirtual().name("datagrid-aeron-archive-reader").unstarted(this::run);
         this.thread.start();

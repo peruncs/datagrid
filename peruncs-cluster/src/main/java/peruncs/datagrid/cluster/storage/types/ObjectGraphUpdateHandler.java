@@ -20,7 +20,7 @@ public interface ObjectGraphUpdateHandler {
     ///
     /// @return synchronized update handler
     static ObjectGraphUpdateHandler Synchronized() {
-        return updater -> XThreads.executeSynchronized(updater::run);
+        return XThreads::executeSynchronized;
     }
 
         /// Runs an update in a structured virtual-thread child.

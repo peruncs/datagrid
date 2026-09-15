@@ -26,7 +26,7 @@ class ReplicationCursorTest {
         assertEquals("", new ReplicationCursor("aeron", null, -1, "").providerPosition());
         assertEquals("", ReplicationCursor.of("aeron", null, -1, null).providerPosition());
         assertEquals("", ReplicationCursor.of("aeron", null, -1, new byte[0]).providerPosition());
-        assertTrue(!new ReplicationCursor("aeron", null, -1, "").hasProviderPosition());
+        assertFalse(new ReplicationCursor("aeron", null, -1, "").hasProviderPosition());
     }
 
         /// Verifies uppercase hex is accepted exactly as hex decoding accepts it.

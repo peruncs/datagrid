@@ -11,6 +11,7 @@ import java.lang.ref.Cleaner;
 import java.nio.ByteBuffer;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongUnaryOperator;
 import java.util.zip.CRC32C;
 
@@ -30,9 +31,15 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private final long epoch;
     private final AutoCloseable closeAction;
     private final LongUnaryOperator commitPositionAwaiter;
-    private final ByteBuffer envelopeStorage;
     private final UnsafeBuffer envelopeBuffer;
     private final DirectBufferCleanup directBufferCleanup;
+    /* Serializes use of the shared envelope buffer and its staging CRCs. This is
+     * deliberately separate from the publisher monitor: a terminal-marker offer
+     * may retry for the whole offer timeout, and holding the state monitor
+     * across it would stall monitoring, health probes, and close(). The lock is
+     * reentrant because a prepared transaction holds it across the chunk fill
+     * and the individual chunk offers. */
+    private final ReentrantLock offerLock = new ReentrantLock();
     private final Cleaner.Cleanable cleanable;
     private final AeronReplicationEnvelope.ChecksumContext envelopeChecksum =
             new AeronReplicationEnvelope.ChecksumContext();
@@ -111,9 +118,9 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.nextSequence = initialSequence;
         this.closeAction = closeAction;
         this.commitPositionAwaiter = commitPositionAwaiter;
-        this.envelopeStorage = ByteBuffer.allocateDirect(maxMessageLength);
-        this.envelopeBuffer = new UnsafeBuffer(this.envelopeStorage);
-        this.directBufferCleanup = new DirectBufferCleanup(this.envelopeStorage);
+        final ByteBuffer envelopeStorage = ByteBuffer.allocateDirect(maxMessageLength);
+        this.envelopeBuffer = new UnsafeBuffer(envelopeStorage);
+        this.directBufferCleanup = new DirectBufferCleanup(envelopeStorage);
         this.cleanable = CLEANER.get().register(this, this.directBufferCleanup);
     }
 
@@ -394,6 +401,14 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return this.configuration.maxTransactionBytes();
     }
 
+        /// Returns the bounded wait for one recorded-position acknowledgement.
+    ///
+    /// Coordinator shutdown paths use it to bound their wait for an in-flight
+    /// commit instead of failing fast while a commit is still waiting.
+    long recordedPositionTimeoutNanos() {
+        return this.configuration.recordedPositionTimeoutNanos();
+    }
+
         /// Publishes Store data directly from the caller's buffer sequence.
     ///
     /// The returned value is the CRC32C of the complete logical Store binary.
@@ -410,34 +425,43 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
 
         final int count = this.chunkCount(length);
-        int sourceIndex = 0;
-        ByteBuffer source = sources[sourceIndex];
-        int sourcePosition = source.position();
-        int logicalOffset = 0;
-        for (int chunkIndex = 0; chunkIndex < count; chunkIndex++) {
-            final int chunkLength = Math.min(this.configuration.chunkSize(), length - logicalOffset);
-            this.chunkCrc.reset();
-            int copied = 0;
-            while (copied < chunkLength) {
-                while (sourcePosition >= source.limit()) {
-                    if (++sourceIndex >= sourceCount) throw new IllegalArgumentException("data buffer length changed");
-                    source = sources[sourceIndex];
-                    sourcePosition = source.position();
+        /* Hold the offer lock for the whole fill/offer loop: each chunk's payload
+         * bytes must stay in the shared envelope buffer until that chunk is
+         * offered, so a concurrent terminal marker cannot reuse the buffer
+         * between a fill and its offer. */
+        this.offerLock.lock();
+        try {
+            int sourceIndex = 0;
+            ByteBuffer source = sources[sourceIndex];
+            int sourcePosition = source.position();
+            int logicalOffset = 0;
+            for (int chunkIndex = 0; chunkIndex < count; chunkIndex++) {
+                final int chunkLength = Math.min(this.configuration.chunkSize(), length - logicalOffset);
+                this.chunkCrc.reset();
+                int copied = 0;
+                while (copied < chunkLength) {
+                    while (sourcePosition >= source.limit()) {
+                        if (++sourceIndex >= sourceCount) throw new IllegalArgumentException("data buffer length changed");
+                        source = sources[sourceIndex];
+                        sourcePosition = source.position();
+                    }
+                    /* CRC and envelope fill read the source segment directly:
+                     * no heap staging copy between the caller buffers and the
+                     * off-heap envelope. */
+                    final int amount = Math.min(source.limit() - sourcePosition, chunkLength - copied);
+                    updateCrc(crc, source, sourcePosition, amount);
+                    updateCrc(this.chunkCrc, source, sourcePosition, amount);
+                    this.envelopeBuffer.putBytes(AeronReplicationEnvelope.HEADER_LENGTH + copied,
+                            source, sourcePosition, amount);
+                    sourcePosition += amount;
+                    copied += amount;
                 }
-                /* CRC and envelope fill read the source segment directly:
-                 * no heap staging copy between the caller buffers and the
-                 * off-heap envelope. */
-                final int amount = Math.min(source.limit() - sourcePosition, chunkLength - copied);
-                updateCrc(crc, source, sourcePosition, amount);
-                updateCrc(this.chunkCrc, source, sourcePosition, amount);
-                this.envelopeBuffer.putBytes(AeronReplicationEnvelope.HEADER_LENGTH + copied,
-                        source, sourcePosition, amount);
-                sourcePosition += amount;
-                copied += amount;
+                this.offerDataChunk(sequence, length, chunkIndex, count, logicalOffset,
+                        chunkLength, (int) this.chunkCrc.getValue());
+                logicalOffset += chunkLength;
             }
-            this.offerDataChunk(sequence, length, chunkIndex, count, logicalOffset,
-                    chunkLength, (int) this.chunkCrc.getValue());
-            logicalOffset += chunkLength;
+        } finally {
+            this.offerLock.unlock();
         }
         return (int) crc.getValue();
     }
@@ -467,6 +491,19 @@ final class AeronReplicationPublisher implements AutoCloseable {
         crc.update(view);
     }
 
+        /// Marks one transaction terminal and releases the publisher for the next one.
+    ///
+    /// @param transaction terminal transaction
+    /// @param failed whether the publisher itself is now untrustworthy
+    private void finishTerminal(final PreparedTransaction transaction, final boolean failed) {
+        synchronized (this) {
+            transaction.terminal = true;
+            this.pendingTransaction = null;
+            this.terminalOperation = false;
+            if (failed) this.failed = true;
+        }
+    }
+
         /// Publishes the commit marker and waits for the configured durability boundary.
     long commit(final PreparedTransaction transaction) {
         final long commitPosition;
@@ -476,38 +513,30 @@ final class AeronReplicationPublisher implements AutoCloseable {
             if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
             if (this.terminalOperation) throw new IllegalStateException("publisher terminal operation is already running");
             this.terminalOperation = true;
-            try {
-                CrashHook.invoke("BEFORE_COMMIT_OFFER", transaction.sequence);
-                commitPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.COMMIT,
-                        transaction.dataLength, transaction.dataChunkCount, transaction.crc32c);
-            } catch (final RuntimeException | Error failure) {
-                transaction.terminal = true;
-                this.pendingTransaction = null;
-                this.terminalOperation = false;
-                this.failed = true;
-                throw failure;
-            }
+        }
+        /* The offer retries under back pressure for the whole offer timeout; do
+         * not hold the state monitor across it, or health probes and close()
+         * stall behind the marker. offerLock keeps the shared envelope buffer
+         * exclusive instead. */
+        try {
+            CrashHook.invoke("BEFORE_COMMIT_OFFER", transaction.sequence);
+            commitPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.COMMIT,
+                    transaction.dataLength, transaction.dataChunkCount, transaction.crc32c);
+        } catch (final RuntimeException | Error failure) {
+            this.finishTerminal(transaction, true);
+            throw failure;
         }
         try {
             CrashHook.invoke("AFTER_COMMIT_OFFER", transaction.sequence);
             final long recordedPosition = this.commitPositionAwaiter.applyAsLong(commitPosition);
             CrashHook.invoke("AFTER_COMMIT_RECORDED", transaction.sequence);
-            synchronized (this) {
-                transaction.terminal = true;
-                this.pendingTransaction = null;
-                this.terminalOperation = false;
-            }
+            this.finishTerminal(transaction, false);
             return recordedPosition;
         } catch (final RuntimeException | Error failure) {
             /* Once the commit marker was offered it may still be delivered or
              * recorded. Publishing an abort after an acknowledgement timeout would
              * create two terminal markers for one sequence. Fail closed instead. */
-            synchronized (this) {
-                transaction.terminal = true;
-                this.pendingTransaction = null;
-                this.terminalOperation = false;
-                this.failed = true;
-            }
+            this.finishTerminal(transaction, true);
             throw failure;
         }
     }
@@ -521,17 +550,16 @@ final class AeronReplicationPublisher implements AutoCloseable {
             if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
             if (this.terminalOperation) throw new IllegalStateException("publisher terminal operation is already running");
             this.terminalOperation = true;
-            try {
-                offeredPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.ABORT,
-                        transaction.dataLength, transaction.dataChunkCount, 0);
-                transaction.abortAttempted = true;
-            } catch (final RuntimeException | Error failure) {
-                transaction.terminal = true;
-                this.pendingTransaction = null;
-                this.terminalOperation = false;
-                this.failed = true;
-                throw failure;
-            }
+        }
+        /* As with the commit marker, run the retrying offer outside the state
+         * monitor so close() and monitoring do not stall behind back pressure. */
+        try {
+            offeredPosition = this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.ABORT,
+                    transaction.dataLength, transaction.dataChunkCount, 0);
+            transaction.abortAttempted = true;
+        } catch (final RuntimeException | Error failure) {
+            this.finishTerminal(transaction, true);
+            throw failure;
         }
         try {
             final long position = this.commitPositionAwaiter.applyAsLong(offeredPosition);
@@ -551,12 +579,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
             /* The marker may already have been offered when the Archive acknowledgement
              * failed. Surface that attempted abort with its known-or-unknown position so
              * the coordinator can persist an uncertain state instead of losing evidence. */
-            synchronized (this) {
-                transaction.terminal = true;
-                this.pendingTransaction = null;
-                this.terminalOperation = false;
-                this.failed = true;
-            }
+            this.finishTerminal(transaction, true);
             this.invokeAbortActionAfterFailure(transaction, failure);
             throw failure;
         }
@@ -584,31 +607,41 @@ final class AeronReplicationPublisher implements AutoCloseable {
                               final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
                               final int commitCrc32c, final org.agrona.DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
-        return AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
-            final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
-                    this.epoch, sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
-                    payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength);
-            if (encodedLength > this.maxMessageLength) {
-                throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
-            }
-            return this.offerer.offer(this.envelopeBuffer, encodedLength);
-        });
+        this.offerLock.lock();
+        try {
+            return AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
+                final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
+                        this.epoch, sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
+                        payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength);
+                if (encodedLength > this.maxMessageLength) {
+                    throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+                }
+                return this.offerer.offer(this.envelopeBuffer, encodedLength);
+            });
+        } finally {
+            this.offerLock.unlock();
+        }
     }
 
     private void offerDataChunk(final long sequence, final int payloadLength, final int chunkIndex,
                                 final int chunkCount, final int chunkOffset, final int payloadChunkLength, final int payloadCrc32c) {
-        AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
-            final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.envelopeBuffer, 0,
-                    this.clusterId, this.epoch, sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
-                    chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
-                    AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
-                    payloadCrc32c);
-            if (encodedLength > this.maxMessageLength) {
-                throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
-            }
-            this.offerer.offer(this.envelopeBuffer, encodedLength);
-            return null;
-        });
+        this.offerLock.lock();
+        try {
+            AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
+                final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.envelopeBuffer, 0,
+                        this.clusterId, this.epoch, sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
+                        chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
+                        AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
+                        payloadCrc32c);
+                if (encodedLength > this.maxMessageLength) {
+                    throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+                }
+                this.offerer.offer(this.envelopeBuffer, encodedLength);
+                return null;
+            });
+        } finally {
+            this.offerLock.unlock();
+        }
     }
 
         /// Replays an abort callback after a publication failure, retaining callback failures.
@@ -744,10 +777,11 @@ final class AeronReplicationPublisher implements AutoCloseable {
         if (abortPending) {
             boolean abortMarkerOffered = false;
             try {
-                final long offeredPosition;
+                /* The retrying abort offer runs outside the state monitor; only
+                 * the token's flag update needs it. */
+                final long offeredPosition = this.offerMarker(pending.sequence,
+                        AeronReplicationEnvelope.Kind.ABORT, pending.dataLength, pending.dataChunkCount, 0);
                 synchronized (this) {
-                    offeredPosition = this.offerMarker(pending.sequence, AeronReplicationEnvelope.Kind.ABORT,
-                            pending.dataLength, pending.dataChunkCount, 0);
                     pending.abortAttempted = true;
                 }
                 abortMarkerOffered = true;

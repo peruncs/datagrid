@@ -118,12 +118,6 @@ final class AeronClusteredCacheMessageCodec {
                 buffer.getLong(offset + SENDER_ID_OFFSET + Long.BYTES, ByteOrder.BIG_ENDIAN));
     }
 
-        /// Returns the sender identity after validating the complete frame.
-    static SenderId senderIdOf(final DirectBuffer buffer, final int offset, final int length) {
-        validateHeader(buffer, offset, length, -1);
-        return senderIdOf(buffer, offset);
-    }
-
         /// Returns the identity of a 16-byte sender id byte array.
     ///
     /// @param senderId sender identity bytes
@@ -257,13 +251,21 @@ final class AeronClusteredCacheMessageCodec {
     }
 
     private static final ThreadLocal<CRC32C> CHECKSUM = ThreadLocal.withInitial(CRC32C::new);
+    /* Bulk CRC needs one contiguous copy; the polling thread reuses this array
+     * instead of calling getByte once per byte (about a million virtual calls
+     * for a one-megabyte frame). */
+    private static final ThreadLocal<byte[]> CHECKSUM_SCRATCH = ThreadLocal.withInitial(() -> new byte[0]);
 
     private static int checksum(final DirectBuffer buffer, final int offset, final int length) {
         final CRC32C crc = CHECKSUM.get();
         crc.reset();
-        for (int index = 0; index < length; index++) {
-            crc.update(buffer.getByte(offset + index));
+        byte[] scratch = CHECKSUM_SCRATCH.get();
+        if (scratch.length < length) {
+            scratch = new byte[length];
+            CHECKSUM_SCRATCH.set(scratch);
         }
+        buffer.getBytes(offset, scratch, 0, length);
+        crc.update(scratch, 0, length);
         return (int) crc.getValue();
     }
 

@@ -39,7 +39,7 @@ class StorageWriteGatingTest {
             final ClusterStorageManager<Object> manager =
                     ClusterStorageManager.New(delegate, () -> true, ClusterStorageManager.ShutdownCallback.NoOp());
 
-            assertDoesNotThrow(() -> manager.importData(X.<java.nio.ByteBuffer>Enum()));
+            assertDoesNotThrow(() -> manager.importData(X.Enum()));
             assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("c")));
             assertDoesNotThrow(() -> manager.persistenceManager().consolidate());
         }

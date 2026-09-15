@@ -405,7 +405,7 @@ class ClusteredCacheMessageAcceptorTest {
                 }
 
                 @Override
-                public <T> T unwrap(final Class<T> clazz) {
+                public <U> U unwrap(final Class<U> clazz) {
                     throw new IllegalArgumentException("unsupported unwrap: " + clazz.getName());
                 }
             };

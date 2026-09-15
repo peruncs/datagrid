@@ -789,16 +789,14 @@ public final class AeronClusterReplicationTransportProvider {
             return null;
         }
 
-        private AeronArchiveReplicationPublisher ensureWriter() {
-            final AeronArchiveReplicationPublisher writer;
+        private void ensureWriter() {
             synchronized (this) {
-                writer = this.ensureWriterLocked();
+                this.ensureWriterLocked();
             }
             /* Retention callbacks acquire their own monitor. Do not invoke them
              * while the transport monitor is held, or retention->transport and
              * transport->retention paths can deadlock during writer recovery. */
             this.drainDeferredWatermarks();
-            return writer;
         }
 
         private AeronArchiveReplicationPublisher ensureWriterLocked() {

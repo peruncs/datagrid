@@ -453,7 +453,7 @@ class AeronArchiveRetentionTest {
                 final IllegalStateException failure =
                         assertThrows(IllegalStateException.class, retention::isSupported);
                 final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertTrue(failure.getCause() instanceof TimeoutException,
+                assertInstanceOf(TimeoutException.class, failure.getCause(),
                         "expected a TimeoutException cause, got " + failure.getCause());
                 assertTrue(elapsedMillis < 10_000L,
                         "retention wait was not bounded: %s ms".formatted(elapsedMillis));

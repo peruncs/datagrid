@@ -147,7 +147,7 @@ class AeronArchiveReplicationIT {
                     recordingId = awaitRecordingId(publisher);
                 }
             }
-            final Path segment = ArchiveArtifactMutator.segments(archiveDirectory.toPath(), recordingId).get(0);
+            final Path segment = ArchiveArtifactMutator.segments(archiveDirectory.toPath(), recordingId).getFirst();
             ArchiveArtifactMutator.corruptFirstEnvelopePayload(segment);
 
             Throwable failure = null;
@@ -215,7 +215,7 @@ class AeronArchiveReplicationIT {
             final java.util.List<Path> segments = ArchiveArtifactMutator.segments(
                     fixture.archiveDirectory(), fixture.recordingId());
             ArchiveArtifactMutator.truncateFinalFrame(
-                    segments.get(segments.size() - 1),
+                    segments.getLast(),
                     fixture.startPosition(), fixture.stopPosition());
             Throwable failure = null;
             try {

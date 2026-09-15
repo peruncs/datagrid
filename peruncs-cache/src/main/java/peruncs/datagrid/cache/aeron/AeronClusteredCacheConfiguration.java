@@ -64,11 +64,9 @@ public record AeronClusteredCacheConfiguration(
             throw new IllegalArgumentException(
                     "offerTimeoutMillis must not be negative: %s".formatted(offerTimeoutMillis));
         }
-        try {
-            Math.multiplyExact(offerTimeoutMillis, 1_000_000L);
-        } catch (final ArithmeticException overflow) {
+        if (offerTimeoutMillis > Long.MAX_VALUE / 1_000_000L) {
             throw new IllegalArgumentException(
-                    "offerTimeoutMillis is too large: %s".formatted(offerTimeoutMillis), overflow);
+                    "offerTimeoutMillis is too large: %s".formatted(offerTimeoutMillis));
         }
         if (maxPayloadBytes < 1 || maxPayloadBytes > MAX_PAYLOAD_BYTES) {
             throw new IllegalArgumentException(

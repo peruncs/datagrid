@@ -242,9 +242,5 @@ class NodeHousekeeperTest {
         public Throwable failure() {
             return null;
         }
-
-        @Override
-        public void close() {
-        }
     }
 }

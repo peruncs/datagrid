@@ -310,7 +310,6 @@ public final class ProviderCrashChildMain {
 
     private static final class ChildRuntime implements AutoCloseable {
         private final Path base;
-        private final Path control;
         private final ReplicationDurabilityMode durability;
         private final String barrierPoint;
         private final BiConsumer<String, Long> crashHook;
@@ -326,7 +325,6 @@ public final class ProviderCrashChildMain {
         private ChildRuntime(final Path base, final Path control,
                              final ReplicationDurabilityMode durability, final String barrierPoint) {
             this.base = base;
-            this.control = control;
             this.durability = durability;
             this.barrierPoint = barrierPoint;
             this.crashHook = crashHook(control, barrierPoint);

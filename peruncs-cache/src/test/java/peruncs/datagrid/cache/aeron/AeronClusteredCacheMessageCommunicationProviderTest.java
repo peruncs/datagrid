@@ -275,11 +275,9 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 publish(sender, EventType.CREATED, "cache", "table", 7L);
                 assertFalse(selfReceived.await(1, TimeUnit.SECONDS),
                         "a node must ignore an invalidation it published itself");
-                final AeronClusteredCacheMessageReceiver aeronReceiver =
-                        receiver;
-                assertTrue(aeronReceiver.selfSkipped() >= 1L, "the self-published frame must be counted");
-                assertEquals(0L, aeronReceiver.received(), "no frame may be applied from the same node");
-                assertEquals(0L, aeronReceiver.gaps(), "a single frame cannot create a gap");
+                assertTrue(receiver.selfSkipped() >= 1L, "the self-published frame must be counted");
+                assertEquals(0L, receiver.received(), "no frame may be applied from the same node");
+                assertEquals(0L, receiver.gaps(), "a single frame cannot create a gap");
             } finally {
                 sender.dispose();
             }
@@ -436,14 +434,12 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     final UnsafeBuffer truncated =
                             new UnsafeBuffer(new byte[AeronClusteredCacheMessageCodec.HEADER_LENGTH - 1]);
                     raw.offer(truncated, 0, truncated.capacity());
-                    final AeronClusteredCacheMessageReceiver aeronReceiver =
-                            receiver;
                     final long failureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
-                    while (aeronReceiver.failure() == null && System.nanoTime() < failureDeadline) {
+                    while (receiver.failure() == null && System.nanoTime() < failureDeadline) {
                         LockSupport.parkNanos(100_000L);
                     }
-                    assertNotNull(aeronReceiver.failure(), "malformed input must fail the volatile receiver closed");
-                    assertFalse(aeronReceiver.isRunning());
+                    assertNotNull(receiver.failure(), "malformed input must fail the volatile receiver closed");
+                    assertFalse(receiver.isRunning());
 
                     final AeronClusteredCacheMessageCommunicationProvider senderProvider =
                             new AeronClusteredCacheMessageCommunicationProvider();
@@ -815,17 +811,15 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                             "the first contiguous invalidation must be applied");
                     assertNull(received.poll(1, TimeUnit.SECONDS),
                             "the invalidation after a sender gap must be rejected before cache application");
-                    final AeronClusteredCacheMessageReceiver aeronReceiver =
-                            receiver;
                     final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (aeronReceiver.gaps() < 1L && System.nanoTime() < deadline) {
+                    while (receiver.gaps() < 1L && System.nanoTime() < deadline) {
                         LockSupport.parkNanos(10_000L);
                     }
-                    assertTrue(aeronReceiver.gaps() >= 1L,
+                    assertTrue(receiver.gaps() >= 1L,
                             "a skipped sequence must be reported as a gap");
-                    assertNotNull(aeronReceiver.failure(),
+                    assertNotNull(receiver.failure(),
                             "a lost invalidation must fail the volatile receiver closed");
-                    assertFalse(aeronReceiver.isRunning(),
+                    assertFalse(receiver.isRunning(),
                             "a receiver with a sequence gap must stop polling");
                 }
             } finally {
@@ -907,9 +901,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 receiver.start();
                 try (Aeron aeron = Aeron.connect(new Aeron.Context()
                         .aeronDirectoryName(root.resolve("driver").toString()))) {
-                    final Publication raw = aeron.addPublication(
-                            properties.channel(), properties.streamId());
-                    try {
+                    try (final Publication raw = aeron.addPublication(
+                            properties.channel(), properties.streamId())) {
                         awaitConnected(raw);
                         final byte[] payload = AeronClusteredCachePayloadCodec.encode(
                                 new TimestampsRegionUpdateMessage("cache", "table", 1L));
@@ -929,8 +922,6 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                         }
                         assertNotNull(receiver.failure(), "sender identity cardinality must be bounded");
                         assertFalse(receiver.isRunning(), "receiver must stop after identity cardinality overflow");
-                    } finally {
-                        raw.close();
                     }
                 }
             } finally {
@@ -980,13 +971,11 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     }
                     assertEquals(10, delivered, "every invalidation from both providers must be delivered");
 
-                    final AeronClusteredCacheMessageReceiver aeronObserver =
-                            observer;
                     final long gapDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (aeronObserver.gaps() != 0L && System.nanoTime() < gapDeadline) {
+                    while (observer.gaps() != 0L && System.nanoTime() < gapDeadline) {
                         LockSupport.parkNanos(10_000L);
                     }
-                    assertEquals(0L, aeronObserver.gaps(),
+                    assertEquals(0L, observer.gaps(),
                             "providers sharing one node id must draw from one sequence and never report false gaps");
                 } finally {
                     first.dispose();
@@ -1036,18 +1025,14 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     assertEquals(5, drainAll(receivedA, 5, 15));
                     assertEquals(5, drainAll(receivedB, 5, 15));
 
-                    final AeronClusteredCacheMessageReceiver aeronObserverA =
-                            observerReceiverA;
-                    final AeronClusteredCacheMessageReceiver aeronObserverB =
-                            observerReceiverB;
                     final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while ((aeronObserverA.gaps() != 0L || aeronObserverB.gaps() != 0L) &&
+                    while ((observerReceiverA.gaps() != 0L || observerReceiverB.gaps() != 0L) &&
                            System.nanoTime() < deadline) {
                         LockSupport.parkNanos(10_000L);
                     }
-                    assertEquals(0L, aeronObserverA.gaps(),
+                    assertEquals(0L, observerReceiverA.gaps(),
                             "one node id on one stream must not report false gaps");
-                    assertEquals(0L, aeronObserverB.gaps(),
+                    assertEquals(0L, observerReceiverB.gaps(),
                             "one node id on another stream must not report false gaps");
                 } finally {
                     senderA.dispose();

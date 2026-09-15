@@ -157,13 +157,13 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// invalidation cannot be published.
     ///
     /// One provider owns at most one sender. A repeat call with the same
-    /// serializer and limits returns the existing sender; a different
-    /// serializer or different limits is rejected, and a disposed sender is
-    /// never resurrected — create a new provider instead. The sender must
-    /// share its serializer instance with the receiver. Every value is
-    /// validated before any Aeron resource or sequence lease is acquired, so
-    /// a rejected call cannot leak a live runtime, and a failed construction
-    /// releases the lease and closes still-unbound resources again.
+    /// transport configuration and limits returns the existing sender; a
+    /// different channel, stream, directory, node id, or limits is rejected,
+    /// and a disposed sender is never resurrected — create a new provider
+    /// instead. Every value is validated before any Aeron resource or sequence
+    /// lease is acquired, so a rejected call cannot leak a live runtime, and a
+    /// failed construction releases the lease and closes still-unbound
+    /// resources again.
     ///
     /// @param configuration injected Aeron configuration
     /// @return sender for timestamp cache events
@@ -175,6 +175,10 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         final byte[] senderId = this.ensureSenderId(configuration);
         final long offerTimeoutNanos = configuration.offerTimeoutNanos();
         final int maxPayloadBytes = configuration.maxPayloadBytes();
+        /* Validate the transport binding even on a repeat call: a second call
+         * with a different channel or stream must be rejected, not silently
+         * bound to the resources created by the first call. */
+        final AeronClusteredCacheResources resources = this.ensureResources(configuration);
         if (this.sender != null) {
             if (this.sender.isDisposed()) {
                 throw new IllegalStateException(
@@ -186,10 +190,6 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             }
             return this.sender;
         }
-        /* Validate every value that can reject the binding before starting an
-         * embedded driver or acquiring the shared sequence lease. A malformed
-         * first request must not leak a live Aeron runtime that no handle owns. */
-        final AeronClusteredCacheResources resources = this.ensureResources(configuration);
         final AeronClusteredCacheSenderSequence.SequenceLease sequence;
         try {
             sequence = this.ensureSequence(configuration);
@@ -230,11 +230,11 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// repair a missed message, so continuing would expose stale cache entries.
     ///
     /// One provider owns at most one receiver, mirroring the sender rules:
-    /// a repeat call with the same serializer, acceptor, and limits returns
-    /// the existing receiver, anything different is rejected, and a disposed
-    /// receiver requires a new provider. The node identity is validated
-    /// before any resource is created so a conflicting call cannot strand a
-    /// live runtime behind it.
+    /// a repeat call with the same transport configuration, acceptor, and
+    /// limits returns the existing receiver, anything different is rejected,
+    /// and a disposed receiver requires a new provider. The node identity and
+    /// transport binding are validated before any resource is created so a
+    /// conflicting call cannot strand a live runtime behind it.
     ///
     /// @param configuration   injected Aeron configuration
     /// @param messageAcceptor target for received messages
@@ -246,11 +246,12 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         Objects.requireNonNull(configuration, "configuration");
         Objects.requireNonNull(messageAcceptor, "messageAcceptor");
         this.ensureProviderOpen();
-        /* Validate the node id before creating resources so a conflicting second
-         * call fails with IllegalArgumentException and cannot leave closed
-         * resources behind for a retry. */
+        /* Validate the node id and transport binding before creating resources
+         * so a conflicting second call fails with IllegalArgumentException and
+         * cannot leave closed resources behind for a retry. */
         final byte[] senderId = this.ensureSenderId(configuration);
         final int maxPayloadBytes = configuration.maxPayloadBytes();
+        final AeronClusteredCacheResources resources = this.ensureResources(configuration);
         if (this.receiver != null) {
             if (this.receiver.isDisposed()) {
                 throw new IllegalStateException(
@@ -262,7 +263,6 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             }
             return this.receiver;
         }
-        final AeronClusteredCacheResources resources = this.ensureResources(configuration);
         final AeronClusteredCacheMessageReceiver created;
         try {
             created = new AeronClusteredCacheMessageReceiver(

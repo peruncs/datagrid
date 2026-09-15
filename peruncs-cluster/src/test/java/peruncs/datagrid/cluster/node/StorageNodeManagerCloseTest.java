@@ -71,7 +71,7 @@ class StorageNodeManagerCloseTest {
                 tracked(StorageNodeHealthCheck.class, health),
                 tracked(StorageDiskSpaceReader.class, new CountingHandler()),
                 tracked(ReplicationPositionProvider.class, position),
-                "aeron");
+                "aeron", StorageNodeManager.Role.READER);
     }
 
         /// A close that fails mid-way still releases everything exactly once;
@@ -112,6 +112,10 @@ class StorageNodeManagerCloseTest {
 
         manager.switchToDistribution();
         assertTrue(manager.finishDistributionSwitch());
+        /* Promotion closes the reader health check; readiness must then come
+         * from the distributor instead of the closed reader check. */
+        assertTrue(manager.isReady(), "a promoted node must report ready through the distributor");
+        assertTrue(manager.isHealthy(), "a promoted node must report healthy through the distributor");
         manager.close();
 
         assertEquals(1, client.disposeCalls.get(), "data client disposed twice across promotion and close");

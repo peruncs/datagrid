@@ -19,9 +19,17 @@ import static org.eclipse.serializer.util.X.notNull;
 /// Nodes whose transport supports promotion use
 /// [PromotableStorageNodeManager] instead.
 public interface StorageNodeManager extends ClusterNodeManager {
-        /// Creates a reader manager with an explicit transport id for monitoring labels.
+        /// The fixed replication role a storage node manager is created for.
+    enum Role {
+            /// Applies replicated writes and never distributes.
+        READER,
+            /// Owns the write path and always distributes.
+        DISTRIBUTOR
+    }
+
+        /// Creates a storage node manager for a fixed replication role.
     ///
-    /// The returned manager is never a distributor and offers no promotion
+    /// A [Role#READER] manager never distributes and offers no promotion
     /// operation. Use [PromotableStorageNodeManager] for transports that
     /// support the reader-to-distributor transition.
     ///
@@ -32,7 +40,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
     /// @param storageDiskSpaceReader disk-space reader
     /// @param positionProvider       position provider
     /// @param replicationTransport   transport id
-    /// @return reader storage node manager
+    /// @param role                   fixed replication role
+    /// @return storage node manager
     static StorageNodeManager New(
             final StorageBinaryDataDistributor dataDistributor,
             final StorageTaskExecutor storageTaskExecutor,
@@ -40,13 +49,19 @@ public interface StorageNodeManager extends ClusterNodeManager {
             final StorageNodeHealthCheck healthCheck,
             final StorageDiskSpaceReader storageDiskSpaceReader,
             final ReplicationPositionProvider positionProvider,
-            final String replicationTransport
+            final String replicationTransport,
+            final Role role
     ) {
-        return new Reader(
-                notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient), notNull(healthCheck),
-                notNull(storageDiskSpaceReader), notNull(positionProvider),
-                replicationTransport
-        );
+        return switch (notNull(role)) {
+            case DISTRIBUTOR -> new Distributor(
+                    notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient),
+                    notNull(healthCheck), notNull(storageDiskSpaceReader), notNull(positionProvider),
+                    replicationTransport);
+            case READER -> new Reader(
+                    notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient),
+                    notNull(healthCheck), notNull(storageDiskSpaceReader), notNull(positionProvider),
+                    replicationTransport);
+        };
     }
 
         /// Reports whether this node is a distributor.
@@ -129,12 +144,26 @@ public interface StorageNodeManager extends ClusterNodeManager {
 
         @Override
         public boolean isReady() throws NodeLibraryException {
-            return this.storageTaskExecutor.failure() == null && this.healthCheck.isReady();
+            return this.storageTaskExecutor.failure() == null && this.replicationReady();
         }
 
         @Override
         public boolean isHealthy() {
-            return this.storageTaskExecutor.failure() == null && this.healthCheck.isHealthy();
+            return this.storageTaskExecutor.failure() == null && this.replicationHealthy();
+        }
+
+        /// Reports replication readiness for the current role.
+        ///
+        /// Promotion closes the reader health check, so a distributor reports
+        /// its own failure state instead; consulting the closed reader check
+        /// would leave every probe failing with 503 after promotion.
+        private boolean replicationReady() throws NodeLibraryException {
+            return this.isDistributor() ? this.dataDistributor.failure() == null : this.healthCheck.isReady();
+        }
+
+        /// Reports replication health for the current role.
+        private boolean replicationHealthy() {
+            return this.isDistributor() ? this.dataDistributor.failure() == null : this.healthCheck.isHealthy();
         }
 
         @Override
@@ -176,6 +205,11 @@ public interface StorageNodeManager extends ClusterNodeManager {
 
         @Override
         public ReplicationHealth.State getReplicationState() {
+            if (this.isDistributor()) {
+                return this.dataDistributor.failure() == null
+                        ? ReplicationHealth.State.LIVE
+                        : ReplicationHealth.State.FAILED;
+            }
             return this.healthCheck.replicationState();
         }
 
@@ -285,6 +319,32 @@ public interface StorageNodeManager extends ClusterNodeManager {
         @Override
         public boolean isDistributor() {
             return false;
+        }
+    }
+
+        /// A fixed writer that always distributes.
+    ///
+    /// The fixed writer owns the publication path from startup, so it reports
+    /// itself as the distributor and publishes the distributor's message index
+    /// as its current sequence instead of the placeholder cursor a reader
+    /// client would expose.
+    final class Distributor extends Base {
+        private Distributor(
+                final StorageBinaryDataDistributor dataDistributor,
+                final StorageTaskExecutor storageTaskExecutor,
+                final StorageBinaryDataClient dataClient,
+                final StorageNodeHealthCheck healthCheck,
+                final StorageDiskSpaceReader storageDiskSpaceReader,
+                final ReplicationPositionProvider positionProvider,
+                final String replicationTransport
+        ) {
+            super(dataDistributor, storageTaskExecutor, dataClient, healthCheck,
+                    storageDiskSpaceReader, positionProvider, replicationTransport);
+        }
+
+        @Override
+        public boolean isDistributor() {
+            return true;
         }
     }
 }

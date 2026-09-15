@@ -271,6 +271,9 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
     /// an invalidation (or the sender identity was reused); the receiver therefore
     /// fails closed instead of continuing with a cache that cannot be reconciled.
     private boolean acceptSequence(final AeronClusteredCacheMessageCodec.SenderId sender, final long sequence) {
+        /* Defense in depth: the codec's validateHeader already rejects a
+         * negative or exhausted sequence, so this guard only fires if that
+         * invariant is ever weakened. */
         if (sequence < 0) {
             final IllegalStateException invalid = new IllegalStateException(
                     "Aeron clustered-cache invalidation sequence must be non-negative: %s".formatted(sequence));

@@ -75,17 +75,13 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
     }
 
         /// Combines the two Store extension contracts when one subject implements both.
-    private static final class TargetAndDictionaryExporter
-            implements PersistenceTarget<Binary>, PersistenceTypeDictionaryExporter {
-        private final PersistenceTarget<Binary> target;
-        private final PersistenceTypeDictionaryExporter dictionaryExporter;
-
-        private TargetAndDictionaryExporter(
-                final PersistenceTarget<Binary> target,
-                final PersistenceTypeDictionaryExporter dictionaryExporter
-        ) {
-            this.target = notNull(target);
-            this.dictionaryExporter = notNull(dictionaryExporter);
+    private record TargetAndDictionaryExporter(
+            PersistenceTarget<Binary> target,
+            PersistenceTypeDictionaryExporter dictionaryExporter
+    ) implements PersistenceTarget<Binary>, PersistenceTypeDictionaryExporter {
+        private TargetAndDictionaryExporter {
+            notNull(target);
+            notNull(dictionaryExporter);
         }
 
         @Override

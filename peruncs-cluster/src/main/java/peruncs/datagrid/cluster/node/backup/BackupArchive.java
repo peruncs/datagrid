@@ -100,8 +100,6 @@ final class BackupArchive {
                     extractedBytes = extractEntry(zip, root, entry, extractedBytes, budget, transferBuffer);
                 }
             }
-        } catch (final NodeLibraryException failure) {
-            throw failure;
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to extract storage", failure);
         }
@@ -130,7 +128,7 @@ final class BackupArchive {
             if (manifest == null) throw new NodeLibraryException("Backup archive is missing manifest");
             final long declared = manifest.getSize();
             final byte[] transferBuffer = new byte[8192];
-            final int initialCapacity = (int) Math.min(MAX_MANIFEST_BYTES, Math.max(0L, declared));
+            final int initialCapacity = (int) Math.clamp(declared, 0L, MAX_MANIFEST_BYTES);
             final ByteArrayOutputStream output = new ByteArrayOutputStream(initialCapacity);
             try (InputStream data = zip.getInputStream(manifest)) {
                 try {
@@ -152,8 +150,6 @@ final class BackupArchive {
                 throw new NodeLibraryException("Backup manifest exceeds its declared size");
             }
             return output.toByteArray();
-        } catch (final NodeLibraryException failure) {
-            throw failure;
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to read backup manifest from %s".formatted(archive), failure);
         }
@@ -172,8 +168,6 @@ final class BackupArchive {
                 }
             }
             return false;
-        } catch (final NodeLibraryException failure) {
-            throw failure;
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to inspect backup archive %s".formatted(archive), failure);
         }

@@ -7,8 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Tests neutral transport behavior.
 class NeutralTransportTest {
@@ -34,20 +33,6 @@ class NeutralTransportTest {
         final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
             private final AtomicReference<String> pending = new AtomicReference<>();
 
-            public void messageIndex(final long value) {
-            }
-
-            public long messageIndex() {
-                return -1;
-            }
-
-            public void ignoreDistribution(final boolean value) {
-            }
-
-            public boolean ignoreDistribution() {
-                return false;
-            }
-
             public void distributeTypeDictionary(final String value) {
                 this.pending.set(value);
             }
@@ -71,20 +56,6 @@ class NeutralTransportTest {
     @Test
     void queuedDictionaryCrossesTheStartupThreadBoundary() {
         final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
-            public void messageIndex(final long value) {
-            }
-
-            public long messageIndex() {
-                return -1;
-            }
-
-            public void ignoreDistribution(final boolean value) {
-            }
-
-            public boolean ignoreDistribution() {
-                return false;
-            }
-
             public void distributeTypeDictionary(final String value) {
             }
 
@@ -97,27 +68,13 @@ class NeutralTransportTest {
         final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
         caching.queueTypeDictionaryForNextTransaction("full-dictionary");
         assertEquals("full-dictionary", caching.consumeTypeDictionary());
-        assertEquals(null, caching.consumeTypeDictionary());
+        assertNull(caching.consumeTypeDictionary());
     }
 
         /// A restart snapshot replaces an incremental dictionary staged before startup completed.
     @Test
     void queuedDictionarySupersedesStaleIncrementalDictionary() {
         final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
-            public void messageIndex(final long value) {
-            }
-
-            public long messageIndex() {
-                return -1;
-            }
-
-            public void ignoreDistribution(final boolean value) {
-            }
-
-            public boolean ignoreDistribution() {
-                return false;
-            }
-
             public void distributeTypeDictionary(final String value) {
             }
 

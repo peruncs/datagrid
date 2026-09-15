@@ -30,14 +30,11 @@ class ClusterFoundationLifecycleTest {
                                 .setStorageFileProvider(Storage.FileProvider(storagePath))
                                 .createConfiguration()))
                 .setRootSupplier(Object::new);
-        final ClusterFoundation foundation = builder.build();
         builder.setEnableAsyncDistribution(true);
 
-        assertDoesNotThrow(foundation::startStorageManager);
-        try {
+        try (final ClusterFoundation foundation = builder.build()) {
             assertDoesNotThrow(foundation::startStorageManager);
-        } finally {
-            foundation.close();
+            assertDoesNotThrow(foundation::startStorageManager);
         }
     }
 }

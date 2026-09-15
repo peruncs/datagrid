@@ -9,8 +9,10 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -133,8 +135,8 @@ class AeronReplicationPublisherTest {
             assertEquals(3, prepared.dataLength());
             assertEquals(2, messages.size());
             assertEquals(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY,
-                    AeronReplicationEnvelope.decode(new org.agrona.concurrent.UnsafeBuffer(messages.get(0)), 0,
-                            messages.get(0).length).kind());
+                    AeronReplicationEnvelope.decode(new org.agrona.concurrent.UnsafeBuffer(messages.getFirst()), 0,
+                            messages.getFirst().length).kind());
             assertEquals(AeronReplicationEnvelope.Kind.STORE_BINARY,
                     AeronReplicationEnvelope.decode(new org.agrona.concurrent.UnsafeBuffer(messages.get(1)), 0,
                             messages.get(1).length).kind());
@@ -168,7 +170,7 @@ class AeronReplicationPublisherTest {
             publisher.publishTransaction(null, new ByteBuffer[]{first, second});
             assertEquals(firstPosition, first.position());
             assertEquals(secondPosition, second.position());
-            assertArrayEquals(new byte[]{1, 2, 3, 4}, preparedData(messages.get(0)));
+            assertArrayEquals(new byte[]{1, 2, 3, 4}, preparedData(messages.getFirst()));
         }
     }
 
@@ -309,7 +311,7 @@ class AeronReplicationPublisherTest {
             publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.allocate(0)});
             assertEquals(2, messages.size());
             final AeronReplicationEnvelope.Envelope data = AeronReplicationEnvelope.decode(
-                    new org.agrona.concurrent.UnsafeBuffer(messages.get(0)), 0, messages.get(0).length);
+                    new org.agrona.concurrent.UnsafeBuffer(messages.getFirst()), 0, messages.getFirst().length);
             assertEquals(AeronReplicationEnvelope.Kind.STORE_BINARY, data.kind());
             assertEquals(0, data.payloadLength());
             assertEquals(0, data.payload().length);
@@ -454,6 +456,64 @@ class AeronReplicationPublisherTest {
             assertFalse(publisher.hasSequenceReservation());
             assertEquals(reserved, prepared.sequence());
             publisher.commit(prepared);
+        }
+    }
+
+        /// A commit marker that retries under back pressure must not hold the
+        /// publisher state monitor: monitoring and close() must stay responsive
+        /// while the offer is in flight.
+    @Test
+    void slowCommitOfferDoesNotBlockStateAccessors() throws Exception {
+        final CountDownLatch commitOfferEntered = new CountDownLatch(1);
+        final CountDownLatch releaseOffer = new CountDownLatch(1);
+        final AtomicInteger offers = new AtomicInteger();
+        final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
+        final AeronReplicationConfiguration configuration = configuration(30_000_000_000L);
+        try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) ->
+                {
+                    if (offers.incrementAndGet() == 1) {
+                        return length;
+                    }
+                    commitOfferEntered.countDown();
+                    try {
+                        if (!releaseOffer.await(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("commit offer was never released");
+                        }
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("commit offer wait was interrupted", interrupted);
+                    }
+                    return length;
+                },
+                configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})});
+            final Thread committing = Thread.ofVirtual().start(() ->
+            {
+                try {
+                    publisher.commit(prepared);
+                } catch (final Throwable failure) {
+                    commitFailure.set(failure);
+                }
+            });
+
+            assertTrue(commitOfferEntered.await(10, java.util.concurrent.TimeUnit.SECONDS),
+                    "commit offer never started");
+            final long start = System.nanoTime();
+            assertFalse(publisher.isFailed(), "monitoring must observe state during the offer");
+            publisher.nextSequence();
+            publisher.isClosed();
+            publisher.hasPendingTransaction();
+            final long elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(elapsedMillis < 5_000L,
+                    "state accessors stalled behind the commit offer for %s ms".formatted(elapsedMillis));
+
+            releaseOffer.countDown();
+            committing.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(10));
+            assertFalse(committing.isAlive(), "commit did not finish after the offer was released");
+            assertNull(commitFailure.get(), "commit must succeed after the offer completes");
+            assertFalse(publisher.isFailed(), "a successful commit must not fail the publisher");
         }
     }
 }
