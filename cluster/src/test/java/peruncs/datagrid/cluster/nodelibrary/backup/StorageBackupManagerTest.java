@@ -6,6 +6,7 @@ import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.nodelibrary.replication.ClusterStorageBinaryDataClient;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationLogRetention;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
@@ -99,7 +100,7 @@ class StorageBackupManagerTest {
     void doesNotCreateOrResumeWhenTheReaderStopIsUnresolved() {
         final FakeClient client = new FakeClient();
         client.running = true;
-        client.stopOutcome = peruncs.datagrid.storage.distributed.types.StorageBinaryDataClient.StopOutcome.TIMED_OUT;
+        client.stopOutcome = StorageBinaryDataClient.StopOutcome.TIMED_OUT;
         final FakeBackend backend = new FakeBackend();
 
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
@@ -162,8 +163,8 @@ class StorageBackupManagerTest {
         private boolean running;
         private RuntimeException failure;
         private RuntimeException resumeFailure;
-        private peruncs.datagrid.storage.distributed.types.StorageBinaryDataClient.StopOutcome stopOutcome =
-                peruncs.datagrid.storage.distributed.types.StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY;
+        private StorageBinaryDataClient.StopOutcome stopOutcome =
+                StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY;
         private int stopCalls;
         private int resumeCalls;
 

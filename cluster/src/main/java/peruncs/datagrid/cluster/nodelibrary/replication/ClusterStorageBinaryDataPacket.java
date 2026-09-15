@@ -1,9 +1,9 @@
 package peruncs.datagrid.cluster.nodelibrary.replication;
 
 
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataException;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacket;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataException;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage.MessageType;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacket;
 
 import java.nio.ByteBuffer;
 

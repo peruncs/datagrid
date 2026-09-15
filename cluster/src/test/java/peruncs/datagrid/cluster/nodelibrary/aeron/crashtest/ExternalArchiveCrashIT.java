@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.nodelibrary.aeron.crashtest;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.storage.distributed.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
 import java.nio.file.Files;

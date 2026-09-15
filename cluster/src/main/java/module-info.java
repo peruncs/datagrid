@@ -7,9 +7,9 @@
  * {@code ...cluster.nodelibrary.replication}, and the HTTP surface in
  * {@code ...cluster.nodelibrary.http}, implemented by the Aeron transport in
  * {@code ...cluster.nodelibrary.aeron}. Store binary movement lives in
- * {@code ...storage.distributed.types}, carried by
- * {@code ...storage.distributed.aeron.*}, with the embedded Lucene/JVector
- * index policy in {@code ...storage.distributed.index}. Aeron is the only
+ * {@code ...cluster.storage.types}, carried by
+ * {@code ...cluster.storage.aeron.*}, with the embedded Lucene/JVector
+ * index policy in {@code ...cluster.storage.index}. Aeron is the only
  * transport.</p>
  *
  * <p>Applications create the node services, start them in dependency order,
@@ -52,10 +52,10 @@ module peruncs.datagrid.cluster
     exports peruncs.datagrid.cluster.nodelibrary.store;
     exports peruncs.datagrid.cluster.nodelibrary.http;
     exports peruncs.datagrid.cluster.nodelibrary.aeron;
-    exports peruncs.datagrid.storage.distributed.types;
-    exports peruncs.datagrid.storage.distributed.aeron.config;
-    exports peruncs.datagrid.storage.distributed.aeron.checkpoint;
-    exports peruncs.datagrid.storage.distributed.aeron.reader;
-    exports peruncs.datagrid.storage.distributed.aeron.writer;
-    exports peruncs.datagrid.storage.distributed.index;
+    exports peruncs.datagrid.cluster.storage.types;
+    exports peruncs.datagrid.cluster.storage.aeron.config;
+    exports peruncs.datagrid.cluster.storage.aeron.checkpoint;
+    exports peruncs.datagrid.cluster.storage.aeron.reader;
+    exports peruncs.datagrid.cluster.storage.aeron.writer;
+    exports peruncs.datagrid.cluster.storage.index;
 }

@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.nodelibrary.replication;
 
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.util.concurrent.atomic.AtomicReference;
 

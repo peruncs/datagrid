@@ -7,7 +7,7 @@ import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.driver.ThreadingMode;
 import org.agrona.SystemUtil;
 import peruncs.datagrid.cluster.nodelibrary.node.NodelibraryPropertiesProvider;
-import peruncs.datagrid.storage.distributed.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;

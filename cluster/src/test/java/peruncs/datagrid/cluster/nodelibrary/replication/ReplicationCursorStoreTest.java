@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.nodelibrary.replication;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.storage.distributed.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Files;

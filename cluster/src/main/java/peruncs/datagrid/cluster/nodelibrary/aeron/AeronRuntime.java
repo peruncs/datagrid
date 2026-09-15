@@ -7,7 +7,7 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.exceptions.ActiveDriverException;
 import org.agrona.ErrorHandler;
-import peruncs.datagrid.storage.distributed.types.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.io.IOException;
 import java.nio.file.Files;

@@ -10,18 +10,20 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import peruncs.datagrid.cluster.nodelibrary.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.nodelibrary.replication.*;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronAuthenticatedWatermark;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpointStore;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.storage.distributed.aeron.reader.CursorSnapshot;
-import peruncs.datagrid.storage.distributed.aeron.reader.ReaderDeliveryListener;
-import peruncs.datagrid.storage.distributed.aeron.reader.StorageBinaryDataClientAeronArchive;
-import peruncs.datagrid.storage.distributed.aeron.writer.AeronArchiveReplicationPublisher;
-import peruncs.datagrid.storage.distributed.aeron.writer.AeronReplicationWriteCoordinator;
-import peruncs.datagrid.storage.distributed.aeron.writer.AeronStorageBinaryTargetDistributing;
-import peruncs.datagrid.storage.distributed.types.AtomicFileStore;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.aeron.reader.CursorSnapshot;
+import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
+import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeronArchive;
+import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
+import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
+import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryTargetDistributing;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -245,7 +247,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         @Override
         public synchronized UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-                final String streamName, final peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor distributor) {
+                final String streamName, final StorageBinaryDataDistributor distributor) {
             this.ensureOpen();
             this.claimStream(streamName);
             if (!"writer".equals(this.settings.role())) {
@@ -1337,7 +1339,7 @@ public final class AeronClusterReplicationTransportProvider {
 
     /** Adapts complete Aeron data to the neutral packet acceptor. */
     private record ReceiverAdapter(Transport owner, ClusterStorageBinaryDataPacketAcceptor packetAcceptor)
-            implements peruncs.datagrid.storage.distributed.types.StorageBinaryDataReceiver {
+            implements StorageBinaryDataReceiver {
         public void receiveTypeDictionary(final String value) {
             this.owner().enterDeliveryCallback();
             try {

@@ -10,10 +10,10 @@ import peruncs.datagrid.cluster.nodelibrary.backup.BackupTarget;
 import peruncs.datagrid.cluster.nodelibrary.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.nodelibrary.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.nodelibrary.replication.ClusterStorageBinaryDataDistributor;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpointStore;
-import peruncs.datagrid.storage.distributed.types.AtomicFileStoreCrashHook;
-import peruncs.datagrid.storage.distributed.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
+import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;

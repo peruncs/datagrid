@@ -12,7 +12,7 @@ at configuration and a reader can never promote itself to writer.
 
 | Directory | Artifact          | Java module                     | Contents                                                                    |
 |-----------|-------------------|---------------------------------|-----------------------------------------------------------------------------|
-| `cache`   | `peruncs-cache`   | `peruncs.datagrid.cache.clustered` | Hibernate clustered-cache region factory, timestamp invalidation over Aeron |
+| `cache`   | `peruncs-cache`   | `peruncs.datagrid.cache`           | Hibernate clustered-cache region factory, timestamp invalidation over Aeron |
 | `cluster` | `peruncs-cluster` | `peruncs.datagrid.cluster`         | Node lifecycle, backup, replication, Store transport, and indexes over Aeron |
 
 The `cluster` module keeps the `cluster.nodelibrary.*` packages organized by

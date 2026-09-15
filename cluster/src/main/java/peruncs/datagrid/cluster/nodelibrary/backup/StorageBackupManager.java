@@ -8,7 +8,7 @@ import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.nodelibrary.replication.ClusterStorageBinaryDataClient;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationLogRetention;
-import peruncs.datagrid.storage.distributed.types.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.nio.file.Path;
 import java.util.Comparator;

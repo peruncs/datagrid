@@ -13,7 +13,7 @@ import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationCursorStore;
 import peruncs.datagrid.cluster.nodelibrary.store.StorageFileOperations;
-import peruncs.datagrid.storage.distributed.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;

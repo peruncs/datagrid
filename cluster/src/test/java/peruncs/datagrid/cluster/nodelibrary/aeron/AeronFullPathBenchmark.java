@@ -3,8 +3,9 @@ package peruncs.datagrid.cluster.nodelibrary.aeron;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import peruncs.datagrid.cluster.nodelibrary.replication.*;
-import peruncs.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.types.ObjectGraphUpdateHandler;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.types.DistributedStorage;
 
 import java.lang.management.BufferPoolMXBean;
 import java.lang.management.ManagementFactory;
@@ -63,7 +64,7 @@ public final class AeronFullPathBenchmark {
             final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
             final AeronStoreIntegrationIT.Root initial = new AeronStoreIntegrationIT.Root();
             final EmbeddedStorageFoundation<?> seedFoundation = AeronStoreIntegrationIT.foundation(writerPath);
-            peruncs.datagrid.storage.distributed.types.DistributedStorage.configureWriting(seedFoundation, distributor,
+            DistributedStorage.configureWriting(seedFoundation, distributor,
                     writerTransport.persistenceTargetFactory("store", distributor));
             final EmbeddedStorageManager seed = seedFoundation.start(initial);
             seed.storeRoot();
@@ -72,7 +73,7 @@ public final class AeronFullPathBenchmark {
             AeronStoreIntegrationIT.copyDirectory(writerPath, readerPath);
 
             final EmbeddedStorageFoundation<?> writerFoundation = AeronStoreIntegrationIT.foundation(writerPath);
-            peruncs.datagrid.storage.distributed.types.DistributedStorage.configureWriting(writerFoundation, distributor,
+            DistributedStorage.configureWriting(writerFoundation, distributor,
                     writerTransport.persistenceTargetFactory("store", distributor));
             final EmbeddedStorageManager writer = writerFoundation.start();
             final AeronStoreIntegrationIT.Root writerRoot = writer.root();

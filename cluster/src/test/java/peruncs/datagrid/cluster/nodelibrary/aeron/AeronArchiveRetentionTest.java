@@ -4,8 +4,8 @@ import io.aeron.archive.client.ArchiveException;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationLogRetention;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronAuthenticatedWatermark;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Files;

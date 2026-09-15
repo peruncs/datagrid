@@ -15,7 +15,8 @@ import org.eclipse.store.storage.types.StorageConnection;
 import org.slf4j.Logger;
 import peruncs.datagrid.cluster.nodelibrary.exceptions.IncompatibleTypeDictionaryException;
 import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
-import peruncs.datagrid.storage.distributed.types.*;
+import peruncs.datagrid.cluster.storage.types.*;
+import peruncs.datagrid.cluster.storage.types.*;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -151,7 +152,7 @@ public interface ClusterStorageBinaryDataMerger extends StorageBinaryDataMerger,
                  * binary was discarded. */
                 throw new IllegalStateException("Storage binary merger is disposed");
             }
-            final ByteBuffer[] sourceBuffers = peruncs.datagrid.storage.distributed.types.StorageBinaryDataChunker
+            final ByteBuffer[] sourceBuffers = StorageBinaryDataChunker
                     .importArray(data);
             final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.importOwned(this.storage, sourceBuffers);
             /* scheduleMaterialization owns cleanup on every rejection.  Releasing here

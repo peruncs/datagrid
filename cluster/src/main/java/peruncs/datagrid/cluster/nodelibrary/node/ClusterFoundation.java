@@ -17,9 +17,9 @@ import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.nodelibrary.http.ClusterRestRequestController;
 import peruncs.datagrid.cluster.nodelibrary.replication.*;
 import peruncs.datagrid.cluster.nodelibrary.store.*;
-import peruncs.datagrid.storage.distributed.types.AtomicFileStore;
-import peruncs.datagrid.storage.distributed.types.DistributedStorage;
-import peruncs.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.DistributedStorage;
+import peruncs.datagrid.cluster.storage.types.ObjectGraphUpdateHandler;
 
 import java.io.IOException;
 import java.net.URI;

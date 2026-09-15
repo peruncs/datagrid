@@ -2,8 +2,8 @@ package peruncs.datagrid.cluster.nodelibrary.replication;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryTargetDistributing;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryTargetDistributing;
 
 import java.util.function.UnaryOperator;
 

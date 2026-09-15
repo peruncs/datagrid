@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.nodelibrary.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.nodelibrary.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.nodelibrary.replication.*;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;

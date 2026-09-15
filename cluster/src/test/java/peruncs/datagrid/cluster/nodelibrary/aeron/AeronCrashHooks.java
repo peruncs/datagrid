@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.nodelibrary.aeron;
 
-import peruncs.datagrid.storage.distributed.aeron.writer.CrashHook;
+import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 
 import java.util.function.BiConsumer;
 

@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.nodelibrary.replication;
 
 import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 /**
  * Aeron reader lifecycle. The Aeron reader exposes a {@link ReplicationCursor}.

@@ -9,8 +9,8 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import peruncs.datagrid.cluster.nodelibrary.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.nodelibrary.replication.ClusterReplicationTransport;
-import peruncs.datagrid.storage.distributed.types.DistributedStorage;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.types.DistributedStorage;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

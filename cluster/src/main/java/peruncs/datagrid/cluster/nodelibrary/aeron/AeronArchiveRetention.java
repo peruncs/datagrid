@@ -4,9 +4,9 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationLogRetention;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronAuthenticatedWatermark;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.storage.distributed.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;

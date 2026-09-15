@@ -13,7 +13,7 @@
  *
  * @since 1.0
  */
-module peruncs.datagrid.cache.clustered
+module peruncs.datagrid.cache
 {
     requires org.eclipse.serializer;
     requires org.eclipse.serializer.base;
@@ -25,6 +25,6 @@ module peruncs.datagrid.cache.clustered
     requires io.aeron.driver;
     requires org.agrona;
 
-    exports peruncs.datagrid.cache.clustered.types;
-    exports peruncs.datagrid.cache.clustered.aeron.types;
+    exports peruncs.datagrid.cache.types;
+    exports peruncs.datagrid.cache.aeron;
 }

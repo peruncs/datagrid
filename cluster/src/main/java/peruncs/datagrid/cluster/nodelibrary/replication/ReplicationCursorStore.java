@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.nodelibrary.replication;
 
 import org.eclipse.serializer.io.XIO;
-import peruncs.datagrid.storage.distributed.types.AtomicFileStore;
-import peruncs.datagrid.storage.distributed.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;

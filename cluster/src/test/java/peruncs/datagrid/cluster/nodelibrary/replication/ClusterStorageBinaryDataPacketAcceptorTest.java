@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.nodelibrary.replication;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacket;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacket;
 
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static peruncs.datagrid.storage.distributed.types.StorageBinaryDataMessage.MessageType.DATA;
+import static peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage.MessageType.DATA;
 
 /** Verifies that the cluster acceptor forwards packets and lifecycle to the merger. */
 class ClusterStorageBinaryDataPacketAcceptorTest {

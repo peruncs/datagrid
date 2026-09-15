@@ -7,8 +7,8 @@ import org.agrona.DirectBuffer;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronAuthenticatedWatermark;
-import peruncs.datagrid.storage.distributed.types.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
+import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.Arrays;
 import java.util.Objects;

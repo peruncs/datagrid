@@ -16,11 +16,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import peruncs.datagrid.cluster.nodelibrary.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.nodelibrary.replication.*;
-import peruncs.datagrid.storage.distributed.index.ClusterStoreIndexes;
-import peruncs.datagrid.storage.distributed.types.DistributedStorage;
-import peruncs.datagrid.storage.distributed.types.ObjectGraphUpdateHandler;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataClient;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
+import peruncs.datagrid.cluster.storage.types.DistributedStorage;
+import peruncs.datagrid.cluster.storage.types.ObjectGraphUpdateHandler;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -134,7 +134,7 @@ class AeronStoreIntegrationIT {
                 while (client.isRunning() && System.nanoTime() < stopDeadline) {
                     java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
                 }
-                assertEquals(peruncs.datagrid.storage.distributed.types.StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY,
+                assertEquals(StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY,
                         client.stopOutcome(), role + " did not stop at a resolved transaction boundary");
             } finally {
                 client.dispose();

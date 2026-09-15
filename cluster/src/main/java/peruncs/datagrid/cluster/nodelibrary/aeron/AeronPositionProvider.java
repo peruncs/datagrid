@@ -4,7 +4,7 @@ import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
 import peruncs.datagrid.cluster.nodelibrary.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.nodelibrary.replication.ReplicationPositionProvider;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 
 import java.util.Objects;
 import java.util.UUID;

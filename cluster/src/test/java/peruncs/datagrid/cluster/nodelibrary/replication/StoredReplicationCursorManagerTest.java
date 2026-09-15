@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.nodelibrary.replication;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.storage.distributed.types.AtomicFileStoreCrashHook;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

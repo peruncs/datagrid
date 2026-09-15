@@ -3,8 +3,8 @@ package peruncs.datagrid.cluster.nodelibrary.replication;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.typing.Disposable;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacket;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacketAcceptor;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacket;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacketAcceptor;
 
 import java.util.List;
 

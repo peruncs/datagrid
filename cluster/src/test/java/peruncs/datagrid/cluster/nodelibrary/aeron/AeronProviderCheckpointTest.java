@@ -10,8 +10,8 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.nodelibrary.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.nodelibrary.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.nodelibrary.replication.ClusterStorageBinaryDataDistributor;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpoint;
-import peruncs.datagrid.storage.distributed.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 
 import java.net.ServerSocket;
 import java.nio.file.Files;
