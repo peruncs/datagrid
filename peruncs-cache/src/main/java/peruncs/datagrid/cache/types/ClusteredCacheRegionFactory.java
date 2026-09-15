@@ -51,6 +51,9 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     private static final String KEY_DRIVER_TIMEOUT_MILLIS = AERON_PREFIX + "driver-timeout-millis";
         /// Key bounding the accepted serialized payload size.
     private static final String KEY_MAX_PAYLOAD_BYTES = AERON_PREFIX + "max-payload-bytes";
+        /// Removed key that selected a serializer type provider.
+    private static final String REMOVED_KEY_SERIALIZATION_TYPES_PROVIDER =
+            CLUSTERED_PREFIX + "serialization-types-provider";
 
         /// Listener configuration created during session-factory preparation.
     private volatile ClusteredCacheEntryListenerConfiguration cacheEntryListenerConfiguration;
@@ -80,6 +83,13 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     static AeronClusteredCacheConfiguration clusteredCacheConfiguration(
             @SuppressWarnings("rawtypes") final Map properties
     ) {
+        /* The wire format is a fixed timestamp-update schema, so the old
+         * serializer type provider no longer exists. Fail loudly instead of
+         * silently ignoring a key an embedder still sets. */
+        if (stringProperty(properties, REMOVED_KEY_SERIALIZATION_TYPES_PROVIDER, null) != null) {
+            throw new IllegalArgumentException(
+                    "%s was removed: clustered-cache invalidations use a fixed payload schema and no longer serialize entity types".formatted(REMOVED_KEY_SERIALIZATION_TYPES_PROVIDER));
+        }
         final String nodeId = stringProperty(properties, KEY_NODE_ID, null);
         return new AeronClusteredCacheConfiguration(
                 stringProperty(properties, KEY_CHANNEL, AeronClusteredCacheConfiguration.DEFAULT_CHANNEL),

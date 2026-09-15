@@ -1,5 +1,8 @@
 package peruncs.datagrid.cluster.storage.aeron.config;
 
+import org.agrona.concurrent.BackoffIdleStrategy;
+import org.agrona.concurrent.IdleStrategy;
+
 /// Idle pacing and probe spacing for bounded Aeron retry loops.
 ///
 /// All values are nanoseconds. The defaults preserve the historical behavior
@@ -56,5 +59,17 @@ public record AeronRetryPolicy(
         if (catalogProbeInitialDelayNanos > catalogProbeMaxDelayNanos) {
             throw new IllegalArgumentException("catalog probe delays must grow with min <= max");
         }
+    }
+
+        /// Creates an idle strategy paced by this policy's idle bounds.
+    ///
+    /// Callers that poll a subscription or offer loop should build their
+    /// strategy from here so the configured pacing is actually applied instead
+    /// of Agrona's hard-coded defaults.
+    ///
+    /// @return idle strategy using this policy's spin, yield, and park bounds
+    public IdleStrategy idleStrategy() {
+        return new BackoffIdleStrategy(
+                this.idleMaxSpins, this.idleMaxYields, this.idleMinParkNanos, this.idleMaxParkNanos);
     }
 }

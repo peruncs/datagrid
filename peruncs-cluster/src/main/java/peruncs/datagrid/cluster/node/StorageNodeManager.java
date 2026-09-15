@@ -210,20 +210,24 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return;
             }
             this.closed = true;
-            final boolean readerResourcesReleased = this.readerResourcesReleased();
             Throwable failure = null;
             try {
                 this.dataDistributor.dispose();
             } catch (final RuntimeException | Error closeFailure) {
                 failure = closeFailure;
             }
-            if (!readerResourcesReleased) {
+            /* Promotion may have released one reader resource and failed on the
+             * other, so each is guarded independently; an aggregate guard would
+             * re-dispose the resource that already closed. */
+            if (!this.readerClientReleased()) {
                 try {
                     this.dataClient.dispose();
                 } catch (final RuntimeException | Error closeFailure) {
                     if (failure == null) failure = closeFailure;
                     else failure.addSuppressed(closeFailure);
                 }
+            }
+            if (!this.readerHealthReleased()) {
                 try {
                     this.healthCheck.close();
                 } catch (final RuntimeException | Error closeFailure) {
@@ -243,14 +247,21 @@ public interface StorageNodeManager extends ClusterNodeManager {
             }
         }
 
-        /// Reports whether promotion already released the reader resources.
+        /// Reports whether promotion already released the reader data client.
         ///
-        /// A promoted node closed its health check and data client during the
-        /// role transition; closing them again would double-dispose. The base
-        /// implementation never promotes and always releases them here.
+        /// A promoted node disposes its reader client during the role transition;
+        /// closing it again would double-dispose. The base implementation never
+        /// promotes and always releases it here.
         ///
-        /// @return `true` when [PromotableStorageNodeManager] promotion released them
-        protected boolean readerResourcesReleased() {
+        /// @return `true` when [PromotableStorageNodeManager] promotion released the client
+        protected boolean readerClientReleased() {
+            return false;
+        }
+
+        /// Reports whether promotion already released the reader health check.
+        ///
+        /// @return `true` when [PromotableStorageNodeManager] promotion released the health check
+        protected boolean readerHealthReleased() {
             return false;
         }
     }

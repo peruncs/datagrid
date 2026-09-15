@@ -15,10 +15,12 @@ import java.util.Objects;
 /// The listener filter marks this synchronous remote update as silent so it is
 /// never broadcast back to the cluster.
 ///
-/// `Cache.putSilentIfGreater` would express this directly, but the published
-/// `eclipse-store` snapshot this module builds against does not yet expose it,
-/// and it dispatches no listener. Until the dependency provides it, the
-/// processor plus a filter is the only atomic, non-rebroadcasting path.
+/// `Cache.putSilentIfGreater` would express this directly and is the desired
+/// replacement, because it applies the maximum under the same lock without
+/// dispatching any listener at all. The published `eclipse-store` snapshot this
+/// module builds against does not yet expose it, so until the dependency
+/// provides it, the processor plus a filter is the only atomic,
+/// non-rebroadcasting path.
 public class ClusteredCacheMessageAcceptor {
     private static final System.Logger LOGGER =
             System.getLogger(ClusteredCacheMessageAcceptor.class.getName());

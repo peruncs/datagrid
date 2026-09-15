@@ -54,6 +54,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
      * retention agent thread; closed is volatile so any thread observes shutdown. */
     private AeronAuthenticatedWatermark.Quorum quorum;
     private volatile boolean closed;
+    private volatile boolean secretErased;
     private boolean stateRestored;
     private AeronAuthenticatedWatermark persistedBoundary;
     private final ExecutorService agent = Executors.newSingleThreadExecutor(Thread.ofVirtual()
@@ -383,7 +384,13 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
 
     @Override
     public void close() {
-        if (this.closed) return;
+        /* `closed` stops new commands and is set immediately; `secretErased`
+         * records whether the key material is gone. A close that could not stop
+         * the agent leaves the key in place but stays retryable: a later close()
+         * re-runs the bounded shutdown and erases the key once the agent has
+         * actually terminated, so a slow shutdown never turns temporary key
+         * retention into a permanent silent one. */
+        if (this.closed && this.secretErased) return;
         this.closed = true;
         boolean terminated = true;
         /* Queued commands drain first: shutdown() lets the running and queued
@@ -406,15 +413,16 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         if (!terminated) {
             /* A command may still be executing on the agent and reading the key.
              * Erasing it now would race a live HMAC computation, so retain the
-             * key and let the operator restart the process to reclaim it. */
+             * key; a later close() retries once the agent exits. */
             LOGGER.log(System.Logger.Level.WARNING,
-                    "Aeron retention agent did not terminate; retaining the HMAC key");
+                    "Aeron retention agent did not terminate; retaining the HMAC key for a later retry");
             return;
         }
         /* Keep the key only for the lifetime of the controller. The quorum owns a
          * defensive copy for validation, so both copies must be erased explicitly. */
         this.quorum.clearSecret();
         Arrays.fill(this.secret, (byte) 0);
+        this.secretErased = true;
     }
 
     private AeronWriterBoundary requestedBoundary(final ReplicationCursor cursor) {

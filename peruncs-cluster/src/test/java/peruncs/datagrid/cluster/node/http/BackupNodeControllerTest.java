@@ -5,7 +5,6 @@ import peruncs.datagrid.cluster.node.backup.BackupBusyException;
 import peruncs.datagrid.cluster.node.backup.BackupNodeManager;
 import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
 
-
 import java.lang.reflect.Proxy;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

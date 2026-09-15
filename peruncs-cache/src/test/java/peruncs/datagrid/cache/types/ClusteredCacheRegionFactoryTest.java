@@ -79,6 +79,19 @@ class ClusteredCacheRegionFactoryTest {
         assertNull(configuration.nodeId());
     }
 
+        /// The fixed payload schema removed the serializer type provider, so the
+    /// old key must fail loudly instead of being silently ignored.
+    @Test
+    void clusteredCacheConfigurationRejectsRemovedSerializationTypesProviderKey() {
+        final Map<String, Object> properties = new HashMap<>();
+        properties.put("hibernate.cache.eclipsestore.clustered.serialization-types-provider", "configured");
+
+        final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> ClusteredCacheRegionFactory.clusteredCacheConfiguration(properties));
+        assertTrue(failure.getMessage().contains("serialization-types-provider"),
+                "the failure must name the removed key: " + failure.getMessage());
+    }
+
     @Test
     void clusteredCacheConfigurationNormalizesAndRejectsValues() {
         final UUID nodeId = UUID.randomUUID();

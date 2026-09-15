@@ -190,9 +190,8 @@ class AeronReaderLifecycleTest {
                 () -> AeronReaderLifecycle.runPollingLoop(
                         active, () -> false, () -> 0, () -> false, () -> true, () -> {
                             throw expected;
-                        }, AeronReaderLifecycle.defaultIdleStrategy()
-                )
-        );
+                        },
+                        AeronReaderLifecycle.defaultIdleStrategy()));
 
         assertSame(expected, actual);
         assertFalse(active.get());

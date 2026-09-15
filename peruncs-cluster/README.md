@@ -117,11 +117,30 @@ oversized content, missing storage, and incomplete generated metadata. The
 REST backup endpoints trigger and read these local-volume operations; no
 backup HTTP transport or hosted backup target is configured by the node.
 
-The node exposes Aeron through the normal monitoring endpoints:
-`/eclipse-datagrid/health`, `/eclipse-datagrid/health/ready`, and the
-Prometheus-compatible `/eclipse-datagrid/replication-metrics`. The latter
-reports `transport="aeron"`, replay/live state, current/latest sequence, lag,
-readiness, and health, including Archive or replay failures.
+The node ships no HTTP server. The embedding application mounts the routes
+below under `/eclipse-datagrid` on its own stack and delegates each to
+`ClusterRestRequestController`; the path constants live in
+`peruncs.datagrid.cluster.node.http.StorageNodeRestPaths`. The controller
+returns typed values (`ReplicationMetrics`, byte counts, booleans) and never
+renders JSON or Prometheus text itself.
+
+| Path | Methods | Purpose |
+|---|---|---|
+| `/distributor` | GET | Whether this node is the distributor |
+| `/activate-distributor/start` | POST | Start the distributor role transition |
+| `/activate-distributor/finish` | POST | Finish the distributor role transition |
+| `/health` | GET | Liveness probe |
+| `/health/ready` | GET | Readiness probe |
+| `/storage-bytes` | GET | Current storage size in bytes |
+| `/replication-metrics` | GET | Raw replication observability values |
+| `/backup` | GET, POST | Whether a backup runs / start a backup |
+| `/updates` | GET, POST | Whether replication is paused / pause it |
+| `/resume-updates` | POST | Resume replication |
+| `/gc` | GET, POST | Whether storage checks run / start them |
+
+The Prometheus-compatible `/replication-metrics` reports `transport="aeron"`,
+replay/live state, current/latest sequence, lag, readiness, and health,
+including Archive or replay failures.
 
 ## Store binary transport
 

@@ -171,7 +171,11 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         private final LazyConstant<AfterDataMessageConsumedListener> afterDataMessageConsumedListener;
         private final LazyConstant<StorageBinaryDataMerger> dataMerger;
         private final LazyConstant<StorageBinaryDataPacketAcceptor> dataPacketAcceptor;
-        private StoredReplicationCursorManager storedReplicationCursorManager;
+        /* Intentionally not a LazyConstant: a backup restore closes and replaces
+         * this manager, which a one-shot memoized holder cannot express. The
+         * volatile field with double-checked locking gives the same safe
+         * publication without a per-access lock. */
+        private volatile StoredReplicationCursorManager storedReplicationCursorManager;
         private final LazyConstant<ClusterReplicationTransport> replicationTransport;
         private final LazyConstant<ReplicationPositionProvider> positionProvider;
         private final LazyConstant<ReplicationLogRetention> replicationRetention;
@@ -723,11 +727,18 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         }
 
 
-        private synchronized StoredReplicationCursorManager getStoredReplicationCursorManager() {
-            if (this.storedReplicationCursorManager == null) {
-                this.storedReplicationCursorManager = this.dispatch(this.ensureStoredReplicationCursorManager());
+        private StoredReplicationCursorManager getStoredReplicationCursorManager() {
+            StoredReplicationCursorManager manager = this.storedReplicationCursorManager;
+            if (manager == null) {
+                synchronized (this) {
+                    manager = this.storedReplicationCursorManager;
+                    if (manager == null) {
+                        manager = this.dispatch(this.ensureStoredReplicationCursorManager());
+                        this.storedReplicationCursorManager = manager;
+                    }
+                }
             }
-            return this.storedReplicationCursorManager;
+            return manager;
         }
 
 
@@ -1129,7 +1140,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             }
         }
 
-        private void closeStoredReplicationCursorManager() {
+        private synchronized void closeStoredReplicationCursorManager() {
             if (this.storedReplicationCursorManager == null) {
                 return;
             }

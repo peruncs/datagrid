@@ -12,12 +12,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// A remote timestamp applied through a real cache must never be rebroadcast.
 ///
-/// Remote updates are applied with `Cache.putSilentIfGreater`, which performs
-/// the max comparison under the cache's internal table lock and dispatches no
-/// cache listener at all. This test exercises the real cache, the real listener
-/// configuration, and the real (unconnected) sender: any publish attempt fails
-/// on the sender's missing resources, so the test fails loudly if a remote
-/// update ever reaches the sender.
+/// Remote updates are applied through a JCache `EntryProcessor`, which
+/// dispatches cache events to registered listeners on the invoking thread. The
+/// acceptor wraps that invocation in a `ScopedValue` binding, and the listener
+/// filter suppresses events while the binding is active. This test exercises the
+/// real cache, the real listener configuration, and the real (unconnected)
+/// sender: if the filter ever fails to suppress the remote update, the sender is
+/// invoked and the test fails instead of the cluster rebroadcasting silently.
 class ClusteredCacheRemoteUpdateSuppressionTest {
     @Test
     void remoteUpdateThroughRealCacheIsNotRebroadcast() {

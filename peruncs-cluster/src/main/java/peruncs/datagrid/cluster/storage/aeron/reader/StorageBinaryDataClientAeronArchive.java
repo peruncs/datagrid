@@ -4,6 +4,7 @@ import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.PersistentSubscription;
 import io.aeron.logbuffer.ControlledFragmentHandler;
+import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
@@ -29,6 +30,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
     private final PersistentSubscription subscription;
     private final TransactionAssembler assembler;
     private final long stopTimeoutNanos;
+    private final IdleStrategy idleStrategy;
     private final AtomicBoolean active = new AtomicBoolean();
     private final AtomicLong stopDeadlineNanos = new AtomicLong();
     private volatile Thread thread;
@@ -61,10 +63,13 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
     ) {
         this.subscription = Objects.requireNonNull(subscription, "subscription");
         try {
-            this.stopTimeoutNanos = Objects.requireNonNull(configuration, "configuration").readerStopTimeoutNanos();
+            final AeronReplicationConfiguration requiredConfiguration =
+                    Objects.requireNonNull(configuration, "configuration");
+            this.stopTimeoutNanos = requiredConfiguration.readerStopTimeoutNanos();
+            this.idleStrategy = requiredConfiguration.retryPolicy().idleStrategy();
             this.assembler = new TransactionAssembler(
-                    configuration, clusterId, epoch, initialSequence, initialPosition, receiver, transactionResolved,
-                    deliveryListener
+                    requiredConfiguration, clusterId, epoch, initialSequence, initialPosition, receiver,
+                    transactionResolved, deliveryListener
             );
         } catch (final RuntimeException | Error failure) {
             try {
@@ -233,26 +238,13 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
         }
     }
 
-        /// Records a failure outcome unless an earlier terminal outcome already won.
-    private void failOutcome() {
-        this.stopOutcome.updateAndGet(current ->
-                current == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-                current == StorageBinaryDataClient.StopOutcome.CLOSED
-                        ? current
-                        : StorageBinaryDataClient.StopOutcome.FAILED);
-    }
-
-        /// Records the closed outcome only when no failure already terminated the reader.
-    private void closeOutcome() {
-        this.stopOutcome.updateAndGet(current ->
-                current == StorageBinaryDataClient.StopOutcome.FAILED ||
-                current == StorageBinaryDataClient.StopOutcome.TIMED_OUT
-                        ? current
-                        : StorageBinaryDataClient.StopOutcome.CLOSED);
-    }
-
-        /// Sets a non-terminal transition (RUNNING/STOPPING) unless a terminal outcome won.
-    private void transitionOutcome(final StorageBinaryDataClient.StopOutcome next) {
+        /// Sets the next stop outcome unless a terminal outcome already won.
+    ///
+    /// Every transition goes through here so a later event can never downgrade a
+    /// reader that already failed, timed out, or closed to a cleaner-looking
+    /// state. Non-terminal states (RUNNING, STOPPING, and the resolved boundary
+    /// markers) are overwritten as usual.
+    private void updateOutcome(final StorageBinaryDataClient.StopOutcome next) {
         this.stopOutcome.updateAndGet(current -> switch (current) {
             case FAILED, TIMED_OUT, CLOSED -> current;
             default -> next;
@@ -305,11 +297,11 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
                     () -> this.stopAtLatest && ReplicationRetry.expired(this.stopDeadlineNanos.get()),
                     () ->
                     {
-                        this.stopOutcome.set(StorageBinaryDataClient.StopOutcome.TIMED_OUT);
+                        this.updateOutcome(StorageBinaryDataClient.StopOutcome.TIMED_OUT);
                         this.assembler.failure(new IllegalStateException(
                                 "Timed out waiting for Aeron Archive replay to reach the live tail"));
                     },
-                    AeronReaderLifecycle.defaultIdleStrategy()
+                    this.idleStrategy
             );
             this.completeRun();
         } catch (final RuntimeException e) {
@@ -333,17 +325,17 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
                     "PersistentSubscription failed", this.subscription.failureReason()));
         }
         if (this.assembler.failure() != null) {
-            this.failOutcome();
+            this.updateOutcome(StorageBinaryDataClient.StopOutcome.FAILED);
             return;
         }
-        this.transitionOutcome(this.stopAtLatest && this.live
+        this.updateOutcome(this.stopAtLatest && this.live
                 ? StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY
                 : StorageBinaryDataClient.StopOutcome.STOPPED);
     }
 
     private synchronized void finishRun(final CountDownLatch lifecycleStopped) {
         if (this.assembler.failure() != null) {
-            this.failOutcome();
+            this.updateOutcome(StorageBinaryDataClient.StopOutcome.FAILED);
         }
         this.active.set(false);
         this.live = false;
@@ -376,7 +368,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
         }
         this.stopAtLatest = true;
         this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
-        if (this.active.get()) this.transitionOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
+        if (this.active.get()) this.updateOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
     }
 
         /// Returns the last sequence delivered after commit and checksum validation.
@@ -472,7 +464,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
         this.assembler.failure(Objects.requireNonNull(failure, "failure"));
         this.active.set(false);
         this.live = false;
-        this.failOutcome();
+        this.updateOutcome(StorageBinaryDataClient.StopOutcome.FAILED);
     }
 
         /// Stops polling and releases this reader's subscriptions.
@@ -488,7 +480,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
         synchronized (this) {
             if (this.disposed) return;
             this.disposeRequested = true;
-            if (this.active.get()) this.transitionOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
+            if (this.active.get()) this.updateOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
             pollingThread = this.thread;
         }
         AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close,
@@ -498,7 +490,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
             this.thread = null;
             this.disposed = true;
             /* A failed or timed-out reader must not be reported as a clean close. */
-            this.closeOutcome();
+            this.updateOutcome(StorageBinaryDataClient.StopOutcome.CLOSED);
         }
     }
 

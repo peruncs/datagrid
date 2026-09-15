@@ -44,7 +44,12 @@
 /// @since 1.0
 module peruncs.datagrid.cache
 {
-    requires org.eclipse.serializer.base;
+    /* Transitive for modules whose types appear in exported API signatures:
+     * Disposable is an implemented interface, CacheManager a public constructor
+     * parameter, CacheRegionFactory the superclass, Hibernate settings and
+     * storage-access types appear in public/protected methods, and
+     * CacheEntryListenerConfiguration is a public return type. */
+    requires transitive org.eclipse.serializer.base;
     requires transitive org.eclipse.store.cache;
     requires transitive org.eclipse.store.cache.hibernate;
     requires transitive org.hibernate.orm.core;

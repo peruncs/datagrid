@@ -174,10 +174,13 @@ public interface PromotableStorageNodeManager extends StorageNodeManager {
         }
 
         @Override
-        protected boolean readerResourcesReleased() {
-            /* A later close() must not dispose a resource that promotion already
-             * released, so report release only for those actually closed. */
-            return this.healthReleased && this.clientReleased;
+        protected boolean readerClientReleased() {
+            return this.clientReleased;
+        }
+
+        @Override
+        protected boolean readerHealthReleased() {
+            return this.healthReleased;
         }
     }
 }
