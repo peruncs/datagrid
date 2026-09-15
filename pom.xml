@@ -40,8 +40,8 @@
     </properties>
 
 	<modules>
-		<module>cache</module>
-		<module>cluster</module>
+		<module>peruncs-cache</module>
+		<module>peruncs-cluster</module>
 	</modules>
 
     <repositories>

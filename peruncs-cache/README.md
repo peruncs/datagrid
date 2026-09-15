@@ -32,7 +32,7 @@ isolated network.
 
 ## Tests
 
-`mvn -pl cache -am test`. The provider suite runs a real embedded
+`mvn -pl peruncs-cache -am test`. The provider suite runs a real embedded
 MediaDriver over `aeron:ipc`.
 
 ## Design

@@ -1,4 +1,4 @@
-Review @cache/README.md, @cluster/README.md and their docs/adr records for the general outline of the Aeron datagrid implementation
+Review @peruncs-cache/README.md, @peruncs-cluster/README.md and their module-info.java records for the general outline of the Aeron datagrid implementation
 
 ## General code rules - items to investigate or fix:
 

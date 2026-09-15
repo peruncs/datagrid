@@ -139,7 +139,7 @@ network.
 Run the transport and UDP/Archive integration tests with:
 
 ```text
-mvn -pl cluster -am verify
+mvn -pl peruncs-cluster -am verify
 ```
 
 ## Design

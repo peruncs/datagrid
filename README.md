@@ -11,8 +11,8 @@ is fully consistent locally, while the cluster model is eventual consistency.
 
 | Module | Artifact | Contents |
 |---|---|---|
-| [`cache`](cache/README.md) | `peruncs-cache` | Clustered Hibernate second-level cache over Aeron |
-| [`cluster`](cluster/README.md) | `peruncs-cluster` | Node lifecycle, backup, Store replication, and indexes over Aeron |
+| [`peruncs-cache`](peruncs-cache/README.md) | `peruncs-cache` | Clustered Hibernate second-level cache over Aeron |
+| [`peruncs-cluster`](peruncs-cluster/README.md) | `peruncs-cluster` | Node lifecycle, backup, Store replication, and indexes over Aeron |
 
 Each module keeps its own `README.md` and architecture decision records in
 `docs/adr/`. `cache` and `cluster` are independent; `cluster` is
