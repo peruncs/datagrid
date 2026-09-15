@@ -1,4 +1,4 @@
-Review @docs/aeron-design.md for the general outline of the Aeron datagrid implementation
+Review @cache/README.md, @cluster/README.md and their docs/adr records for the general outline of the Aeron datagrid implementation
 
 ## General code rules - items to investigate or fix:
 

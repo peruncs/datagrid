@@ -141,3 +141,11 @@ Run the transport and UDP/Archive integration tests with:
 ```text
 mvn -pl cluster -am verify
 ```
+
+## Decisions
+
+- [ADR 0001](docs/adr/0001-archive-first-replication.md): Archive-first replication
+- [ADR 0002](docs/adr/0002-fixed-roles-without-consensus.md): fixed roles
+- [ADR 0003](docs/adr/0003-durable-cursors-and-checkpoints.md): durable cursors
+- [ADR 0004](docs/adr/0004-quorum-gated-retention.md): quorum-gated retention
+- [ADR 0005](docs/adr/0005-in-graph-index-policy.md): in-graph indexes
