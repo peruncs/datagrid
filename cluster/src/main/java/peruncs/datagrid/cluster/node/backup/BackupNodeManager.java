@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
+import peruncs.datagrid.cluster.node.ClusterNodeManager;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
-import peruncs.datagrid.cluster.node.node.ClusterNodeManager;
 import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 

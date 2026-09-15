@@ -7,7 +7,7 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataDistributor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;

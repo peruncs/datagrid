@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;

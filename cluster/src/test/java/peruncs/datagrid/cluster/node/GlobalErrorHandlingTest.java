@@ -1,6 +1,7 @@
-package peruncs.datagrid.cluster.node.node;
+package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.node.GlobalErrorHandling;
 import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
 
 import static org.junit.jupiter.api.Assertions.assertSame;

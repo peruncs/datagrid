@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.node.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;

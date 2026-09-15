@@ -1,9 +1,9 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.StorageNodeManager;
 import peruncs.datagrid.cluster.node.http.ClusterRestRequestController;
-import peruncs.datagrid.cluster.node.node.NodelibraryPropertiesProvider;
-import peruncs.datagrid.cluster.node.node.StorageNodeManager;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 

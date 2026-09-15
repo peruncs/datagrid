@@ -1,6 +1,7 @@
-package peruncs.datagrid.cluster.node.node;
+package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.node.ClusterFoundation;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 

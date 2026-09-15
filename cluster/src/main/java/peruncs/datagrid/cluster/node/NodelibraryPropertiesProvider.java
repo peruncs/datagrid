@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.node.node;
+package peruncs.datagrid.cluster.node;
 
 import peruncs.datagrid.cluster.node.backup.BackupTarget;
 

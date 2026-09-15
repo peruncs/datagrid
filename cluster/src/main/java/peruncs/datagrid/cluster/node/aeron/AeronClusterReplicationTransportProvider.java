@@ -8,7 +8,7 @@ import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.TimeoutException;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.node.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.*;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;

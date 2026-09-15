@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.node.node;
+package peruncs.datagrid.cluster.node;
 
 import org.eclipse.serializer.exceptions.MissingFoundationPartException;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryAssembler;

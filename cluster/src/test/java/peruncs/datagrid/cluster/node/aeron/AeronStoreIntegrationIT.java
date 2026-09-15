@@ -14,7 +14,7 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import peruncs.datagrid.cluster.node.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.*;
 import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 import peruncs.datagrid.cluster.storage.types.DistributedStorage;

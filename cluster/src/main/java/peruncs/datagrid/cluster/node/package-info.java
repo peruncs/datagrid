@@ -7,4 +7,4 @@
 /// that node is closed.
 ///
 /// @since 1.0
-package peruncs.datagrid.cluster.node.node;
+package peruncs.datagrid.cluster.node;

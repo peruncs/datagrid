@@ -1,13 +1,12 @@
 /// Data Grid node with Aeron replication.
 ///
 /// Applications create the node services, start them in dependency order,
-/// and close them in reverse order. The node lifecycle lives in
-/// `...cluster.node.node`, storage adaptation in
-/// `...cluster.node.store`, backup in
-/// `...cluster.node.backup`, replication in
-/// `...cluster.node.replication`, and the HTTP surface in
-/// `...cluster.node.http`, implemented by the Aeron transport in
-/// `...cluster.node.aeron`. Store binary movement lives in
+/// and close them in reverse order. The node lifecycle, storage
+/// adaptation, backup, replication, and HTTP surface live in
+/// `...cluster.node`, `...cluster.node.store`, `...cluster.node.backup`,
+/// `...cluster.node.replication`, and `...cluster.node.http`,
+/// implemented by the Aeron transport in `...cluster.node.aeron`.
+/// Store binary movement lives in
 /// `...cluster.storage.types`, carried by
 /// `...cluster.storage.aeron.*`, with the embedded Lucene/JVector
 /// index policy in `...cluster.storage.index`. The exported packages
@@ -97,7 +96,7 @@ module peruncs.datagrid.cluster
     exports peruncs.datagrid.cluster.node.exceptions;
     exports peruncs.datagrid.cluster.node.backup;
     exports peruncs.datagrid.cluster.node.replication;
-    exports peruncs.datagrid.cluster.node.node;
+    exports peruncs.datagrid.cluster.node;
     exports peruncs.datagrid.cluster.node.store;
     exports peruncs.datagrid.cluster.node.http;
     exports peruncs.datagrid.cluster.node.aeron;

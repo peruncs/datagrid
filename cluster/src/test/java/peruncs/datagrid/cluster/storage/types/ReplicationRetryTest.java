@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import static org.junit.jupiter.api.Assertions.*;
 

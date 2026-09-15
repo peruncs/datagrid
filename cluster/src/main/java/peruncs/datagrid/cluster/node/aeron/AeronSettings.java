@@ -6,7 +6,7 @@ import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.driver.ThreadingMode;
 import org.agrona.SystemUtil;
-import peruncs.datagrid.cluster.node.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 
 import java.io.IOException;
