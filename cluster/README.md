@@ -1,7 +1,7 @@
 # DataGrid cluster node with Aeron replication
 
-`peruncs-cluster-nodelibrary` runs a Data Grid node with Aeron replication. Install it
-together with `peruncs-storage-distributed` and set:
+`peruncs-cluster` runs a Data Grid node with Aeron replication, including the
+Store binary transport and the embedded index policy. Add it and set:
 
 ```text
 ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron
@@ -102,8 +102,42 @@ credentials. Do not enable ACK-driven deletion on an untrusted network.
 Fixed-writer/no-consensus operation is intentional. Writer fencing and manual
 promotion remain deployment responsibilities.
 
-The framework adapters expose Aeron through the normal monitoring endpoints:
-`/eclipse-datagrid/health`, `/eclipse-datagrid/health/ready`, and the
+The node exposes Aeron through the normal monitoring endpoints:
+/eclipse-datagrid/health`, `/eclipse-datagrid/health/ready`, and the
 Prometheus-compatible `/eclipse-datagrid/replication-metrics`. The latter
 reports `transport="aeron"`, replay/live state, current/latest sequence, lag,
 readiness, and health, including Archive or replay failures.
+
+## Store binary transport
+
+The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque and
+adds a 68-byte versioned envelope for cluster identity, sequence, chunking,
+CRC32C, and commit/abort markers. A writer should use
+`AeronStorageBinaryTargetDistributing` with an
+`AeronReplicationWriteCoordinator` so the ordering is:
+
+```text
+Archive prepare chunks -> local Store enqueue -> Archive commit
+```
+
+Readers use `StorageBinaryDataClientAeronArchive.New(...)` for replay, live
+join, and reconnect. Persist the DataGrid cursor/checkpoint after each
+completed commit. `AeronReplicationCheckpointStore` is provided for
+deployments that persist the Aeron-specific identity and replay boundary.
+
+The envelope is deliberately not an SBE-generated second payload format:
+Eclipse Serializer's `Binary` bytes remain the authoritative Store payload,
+while the fixed header supplies only framing and validation. Chunk size must
+remain below `min(termLength / 8, 16 MiB) - 64`; Aeron fragments each envelope
+as needed for the selected MTU.
+
+CRC32C detects corruption but does not authenticate a sender. Bind UDP and
+Archive-control channels to private interfaces and restrict them with firewall
+or network-policy rules; do not enable ACK-driven retention on an untrusted
+network.
+
+Run the transport and UDP/Archive integration tests with:
+
+```text
+mvn -pl cluster -am verify
+```

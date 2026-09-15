@@ -10,14 +10,13 @@ at configuration and a reader can never promote itself to writer.
 
 ## Module map
 
-| Directory             | Artifact                            | Java module                                  | Contents                                                                    |
-|-----------------------|-------------------------------------|----------------------------------------------|-----------------------------------------------------------------------------|
-| `cache/clustered`     | `peruncs-cache-clustered`           | `peruncs.datagrid.cache.clustered`           | Hibernate clustered-cache region factory, timestamp invalidation over Aeron |
-| `storage/distributed` | `peruncs-storage-distributed`       | `peruncs.datagrid.storage.distributed`       | Store binary replication contracts plus the Aeron transport                 |
-| `storage/index`       | `peruncs-storage-distributed-index` | `peruncs.datagrid.storage.distributed.index` | Embedded Lucene/JVector index policy for clustered storage                  |
-| `cluster/nodelibrary` | `peruncs-cluster-nodelibrary`       | `peruncs.datagrid.cluster.nodelibrary`       | Node lifecycle, backup, replication, and HTTP surface over Aeron            |
+| Directory | Artifact          | Java module                     | Contents                                                                    |
+|-----------|-------------------|---------------------------------|-----------------------------------------------------------------------------|
+| `cache`   | `peruncs-cache`   | `peruncs.datagrid.cache.clustered` | Hibernate clustered-cache region factory, timestamp invalidation over Aeron |
+| `cluster` | `peruncs-cluster` | `peruncs.datagrid.cluster`         | Node lifecycle, backup, replication, Store transport, and indexes over Aeron |
 
-The `cluster.nodelibrary` module is organized by concern: `node` (foundation,
+The `cluster` module keeps the `cluster.nodelibrary.*` packages organized by
+concern: `node` (foundation,
 managers, configuration), `store` (Store adaptation), `backup` (backends,
 manager, proxy client), `replication` (transport, cursors, health, retention),
 `http` (route table and request controller), and `aeron` (the transport
@@ -93,5 +92,5 @@ health, including Archive and replay failures.
 
 Unit tests cover framing, envelope, checkpoints, coordinator, backup, and
 lifecycle. Integration tests run real MediaDriver/Archive instances over
-dynamic-MDC UDP (`*IT`). Forked process-crash suites cover provider restart,
-driver failure, and reader crashes; see `docs/crash_testing.md`.
+dynamic-MDC UDP (`*IT`). Forked process-crash suites (`-Pcrashmatrix`) cover
+provider restart, driver failure, and reader crashes.

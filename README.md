@@ -35,9 +35,10 @@ consistency.
 
 ### Aeron replication
 
-Store binary replication runs over Aeron. Add `peruncs-storage-distributed` plus
-`peruncs-cluster-nodelibrary`, with `ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron`
-and a stable `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`.
+Store binary replication runs over Aeron. Add `peruncs-cluster`, with
+`ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron` and a stable
+`ECLIPSE_DATAGRID_AERON_CLUSTER_ID`. Clustered Hibernate caching lives in
+`peruncs-cache`.
 
 The Aeron transport embeds MediaDriver/Aeron Archive and uses reliable UDP.
 The fixed-writer/no-consensus model is intentional. See
@@ -56,11 +57,7 @@ transitively. For example:
 
 <dependency>
     <groupId>peruncs</groupId>
-    <artifactId>peruncs-storage-distributed</artifactId>
-</dependency>
-<dependency>
-<groupId>peruncs</groupId>
-<artifactId>peruncs-cluster-nodelibrary</artifactId>
+    <artifactId>peruncs-cluster</artifactId>
 </dependency>
 ```
 
@@ -75,7 +72,7 @@ set an explicit `ECLIPSE_DATAGRID_REPLICATION_ROLE`; the provider refuses to
 guess whether a node is a writer or reader.
 Keep the same values on the writer and readers. Clustered text and vector
 indexes must stay inside the Eclipse Store object graph so their state follows
-the same Store transaction as the entities. The `peruncs-storage-distributed-index`
+the same Store transaction as the entities. The `peruncs-cluster`
 module provides the supported registration API: Lucene uses an embedded
 GraphDirectory and JVector uses its persisted vector store. External Lucene
 directories and JVector on-disk indexes are rejected; they are not supported by
