@@ -16,27 +16,27 @@
  */
 module peruncs.datagrid.cluster.nodelibrary
 {
-	requires peruncs.datagrid.storage.distributed;
-	requires org.eclipse.serializer.persistence;
-	requires org.eclipse.serializer.persistence.binary;
-	requires org.eclipse.store.storage;
-	requires org.eclipse.store.storage.embedded;
-	requires org.eclipse.serializer.afs;
-	requires org.eclipse.store.afs.nio;
-	requires com.fasterxml.jackson.core;
-	requires com.fasterxml.jackson.databind;
-	requires java.net.http;
-	requires org.apache.commons.compress;
-	requires io.aeron.client;
-	requires io.aeron.archive;
-	requires io.aeron.driver;
-	requires org.agrona;
+    requires peruncs.datagrid.storage.distributed;
+    requires org.eclipse.serializer.persistence;
+    requires org.eclipse.serializer.persistence.binary;
+    requires org.eclipse.store.storage;
+    requires org.eclipse.store.storage.embedded;
+    requires org.eclipse.serializer.afs;
+    requires org.eclipse.store.afs.nio;
+    requires com.fasterxml.jackson.core;
+    requires com.fasterxml.jackson.databind;
+    requires java.net.http;
+    requires org.apache.commons.compress;
+    requires io.aeron.client;
+    requires io.aeron.archive;
+    requires io.aeron.driver;
+    requires org.agrona;
 
-	exports peruncs.datagrid.cluster.nodelibrary.exceptions;
-	exports peruncs.datagrid.cluster.nodelibrary.backup;
-	exports peruncs.datagrid.cluster.nodelibrary.replication;
-	exports peruncs.datagrid.cluster.nodelibrary.node;
-	exports peruncs.datagrid.cluster.nodelibrary.store;
-	exports peruncs.datagrid.cluster.nodelibrary.http;
-	exports peruncs.datagrid.cluster.nodelibrary.aeron;
+    exports peruncs.datagrid.cluster.nodelibrary.exceptions;
+    exports peruncs.datagrid.cluster.nodelibrary.backup;
+    exports peruncs.datagrid.cluster.nodelibrary.replication;
+    exports peruncs.datagrid.cluster.nodelibrary.node;
+    exports peruncs.datagrid.cluster.nodelibrary.store;
+    exports peruncs.datagrid.cluster.nodelibrary.http;
+    exports peruncs.datagrid.cluster.nodelibrary.aeron;
 }

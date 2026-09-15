@@ -12,89 +12,97 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Verifies the region factory health gate and serializer provider resolution. */
-class ClusteredCacheRegionFactoryTest
-{
-	@Test
-	void failClosedStorageAccessRefusesOperationsAfterReceiverFailure()
-	{
-		final boolean[] healthy = {true};
-		final boolean[] used = {false};
-		final StorageAccess delegate = new StorageAccess()
-		{
-			@Override public Object getFromCache(final Object key, final SharedSessionContractImplementor session)
-			{
-				used[0] = true;
-				return null;
-			}
-			@Override public void putIntoCache(final Object key, final Object value, final SharedSessionContractImplementor session)
-			{
-				used[0] = true;
-			}
-			@Override public boolean contains(final Object key) { used[0] = true; return false; }
-			@Override public void evictData() { used[0] = true; }
-			@Override public void evictData(final Object key) { used[0] = true; }
-			@Override public void release() { used[0] = true; }
-		};
-		final StorageAccess guarded = new ClusteredCacheRegionFactory.FailClosedStorageAccess(
-			delegate, () ->
-			{
-				if (!healthy[0])
-				{
-					throw new CacheException("receiver failed");
-				}
-			});
+class ClusteredCacheRegionFactoryTest {
+    @Test
+    void failClosedStorageAccessRefusesOperationsAfterReceiverFailure() {
+        final boolean[] healthy = {true};
+        final boolean[] used = {false};
+        final StorageAccess delegate = new StorageAccess() {
+            @Override
+            public Object getFromCache(final Object key, final SharedSessionContractImplementor session) {
+                used[0] = true;
+                return null;
+            }
 
-		assertFalse(guarded.contains("key"));
-		assertTrue(used[0]);
-		used[0] = false;
-		healthy[0] = false;
-		assertThrows(CacheException.class, () -> guarded.contains("key"));
-		assertFalse(used[0], "failed receiver must prevent access to the local timestamps cache");
-	}
+            @Override
+            public void putIntoCache(final Object key, final Object value, final SharedSessionContractImplementor session) {
+                used[0] = true;
+            }
 
-	@Test
-	void resolveSerializationTypesProviderDefaultsWhenUnset()
-	{
-		final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
+            @Override
+            public boolean contains(final Object key) {
+                used[0] = true;
+                return false;
+            }
 
-		final SerializationTypesProvider provider = factory.resolveSerializationTypesProvider(null, Map.of());
+            @Override
+            public void evictData() {
+                used[0] = true;
+            }
 
-		assertInstanceOf(SerializationTypesProvider.Default.class, provider);
-	}
+            @Override
+            public void evictData(final Object key) {
+                used[0] = true;
+            }
 
-	@Test
-	void resolveSerializationTypesProviderAcceptsPublicConstructor()
-	{
-		final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
+            @Override
+            public void release() {
+                used[0] = true;
+            }
+        };
+        final StorageAccess guarded = new ClusteredCacheRegionFactory.FailClosedStorageAccess(
+                delegate, () ->
+        {
+            if (!healthy[0]) {
+                throw new CacheException("receiver failed");
+            }
+        });
 
-		final SerializationTypesProvider provider = factory.resolveSerializationTypesProvider(
-			null, Map.of(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER, PublicTypesProvider.class));
+        assertFalse(guarded.contains("key"));
+        assertTrue(used[0]);
+        used[0] = false;
+        healthy[0] = false;
+        assertThrows(CacheException.class, () -> guarded.contains("key"));
+        assertFalse(used[0], "failed receiver must prevent access to the local timestamps cache");
+    }
 
-		assertInstanceOf(PublicTypesProvider.class, provider);
-	}
+    @Test
+    void resolveSerializationTypesProviderDefaultsWhenUnset() {
+        final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
 
-	@Test
-	void resolveSerializationTypesProviderRejectsWrongClass()
-	{
-		final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
+        final SerializationTypesProvider provider = factory.resolveSerializationTypesProvider(null, Map.of());
 
-		assertThrows(CacheException.class,
-			() -> factory.resolveSerializationTypesProvider(null,
-				Map.of(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER, String.class)),
-			"a configured class with the wrong serialization contract must fail at configuration time");
-	}
+        assertInstanceOf(SerializationTypesProvider.Default.class, provider);
+    }
 
-	/** Types provider with a public no-argument constructor. */
-	public static final class PublicTypesProvider implements SerializationTypesProvider
-	{
-		public PublicTypesProvider()
-		{
-		}
+    @Test
+    void resolveSerializationTypesProviderAcceptsPublicConstructor() {
+        final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
 
-		@Override
-		public Collection<Class<?>> provideTypes()
-		{
-			return List.of();
-		}
-	}
+        final SerializationTypesProvider provider = factory.resolveSerializationTypesProvider(
+                null, Map.of(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER, PublicTypesProvider.class));
+
+        assertInstanceOf(PublicTypesProvider.class, provider);
+    }
+
+    @Test
+    void resolveSerializationTypesProviderRejectsWrongClass() {
+        final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
+
+        assertThrows(CacheException.class,
+                () -> factory.resolveSerializationTypesProvider(null,
+                        Map.of(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER, String.class)),
+                "a configured class with the wrong serialization contract must fail at configuration time");
+    }
+
+    /** Types provider with a public no-argument constructor. */
+    public static final class PublicTypesProvider implements SerializationTypesProvider {
+        public PublicTypesProvider() {
+        }
+
+        @Override
+        public Collection<Class<?>> provideTypes() {
+            return List.of();
+        }
+    }
 }

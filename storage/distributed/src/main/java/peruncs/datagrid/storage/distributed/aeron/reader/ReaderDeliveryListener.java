@@ -14,27 +14,25 @@ package peruncs.datagrid.storage.distributed.aeron.reader;
  * deadlock a caller that is waiting for the polling thread.</p>
  */
 @FunctionalInterface
-public interface ReaderDeliveryListener
-{
-	/**
-	 * Invoked immediately before the assembled bytes enter the Store.
-	 *
-	 * @param sequence terminal replication sequence
-	 * @param position terminal Archive position
-	 * @param dataLength assembled Store binary length
-	 * @param dataChunkCount assembled Store chunk count
-	 * @param crc32c checksum from the commit marker
-	 */
-	void beforeStoreImport(long sequence, long position, int dataLength, int dataChunkCount, int crc32c);
+public interface ReaderDeliveryListener {
+    /**
+     * Invoked immediately before the assembled bytes enter the Store.
+     *
+     * @param sequence       terminal replication sequence
+     * @param position       terminal Archive position
+     * @param dataLength     assembled Store binary length
+     * @param dataChunkCount assembled Store chunk count
+     * @param crc32c         checksum from the commit marker
+     */
+    void beforeStoreImport(long sequence, long position, int dataLength, int dataChunkCount, int crc32c);
 
-	/**
-	 * Invoked synchronously on the same polling thread after Store import and
-	 * the durable cursor callback succeed. An implementation may clear the
-	 * uncertainty marker for the transaction whose {@link #beforeStoreImport}
-	 * callback just ran; no transaction arguments are repeated because the
-	 * assembler processes one transaction at a time.
-	 */
-	default void afterStoreImport()
-	{
-	}
+    /**
+     * Invoked synchronously on the same polling thread after Store import and
+     * the durable cursor callback succeed. An implementation may clear the
+     * uncertainty marker for the transaction whose {@link #beforeStoreImport}
+     * callback just ran; no transaction arguments are repeated because the
+     * assembler processes one transaction at a time.
+     */
+    default void afterStoreImport() {
+    }
 }

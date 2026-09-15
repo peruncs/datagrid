@@ -13,12 +13,12 @@
  */
 module peruncs.datagrid.storage.distributed.index
 {
-	requires org.eclipse.store.gigamap;
-	requires org.eclipse.store.gigamap.lucene;
-	// The upstream module name is misspelled; keep the dependency aligned with
-	// the published module descriptor.
-	requires org.eclipes.store.gigamap.jvector;
-	requires org.apache.lucene.core;
+    requires org.eclipse.store.gigamap;
+    requires org.eclipse.store.gigamap.lucene;
+    // The upstream module name is misspelled; keep the dependency aligned with
+    // the published module descriptor.
+    requires org.eclipes.store.gigamap.jvector;
+    requires org.apache.lucene.core;
 
-	exports peruncs.datagrid.storage.distributed.index;
+    exports peruncs.datagrid.storage.distributed.index;
 }

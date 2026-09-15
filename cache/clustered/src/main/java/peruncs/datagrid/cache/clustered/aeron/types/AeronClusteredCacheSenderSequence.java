@@ -24,72 +24,60 @@ import java.util.concurrent.ConcurrentHashMap;
  * sequence instead, because its random identity is unique per provider
  * instance.</p>
  */
-final class AeronClusteredCacheSenderSequence
-{
-	private static final ConcurrentHashMap<Key, Entry> SEQUENCES = new ConcurrentHashMap<>();
+final class AeronClusteredCacheSenderSequence {
+    private static final ConcurrentHashMap<Key, Entry> SEQUENCES = new ConcurrentHashMap<>();
 
-	private AeronClusteredCacheSenderSequence()
-	{
-	}
+    private AeronClusteredCacheSenderSequence() {
+    }
 
-	/** Key of one shared sequence: an identity on one channel and stream. */
-	private record Key(String channel, int streamId, AeronClusteredCacheMessageCodec.SenderId sender)
-	{
-	}
+    /** Acquires a sequence lease for one configured identity. */
+    static SequenceLease acquire(final byte[] senderId, final String channel, final int streamId) {
+        final Key key = new Key(channel, streamId, AeronClusteredCacheMessageCodec.senderIdOf(senderId));
+        final Entry entry = SEQUENCES.computeIfAbsent(key, ignored -> new Entry());
+        return new SequenceLease(entry);
+    }
 
-	/** Acquires a sequence lease for one configured identity. */
-	static SequenceLease acquire(final byte[] senderId, final String channel, final int streamId)
-	{
-		final Key key = new Key(channel, streamId, AeronClusteredCacheMessageCodec.senderIdOf(senderId));
-		final Entry entry = SEQUENCES.computeIfAbsent(key, ignored -> new Entry());
-		return new SequenceLease(entry);
-	}
+    /** Key of one shared sequence: an identity on one channel and stream. */
+    private record Key(String channel, int streamId, AeronClusteredCacheMessageCodec.SenderId sender) {
+    }
 
-	private static final class Entry
-	{
-		private long sequence;
-		private final Object lock = new Object();
-	}
+    private static final class Entry {
+        private final Object lock = new Object();
+        private long sequence;
+    }
 
-	/** A sender-owned reference to the shared sequence. */
-	static final class SequenceLease implements AutoCloseable
-	{
-		private final Entry entry;
+    /** A sender-owned reference to the shared sequence. */
+    static final class SequenceLease implements AutoCloseable {
+        private final Entry entry;
 
-		private SequenceLease(final Entry entry)
-		{
-			this.entry = entry;
-		}
+        private SequenceLease(final Entry entry) {
+            this.entry = entry;
+        }
 
-		/** Creates an isolated sequence for a provider without a configured identity. */
-		static SequenceLease local()
-		{
-			return new SequenceLease(new Entry());
-		}
+        /** Creates an isolated sequence for a provider without a configured identity. */
+        static SequenceLease local() {
+            return new SequenceLease(new Entry());
+        }
 
-		long current()
-		{
-			return this.entry.sequence;
-		}
+        long current() {
+            return this.entry.sequence;
+        }
 
-		void advance()
-		{
-			this.entry.sequence++;
-		}
+        void advance() {
+            this.entry.sequence++;
+        }
 
-		Object lock()
-		{
-			return this.entry.lock;
-		}
+        Object lock() {
+            return this.entry.lock;
+        }
 
-		@Override
-		public void close()
-		{
-			/* Intentional no-op. The entry is retained after the final lease
-			 * closes: the sender identity is a process incarnation, so reusing
-			 * its sequence after provider recreation would otherwise create
-			 * a false gap in a still-live receiver. The bounded key set is one
-			 * entry per configured node/channel/stream. */
-		}
-	}
+        @Override
+        public void close() {
+            /* Intentional no-op. The entry is retained after the final lease
+             * closes: the sender identity is a process incarnation, so reusing
+             * its sequence after provider recreation would otherwise create
+             * a false gap in a still-live receiver. The bounded key set is one
+             * entry per configured node/channel/stream. */
+        }
+    }
 }

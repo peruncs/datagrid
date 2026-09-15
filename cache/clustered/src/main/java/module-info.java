@@ -15,16 +15,16 @@
  */
 module peruncs.datagrid.cache.clustered
 {
-	requires org.eclipse.serializer;
-	requires org.eclipse.serializer.base;
-	requires org.eclipse.store.cache;
-	requires org.eclipse.store.cache.hibernate;
-	requires org.hibernate.orm.core;
-	requires cache.api;
-	requires io.aeron.client;
-	requires io.aeron.driver;
-	requires org.agrona;
+    requires org.eclipse.serializer;
+    requires org.eclipse.serializer.base;
+    requires org.eclipse.store.cache;
+    requires org.eclipse.store.cache.hibernate;
+    requires org.hibernate.orm.core;
+    requires cache.api;
+    requires io.aeron.client;
+    requires io.aeron.driver;
+    requires org.agrona;
 
-	exports peruncs.datagrid.cache.clustered.types;
-	exports peruncs.datagrid.cache.clustered.aeron.types;
+    exports peruncs.datagrid.cache.clustered.types;
+    exports peruncs.datagrid.cache.clustered.aeron.types;
 }

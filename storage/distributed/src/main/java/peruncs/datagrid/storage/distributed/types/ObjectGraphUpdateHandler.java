@@ -14,36 +14,33 @@ import java.util.concurrent.CompletionStage;
  * returned stage must complete only after the updater has finished, because
  * replication cursor persistence depends on that completion boundary.</p>
  */
-	@FunctionalInterface
-	public interface ObjectGraphUpdateHandler
-	{
-		/** Runs an update when the object graph may be changed.
-		 *
-		 * @param updater update to run
-		 * @return stage completed after the update has finished
-		 */
-		CompletionStage<Void> objectGraphUpdateAvailable(ObjectGraphUpdater updater);
+@FunctionalInterface
+public interface ObjectGraphUpdateHandler {
+    /**
+     * Creates a handler that serializes updates on the Store lock.
+     *
+     * @return synchronized update handler
+     */
+    static ObjectGraphUpdateHandler Synchronized() {
+        return updater ->
+        {
+            final CompletableFuture<Void> result = new CompletableFuture<>();
+            try {
+                XThreads.executeSynchronized(updater::updateObjectGraph);
+                result.complete(null);
+            } catch (final Throwable failure) {
+                result.completeExceptionally(failure);
+            }
+            return result;
+        };
+    }
 
-		/** Creates a handler that serializes updates on the Store lock.
-		 *
-		 * @return synchronized update handler
-		 */
-		static ObjectGraphUpdateHandler Synchronized()
-		{
-			return updater ->
-			{
-				final CompletableFuture<Void> result = new CompletableFuture<>();
-				try
-				{
-					XThreads.executeSynchronized(updater::updateObjectGraph);
-					result.complete(null);
-				}
-				catch (final Throwable failure)
-				{
-					result.completeExceptionally(failure);
-				}
-				return result;
-			};
-		}
+    /**
+     * Runs an update when the object graph may be changed.
+     *
+     * @param updater update to run
+     * @return stage completed after the update has finished
+     */
+    CompletionStage<Void> objectGraphUpdateAvailable(ObjectGraphUpdater updater);
 
 }

@@ -6,6 +6,5 @@ package peruncs.datagrid.storage.distributed.aeron.reader;
  * @param sequence last resolved transaction sequence
  * @param position Archive position of that transaction
  */
-public record CursorSnapshot(long sequence, long position)
-{
+public record CursorSnapshot(long sequence, long position) {
 }

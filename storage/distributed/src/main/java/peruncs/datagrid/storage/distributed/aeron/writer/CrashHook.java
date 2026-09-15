@@ -15,35 +15,30 @@ import java.util.function.BiConsumer;
  * by a forked child that the parent can terminate; blocking while holding a
  * publisher or coordinator monitor can otherwise deadlock the test.</p>
  */
-public final class CrashHook
-{
-	private static final ThreadLocal<BiConsumer<String, Long>> CURRENT = new ThreadLocal<>();
+public final class CrashHook {
+    private static final ThreadLocal<BiConsumer<String, Long>> CURRENT = new ThreadLocal<>();
 
-	private CrashHook()
-	{
-	}
+    private CrashHook() {
+    }
 
-	/**
-	 * Installs a hook for the current thread. Passing {@code null} removes the
-	 * current thread's hook.
-	 *
-	 * @param hook callback invoked at an armed crash point, or {@code null}
-	 */
-	public static void install(final BiConsumer<String, Long> hook)
-	{
-		if (hook == null) CURRENT.remove();
-		else CURRENT.set(hook);
-	}
+    /**
+     * Installs a hook for the current thread. Passing {@code null} removes the
+     * current thread's hook.
+     *
+     * @param hook callback invoked at an armed crash point, or {@code null}
+     */
+    public static void install(final BiConsumer<String, Long> hook) {
+        if (hook == null) CURRENT.remove();
+        else CURRENT.set(hook);
+    }
 
-	/** Removes the crash hook installed for the current thread, if any. */
-	public static void clear()
-	{
-		CURRENT.remove();
-	}
+    /** Removes the crash hook installed for the current thread, if any. */
+    public static void clear() {
+        CURRENT.remove();
+    }
 
-	static void invoke(final String name, final long sequence)
-	{
-		final BiConsumer<String, Long> hook = CURRENT.get();
-		if (hook != null) hook.accept(name, sequence);
-	}
+    static void invoke(final String name, final long sequence) {
+        final BiConsumer<String, Long> hook = CURRENT.get();
+        if (hook != null) hook.accept(name, sequence);
+    }
 }

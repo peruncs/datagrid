@@ -6,245 +6,213 @@ package peruncs.datagrid.cluster.nodelibrary.http;
  * <p>These constants define the route table. The request controller remains
  * responsible for the behavior behind each route.</p>
  */
-public final class StorageNodeRestRouteConfigurations
-{
-	/** Shared media types used by the node endpoints. */
-	public static final class MediaTypes
-	{
-		private static final String WILDCARD = "*/*";
-		private static final String APPLICATION_JSON = "application/json";
-		private static final String TEXT_PLAIN = "text/plain";
+public final class StorageNodeRestRouteConfigurations {
+    /** Root path shared by all node endpoints. */
+    public static final String ROOT_PATH = "/eclipse-datagrid";
 
-		private MediaTypes()
-		{
-		}
-	}
+    private StorageNodeRestRouteConfigurations() {
+    }
 
-	/** Root path shared by all node endpoints. */
-	public static final String ROOT_PATH = "/eclipse-datagrid";
+    /** Shared media types used by the node endpoints. */
+    public static final class MediaTypes {
+        private static final String WILDCARD = "*/*";
+        private static final String APPLICATION_JSON = "application/json";
+        private static final String TEXT_PLAIN = "text/plain";
 
-	/** Reads whether this node is the distributor. */
-	public static final class GetDistributor
-	{
-		/** Distributor endpoint path. */
-		public static final String PATH = "/distributor";
-		/** Distributor response media type. */
-		public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
+        private MediaTypes() {
+        }
+    }
 
-		private GetDistributor()
-		{
-		}
-	}
+    /** Reads whether this node is the distributor. */
+    public static final class GetDistributor {
+        /** Distributor endpoint path. */
+        public static final String PATH = "/distributor";
+        /** Distributor response media type. */
+        public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
-	/** Starts the distributor role transition. */
-	public static final class PostActivateDistributorStart
-	{
-		/** Activation-start endpoint path. */
-		public static final String PATH = "/activate-distributor/start";
-		/** Activation-start request media type. */
-		public static final String CONSUMES = MediaTypes.WILDCARD;
-		/** Activation-start response media type. */
-		public static final String PRODUCES = MediaTypes.WILDCARD;
+        private GetDistributor() {
+        }
+    }
 
-		private PostActivateDistributorStart()
-		{
-		}
-	}
+    /** Starts the distributor role transition. */
+    public static final class PostActivateDistributorStart {
+        /** Activation-start endpoint path. */
+        public static final String PATH = "/activate-distributor/start";
+        /** Activation-start request media type. */
+        public static final String CONSUMES = MediaTypes.WILDCARD;
+        /** Activation-start response media type. */
+        public static final String PRODUCES = MediaTypes.WILDCARD;
 
-	/** Finishes the distributor role transition. */
-	public static final class PostActivateDistributorFinish
-	{
-		/** Activation-finish endpoint path. */
-		public static final String PATH = "/activate-distributor/finish";
-		/** Activation-finish request media type. */
-		public static final String CONSUMES = MediaTypes.WILDCARD;
-		/** Activation-finish response media type. */
-		public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
+        private PostActivateDistributorStart() {
+        }
+    }
 
-		private PostActivateDistributorFinish()
-		{
-		}
-	}
+    /** Finishes the distributor role transition. */
+    public static final class PostActivateDistributorFinish {
+        /** Activation-finish endpoint path. */
+        public static final String PATH = "/activate-distributor/finish";
+        /** Activation-finish request media type. */
+        public static final String CONSUMES = MediaTypes.WILDCARD;
+        /** Activation-finish response media type. */
+        public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
-	/** Reads the node health state. */
-	public static final class GetHealth
-	{
-		/** Health endpoint path. */
-		public static final String PATH = "/health";
-		/** Health response media type. */
-		public static final String PRODUCES = MediaTypes.WILDCARD;
+        private PostActivateDistributorFinish() {
+        }
+    }
 
-		private GetHealth()
-		{
-		}
-	}
+    /** Reads the node health state. */
+    public static final class GetHealth {
+        /** Health endpoint path. */
+        public static final String PATH = "/health";
+        /** Health response media type. */
+        public static final String PRODUCES = MediaTypes.WILDCARD;
 
-	/** Reads whether the node is ready to serve. */
-	public static final class GetHealthReady
-	{
-		/** Readiness endpoint path. */
-		public static final String PATH = "/health/ready";
-		/** Readiness response media type. */
-		public static final String PRODUCES = MediaTypes.WILDCARD;
+        private GetHealth() {
+        }
+    }
 
-		private GetHealthReady()
-		{
-		}
-	}
+    /** Reads whether the node is ready to serve. */
+    public static final class GetHealthReady {
+        /** Readiness endpoint path. */
+        public static final String PATH = "/health/ready";
+        /** Readiness response media type. */
+        public static final String PRODUCES = MediaTypes.WILDCARD;
 
-	/** Reads the number of bytes used by storage. */
-	public static final class GetStorageBytes
-	{
-		/** Storage-size endpoint path. */
-		public static final String PATH = "/storage-bytes";
-		/** Storage-size response media type. */
-		public static final String PRODUCES = MediaTypes.TEXT_PLAIN;
+        private GetHealthReady() {
+        }
+    }
 
-		private GetStorageBytes()
-		{
-		}
-	}
+    /** Reads the number of bytes used by storage. */
+    public static final class GetStorageBytes {
+        /** Storage-size endpoint path. */
+        public static final String PATH = "/storage-bytes";
+        /** Storage-size response media type. */
+        public static final String PRODUCES = MediaTypes.TEXT_PLAIN;
 
-	/** Reads replication metrics. */
-	public static final class GetReplicationMetrics
-	{
-		/** Replication-metrics endpoint path. */
-		public static final String PATH = "/replication-metrics";
-		/** Replication-metrics response media type. */
-		public static final String PRODUCES = MediaTypes.TEXT_PLAIN;
+        private GetStorageBytes() {
+        }
+    }
 
-		private GetReplicationMetrics()
-		{
-		}
-	}
+    /** Reads replication metrics. */
+    public static final class GetReplicationMetrics {
+        /** Replication-metrics endpoint path. */
+        public static final String PATH = "/replication-metrics";
+        /** Replication-metrics response media type. */
+        public static final String PRODUCES = MediaTypes.TEXT_PLAIN;
 
-	/** Starts a storage backup. */
-	public static final class PostBackup
-	{
-		/** Backup endpoint path. */
-		public static final String PATH = "/backup";
-		/** Backup request media type. */
-		public static final String CONSUMES = MediaTypes.APPLICATION_JSON;
-		/** Backup response media type. */
-		public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
+        private GetReplicationMetrics() {
+        }
+    }
 
-		/** Request body that selects the manual backup slot. */
-		public static final class Body
-		{
-			private Boolean useManualSlot;
+    /** Starts a storage backup. */
+    public static final class PostBackup {
+        /** Backup endpoint path. */
+        public static final String PATH = "/backup";
+        /** Backup request media type. */
+        public static final String CONSUMES = MediaTypes.APPLICATION_JSON;
+        /** Backup response media type. */
+        public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
-			/** Creates an empty backup request body. */
-			public Body()
-			{
-			}
+        private PostBackup() {
+        }
 
-			/** Returns whether the manual slot was requested.
-			 * @return manual-slot flag
-			 */
-			public Boolean getUseManualSlot()
-			{
-				return this.useManualSlot;
-			}
+        /** Request body that selects the manual backup slot. */
+        public static final class Body {
+            private Boolean useManualSlot;
 
-			/** Sets whether the manual slot is requested.
-			 * @param useManualSlot manual-slot flag
-			 */
-			public void setUseManualSlot(final Boolean useManualSlot)
-			{
-				this.useManualSlot = useManualSlot;
-			}
-		}
+            /** Creates an empty backup request body. */
+            public Body() {
+            }
 
-		private PostBackup()
-		{
-		}
-	}
+            /**
+             * Returns whether the manual slot was requested.
+             *
+             * @return manual-slot flag
+             */
+            public Boolean getUseManualSlot() {
+                return this.useManualSlot;
+            }
 
-	/** Reads whether a backup is running. */
-	public static final class GetBackup
-	{
-		/** Backup-status endpoint path. */
-		public static final String PATH = "/backup";
-		/** Backup-status response media type. */
-		public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
+            /**
+             * Sets whether the manual slot is requested.
+             *
+             * @param useManualSlot manual-slot flag
+             */
+            public void setUseManualSlot(final Boolean useManualSlot) {
+                this.useManualSlot = useManualSlot;
+            }
+        }
+    }
 
-		private GetBackup()
-		{
-		}
-	}
+    /** Reads whether a backup is running. */
+    public static final class GetBackup {
+        /** Backup-status endpoint path. */
+        public static final String PATH = "/backup";
+        /** Backup-status response media type. */
+        public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
-	/** Stops replication at the latest safe message. */
-	public static final class PostUpdates
-	{
-		/** Update-pause endpoint path. */
-		public static final String PATH = "/updates";
-		/** Update-pause request media type. */
-		public static final String CONSUMES = MediaTypes.WILDCARD;
-		/** Update-pause response media type. */
-		public static final String PRODUCES = MediaTypes.WILDCARD;
+        private GetBackup() {
+        }
+    }
 
-		private PostUpdates()
-		{
-		}
-	}
+    /** Stops replication at the latest safe message. */
+    public static final class PostUpdates {
+        /** Update-pause endpoint path. */
+        public static final String PATH = "/updates";
+        /** Update-pause request media type. */
+        public static final String CONSUMES = MediaTypes.WILDCARD;
+        /** Update-pause response media type. */
+        public static final String PRODUCES = MediaTypes.WILDCARD;
 
-	/** Reads whether replication is paused. */
-	public static final class GetUpdates
-	{
-		/** Update-status endpoint path. */
-		public static final String PATH = "/updates";
-		/** Update-status response media type. */
-		public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
+        private PostUpdates() {
+        }
+    }
 
-		private GetUpdates()
-		{
-		}
-	}
+    /** Reads whether replication is paused. */
+    public static final class GetUpdates {
+        /** Update-status endpoint path. */
+        public static final String PATH = "/updates";
+        /** Update-status response media type. */
+        public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
-	/** Resumes replication after a controlled pause. */
-	public static final class PostResumeUpdates
-	{
-		/** Resume endpoint path. */
-		public static final String PATH = "/resume-updates";
-		/** Resume request media type. */
-		public static final String CONSUMES = MediaTypes.WILDCARD;
-		/** Resume response media type. */
-		public static final String PRODUCES = MediaTypes.WILDCARD;
+        private GetUpdates() {
+        }
+    }
 
-		private PostResumeUpdates()
-		{
-		}
-	}
+    /** Resumes replication after a controlled pause. */
+    public static final class PostResumeUpdates {
+        /** Resume endpoint path. */
+        public static final String PATH = "/resume-updates";
+        /** Resume request media type. */
+        public static final String CONSUMES = MediaTypes.WILDCARD;
+        /** Resume response media type. */
+        public static final String PRODUCES = MediaTypes.WILDCARD;
 
-	/** Starts asynchronous storage checks and cleanup. */
-	public static final class PostGc
-	{
-		/** Storage-check endpoint path. */
-		public static final String PATH = "/gc";
-		/** Storage-check request media type. */
-		public static final String CONSUMES = MediaTypes.WILDCARD;
-		/** Storage-check response media type. */
-		public static final String PRODUCES = MediaTypes.WILDCARD;
+        private PostResumeUpdates() {
+        }
+    }
 
-		private PostGc()
-		{
-		}
-	}
+    /** Starts asynchronous storage checks and cleanup. */
+    public static final class PostGc {
+        /** Storage-check endpoint path. */
+        public static final String PATH = "/gc";
+        /** Storage-check request media type. */
+        public static final String CONSUMES = MediaTypes.WILDCARD;
+        /** Storage-check response media type. */
+        public static final String PRODUCES = MediaTypes.WILDCARD;
 
-	/** Reads whether storage checks are running. */
-	public static final class GetGc
-	{
-		/** Storage-check status path. */
-		public static final String PATH = "/gc";
-		/** Storage-check status response media type. */
-		public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
+        private PostGc() {
+        }
+    }
 
-		private GetGc()
-		{
-		}
-	}
+    /** Reads whether storage checks are running. */
+    public static final class GetGc {
+        /** Storage-check status path. */
+        public static final String PATH = "/gc";
+        /** Storage-check status response media type. */
+        public static final String PRODUCES = MediaTypes.APPLICATION_JSON;
 
-	private StorageNodeRestRouteConfigurations()
-	{
-	}
+        private GetGc() {
+        }
+    }
 }

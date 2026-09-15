@@ -10,15 +10,15 @@ import peruncs.datagrid.cluster.nodelibrary.exceptions.NodelibraryException;
  * The listener is also closeable so a reader can release any callback state
  * during shutdown.</p>
  */
-public interface AfterDataMessageConsumedListener extends AutoCloseable
-{
-	/** Records that one replicated message has been applied.
-	 *
-	 * @param cursor applied replication cursor
-	 * @throws NodelibraryException if follow-up bookkeeping fails
-	 */
-	void onApplied(ReplicationCursor cursor) throws NodelibraryException;
+public interface AfterDataMessageConsumedListener extends AutoCloseable {
+    /**
+     * Records that one replicated message has been applied.
+     *
+     * @param cursor applied replication cursor
+     * @throws NodelibraryException if follow-up bookkeeping fails
+     */
+    void onApplied(ReplicationCursor cursor) throws NodelibraryException;
 
-	@Override
-	void close();
+    @Override
+    void close();
 }

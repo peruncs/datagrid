@@ -15,20 +15,20 @@
  */
 module peruncs.datagrid.storage.distributed
 {
-	requires org.eclipse.store.storage.embedded;
-	requires org.eclipse.serializer.base;
-	requires org.eclipse.serializer.persistence;
-	requires org.eclipse.serializer.persistence.binary;
-	requires org.agrona;
-	requires io.aeron.client;
-	requires io.aeron.archive;
-	/* Benchmark tests use com.sun.management.ThreadMXBean while production
-	 * classes have no runtime dependency on the management implementation. */
-	requires static jdk.management;
+    requires org.eclipse.store.storage.embedded;
+    requires org.eclipse.serializer.base;
+    requires org.eclipse.serializer.persistence;
+    requires org.eclipse.serializer.persistence.binary;
+    requires org.agrona;
+    requires io.aeron.client;
+    requires io.aeron.archive;
+    /* Benchmark tests use com.sun.management.ThreadMXBean while production
+     * classes have no runtime dependency on the management implementation. */
+    requires static jdk.management;
 
-	exports peruncs.datagrid.storage.distributed.types;
-	exports peruncs.datagrid.storage.distributed.aeron.config;
-	exports peruncs.datagrid.storage.distributed.aeron.checkpoint;
-	exports peruncs.datagrid.storage.distributed.aeron.reader;
-	exports peruncs.datagrid.storage.distributed.aeron.writer;
+    exports peruncs.datagrid.storage.distributed.types;
+    exports peruncs.datagrid.storage.distributed.aeron.config;
+    exports peruncs.datagrid.storage.distributed.aeron.checkpoint;
+    exports peruncs.datagrid.storage.distributed.aeron.reader;
+    exports peruncs.datagrid.storage.distributed.aeron.writer;
 }

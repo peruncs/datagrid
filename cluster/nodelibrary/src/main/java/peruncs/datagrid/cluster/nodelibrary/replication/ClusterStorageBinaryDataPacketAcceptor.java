@@ -1,10 +1,10 @@
 package peruncs.datagrid.cluster.nodelibrary.replication;
 
 
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacket;
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacketAcceptor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.typing.Disposable;
+import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacket;
+import peruncs.datagrid.storage.distributed.types.StorageBinaryDataPacketAcceptor;
 
 import java.util.List;
 
@@ -20,148 +20,139 @@ import static org.eclipse.serializer.util.X.notNull;
  * when the merger advertises it. This class will also call
  * {@link #dispose()} on the {@link ClusterStorageBinaryDataMerger}
  */
-public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDataPacketAcceptor, Disposable
-{
-	/** Returns a failure reported by the asynchronous merger, or {@code null}.
-	 * @return merger failure, or {@code null}
-	 */
-	default RuntimeException failure()
-	{
-		return null;
-	}
+public interface ClusterStorageBinaryDataPacketAcceptor extends StorageBinaryDataPacketAcceptor, Disposable {
+    /**
+     * Creates an acceptor for one merger.
+     *
+     * @param merger destination merger
+     * @return packet acceptor
+     */
+    static ClusterStorageBinaryDataPacketAcceptor New(final ClusterStorageBinaryDataMerger merger) {
+        return new Default(notNull(merger));
+    }
 
-	/** Waits until deferred data has been applied.
-	 *
-	 * <p>The default implementation has no deferred work.</p>
-	 */
-	default void awaitApplied()
-	{
-	}
+    /**
+     * Returns a failure reported by the asynchronous merger, or {@code null}.
+     *
+     * @return merger failure, or {@code null}
+     */
+    default RuntimeException failure() {
+        return null;
+    }
 
-	/** Releases a retained partial message and the merger.
-	 */
-	@Override
-	void dispose();
+    /**
+     * Waits until deferred data has been applied.
+     *
+     * <p>The default implementation has no deferred work.</p>
+     */
+    default void awaitApplied() {
+    }
 
-	/**
-	 * Accepts a complete binary without rebuilding packets. Aeron readers use
-	 * this boundary because their assembler has already validated and reassembled
-	 * the transaction. The binary is borrowed for the duration of this call;
-	 * packet transports continue to use {@link #accept(List)}.
-	 *
-	 * @param data complete binary
-	 */
-	default void acceptData(final Binary data)
-	{
-		throw new UnsupportedOperationException("complete-binary delivery is not supported");
-	}
+    /**
+     * Releases a retained partial message and the merger.
+     */
+    @Override
+    void dispose();
 
-	/**
-	 * Accepts a complete binary and may take ownership of its direct buffers.
-	 * Returning {@code true} transfers release responsibility to the acceptor.
-	 *
-	 * @param data complete binary
-	 * @return whether ownership was transferred
-	 */
-	default boolean acceptDataOwned(final Binary data)
-	{
-		this.acceptData(data);
-		return false;
-	}
+    /**
+     * Accepts a complete binary without rebuilding packets. Aeron readers use
+     * this boundary because their assembler has already validated and reassembled
+     * the transaction. The binary is borrowed for the duration of this call;
+     * packet transports continue to use {@link #accept(List)}.
+     *
+     * @param data complete binary
+     */
+    default void acceptData(final Binary data) {
+        throw new UnsupportedOperationException("complete-binary delivery is not supported");
+    }
 
-	/**
-	 * Reports whether complete-binary delivery transfers ownership before the
-	 * callback starts.
-	 *
-	 * @return whether the acceptor owns the binary on callback entry
-	 */
-	default boolean canAcceptDataOwned()
-	{
-		return false;
-	}
+    /**
+     * Accepts a complete binary and may take ownership of its direct buffers.
+     * Returning {@code true} transfers release responsibility to the acceptor.
+     *
+     * @param data complete binary
+     * @return whether ownership was transferred
+     */
+    default boolean acceptDataOwned(final Binary data) {
+        this.acceptData(data);
+        return false;
+    }
 
-	/** Accepts a type dictionary already decoded by the transport.
-	 *
-	 * @param dictionary decoded type dictionary
-	 */
-	default void acceptTypeDictionary(final String dictionary)
-	{
-		throw new UnsupportedOperationException("decoded dictionary delivery is not supported");
-	}
-	/** Creates an acceptor for one merger.
-	 *
-	 * @param merger destination merger
-	 * @return packet acceptor
-	 */
-	static ClusterStorageBinaryDataPacketAcceptor New(final ClusterStorageBinaryDataMerger merger)
-	{
-		return new Default(notNull(merger));
-	}
+    /**
+     * Reports whether complete-binary delivery transfers ownership before the
+     * callback starts.
+     *
+     * @return whether the acceptor owns the binary on callback entry
+     */
+    default boolean canAcceptDataOwned() {
+        return false;
+    }
 
-	/** Reassembles packets with the shared acceptor and forwards merger callbacks. */
-	class Default implements ClusterStorageBinaryDataPacketAcceptor
-	{
-		private final ClusterStorageBinaryDataMerger merger;
-		private final StorageBinaryDataPacketAcceptor delegate;
+    /**
+     * Accepts a type dictionary already decoded by the transport.
+     *
+     * @param dictionary decoded type dictionary
+     */
+    default void acceptTypeDictionary(final String dictionary) {
+        throw new UnsupportedOperationException("decoded dictionary delivery is not supported");
+    }
 
-		/** Creates the packet acceptor implementation.
-		 * @param merger destination merger
-		 */
-		protected Default(final ClusterStorageBinaryDataMerger merger)
-		{
-			super();
-			this.merger = merger;
-			this.delegate =
-				StorageBinaryDataPacketAcceptor.New(merger);
-		}
+    /** Reassembles packets with the shared acceptor and forwards merger callbacks. */
+    class Default implements ClusterStorageBinaryDataPacketAcceptor {
+        private final ClusterStorageBinaryDataMerger merger;
+        private final StorageBinaryDataPacketAcceptor delegate;
 
-		@Override
-		public void accept(final List<StorageBinaryDataPacket> packets)
-		{
-			this.delegate.accept(packets);
-		}
+        /**
+         * Creates the packet acceptor implementation.
+         *
+         * @param merger destination merger
+         */
+        protected Default(final ClusterStorageBinaryDataMerger merger) {
+            super();
+            this.merger = merger;
+            this.delegate =
+                    StorageBinaryDataPacketAcceptor.New(merger);
+        }
 
-		@Override
-		public RuntimeException failure()
-		{
-			return this.merger.failure();
-		}
+        @Override
+        public void accept(final List<StorageBinaryDataPacket> packets) {
+            this.delegate.accept(packets);
+        }
 
-		@Override
-		public void acceptData(final Binary data)
-		{
-			this.merger.receiveData(data);
-		}
+        @Override
+        public RuntimeException failure() {
+            return this.merger.failure();
+        }
 
-		@Override
-		public boolean acceptDataOwned(final Binary data)
-		{
-			return this.merger.receiveDataOwned(data);
-		}
+        @Override
+        public void acceptData(final Binary data) {
+            this.merger.receiveData(data);
+        }
 
-		@Override
-		public boolean canAcceptDataOwned()
-		{
-			return this.merger.canReceiveDataOwned();
-		}
+        @Override
+        public boolean acceptDataOwned(final Binary data) {
+            return this.merger.receiveDataOwned(data);
+        }
 
-		@Override
-		public void acceptTypeDictionary(final String dictionary)
-		{
-			this.merger.receiveTypeDictionary(dictionary);
-		}
+        @Override
+        public boolean canAcceptDataOwned() {
+            return this.merger.canReceiveDataOwned();
+        }
 
-		@Override
-		public synchronized void dispose()
-		{
-			this.delegate.dispose();
-			this.merger.dispose();
-		}
+        @Override
+        public void acceptTypeDictionary(final String dictionary) {
+            this.merger.receiveTypeDictionary(dictionary);
+        }
 
-		@Override
-		public void awaitApplied()
-		{
-			this.merger.awaitApplied();
-		}
-	}
+        @Override
+        public synchronized void dispose() {
+            this.delegate.dispose();
+            this.merger.dispose();
+        }
+
+        @Override
+        public void awaitApplied() {
+            this.merger.awaitApplied();
+        }
+    }
 }

@@ -1,25 +1,37 @@
-
 # Peruncs Data Grid
 
 ## Description
 
 Peruncs Data Grid is an in-memory data processing layer to speed up database applications and relieve the database.
 
-Peruncs Data Grid can be used as a traditional distributed cache, but it is much more than a common cache. It enables you ultra-fast in-memory searching, as well as complex data processing, through the implementation of individual Java business logic. Unlike traditional caching solutions, which are built as key-value structures, Eclipse Data Grid is a native Java layer that utilizes the native Java object model. This allows you to work with native Java objects, Java types, and any complex Java object graphs, as well as integrate any Java libraries and implement complex logic in your in-memory data layer using Java.
+Peruncs Data Grid can be used as a traditional distributed cache, but it is much more than a common cache. It enables you ultra-fast in-memory
+searching, as well as complex data processing, through the implementation of individual Java business logic. Unlike traditional caching solutions,
+which are built as key-value structures, Eclipse Data Grid is a native Java layer that utilizes the native Java object model. This allows you to work
+with native Java objects, Java types, and any complex Java object graphs, as well as integrate any Java libraries and implement complex logic in your
+in-memory data layer using Java.
 
-Peruncs Data Grid is for everyone who needs an easy-to-use distributed cache, as well as for users who need much more than just a cache, combining caching, high-speed in-memory searching, and complex data manipulation by using Core Java concepts. Move your complex and performance-critical data and data operations to Eclipse Data Grid to significantly reduce database workloads and save costs, boost your application, and your business
+Peruncs Data Grid is for everyone who needs an easy-to-use distributed cache, as well as for users who need much more than just a cache, combining
+caching, high-speed in-memory searching, and complex data manipulation by using Core Java concepts. Move your complex and performance-critical data
+and data operations to Eclipse Data Grid to significantly reduce database workloads and save costs, boost your application, and your business
 
 Eclipse Data Grid is based on two other Eclipse projects:
 
 - [Eclipse Serializer](https://github.com/eclipse-serializer/serializer)
 
-    Powerful and highly secure Java serialization that enables dealing with any complex Java object graphs and avoids deserialization attacks by injecting and executing malicious code.
+  Powerful and highly secure Java serialization that enables dealing with any complex Java object graphs and avoids deserialization attacks by
+  injecting and executing malicious code.
 
 - [EclipseStore](https://github.com/eclipse-store/store)
 
-  Java-native object graph persistence layer to store any complex Java object graphs or individual subgraphs transaction-safe into any binary data storage, and restore them in RAM on demand. Using a traditional database and thus OR-Mapping, JSON conversion, or any other mappings are completely superfluous. EclipseStore is ACID-compliant, provides lazy-loading, indexing, GigaMap for fully automated lazy-loading, and provides a smart concept for schema migration. EclipseStore is built as a persistence layer to be used for a single JVM run on a single node.
+  Java-native object graph persistence layer to store any complex Java object graphs or individual subgraphs transaction-safe into any binary data
+  storage, and restore them in RAM on demand. Using a traditional database and thus OR-Mapping, JSON conversion, or any other mappings are completely
+  superfluous. EclipseStore is ACID-compliant, provides lazy-loading, indexing, GigaMap for fully automated lazy-loading, and provides a smart concept
+  for schema migration. EclipseStore is built as a persistence layer to be used for a single JVM run on a single node.
 
-Peruncs Data Grid itself provides you with the code to generate a cluster environment to run, scale, and maintain a Peruncs Data Grid application based on Kubernetes, as well as important cluster features such as replication, elastic scale-out / scale-in, and backups. Peruncs Data Grid is based on a single-writer approach. While the consistency model on each cluster node is full consistency, the standard cluster consistency model is eventual consistency.
+Peruncs Data Grid itself provides you with the code to generate a cluster environment to run, scale, and maintain a Peruncs Data Grid application
+based on Kubernetes, as well as important cluster features such as replication, elastic scale-out / scale-in, and backups. Peruncs Data Grid is based
+on a single-writer approach. While the consistency model on each cluster node is full consistency, the standard cluster consistency model is eventual
+consistency.
 
 ### Aeron replication
 
@@ -41,13 +53,14 @@ The replication modules are explicit dependencies and are not pulled
 transitively. For example:
 
 ```xml
+
 <dependency>
-  <groupId>peruncs</groupId>
-  <artifactId>peruncs-storage-distributed</artifactId>
+    <groupId>peruncs</groupId>
+    <artifactId>peruncs-storage-distributed</artifactId>
 </dependency>
 <dependency>
-  <groupId>peruncs</groupId>
-  <artifactId>peruncs-cluster-nodelibrary</artifactId>
+<groupId>peruncs</groupId>
+<artifactId>peruncs-cluster-nodelibrary</artifactId>
 </dependency>
 ```
 

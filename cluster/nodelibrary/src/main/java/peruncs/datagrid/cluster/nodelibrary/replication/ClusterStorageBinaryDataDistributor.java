@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.nodelibrary.replication;
 
 
-import peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import peruncs.datagrid.storage.distributed.types.StorageBinaryDataDistributor;
 
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -15,178 +15,186 @@ import static org.eclipse.serializer.util.X.notNull;
  * details. {@link Caching} preserves a type dictionary until the next data
  * message and is used by the Aeron provider.</p>
  */
-public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDistributor
-{
-	/** Creates a distributor that ignores all transport work.
-	 * @return neutral distributor
-	 */
-	static ClusterStorageBinaryDataDistributor NoOp()
-	{
-		return new ClusterStorageBinaryDataDistributor()
-		{
-			private long index = -1;
-			private boolean ignored;
-			public void messageIndex(final long value) { this.index = value; }
-			public long messageIndex() { return this.index; }
-			public void ignoreDistribution(final boolean value) { this.ignored = value; }
-			public boolean ignoreDistribution() { return this.ignored; }
-			public void distributeTypeDictionary(final String value) { }
-			public void distributeData(final Binary value) { }
-			public void dispose() { }
-		};
-	}
+public interface ClusterStorageBinaryDataDistributor extends StorageBinaryDataDistributor {
+    /**
+     * Creates a distributor that ignores all transport work.
+     *
+     * @return neutral distributor
+     */
+    static ClusterStorageBinaryDataDistributor NoOp() {
+        return new ClusterStorageBinaryDataDistributor() {
+            private long index = -1;
+            private boolean ignored;
 
-	/** Sets the next message index.
-	 * @param index message index
-	 */
-	void messageIndex(long index);
+            public void messageIndex(final long value) {
+                this.index = value;
+            }
 
-	/** Returns the current message index.
-	 * @return message index
-	 */
-	long messageIndex();
+            public long messageIndex() {
+                return this.index;
+            }
 
-	/** Sets whether distribution is ignored.
-	 * @param ignore whether to ignore distribution
-	 */
-	void ignoreDistribution(boolean ignore);
+            public void ignoreDistribution(final boolean value) {
+                this.ignored = value;
+            }
 
-	/** Reports whether distribution is ignored.
-	 * @return {@code true} when ignored
-	 */
-	boolean ignoreDistribution();
+            public boolean ignoreDistribution() {
+                return this.ignored;
+            }
 
-	/** Returns a terminal distribution failure, or {@code null} while healthy.
-	 * @return terminal failure, or {@code null}
-	 */
-	default RuntimeException failure()
-	{
-		return null;
-	}
+            public void distributeTypeDictionary(final String value) {
+            }
 
-	/**
-	 * Queues a complete dictionary for the next data transaction, regardless of
-	 * which Store thread performs that transaction. This is used after writer
-	 * restart to re-establish the reader schema before new binaries arrive.
-	 *
-	 * @param typeDictionaryData assembled type dictionary
-	 */
-	default void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
-	{
-		this.distributeTypeDictionary(typeDictionaryData);
-	}
+            public void distributeData(final Binary value) {
+            }
 
-	/** Creates a distributor that keeps dictionary data beside its next binary.
-	 *
-	 * @param delegate destination distributor
-	 * @return caching distributor
-	 */
-	static ClusterStorageBinaryDataDistributor Caching(final ClusterStorageBinaryDataDistributor delegate)
-	{
-		return new Caching(notNull(delegate));
-	}
+            public void dispose() {
+            }
+        };
+    }
 
-	/** Keeps dictionary data adjacent to the transaction that needs it. */
-	final class Caching implements ClusterStorageBinaryDataDistributor
-	{
-		private final ClusterStorageBinaryDataDistributor delegate;
-		private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();
-		private final AtomicReference<String> queuedTypeDictionary = new AtomicReference<>();
+    /**
+     * Creates a distributor that keeps dictionary data beside its next binary.
+     *
+     * @param delegate destination distributor
+     * @return caching distributor
+     */
+    static ClusterStorageBinaryDataDistributor Caching(final ClusterStorageBinaryDataDistributor delegate) {
+        return new Caching(notNull(delegate));
+    }
 
-		private Caching(final ClusterStorageBinaryDataDistributor delegate)
-		{
-			this.delegate = delegate;
-		}
+    /**
+     * Sets the next message index.
+     *
+     * @param index message index
+     */
+    void messageIndex(long index);
 
-		@Override
-		public void distributeData(final Binary data)
-		{
-			final String dictionary = this.typeDictionaryData.get();
-			this.typeDictionaryData.remove();
-			if (dictionary != null)
-			{
-				this.delegate.distributeTypeDictionary(dictionary);
-			}
-			this.delegate.distributeData(data);
-		}
+    /**
+     * Returns the current message index.
+     *
+     * @return message index
+     */
+    long messageIndex();
 
-		@Override
-		public void distributeTypeDictionary(final String typeDictionaryData)
-		{
-			if (typeDictionaryData == null)
-			{
-				this.typeDictionaryData.remove();
-			}
-			else
-			{
-				this.typeDictionaryData.set(typeDictionaryData);
-			}
-		}
+    /**
+     * Sets whether distribution is ignored.
+     *
+     * @param ignore whether to ignore distribution
+     */
+    void ignoreDistribution(boolean ignore);
 
-		@Override
-		public void queueTypeDictionaryForNextTransaction(final String typeDictionaryData)
-		{
-			/* A node may have accumulated an incremental dictionary while startup
-			 * distribution was disabled.  The restart snapshot is authoritative and
-			 * must replace that stale thread-bound value, otherwise consumeTypeDictionary
-			 * would return the incremental fragment and the queued full dictionary would
-			 * never reach the next replicated transaction. */
-			this.typeDictionaryData.remove();
-			this.queuedTypeDictionary.set(typeDictionaryData);
-		}
+    /**
+     * Reports whether distribution is ignored.
+     *
+     * @return {@code true} when ignored
+     */
+    boolean ignoreDistribution();
 
-		@Override
-		public String consumeTypeDictionary()
-		{
-			final String queued = this.queuedTypeDictionary.getAndSet(null);
-			if (queued != null)
-			{
-				/* A full restart snapshot supersedes any incremental dictionary staged
-				 * on the calling thread while startup distribution was disabled. */
-				this.typeDictionaryData.remove();
-				return queued;
-			}
-			final String value = this.typeDictionaryData.get();
-			this.typeDictionaryData.remove();
-			return value;
-		}
+    /**
+     * Returns a terminal distribution failure, or {@code null} while healthy.
+     *
+     * @return terminal failure, or {@code null}
+     */
+    default RuntimeException failure() {
+        return null;
+    }
 
-		@Override
-		public void messageIndex(final long index)
-		{
-			this.delegate.messageIndex(index);
-		}
+    /**
+     * Queues a complete dictionary for the next data transaction, regardless of
+     * which Store thread performs that transaction. This is used after writer
+     * restart to re-establish the reader schema before new binaries arrive.
+     *
+     * @param typeDictionaryData assembled type dictionary
+     */
+    default void queueTypeDictionaryForNextTransaction(final String typeDictionaryData) {
+        this.distributeTypeDictionary(typeDictionaryData);
+    }
 
-		@Override
-		public long messageIndex()
-		{
-			return this.delegate.messageIndex();
-		}
+    /** Keeps dictionary data adjacent to the transaction that needs it. */
+    final class Caching implements ClusterStorageBinaryDataDistributor {
+        private final ClusterStorageBinaryDataDistributor delegate;
+        private final ThreadLocal<String> typeDictionaryData = new ThreadLocal<>();
+        private final AtomicReference<String> queuedTypeDictionary = new AtomicReference<>();
 
-		@Override
-		public boolean ignoreDistribution()
-		{
-			return this.delegate.ignoreDistribution();
-		}
+        private Caching(final ClusterStorageBinaryDataDistributor delegate) {
+            this.delegate = delegate;
+        }
 
-		@Override
-		public RuntimeException failure()
-		{
-			return this.delegate.failure();
-		}
+        @Override
+        public void distributeData(final Binary data) {
+            final String dictionary = this.typeDictionaryData.get();
+            this.typeDictionaryData.remove();
+            if (dictionary != null) {
+                this.delegate.distributeTypeDictionary(dictionary);
+            }
+            this.delegate.distributeData(data);
+        }
 
-		@Override
-		public void ignoreDistribution(final boolean ignore)
-		{
-			this.delegate.ignoreDistribution(ignore);
-		}
+        @Override
+        public void distributeTypeDictionary(final String typeDictionaryData) {
+            if (typeDictionaryData == null) {
+                this.typeDictionaryData.remove();
+            } else {
+                this.typeDictionaryData.set(typeDictionaryData);
+            }
+        }
 
-		@Override
-		public void dispose()
-		{
-			this.typeDictionaryData.remove();
-			this.queuedTypeDictionary.set(null);
-			this.delegate.dispose();
-		}
-	}
+        @Override
+        public void queueTypeDictionaryForNextTransaction(final String typeDictionaryData) {
+            /* A node may have accumulated an incremental dictionary while startup
+             * distribution was disabled.  The restart snapshot is authoritative and
+             * must replace that stale thread-bound value, otherwise consumeTypeDictionary
+             * would return the incremental fragment and the queued full dictionary would
+             * never reach the next replicated transaction. */
+            this.typeDictionaryData.remove();
+            this.queuedTypeDictionary.set(typeDictionaryData);
+        }
+
+        @Override
+        public String consumeTypeDictionary() {
+            final String queued = this.queuedTypeDictionary.getAndSet(null);
+            if (queued != null) {
+                /* A full restart snapshot supersedes any incremental dictionary staged
+                 * on the calling thread while startup distribution was disabled. */
+                this.typeDictionaryData.remove();
+                return queued;
+            }
+            final String value = this.typeDictionaryData.get();
+            this.typeDictionaryData.remove();
+            return value;
+        }
+
+        @Override
+        public void messageIndex(final long index) {
+            this.delegate.messageIndex(index);
+        }
+
+        @Override
+        public long messageIndex() {
+            return this.delegate.messageIndex();
+        }
+
+        @Override
+        public boolean ignoreDistribution() {
+            return this.delegate.ignoreDistribution();
+        }
+
+        @Override
+        public RuntimeException failure() {
+            return this.delegate.failure();
+        }
+
+        @Override
+        public void ignoreDistribution(final boolean ignore) {
+            this.delegate.ignoreDistribution(ignore);
+        }
+
+        @Override
+        public void dispose() {
+            this.typeDictionaryData.remove();
+            this.queuedTypeDictionary.set(null);
+            this.delegate.dispose();
+        }
+    }
 }

@@ -10,12 +10,12 @@ at configuration and a reader can never promote itself to writer.
 
 ## Module map
 
-| Directory | Artifact | Java module | Contents |
-|---|---|---|---|
-| `cache/clustered` | `peruncs-cache-clustered` | `peruncs.datagrid.cache.clustered` | Hibernate clustered-cache region factory, timestamp invalidation over Aeron |
-| `storage/distributed` | `peruncs-storage-distributed` | `peruncs.datagrid.storage.distributed` | Store binary replication contracts plus the Aeron transport |
-| `storage/index` | `peruncs-storage-distributed-index` | `peruncs.datagrid.storage.distributed.index` | Embedded Lucene/JVector index policy for clustered storage |
-| `cluster/nodelibrary` | `peruncs-cluster-nodelibrary` | `peruncs.datagrid.cluster.nodelibrary` | Node lifecycle, backup, replication, and HTTP surface over Aeron |
+| Directory             | Artifact                            | Java module                                  | Contents                                                                    |
+|-----------------------|-------------------------------------|----------------------------------------------|-----------------------------------------------------------------------------|
+| `cache/clustered`     | `peruncs-cache-clustered`           | `peruncs.datagrid.cache.clustered`           | Hibernate clustered-cache region factory, timestamp invalidation over Aeron |
+| `storage/distributed` | `peruncs-storage-distributed`       | `peruncs.datagrid.storage.distributed`       | Store binary replication contracts plus the Aeron transport                 |
+| `storage/index`       | `peruncs-storage-distributed-index` | `peruncs.datagrid.storage.distributed.index` | Embedded Lucene/JVector index policy for clustered storage                  |
+| `cluster/nodelibrary` | `peruncs-cluster-nodelibrary`       | `peruncs.datagrid.cluster.nodelibrary`       | Node lifecycle, backup, replication, and HTTP surface over Aeron            |
 
 The `cluster.nodelibrary` module is organized by concern: `node` (foundation,
 managers, configuration), `store` (Store adaptation), `backup` (backends,
@@ -49,13 +49,11 @@ configuration; the receiver starts before local cache events are redirected.
 The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque
 behind a 68-byte versioned envelope (cluster identity, sequence, chunking,
 CRC32C, commit/abort markers). Writers order Archive prepare chunks before
-the local Store enqueue and the Archive commit
-(`AeronReplicationWriteCoordinator` with
+the local Store enqueue and the Archive commit (`AeronReplicationWriteCoordinator` with
 `AeronStorageBinaryTargetDistributing`). Readers replay from the Archive, join
 the live stream, and reconnect from a durable cursor.
 
-- Cursors (`ReplicationCursor`) and checkpoints
-  (`AeronReplicationCheckpointStore`) persist the recording id/position
+- Cursors (`ReplicationCursor`) and checkpoints (`AeronReplicationCheckpointStore`) persist the recording id/position
   boundary; a restarted or late reader resumes without data loss.
 - Authenticated retention: readers advertise durable boundaries as
   HMAC-signed watermarks; the writer deletes Archive history only through the
