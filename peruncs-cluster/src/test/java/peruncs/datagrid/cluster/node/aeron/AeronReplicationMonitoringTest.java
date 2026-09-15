@@ -5,10 +5,15 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
-import peruncs.datagrid.cluster.node.replication.*;
+import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -18,21 +23,21 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies provider health reflects writer readiness and checkpoint state.
 class AeronReplicationMonitoringTest {
-    private static NodelibraryPropertiesProvider properties(final String role) {
+    private static NodeLibraryPropertiesProvider properties(final String role) {
         return propertiesWith(role, null, null);
     }
 
-    private static NodelibraryPropertiesProvider propertiesWith(
+    private static NodeLibraryPropertiesProvider propertiesWith(
             final String role, final String overrideName, final String overrideValue) {
         return propertiesWith(role, overrideName, overrideValue, false);
     }
 
-    private static NodelibraryPropertiesProvider propertiesWith(
+    private static NodeLibraryPropertiesProvider propertiesWith(
             final String role, final String overrideName, final String overrideValue, final boolean production) {
         final String clusterId = UUID.randomUUID().toString();
         final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
                 "datagrid-aeron-monitoring-%s".formatted(UUID.randomUUID()));
-        return new NodelibraryPropertiesProvider.Env() {
+        return new NodeLibraryPropertiesProvider.Env() {
             @Override
             public String replicationRole() {
                 return role;
@@ -81,7 +86,7 @@ class AeronReplicationMonitoringTest {
             final ReplicationPositionProvider positionProvider = transport.positionProvider("stream");
             positionProvider.init();
             positionProvider.latest();
-            final ClusterStorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
+            final StorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
             final ReplicationHealth health = transport.health(() -> true, client);
             health.init();
             assertEquals("aeron", transport.id());
@@ -114,7 +119,7 @@ class AeronReplicationMonitoringTest {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
                 .create(properties("writer"))) {
             transport.positionProvider("stream").init();
-            final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+            final StorageBinaryDataDistributor distributor = transport.distributor("stream", false);
             final PersistenceTarget<Binary> target = transport.persistenceTargetFactory("stream", distributor)
                     .apply(new PersistenceTarget<>() {
                         public void write(final Binary ignored) {
@@ -134,7 +139,7 @@ class AeronReplicationMonitoringTest {
     void distributorRejectsDataWithoutAStoreTarget() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
                 .create(properties("writer"))) {
-            final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+            final StorageBinaryDataDistributor distributor = transport.distributor("stream", false);
             assertThrows(IllegalStateException.class,
                     () -> distributor.distributeData(ChunksWrapper.New(
                             XMemory.toDirectByteBuffer(new byte[]{3, 2, 1}))));
@@ -207,7 +212,7 @@ class AeronReplicationMonitoringTest {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
                 .create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES",
                         Long.toString(Long.MAX_VALUE)))) {
-            final ClusterStorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
+            final StorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
             final ReplicationHealth health = transport.health(() -> true, client);
             health.init();
             assertFalse(health.isReady());
@@ -244,7 +249,7 @@ class AeronReplicationMonitoringTest {
     void rejectsMalformedNumericAndProductionTemporaryDirectorySettings() {
         assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
                 .create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_EPOCH", "not-a-number")));
-        final NodelibraryPropertiesProvider production = new NodelibraryPropertiesProvider.Env() {
+        final NodeLibraryPropertiesProvider production = new NodeLibraryPropertiesProvider.Env() {
             @Override
             public String replicationRole() {
                 return "writer";
@@ -280,7 +285,7 @@ class AeronReplicationMonitoringTest {
                         "aeron:udp?control=[::]:40123|control-mode=dynamic|fc=max", true)));
     }
 
-    private record TestClient(boolean isRunning, RuntimeException failure) implements ClusterStorageBinaryDataClient {
+    private record TestClient(boolean isRunning, RuntimeException failure) implements StorageBinaryDataClient {
         @Override
         public void start() {
         }

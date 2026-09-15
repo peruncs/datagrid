@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 /// This listener runs after a replicated data message has been applied.
 ///
@@ -12,8 +12,8 @@ public interface AfterDataMessageConsumedListener extends AutoCloseable {
         /// Records that one replicated message has been applied.
     ///
     /// @param cursor applied replication cursor
-    /// @throws NodelibraryException if follow-up bookkeeping fails
-    void onApplied(ReplicationCursor cursor) throws NodelibraryException;
+    /// @throws NodeLibraryException if follow-up bookkeeping fails
+    void onApplied(ReplicationCursor cursor) throws NodeLibraryException;
 
     @Override
     void close();

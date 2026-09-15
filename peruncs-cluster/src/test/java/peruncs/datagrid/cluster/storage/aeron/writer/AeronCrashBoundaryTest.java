@@ -4,7 +4,6 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
@@ -27,11 +26,6 @@ class AeronCrashBoundaryTest {
     private final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
             .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).offerTimeoutNanos(5_000_000L).build();
 
-    @AfterEach
-    void clearHooks() {
-        CrashHook.clear();
-    }
-
         /// Verifies prepared tail failure always publishes abort and fails closed.
     @Test
     void preparedTailFailureAlwaysPublishesAbortAndFailsClosed() {
@@ -40,9 +34,9 @@ class AeronCrashBoundaryTest {
         try (CrashBarrier barrier = new CrashBarrier(
                 CrashPoint.AFTER_DATA_CHUNKS,
                 true, 1_000_000_000L)) {
-            CrashHook.install(barrier::reached);
-            assertThrows(CrashBarrier.SimulatedCrash.class, () -> publisher.prepareTransaction(
-                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1, 2, 3})}));
+            CrashHook.runWithHook(barrier::reached, () -> assertThrows(CrashBarrier.SimulatedCrash.class,
+                    () -> publisher.prepareTransaction(
+                            null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1, 2, 3})})));
         }
         assertEquals(List.of(AeronReplicationEnvelope.Kind.STORE_BINARY, AeronReplicationEnvelope.Kind.ABORT), kinds);
         assertThrows(IllegalStateException.class, () -> publisher.publishTransaction(
@@ -58,9 +52,9 @@ class AeronCrashBoundaryTest {
         try (CrashBarrier barrier = new CrashBarrier(
                 CrashPoint.AFTER_COMMIT_OFFER,
                 true, 1_000_000_000L)) {
-            CrashHook.install(barrier::reached);
-            assertThrows(CrashBarrier.SimulatedCrash.class, () -> publisher.publishTransaction(
-                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{9})}));
+            CrashHook.runWithHook(barrier::reached, () -> assertThrows(CrashBarrier.SimulatedCrash.class,
+                    () -> publisher.publishTransaction(
+                            null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{9})})));
         }
         assertEquals(List.of(AeronReplicationEnvelope.Kind.STORE_BINARY, AeronReplicationEnvelope.Kind.COMMIT), kinds);
         assertThrows(IllegalStateException.class, () -> publisher.publishTransaction(
@@ -98,10 +92,9 @@ class AeronCrashBoundaryTest {
             try (CrashBarrier barrier = new CrashBarrier(
                     CrashPoint.AFTER_ENQUEUE_BEFORE_PREPARE,
                     true, 1_000_000_000L)) {
-                CrashHook.install(barrier::reached);
-                assertThrows(CrashBarrier.SimulatedCrash.class, () ->
-                        new AeronStorageBinaryTargetDistributing(local, coordinator).write(
-                                ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{7}))));
+                CrashHook.runWithHook(barrier::reached, () -> assertThrows(CrashBarrier.SimulatedCrash.class, () ->
+                        new AeronStorageBinaryReplicationTarget(local, coordinator).write(
+                                ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{7})))));
             }
             assertEquals(1, localWrites.get());
             assertEquals(0, offers.get());
@@ -118,17 +111,16 @@ class AeronCrashBoundaryTest {
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
                 publisher, ReplicationDurabilityMode.ARCHIVE_FIRST,
                 (state, sequence, length, chunks, crc, position) -> states.add(state));
-        CrashHook.install((name, ignored) ->
-        {
-            if ("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT".equals(name)) {
-                throw new CrashBarrier.SimulatedCrash(
-                        CrashPoint.AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT,
-                        ignored);
-            }
-        });
         try {
-            assertThrows(CrashBarrier.SimulatedCrash.class, () -> coordinator.distributeData(
-                    ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{5}))));
+            CrashHook.runWithHook((name, ignored) ->
+            {
+                if ("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT".equals(name)) {
+                    throw new CrashBarrier.SimulatedCrash(
+                            CrashPoint.AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT,
+                            ignored);
+                }
+            }, () -> assertThrows(CrashBarrier.SimulatedCrash.class, () -> coordinator.distributeData(
+                    ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{5})))));
             /* The Archive terminal is known durable, so converting the checkpoint to
              * COMMITTING_UNCERTAIN would be misleading. The surviving PREPARING fence
              * deliberately forces restart validation to report RESEED_REQUIRED. */

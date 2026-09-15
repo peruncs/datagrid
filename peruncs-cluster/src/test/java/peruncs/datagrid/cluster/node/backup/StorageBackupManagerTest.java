@@ -2,13 +2,11 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
-import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -29,23 +27,9 @@ class StorageBackupManagerTest {
                 storageConnection(), maxBackupCount, backend, () -> CURSOR, client, retention);
     }
 
-        /// A proxy keeps this orchestration test independent of Store implementation details.
+    /// A typed stub keeps this orchestration test independent of Store implementation details.
     private static StorageConnection storageConnection() {
-        return (StorageConnection) Proxy.newProxyInstance(
-                StorageConnection.class.getClassLoader(),
-                new Class<?>[]{StorageConnection.class},
-                (proxy, method, arguments) ->
-                {
-                    if (method.getReturnType() == boolean.class) return false;
-                    if (method.getReturnType() == byte.class) return (byte) 0;
-                    if (method.getReturnType() == short.class) return (short) 0;
-                    if (method.getReturnType() == int.class) return 0;
-                    if (method.getReturnType() == long.class) return 0L;
-                    if (method.getReturnType() == float.class) return 0.0f;
-                    if (method.getReturnType() == double.class) return 0.0d;
-                    if (method.getReturnType() == char.class) return '\0';
-                    return null;
-                });
+        return new TestStorageConnection();
     }
 
     @Test
@@ -130,7 +114,7 @@ class StorageBackupManagerTest {
     void preservesBackupFailureWhenResumeAlsoFails() {
         final FakeClient client = new FakeClient();
         client.running = true;
-        client.resumeFailure = new NodelibraryException("resume failed");
+        client.resumeFailure = new NodeLibraryException("resume failed");
         final FakeBackend backend = new FakeBackend();
         backend.createFailure = new IllegalStateException("backup failed");
 
@@ -159,7 +143,7 @@ class StorageBackupManagerTest {
         assertEquals(0, retention.calls);
     }
 
-    private static final class FakeClient implements ClusterStorageBinaryDataClient {
+    private static final class FakeClient implements StorageBinaryDataClient {
         private boolean running;
         private RuntimeException failure;
         private RuntimeException resumeFailure;

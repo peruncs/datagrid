@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.exceptions;
 
 /// Reports that a node has reached its configured storage limit.
-public class StorageLimitReachedException extends NodelibraryException {
+public final class StorageLimitReachedException extends NodeLibraryException {
         /// Creates an exception without a message.
     public StorageLimitReachedException() {
         super();

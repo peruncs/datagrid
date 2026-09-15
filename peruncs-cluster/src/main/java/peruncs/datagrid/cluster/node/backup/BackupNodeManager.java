@@ -2,9 +2,9 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
 import peruncs.datagrid.cluster.node.ClusterNodeManager;
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -23,7 +23,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
     /// @return backup manager
     static BackupNodeManager New(
             final StorageBackupTaskExecutor storageBackupTaskExecutor,
-            final ClusterStorageBinaryDataClient dataClient,
+            final StorageBinaryDataClient dataClient,
             final StorageController storageController,
             final StorageDiskSpaceReader storageDiskSpaceReader
     ) {
@@ -40,8 +40,8 @@ public interface BackupNodeManager extends ClusterNodeManager {
 
         /// Resumes the reader after backup work.
     ///
-    /// @throws NodelibraryException if the reader cannot resume
-    void resumeReading() throws NodelibraryException;
+    /// @throws NodeLibraryException if the reader cannot resume
+    void resumeReading() throws NodeLibraryException;
 
         /// Reports whether the reader is active.
     ///
@@ -51,8 +51,8 @@ public interface BackupNodeManager extends ClusterNodeManager {
         /// Creates a storage backup.
     ///
     /// @param useManualSlot whether to use the manual backup slot
-    /// @throws NodelibraryException if backup creation fails
-    void createStorageBackup(final boolean useManualSlot) throws NodelibraryException;
+    /// @throws NodeLibraryException if backup creation fails
+    void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException;
 
         /// Reports whether a backup is running.
     ///
@@ -64,13 +64,13 @@ public interface BackupNodeManager extends ClusterNodeManager {
         private static final System.Logger LOGGER = System.getLogger(BackupNodeManager.class.getName());
 
         private final StorageBackupTaskExecutor tasks;
-        private final ClusterStorageBinaryDataClient dataClient;
+        private final StorageBinaryDataClient dataClient;
         private final StorageController storageController;
         private final StorageDiskSpaceReader storageDiskSpaceReader;
 
         private Default(
                 final StorageBackupTaskExecutor storageBackupTaskExecutor,
-                final ClusterStorageBinaryDataClient dataClient,
+                final StorageBinaryDataClient dataClient,
                 final StorageController storageController,
                 final StorageDiskSpaceReader storageDiskSpaceReader
         ) {
@@ -86,7 +86,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
         }
 
         @Override
-        public void resumeReading() throws NodelibraryException {
+        public void resumeReading() throws NodeLibraryException {
             this.dataClient.resume();
         }
 
@@ -96,8 +96,10 @@ public interface BackupNodeManager extends ClusterNodeManager {
         }
 
         @Override
-        public void createStorageBackup(final boolean useManualSlot) throws NodelibraryException {
-            this.tasks.runBackup(useManualSlot);
+        public void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException {
+            if (this.tasks.runBackup(useManualSlot) == StorageBackupTaskExecutor.BackupStartResult.BUSY) {
+                throw new IllegalStateException("Storage backup is already running");
+            }
         }
 
         @Override
@@ -107,12 +109,17 @@ public interface BackupNodeManager extends ClusterNodeManager {
 
         @Override
         public boolean isHealthy() {
-            return this.isStorageAvailable();
+            return this.isStorageAvailable()
+                    && this.dataClient.failure() == null
+                    && this.tasks.backupFailure() == null;
         }
 
         @Override
-        public boolean isReady() throws NodelibraryException {
-            return this.isStorageAvailable();
+        public boolean isReady() throws NodeLibraryException {
+            return this.isStorageAvailable()
+                    && this.dataClient.isRunning()
+                    && this.dataClient.failure() == null
+                    && this.tasks.backupFailure() == null;
         }
 
         @Override
@@ -121,7 +128,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
         }
 
         @Override
-        public long readStorageSizeBytes() throws NodelibraryException {
+        public long readStorageSizeBytes() throws NodeLibraryException {
             return this.storageDiskSpaceReader.readUsedDiskSpaceBytes();
         }
 
@@ -133,11 +140,21 @@ public interface BackupNodeManager extends ClusterNodeManager {
         @Override
         public void close() {
             LOGGER.log(System.Logger.Level.INFO, "Closing BackupNodeManager.");
+            Throwable failure = null;
             try {
                 this.dataClient.dispose();
-            } finally {
-                this.tasks.close();
+            } catch (final Throwable closeFailure) {
+                failure = closeFailure;
             }
+            try {
+                this.tasks.close();
+            } catch (final Throwable closeFailure) {
+                if (failure == null) failure = closeFailure;
+                else if (failure != closeFailure) failure.addSuppressed(closeFailure);
+            }
+            if (failure instanceof Error error) throw error;
+            if (failure instanceof RuntimeException runtime) throw runtime;
+            if (failure != null) throw new IllegalStateException("failed to close backup node resources", failure);
         }
 
         private boolean isStorageAvailable() {

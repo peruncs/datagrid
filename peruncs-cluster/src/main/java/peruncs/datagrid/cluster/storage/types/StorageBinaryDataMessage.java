@@ -13,11 +13,12 @@ import static org.eclipse.serializer.util.X.notNull;
 /// The message owns its direct buffer after the first packet arrives. A
 /// complete message can be consumed and then disposed; callers must not retain
 /// its buffer after disposal.
-public interface StorageBinaryDataMessage extends Disposable, AutoCloseable {
+public sealed interface StorageBinaryDataMessage extends Disposable, AutoCloseable
+        permits StorageBinaryDataMessageDefault {
         /// Defensive upper bound for a single network message.
-    int MAX_MESSAGE_LENGTH = ReplicationLimits.MAX_MESSAGE_BYTES;
+    int MAX_MESSAGE_LENGTH = 64 * 1024 * 1024;
         /// Defensive upper bound for packet metadata in one message.
-    int MAX_PACKET_COUNT = ReplicationLimits.MAX_PACKET_COUNT;
+    int MAX_PACKET_COUNT = 1_000_000;
 
         /// Creates a message from its first packet.
     ///
@@ -86,7 +87,7 @@ final class StorageBinaryDataMessageDefault implements StorageBinaryDataMessage 
         if (this.length > MAX_MESSAGE_LENGTH) {
             throw new StorageBinaryDataException("Data message exceeds maximum length %s".formatted(MAX_MESSAGE_LENGTH));
         }
-        if (this.length < 0 || this.packetCount <= 0 || this.packetCount > MAX_PACKET_COUNT) {
+        if (this.length <= 0 || this.packetCount <= 0 || this.packetCount > MAX_PACKET_COUNT) {
             throw new StorageBinaryDataException("invalid data message dimensions");
         }
         /* Do not trust the declared length as an allocation request. A malformed

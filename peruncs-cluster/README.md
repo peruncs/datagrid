@@ -102,8 +102,23 @@ credentials. Do not enable ACK-driven deletion on an untrusted network.
 Fixed-writer/no-consensus operation is intentional. Writer fencing and manual
 promotion remain deployment responsibilities.
 
+## Filesystem backups
+
+Backups use the filesystem named by `ECLIPSE_DATAGRID_BACKUP_PATH` (default
+`backups`). This can be a network-mounted volume. Each generated backup is a
+single compressed archive named `<timestamp>.zip` or
+`<timestamp>.manual.zip`; the archive contains `storage/`, `manifest`, and
+`ready`. The complete archive is atomically moved into the volume, so readers
+never select an in-progress export. Operator-provided storage is kept as
+`user-uploaded-storage.zip` and is restored through its separate API.
+
+Archive extraction rejects traversal, symbolic-link paths, duplicate entries,
+oversized content, missing storage, and incomplete generated metadata. The
+REST backup endpoints trigger and read these local-volume operations; no
+backup HTTP transport or hosted backup target is configured by the node.
+
 The node exposes Aeron through the normal monitoring endpoints:
-/eclipse-datagrid/health`, `/eclipse-datagrid/health/ready`, and the
+`/eclipse-datagrid/health`, `/eclipse-datagrid/health/ready`, and the
 Prometheus-compatible `/eclipse-datagrid/replication-metrics`. The latter
 reports `transport="aeron"`, replay/live state, current/latest sequence, lag,
 readiness, and health, including Archive or replay failures.
@@ -113,7 +128,7 @@ readiness, and health, including Archive or replay failures.
 The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque and
 adds a 68-byte versioned envelope for cluster identity, sequence, chunking,
 CRC32C, and commit/abort markers. A writer should use
-`AeronStorageBinaryTargetDistributing` with an
+`AeronStorageBinaryReplicationTarget` with an
 `AeronReplicationWriteCoordinator` so the ordering is:
 
 ```text

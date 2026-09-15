@@ -8,6 +8,7 @@ import javax.cache.integration.CompletionListener;
 import javax.cache.processor.EntryProcessor;
 import javax.cache.processor.EntryProcessorException;
 import javax.cache.processor.EntryProcessorResult;
+import javax.cache.processor.MutableEntry;
 import java.net.URI;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +34,8 @@ class ClusteredCacheMessageAcceptorTest {
         acceptor.accept(new TimestampsRegionUpdateMessage("cache", "table", 42L));
 
         assertEquals(42L, cache.entries.get("table"));
+        assertFalse(ClusteredCacheMessageAcceptor.isRemoteUpdate(),
+                "remote-update context must not escape the cache invocation");
     }
 
     @Test
@@ -103,7 +106,7 @@ class ClusteredCacheMessageAcceptorTest {
         final Thread[] threads = new Thread[updates];
         for (int i = 0; i < updates; i++) {
             final long timestamp = i;
-            threads[i] = new Thread(() ->
+            threads[i] = Thread.ofVirtual().name("clustered-cache-acceptor-test-%s".formatted(i)).unstarted(() ->
             {
                 try {
                     start.await();
@@ -114,7 +117,7 @@ class ClusteredCacheMessageAcceptorTest {
                         Thread.currentThread().interrupt();
                     }
                 }
-            }, "clustered-cache-acceptor-test-%s".formatted(i));
+            });
             threads[i].start();
         }
         start.countDown();
@@ -134,7 +137,7 @@ class ClusteredCacheMessageAcceptorTest {
         final ClusteredCacheMessageAcceptor acceptor = acceptor(cache);
         final CountDownLatch start = new CountDownLatch(1);
         final AtomicReference<Throwable> failure = new AtomicReference<>();
-        final Thread local = new Thread(() ->
+        final Thread local = Thread.ofVirtual().name("clustered-cache-local-writer-test").unstarted(() ->
         {
             try {
                 start.await();
@@ -144,8 +147,8 @@ class ClusteredCacheMessageAcceptorTest {
             } catch (final Throwable error) {
                 failure.set(error);
             }
-        }, "clustered-cache-local-writer-test");
-        final Thread remote = new Thread(() ->
+        });
+        final Thread remote = Thread.ofVirtual().name("clustered-cache-remote-writer-test").unstarted(() ->
         {
             try {
                 start.await();
@@ -155,7 +158,7 @@ class ClusteredCacheMessageAcceptorTest {
             } catch (final Throwable error) {
                 failure.set(error);
             }
-        }, "clustered-cache-remote-writer-test");
+        });
         local.start();
         remote.start();
         start.countDown();
@@ -374,8 +377,39 @@ class ClusteredCacheMessageAcceptorTest {
         }
 
         @Override
-        public <T> T invoke(Object key, EntryProcessor<Object, Object, T> entryProcessor, Object... arguments) throws EntryProcessorException {
-            throw new UnsupportedOperationException();
+        public synchronized <T> T invoke(Object key, EntryProcessor<Object, Object, T> entryProcessor, Object... arguments) throws EntryProcessorException {
+            final MutableEntry<Object, Object> entry = new MutableEntry<>() {
+                @Override
+                public Object getKey() {
+                    return key;
+                }
+
+                @Override
+                public Object getValue() {
+                    return StubCache.this.entries.get(key);
+                }
+
+                @Override
+                public boolean exists() {
+                    return StubCache.this.entries.containsKey(key);
+                }
+
+                @Override
+                public void remove() {
+                    StubCache.this.entries.remove(key);
+                }
+
+                @Override
+                public void setValue(final Object value) {
+                    StubCache.this.entries.put(key, value);
+                }
+
+                @Override
+                public <T> T unwrap(final Class<T> clazz) {
+                    throw new IllegalArgumentException("unsupported unwrap: " + clazz.getName());
+                }
+            };
+            return entryProcessor.process(entry, arguments);
         }
 
         @Override

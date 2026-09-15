@@ -31,7 +31,8 @@ class AeronClusteredCacheMessageCodecTest {
         final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
 
         final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 7L, payload);
-        assertEquals(AeronClusteredCacheMessageCodec.HEADER_LENGTH + payload.length, length);
+        assertEquals(AeronClusteredCacheMessageCodec.HEADER_LENGTH +
+                AeronClusteredCacheMessageCodec.CRC_LENGTH + payload.length, length);
         assertTrue(AeronClusteredCacheMessageCodec.senderIdMatches(buffer, 0, length, SENDER_ID));
         assertFalse(AeronClusteredCacheMessageCodec.senderIdMatches(buffer, 0, length, uuidBytes(UUID.randomUUID())));
         assertEquals(7L, AeronClusteredCacheMessageCodec.sequenceOf(buffer, 0, length));
@@ -40,6 +41,16 @@ class AeronClusteredCacheMessageCodecTest {
         assertEquals(readLong(SENDER_ID, 0), sender.mostSignificantBits());
         assertEquals(readLong(SENDER_ID, Long.BYTES), sender.leastSignificantBits());
         assertArrayEquals(payload, AeronClusteredCacheMessageCodec.decodePayload(buffer, 0, length, 1024));
+    }
+
+    @Test
+    void rejectsPayloadCorruptionEvenWhenFrameLengthIsValid() {
+        final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
+        final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 1L, new byte[]{1, 2, 3});
+        buffer.putByte(AeronClusteredCacheMessageCodec.HEADER_LENGTH, (byte) 9);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> AeronClusteredCacheMessageCodec.decodePayload(buffer, 0, length, 1024));
     }
 
     @Test
@@ -89,7 +100,8 @@ class AeronClusteredCacheMessageCodecTest {
     void roundTripsEmptyPayload() {
         final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64);
         final int length = AeronClusteredCacheMessageCodec.encode(buffer, SENDER_ID, 0L, new byte[0]);
-        assertEquals(AeronClusteredCacheMessageCodec.HEADER_LENGTH, length);
+        assertEquals(AeronClusteredCacheMessageCodec.HEADER_LENGTH +
+                AeronClusteredCacheMessageCodec.CRC_LENGTH, length);
         assertArrayEquals(new byte[0], AeronClusteredCacheMessageCodec.decodePayload(buffer, 0, length, 1024));
     }
 

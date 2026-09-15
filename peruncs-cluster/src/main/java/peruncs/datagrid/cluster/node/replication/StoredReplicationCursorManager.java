@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import org.eclipse.serializer.concurrency.LockedExecutor;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 import java.io.IOException;
 import java.nio.file.NoSuchFileException;
@@ -29,14 +30,14 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
         /// Returns the last stored replication cursor.
     ///
     /// @return stored replication cursor
-    /// @throws NodelibraryException if reading fails
-    ReplicationCursor get() throws NodelibraryException;
+    /// @throws NodeLibraryException if reading fails
+    ReplicationCursor get() throws NodeLibraryException;
 
         /// Stores a replication cursor as the restart boundary.
     ///
     /// @param cursor replication cursor
-    /// @throws NodelibraryException if writing fails
-    void set(ReplicationCursor cursor) throws NodelibraryException;
+    /// @throws NodeLibraryException if writing fails
+    void set(ReplicationCursor cursor) throws NodeLibraryException;
 
     @Override
     void close();
@@ -46,6 +47,7 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
         private static final System.Logger LOGGER = System.getLogger(StoredReplicationCursorManager.class.getName());
 
         private final Path path;
+        private final LockedExecutor stateLock = LockedExecutor.New();
 
         private boolean closed = false;
         private boolean initialized = false;
@@ -57,31 +59,35 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
         }
 
         @Override
-        public synchronized ReplicationCursor get() throws NodelibraryException {
-            this.ensureOpen();
-            this.ensureInit();
-            return this.cursor;
+        public ReplicationCursor get() throws NodeLibraryException {
+            return this.stateLock.write(() -> {
+                this.ensureOpen();
+                this.ensureInit();
+                return this.cursor;
+            });
         }
 
         @Override
-        public synchronized void set(final ReplicationCursor cursor) throws NodelibraryException {
-            this.ensureOpen();
-            this.ensureInit();
+        public void set(final ReplicationCursor cursor) throws NodeLibraryException {
+            this.stateLock.write(() -> {
+                this.ensureOpen();
+                this.ensureInit();
 
-            try {
-                ReplicationCursorStore.write(this.path, cursor);
-                final long written = cursor.providerPosition().length;
-                if (LOGGER.isLoggable(System.Logger.Level.DEBUG) && cursor.logicalSequence() % 10_000 == 0) {
-                    LOGGER.log(System.Logger.Level.DEBUG, "Stored replication sequence %s, written %s bytes".formatted(cursor.logicalSequence(), written));
+                try {
+                    ReplicationCursorStore.write(this.path, cursor);
+                    final long written = cursor.providerPosition().length;
+                    if (LOGGER.isLoggable(System.Logger.Level.DEBUG) && cursor.logicalSequence() % 10_000 == 0) {
+                        LOGGER.log(System.Logger.Level.DEBUG, "Stored replication sequence %s, written %s bytes".formatted(cursor.logicalSequence(), written));
+                    }
+                } catch (final IOException | RuntimeException e) {
+                    throw new NodeLibraryException("Failed to write replication cursor file", e);
                 }
-            } catch (final IOException | RuntimeException e) {
-                throw new NodelibraryException("Failed to write replication cursor file", e);
-            }
 
-            this.cursor = cursor;
+                this.cursor = cursor;
+            });
         }
 
-        private void ensureInit() throws NodelibraryException {
+        private void ensureInit() throws NodeLibraryException {
             this.ensureOpen();
             if (this.initialized) {
                 return;
@@ -97,7 +103,7 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
                 LOGGER.log(System.Logger.Level.DEBUG, "New replication cursor file has been created.");
                 this.cursor = new ReplicationCursor("none", null, -1, new byte[0]);
             } catch (final IOException failure) {
-                throw new NodelibraryException("Failed to read binary replication cursor %s".formatted(this.path), failure);
+                throw new NodeLibraryException("Failed to read binary replication cursor %s".formatted(this.path), failure);
             }
 
             this.initialized = true;
@@ -110,12 +116,14 @@ public interface StoredReplicationCursorManager extends AutoCloseable {
         }
 
         @Override
-        public synchronized void close() {
-            if (this.closed) {
-                return;
-            }
-            LOGGER.log(System.Logger.Level.TRACE, "Closing StoredReplicationCursorManager");
-            this.closed = true;
+        public void close() {
+            this.stateLock.write(() -> {
+                if (this.closed) {
+                    return;
+                }
+                LOGGER.log(System.Logger.Level.TRACE, "Closing StoredReplicationCursorManager");
+                this.closed = true;
+            });
         }
     }
 }

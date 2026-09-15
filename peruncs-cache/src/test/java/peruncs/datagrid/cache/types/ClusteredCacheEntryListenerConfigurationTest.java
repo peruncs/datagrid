@@ -1,7 +1,7 @@
 package peruncs.datagrid.cache.types;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageComProvider;
+import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageCommunicationProvider;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageSender;
 import peruncs.datagrid.cache.aeron.AeronClusteredConfigurationPropertyNames;
 
@@ -29,7 +29,7 @@ class ClusteredCacheEntryListenerConfigurationTest {
 
     @Test
     void disposeIsIdempotentAndFailsClosed() {
-        final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
+        final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
                 provider.provideUpdateTimestampsCacheMessageSender(properties(), serializer());
         final ClusteredCacheEntryListenerConfiguration configuration =
@@ -45,7 +45,7 @@ class ClusteredCacheEntryListenerConfigurationTest {
 
     @Test
     void listenerFactoryReturnsTheSender() {
-        final AeronClusteredCacheMessageComProvider provider = new AeronClusteredCacheMessageComProvider();
+        final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
         final AeronClusteredCacheMessageSender sender =
                 provider.provideUpdateTimestampsCacheMessageSender(properties(), serializer());
         final ClusteredCacheEntryListenerConfiguration configuration =
@@ -56,7 +56,8 @@ class ClusteredCacheEntryListenerConfigurationTest {
             assertSame(sender, listener.getCacheEntryListenerFactory().create());
             assertTrue(listener.isSynchronous(), "clustered invalidations must be synchronous");
             assertFalse(listener.isOldValueRequired());
-            assertNull(listener.getCacheEntryEventFilterFactory());
+            assertNotNull(listener.getCacheEntryEventFilterFactory(),
+                    "remote timestamp updates must not be rebroadcast");
         } finally {
             configuration.dispose();
         }

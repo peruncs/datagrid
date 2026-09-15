@@ -1,41 +1,23 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Tests neutral transport behavior.
 class NeutralTransportTest {
-    private static Thread dictionaryThread(
-            final String name,
-            final ClusterStorageBinaryDataDistributor distributor,
-            final String dictionary,
-            final CountDownLatch ready,
-            final CountDownLatch release
-    ) {
-        return new Thread(() ->
-        {
-            distributor.distributeTypeDictionary(dictionary);
-            ready.countDown();
-            try {
-                release.await();
-                distributor.distributeData(null);
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }, name);
-    }
 
         /// Verifies no op transport keeps core usable without any provider dependency.
     @Test
     void noOpTransportKeepsCoreUsableWithoutAnyProviderDependency() {
         final ClusterReplicationTransport transport = ClusterReplicationTransport.noOp();
-        final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+        final StorageBinaryDataDistributor distributor = transport.distributor("stream", false);
         distributor.messageIndex(12);
         distributor.ignoreDistribution(true);
         assertEquals(12, distributor.messageIndex());
@@ -47,10 +29,10 @@ class NeutralTransportTest {
 
         /// Verifies caching distributor keeps dictionaries associated with writing threads.
     @Test
-    void cachingDistributorKeepsDictionariesAssociatedWithWritingThreads() throws Exception {
-        final Map<String, String> dictionaries = new ConcurrentHashMap<>();
-        final ClusterStorageBinaryDataDistributor delegate = new ClusterStorageBinaryDataDistributor() {
-            private final ThreadLocal<String> pending = new ThreadLocal<>();
+    void cachingDistributorCarriesOneWriterDictionaryToTheNextTransaction() {
+        final List<String> dictionaries = new ArrayList<>();
+        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
+            private final AtomicReference<String> pending = new AtomicReference<>();
 
             public void messageIndex(final long value) {
             }
@@ -71,31 +53,24 @@ class NeutralTransportTest {
             }
 
             public void distributeData(final org.eclipse.serializer.persistence.binary.types.Binary value) {
-                dictionaries.put(Thread.currentThread().getName(), this.pending.get());
+                dictionaries.add(this.pending.getAndSet(null));
             }
 
             public void dispose() {
             }
         };
-        final ClusterStorageBinaryDataDistributor caching = ClusterStorageBinaryDataDistributor.Caching(delegate);
-        final CountDownLatch ready = new CountDownLatch(2);
-        final CountDownLatch release = new CountDownLatch(1);
-        final Thread first = dictionaryThread("cluster-writer-1", caching, "dictionary-1", ready, release);
-        final Thread second = dictionaryThread("cluster-writer-2", caching, "dictionary-2", ready, release);
-        first.start();
-        second.start();
-        ready.await();
-        release.countDown();
-        first.join();
-        second.join();
-        assertEquals("dictionary-1", dictionaries.get("cluster-writer-1"));
-        assertEquals("dictionary-2", dictionaries.get("cluster-writer-2"));
+        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
+        caching.distributeTypeDictionary("dictionary-1");
+        caching.distributeData(null);
+        caching.distributeTypeDictionary("dictionary-2");
+        caching.distributeData(null);
+        assertEquals(List.of("dictionary-1", "dictionary-2"), dictionaries);
     }
 
         /// A restart dictionary queued by startup is consumed by the first Store thread.
     @Test
     void queuedDictionaryCrossesTheStartupThreadBoundary() {
-        final ClusterStorageBinaryDataDistributor delegate = new ClusterStorageBinaryDataDistributor() {
+        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
             public void messageIndex(final long value) {
             }
 
@@ -119,7 +94,7 @@ class NeutralTransportTest {
             public void dispose() {
             }
         };
-        final ClusterStorageBinaryDataDistributor caching = ClusterStorageBinaryDataDistributor.Caching(delegate);
+        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
         caching.queueTypeDictionaryForNextTransaction("full-dictionary");
         assertEquals("full-dictionary", caching.consumeTypeDictionary());
         assertEquals(null, caching.consumeTypeDictionary());
@@ -127,8 +102,8 @@ class NeutralTransportTest {
 
         /// A restart snapshot replaces an incremental dictionary staged before startup completed.
     @Test
-    void queuedDictionarySupersedesStaleThreadLocalDictionary() {
-        final ClusterStorageBinaryDataDistributor delegate = new ClusterStorageBinaryDataDistributor() {
+    void queuedDictionarySupersedesStaleIncrementalDictionary() {
+        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
             public void messageIndex(final long value) {
             }
 
@@ -152,7 +127,7 @@ class NeutralTransportTest {
             public void dispose() {
             }
         };
-        final ClusterStorageBinaryDataDistributor caching = ClusterStorageBinaryDataDistributor.Caching(delegate);
+        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
         caching.distributeTypeDictionary("stale-incremental");
         caching.queueTypeDictionaryForNextTransaction("full-restart-dictionary");
         assertEquals("full-restart-dictionary", caching.consumeTypeDictionary());

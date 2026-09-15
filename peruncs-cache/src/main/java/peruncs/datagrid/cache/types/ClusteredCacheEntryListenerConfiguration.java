@@ -67,7 +67,7 @@ public class ClusteredCacheEntryListenerConfiguration implements Disposable {
 
         @Override
         public Factory<CacheEntryEventFilter<? super Object, ? super Object>> getCacheEntryEventFilterFactory() {
-            return null;
+            return () -> event -> !ClusteredCacheMessageAcceptor.isRemoteUpdate();
         }
 
         @Override

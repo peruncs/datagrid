@@ -16,7 +16,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// The selected durability mode decides which side is attempted first. A
 /// failed terminal step records an uncertain state and stops further writes;
 /// this is safer than allowing the local Store and Archive to drift silently.
-public final class AeronStorageBinaryTargetDistributing implements PersistenceTarget<Binary> {
+public final class AeronStorageBinaryReplicationTarget implements PersistenceTarget<Binary> {
     private final PersistenceTarget<Binary> delegate;
     private final AeronReplicationWriteCoordinator coordinator;
     private final StorageBinaryDataDistributor dictionarySource;
@@ -27,7 +27,7 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
     ///
     /// @param delegate    local Store target
     /// @param coordinator Aeron transaction coordinator
-    public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
+    public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
                                                 final AeronReplicationWriteCoordinator coordinator) {
         this(delegate, coordinator, null, ignored -> {
         }, () -> true);
@@ -43,7 +43,7 @@ public final class AeronStorageBinaryTargetDistributing implements PersistenceTa
     /// @param dictionarySource    source of staged type dictionaries
     /// @param committedSequence   callback for the committed sequence
     /// @param distributionEnabled predicate that enables replication
-    public AeronStorageBinaryTargetDistributing(final PersistenceTarget<Binary> delegate,
+    public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
                                                 final AeronReplicationWriteCoordinator coordinator, final StorageBinaryDataDistributor dictionarySource,
                                                 final LongConsumer committedSequence, final BooleanSupplier distributionEnabled) {
         this.delegate = notNull(delegate);

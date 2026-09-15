@@ -7,11 +7,11 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataDistributor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -41,7 +41,7 @@ class AeronProviderCheckpointTest {
         final int controlPort = freePort();
         final int livePort = freePort();
         final String clusterId = UUID.randomUUID().toString();
-        final NodelibraryPropertiesProvider properties = new NodelibraryPropertiesProvider.Env() {
+        final NodeLibraryPropertiesProvider properties = new NodeLibraryPropertiesProvider.Env() {
             @Override
             public String replicationRole() {
                 return "writer";
@@ -75,7 +75,7 @@ class AeronProviderCheckpointTest {
             }
         };
         ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(properties);
-        final ClusterStorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+        final StorageBinaryDataDistributor distributor = transport.distributor("stream", false);
         final PersistenceTarget<Binary> target = transport.persistenceTargetFactory("stream", distributor)
                 .apply(new PersistenceTarget<>() {
                     @Override
@@ -95,7 +95,7 @@ class AeronProviderCheckpointTest {
             assertTrue(saved.recordingId() >= 0);
             transport.close();
             transport = new AeronClusterReplicationTransportProvider().create(properties);
-            final ClusterStorageBinaryDataDistributor resumedDistributor = transport.distributor("stream", false);
+            final StorageBinaryDataDistributor resumedDistributor = transport.distributor("stream", false);
             final PersistenceTarget<Binary> resumedTarget = transport.persistenceTargetFactory("stream", resumedDistributor)
                     .apply(new PersistenceTarget<>() {
                         @Override

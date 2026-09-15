@@ -92,7 +92,7 @@ class AeronUdpReplicationIT {
                 }
             };
             receiver.localAccepted = () -> localAccepted[0];
-            new AeronStorageBinaryTargetDistributing(localTarget, coordinator)
+            new AeronStorageBinaryReplicationTarget(localTarget, coordinator)
                     .write(ChunksWrapper.New(first, second));
             assertEquals(firstPosition, first.position());
             assertEquals(secondPosition, second.position());
@@ -151,7 +151,7 @@ class AeronUdpReplicationIT {
                     return true;
                 }
             };
-            final PersistenceTarget<Binary> target = new AeronStorageBinaryTargetDistributing(failingTarget, coordinator);
+            final PersistenceTarget<Binary> target = new AeronStorageBinaryReplicationTarget(failingTarget, coordinator);
             assertThrows(IllegalStateException.class,
                     () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{4, 5, 6}))));
             await(() -> client.lastResolvedSequence() == 0 || client.failure() != null);

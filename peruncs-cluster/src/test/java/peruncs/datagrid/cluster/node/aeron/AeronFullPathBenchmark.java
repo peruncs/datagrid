@@ -2,10 +2,11 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
-import peruncs.datagrid.cluster.node.replication.*;
-import peruncs.datagrid.cluster.storage.types.DistributedStorage;
-import peruncs.datagrid.cluster.storage.types.ObjectGraphUpdateHandler;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.node.replication.AfterDataMessageConsumedListener;
+import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
+import peruncs.datagrid.cluster.storage.types.*;
 
 import java.lang.management.BufferPoolMXBean;
 import java.lang.management.ManagementFactory;
@@ -83,12 +84,12 @@ public final class AeronFullPathBenchmark {
                          readerRoot.resolve("cursor"))) {
                 final EmbeddedStorageFoundation<?> readerFoundation = AeronStoreIntegrationIT.foundation(readerPath);
                 final EmbeddedStorageManager reader = readerFoundation.start();
-                final ClusterStorageBinaryDataMerger merger = ClusterStorageBinaryDataMerger.New(
+                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
                         readerFoundation.getConnectionFoundation(), reader.createConnection(),
                         ObjectGraphUpdateHandler.Synchronized(), 0L, 1L);
-                final ClusterStorageBinaryDataPacketAcceptor acceptor = ClusterStorageBinaryDataPacketAcceptor.New(merger);
+                final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(merger);
                 final AtomicLong resolved = new AtomicLong(baseline.logicalSequence());
-                final ClusterStorageBinaryDataClient client = readerTransport.client(acceptor, "store",
+                final StorageBinaryDataClient client = readerTransport.client(acceptor, "store",
                         new AfterDataMessageConsumedListener() {
                             @Override
                             public void onApplied(final ReplicationCursor cursor) {
@@ -154,14 +155,14 @@ public final class AeronFullPathBenchmark {
         if (resolved.get() != target) throw new IllegalStateException("reader did not apply sequence %s".formatted(target));
     }
 
-    private static void awaitLive(final ClusterStorageBinaryDataClient client) {
+    private static void awaitLive(final StorageBinaryDataClient client) {
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (!client.isLive() && client.failure() == null && System.nanoTime() < deadline) LockSupport.parkNanos(100_000L);
         if (client.failure() != null) throw client.failure();
         if (!client.isLive()) throw new IllegalStateException("reader did not join the live stream");
     }
 
-    private static void awaitStopped(final ClusterStorageBinaryDataClient client) {
+    private static void awaitStopped(final StorageBinaryDataClient client) {
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (client.isRunning() && System.nanoTime() < deadline) LockSupport.parkNanos(100_000L);
         if (client.isRunning()) throw new IllegalStateException("reader did not stop at live tail");

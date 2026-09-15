@@ -12,6 +12,11 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 /// `true` only after the receiver has taken responsibility for releasing
 /// every direct buffer in the supplied binary.
 public interface StorageBinaryDataReceiver {
+        /// Returns a terminal receiver failure, or `null` while healthy.
+    default RuntimeException failure() {
+        return null;
+    }
+
         /// Reports whether [#receiveDataOwned(Binary)] takes ownership before
     /// invoking the implementation.
     ///

@@ -45,7 +45,7 @@ class AeronReaderCrashMatrixIT {
         Files.deleteIfExists(control.resolve("milestone.reached"));
         Files.deleteIfExists(control.resolve("release"));
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        return new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+        return new ProcessBuilder(java, "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
                 "-Ddg.reader.base=%s".formatted(base),
                 "-Ddg.reader.mode=%s".formatted(mode),

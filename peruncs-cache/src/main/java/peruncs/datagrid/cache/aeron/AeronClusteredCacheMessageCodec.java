@@ -4,6 +4,7 @@ import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 
 import java.nio.ByteOrder;
+import java.util.zip.CRC32C;
 
 /// Fixed framing for one clustered-cache invalidation frame.
 ///
@@ -15,11 +16,13 @@ import java.nio.ByteOrder;
 /// loop. The sequence lets a receiver detect a missed burst of invalidations.
 ///
 /// The payload length is validated before any allocation, so a hostile or
-/// corrupt length cannot trigger an unbounded allocation. The channel is
-/// assumed to be on an isolated network; the frame carries no authentication.
+/// corrupt length cannot trigger an unbounded allocation. CRC32C detects
+/// accidental corruption but does not authenticate an untrusted peer.
 final class AeronClusteredCacheMessageCodec {
         /// Wire version; bump when the framing changes.
-    static final int VERSION = 1;
+    static final int VERSION = 2;
+        /// Checksum bytes appended after the serialized payload.
+    static final int CRC_LENGTH = Integer.BYTES;
         /// Header bytes: magic, version, sender id, sequence, payload length.
     static final int HEADER_LENGTH = Integer.BYTES * 3 + Long.BYTES * 3;
         /// Magic "DGCC" identifying a DataGrid clustered-cache frame.
@@ -63,10 +66,12 @@ final class AeronClusteredCacheMessageCodec {
             buffer.putLong(SEQUENCE_OFFSET, sequence, ByteOrder.BIG_ENDIAN);
             buffer.putInt(PAYLOAD_LENGTH_OFFSET, payload.length, ByteOrder.BIG_ENDIAN);
             buffer.putBytes(PAYLOAD_OFFSET, payload, 0, payload.length);
+            buffer.putInt(PAYLOAD_OFFSET + payload.length, checksum(buffer, 0, HEADER_LENGTH + payload.length),
+                    ByteOrder.BIG_ENDIAN);
         } catch (final IndexOutOfBoundsException failure) {
             throw new IllegalArgumentException("buffer is too small for Aeron clustered-cache frame", failure);
         }
-        return HEADER_LENGTH + payload.length;
+        return HEADER_LENGTH + payload.length + CRC_LENGTH;
     }
 
         /// Validates the frame header and reports whether it carries the expected
@@ -100,7 +105,7 @@ final class AeronClusteredCacheMessageCodec {
     /// @param offset frame offset
     /// @return sender identity
     static SenderId senderIdOf(final DirectBuffer buffer, final int offset) {
-        if (!validRange(buffer, offset, HEADER_LENGTH)) {
+        if (!validHeaderRange(buffer, offset)) {
             throw new IllegalArgumentException("Aeron clustered-cache frame header is outside the buffer");
         }
         return new SenderId(
@@ -181,9 +186,15 @@ final class AeronClusteredCacheMessageCodec {
             throw new IllegalArgumentException(
                     "Invalid Aeron clustered-cache payload length: %s".formatted(payloadLength));
         }
-        if (HEADER_LENGTH + payloadLength != length) {
+        if (HEADER_LENGTH + payloadLength + CRC_LENGTH != length) {
             throw new IllegalArgumentException(
                     "Aeron clustered-cache frame length does not match its payload");
+        }
+        final int checksumOffset = offset + HEADER_LENGTH + payloadLength;
+        final int expectedChecksum = buffer.getInt(checksumOffset, ByteOrder.BIG_ENDIAN);
+        final int actualChecksum = checksum(buffer, offset, HEADER_LENGTH + payloadLength);
+        if (expectedChecksum != actualChecksum) {
+            throw new IllegalArgumentException("Aeron clustered-cache frame CRC32C mismatch");
         }
         return new Header(sequence, payloadLength);
     }
@@ -193,8 +204,20 @@ final class AeronClusteredCacheMessageCodec {
     /// truncated fragment when a publication is interrupted; the receiver treats
     /// that input as a terminal stream failure rather than applying later frames.
     private static boolean validRange(final DirectBuffer buffer, final int offset, final int length) {
-        return buffer != null && offset >= 0 && length >= HEADER_LENGTH &&
+        return buffer != null && offset >= 0 && length >= HEADER_LENGTH + CRC_LENGTH &&
                offset <= buffer.capacity() - length;
+    }
+
+    private static boolean validHeaderRange(final DirectBuffer buffer, final int offset) {
+        return buffer != null && offset >= 0 && offset <= buffer.capacity() - HEADER_LENGTH;
+    }
+
+    private static int checksum(final DirectBuffer buffer, final int offset, final int length) {
+        final CRC32C crc = new CRC32C();
+        for (int index = 0; index < length; index++) {
+            crc.update(buffer.getByte(offset + index));
+        }
+        return (int) crc.getValue();
     }
 
     private static boolean validSequence(final long sequence) {

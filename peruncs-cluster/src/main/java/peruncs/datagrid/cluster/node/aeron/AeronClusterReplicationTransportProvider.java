@@ -8,7 +8,7 @@ import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.TimeoutException;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.*;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
@@ -19,11 +19,8 @@ import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
 import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeronArchive;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
-import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryTargetDistributing;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryReplicationTarget;
+import peruncs.datagrid.cluster.storage.types.*;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -34,6 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
 import static java.lang.System.Logger.Level.WARNING;
@@ -45,32 +43,44 @@ import static java.lang.System.Logger.Level.WARNING;
 /// [ClusterReplicationTransport#close()]; individual readers and
 /// distributors do not close the runtime.
 public final class AeronClusterReplicationTransportProvider {
-    /* Test-only, thread-confined seam used by the forked crash harness. */
+    /* Test-only, dynamically scoped seam used by the forked crash harness. */
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusterReplicationTransportProvider.class.getName());
-    private static final ThreadLocal<BiConsumer<String, Long>> CRASH_HOOK = new ThreadLocal<>();
-    private static final ThreadLocal<Long> CHECKPOINT_SEQUENCE = new ThreadLocal<>();
+    private static final ScopedValue<BiConsumer<String, Long>> CRASH_HOOK = ScopedValue.newInstance();
+    private static final ScopedValue<Long> CHECKPOINT_SEQUENCE = ScopedValue.newInstance();
+    private static final ScopedValue<Boolean> DELIVERY_CALLBACK = ScopedValue.newInstance();
         /// Creates a provider that reads Aeron settings when a transport is created.
     public AeronClusterReplicationTransportProvider() {
     }
 
-    static void setCrashHook(final BiConsumer<String, Long> hook) {
-        if (hook == null) CRASH_HOOK.remove();
-        else CRASH_HOOK.set(hook);
+    static void runWithCrashHook(final BiConsumer<String, Long> hook, final Runnable action) {
+        if (hook == null) throw new NullPointerException("hook");
+        if (action == null) throw new NullPointerException("action");
+        ScopedValue.where(CRASH_HOOK, hook).run(action);
     }
 
-    static void clearCrashHook() {
-        CRASH_HOOK.remove();
+    static <T, X extends Throwable> T callWithCrashHook(
+            final BiConsumer<String, Long> hook,
+            final ScopedValue.CallableOp<? extends T, X> operation
+    ) throws X {
+        if (hook == null) throw new NullPointerException("hook");
+        if (operation == null) throw new NullPointerException("operation");
+        return ScopedValue.where(CRASH_HOOK, hook).call(operation);
+    }
+
+    static Runnable inheritCurrentCrashHook(final Runnable action) {
+        if (action == null) throw new NullPointerException("action");
+        final BiConsumer<String, Long> hook = CRASH_HOOK.isBound() ? CRASH_HOOK.get() : null;
+        return hook == null ? action : () -> ScopedValue.where(CRASH_HOOK, hook).run(action);
     }
 
     private static void crashPoint(final String name, final long sequence) {
-        final BiConsumer<String, Long> hook = CRASH_HOOK.get();
+        final BiConsumer<String, Long> hook = CRASH_HOOK.isBound() ? CRASH_HOOK.get() : null;
         if (hook != null) hook.accept(name, sequence);
     }
 
     static long currentCheckpointSequence() {
-        final Long sequence = CHECKPOINT_SEQUENCE.get();
-        return sequence == null ? -1L : sequence;
+        return CHECKPOINT_SEQUENCE.orElse(-1L);
     }
 
     /* Package-private forked-test seam. Keeping the private Transport type hidden
@@ -85,7 +95,7 @@ public final class AeronClusterReplicationTransportProvider {
     ///
     /// @param properties node configuration
     /// @return Aeron replication transport
-    public ClusterReplicationTransport create(final NodelibraryPropertiesProvider properties) {
+    public ClusterReplicationTransport create(final NodeLibraryPropertiesProvider properties) {
         final Transport transport = new Transport(AeronSettings.fromEnvironment(properties));
         /* Probe metadata durability before any synchronized runtime startup path. */
         transport.verifyMetadataStorage();
@@ -108,7 +118,6 @@ public final class AeronClusterReplicationTransportProvider {
          * until the writer boundary exists instead of dropping that acknowledgement. */
         private final java.util.concurrent.ConcurrentHashMap<UUID, AeronAuthenticatedWatermark>
                 deferredWatermarks = new java.util.concurrent.ConcurrentHashMap<>();
-        private final ThreadLocal<Boolean> deliveryCallback = new ThreadLocal<>();
                 /// One transport-owned copy; avoids cloning the configured HMAC key for every cursor.
         private byte[] retentionSecret;
         private volatile AeronRuntime runtime;
@@ -120,7 +129,7 @@ public final class AeronClusterReplicationTransportProvider {
         private volatile AeronWriterBoundary writerBoundary = new AeronWriterBoundary(-1, -1, -1);
         private volatile boolean writerRecoveryInProgress;
         private volatile ReplicationHealth.State writerRecoveryState;
-        private ClusterStorageBinaryDataDistributor distributor;
+        private StorageBinaryDataDistributor distributor;
         private String distributorStream;
         private ReplicationPositionProvider positionProvider;
         private ReplicationLogRetention retention;
@@ -132,7 +141,7 @@ public final class AeronClusterReplicationTransportProvider {
         private Transport(final AeronSettings settings) {
             this.settings = settings;
             this.archiveCapacity = new AeronArchiveCapacity(settings);
-            this.retentionSecret = settings.retentionSecretUnsafe();
+            this.retentionSecret = settings.retentionSecret();
             this.writerRecordingId.set(settings.recordingId());
         }
 
@@ -228,7 +237,7 @@ public final class AeronClusterReplicationTransportProvider {
         /// @param asynchronous must be `false`
         /// @return binary distributor
         @Override
-        public synchronized ClusterStorageBinaryDataDistributor distributor(
+        public synchronized StorageBinaryDataDistributor distributor(
                 final String streamName,
                 final boolean asynchronous
         ) {
@@ -259,25 +268,27 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         @Override
-        public synchronized UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
+        public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
                 final String streamName, final StorageBinaryDataDistributor distributor) {
-            this.ensureOpen();
-            this.claimStream(streamName);
-            if (!"writer".equals(this.settings.role())) {
-                return UnaryOperator.identity();
+            synchronized (this) {
+                this.ensureOpen();
+                this.claimStream(streamName);
+                if (!"writer".equals(this.settings.role())) {
+                    return UnaryOperator.identity();
+                }
             }
             final AeronReplicationWriteCoordinator coordinator = this.ensureCoordinator();
-            return delegate -> new AeronStorageBinaryTargetDistributing(
+            return delegate -> new AeronStorageBinaryReplicationTarget(
                     delegate,
                     coordinator,
                     distributor,
                     sequence ->
                     {
-                        if (distributor instanceof ClusterStorageBinaryDataDistributor cluster) {
+                        if (distributor instanceof StorageBinaryDataDistributor cluster) {
                             cluster.messageIndex(sequence);
                         }
                     },
-                    () -> !(distributor instanceof ClusterStorageBinaryDataDistributor cluster) || !cluster.ignoreDistribution()
+                    () -> !(distributor instanceof StorageBinaryDataDistributor cluster) || !cluster.ignoreDistribution()
             );
         }
 
@@ -301,8 +312,8 @@ public final class AeronClusterReplicationTransportProvider {
         /// @param commitPosition whether reader positions are committed
         /// @return binary data client
         @Override
-        public synchronized ClusterStorageBinaryDataClient client(
-                final ClusterStorageBinaryDataPacketAcceptor packetAcceptor,
+        public synchronized StorageBinaryDataClient client(
+                final StorageBinaryDataPacketAcceptor packetAcceptor,
                 final String streamName,
                 final AfterDataMessageConsumedListener cursorListener,
                 final ReplicationCursor startingCursor,
@@ -316,18 +327,12 @@ public final class AeronClusterReplicationTransportProvider {
              * through the writer's health path. Configure a separate reader/backup-reader
              * node when replay is required. */
             if ("writer".equals(this.settings.role())) {
-                return ClusterStorageBinaryDataClient.NoOp(startingCursor);
+                return StorageBinaryDataClient.NoOp(startingCursor);
             }
             if (packetAcceptor == null) throw new NullPointerException("packetAcceptor");
-            if (this.reader != null) {
-                final StorageBinaryDataClientAeronArchive previous = this.reader;
-                previous.dispose();
-                this.reader = null;
-            }
             this.ensureRuntime();
             final long recordingId = this.settings.recordingId() >= 0
                     ? this.settings.recordingId() : this.discoverReaderRecordingId();
-            this.readerRecordingId.set(recordingId);
             this.rejectUncertainReaderImport(recordingId);
             final ReplicationCursor cursor = startingCursor == null
                     ? new ReplicationCursor("aeron", null, -1, new byte[0]) : startingCursor;
@@ -350,6 +355,15 @@ public final class AeronClusterReplicationTransportProvider {
             if (aeronCursor && cursor.logicalSequence() >= 0 && cursorPosition < 0) {
                 throw new IllegalArgumentException("Aeron cursor has a sequence but no recording position");
             }
+            /* Validate the complete replacement before disturbing a healthy reader.
+             * The reader recording id is also used by its uncertainty-marker callback,
+             * so it must not change until the old polling thread has exited. */
+            if (this.reader != null) {
+                final StorageBinaryDataClientAeronArchive previous = this.reader;
+                previous.dispose();
+                this.reader = null;
+            }
+            this.readerRecordingId.set(recordingId);
             final StorageBinaryDataClientAeronArchive replacement;
             try {
                 replacement = StorageBinaryDataClientAeronArchive.New(
@@ -383,13 +397,8 @@ public final class AeronClusterReplicationTransportProvider {
                                     final byte[] position = new AeronReplicationCursor(
                                             this.settings.clusterId(), this.settings.nodeId(), this.settings.storeGeneration(),
                                             this.settings.epoch(), recordingId, snapshot.position(), snapshot.sequence()).encode();
-                                    this.enterDeliveryCallback();
-                                    try {
-                                        cursorListener.onApplied(new ReplicationCursor("aeron",
-                                                this.settings.storeGeneration(), snapshot.sequence(), position));
-                                    } finally {
-                                        this.exitDeliveryCallback();
-                                    }
+                                    this.runInDeliveryCallback(() -> cursorListener.onApplied(new ReplicationCursor(
+                                            "aeron", this.settings.storeGeneration(), snapshot.sequence(), position)));
                                 }
                                 /* Watermark delivery is independent from the optional neutral
                                  * cursor callback. A direct Aeron reader may not install a
@@ -494,35 +503,33 @@ public final class AeronClusterReplicationTransportProvider {
                 @Override
                 public void beforeStoreImport(final long sequence, final long position, final int dataLength,
                                               final int dataChunkCount, final int crc32c) {
-                    enterDeliveryCallback();
-                    try {
-                        final AeronReplicationCheckpoint checkpoint = new AeronReplicationCheckpoint(
-                                AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                                AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
-                                AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
-                                settings.clusterId(), settings.nodeId(), settings.storeGeneration(), readerRecordingId.get(),
-                                settings.epoch(), sequence, position, dataLength, dataChunkCount, crc32c);
-                        AeronReplicationCheckpointStore.write(path, checkpoint);
-                    } catch (final IOException failure) {
-                        throw reseedRequired("cannot persist uncertain reader import marker: %s".formatted(path), failure);
-                    } finally {
-                        exitDeliveryCallback();
-                    }
+                    runInDeliveryCallback(() -> {
+                        try {
+                            final AeronReplicationCheckpoint checkpoint = new AeronReplicationCheckpoint(
+                                    AeronReplicationCheckpoint.RecordType.READER_CURSOR,
+                                    AeronReplicationCheckpoint.DurabilityMode.ARCHIVE_FIRST,
+                                    AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
+                                    settings.clusterId(), settings.nodeId(), settings.storeGeneration(), readerRecordingId.get(),
+                                    settings.epoch(), sequence, position, dataLength, dataChunkCount, crc32c);
+                            AeronReplicationCheckpointStore.write(path, checkpoint);
+                        } catch (final IOException failure) {
+                            throw reseedRequired("cannot persist uncertain reader import marker: %s".formatted(path), failure);
+                        }
+                    });
                 }
 
                 @Override
                 public void afterStoreImport() {
-                    enterDeliveryCallback();
-                    try {
-                        /* The cursor has already been forced successfully. A directory force
-                         * here only makes marker removal durable; omitting it is safe because
-                         * a stale marker fails closed and requests a reseed after a crash. */
-                        AtomicFileStore.delete(path, false);
-                    } catch (final IOException failure) {
-                        throw reseedRequired("cannot clear uncertain reader import marker: %s".formatted(path), failure);
-                    } finally {
-                        exitDeliveryCallback();
-                    }
+                    runInDeliveryCallback(() -> {
+                        try {
+                            /* The cursor has already been forced successfully. A directory force
+                             * here only makes marker removal durable; omitting it is safe because
+                             * a stale marker fails closed and requests a reseed after a crash. */
+                            AtomicFileStore.delete(path, false);
+                        } catch (final IOException failure) {
+                            throw reseedRequired("cannot clear uncertain reader import marker: %s".formatted(path), failure);
+                        }
+                    });
                 }
             };
         }
@@ -725,7 +732,7 @@ public final class AeronClusterReplicationTransportProvider {
         @Override
         public synchronized ReplicationHealth health(
                 final StorageControllerAdapter storage,
-                final ClusterStorageBinaryDataClient client
+                final StorageBinaryDataClient client
         ) {
             this.ensureOpen();
             if (this.health == null || !this.health.matches(storage, client)) {
@@ -781,7 +788,19 @@ public final class AeronClusterReplicationTransportProvider {
             return null;
         }
 
-        private synchronized AeronArchiveReplicationPublisher ensureWriter() {
+        private AeronArchiveReplicationPublisher ensureWriter() {
+            final AeronArchiveReplicationPublisher writer;
+            synchronized (this) {
+                writer = this.ensureWriterLocked();
+            }
+            /* Retention callbacks acquire their own monitor. Do not invoke them
+             * while the transport monitor is held, or retention->transport and
+             * transport->retention paths can deadlock during writer recovery. */
+            this.drainDeferredWatermarks();
+            return writer;
+        }
+
+        private AeronArchiveReplicationPublisher ensureWriterLocked() {
             if (this.closing || this.closed) {
                 throw new IllegalStateException("Aeron writer cannot start while transport is closing");
             }
@@ -840,12 +859,9 @@ public final class AeronClusterReplicationTransportProvider {
                             this.writerRecordingId.get(), startPosition);
                 }
                 this.writerRecoveryState = null;
-                /* writerRecoveryInProgress remains true until the finally block below;
-                 * publish the recovered boundary before draining deferred reader
-                 * watermarks, otherwise writerReady() would reject every queued ACK and
-                 * they would remain stranded indefinitely. */
+                /* Publish the recovered boundary before the outer method drains
+                 * deferred reader watermarks. */
                 this.writerRecoveryInProgress = false;
-                this.drainDeferredWatermarks();
                 return this.writer;
             } catch (final RuntimeException failure) {
                 this.writerRecoveryState = failure instanceof ReseedRequiredException
@@ -859,30 +875,35 @@ public final class AeronClusterReplicationTransportProvider {
             }
         }
 
-        private synchronized AeronReplicationWriteCoordinator ensureCoordinator() {
-            if (this.coordinator == null) {
-                final AeronArchiveReplicationPublisher.CheckpointWriter checkpointWriter =
-                        new AeronArchiveReplicationPublisher.CheckpointWriter() {
-                            @Override
-                            public void onState(final AeronReplicationCheckpoint.State state, final long sequence,
-                                                final int dataLength, final int dataChunkCount, final int dataCrc32c, final long position) {
-                                persistWriterCheckpoint(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
-                            }
-
-                            @Override
-                            public void clearEnqueueFence() {
-                                try {
-                                    AtomicFileStore.delete(inFlightCheckpointPath());
-                                } catch (final IOException failure) {
-                                    throw new IllegalStateException("cannot clear local enqueue fence", failure);
+        private AeronReplicationWriteCoordinator ensureCoordinator() {
+            final AeronReplicationWriteCoordinator coordinator;
+            synchronized (this) {
+                if (this.coordinator == null) {
+                    final AeronArchiveReplicationPublisher.CheckpointWriter checkpointWriter =
+                            new AeronArchiveReplicationPublisher.CheckpointWriter() {
+                                @Override
+                                public void onState(final AeronReplicationCheckpoint.State state, final long sequence,
+                                                    final int dataLength, final int dataChunkCount, final int dataCrc32c, final long position) {
+                                    persistWriterCheckpoint(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
                                 }
-                            }
-                        };
-                this.coordinator = this.ensureWriter().newWriteCoordinator(
-                        this.settings.replication().durabilityMode(), checkpointWriter,
-                        this.archiveCapacity::available);
+
+                                @Override
+                                public void clearEnqueueFence() {
+                                    try {
+                                        AtomicFileStore.delete(inFlightCheckpointPath());
+                                    } catch (final IOException failure) {
+                                        throw new IllegalStateException("cannot clear local enqueue fence", failure);
+                                    }
+                                }
+                            };
+                    this.coordinator = this.ensureWriterLocked().newWriteCoordinator(
+                            this.settings.replication().durabilityMode(), checkpointWriter,
+                            this.archiveCapacity::available);
+                }
+                coordinator = this.coordinator;
             }
-            return this.coordinator;
+            this.drainDeferredWatermarks();
+            return coordinator;
         }
 
         private AeronReplicationCheckpoint loadWriterCheckpoint() {
@@ -1049,14 +1070,14 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         private void writeCheckpoint(final Path path, final AeronReplicationCheckpoint checkpoint) {
-            CHECKPOINT_SEQUENCE.set(checkpoint.transactionSequence());
-            try {
-                AeronReplicationCheckpointStore.write(path, checkpoint);
-            } catch (final IOException failure) {
-                throw new IllegalStateException("cannot persist writer checkpoint", failure);
-            } finally {
-                CHECKPOINT_SEQUENCE.remove();
-            }
+            ScopedValue.where(CHECKPOINT_SEQUENCE, checkpoint.transactionSequence()).run(() ->
+            {
+                try {
+                    AeronReplicationCheckpointStore.write(path, checkpoint);
+                } catch (final IOException failure) {
+                    throw new IllegalStateException("cannot persist writer checkpoint", failure);
+                }
+            });
         }
 
         private AeronReplicationCheckpoint newWriterCheckpoint(
@@ -1241,21 +1262,24 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         private void ensureNotDeliveryCallback() {
-            if (Boolean.TRUE.equals(this.deliveryCallback.get())) {
+            if (DELIVERY_CALLBACK.isBound()) {
                 throw new IllegalStateException(
                         "Aeron transport cannot be re-entered from a reader delivery callback");
             }
         }
 
-        private void enterDeliveryCallback() {
-            if (Boolean.TRUE.equals(this.deliveryCallback.get())) {
+        private void runInDeliveryCallback(final Runnable action) {
+            if (DELIVERY_CALLBACK.isBound()) {
                 throw new IllegalStateException("nested Aeron reader delivery callback");
             }
-            this.deliveryCallback.set(Boolean.TRUE);
+            ScopedValue.where(DELIVERY_CALLBACK, Boolean.TRUE).run(action);
         }
 
-        private void exitDeliveryCallback() {
-            this.deliveryCallback.remove();
+        private <T> T callInDeliveryCallback(final Supplier<T> action) {
+            if (DELIVERY_CALLBACK.isBound()) {
+                throw new IllegalStateException("nested Aeron reader delivery callback");
+            }
+            return ScopedValue.where(DELIVERY_CALLBACK, Boolean.TRUE).call(action::get);
         }
 
         /// Shuts the transport down in dependency order: reader, write
@@ -1269,7 +1293,7 @@ public final class AeronClusterReplicationTransportProvider {
         /// and thrown together. Never call this from inside a reader delivery
         /// callback.
         @Override
-        public synchronized void close() {
+        public void close() {
             this.ensureNotDeliveryCallback();
             synchronized (this) {
                 if (this.closed) return;
@@ -1321,7 +1345,7 @@ public final class AeronClusterReplicationTransportProvider {
                      * wrapper also retains the local driver forever and prevents the
                      * failed process from exiting. The checkpoint remains fail-closed, so
                      * release the local runtime in that terminal case. */
-                    if (this.writer.isClosed() ||
+                    if (this.writer.isClosed() || this.driverFailure.get() != null ||
                         (this.settings.externalArchive() && isArchiveUnavailable(writerFailure))) {
                         this.writer = null;
                     }
@@ -1374,35 +1398,22 @@ public final class AeronClusterReplicationTransportProvider {
     }
 
         /// Adapts complete Aeron data to the neutral packet acceptor.
-    private record ReceiverAdapter(Transport owner, ClusterStorageBinaryDataPacketAcceptor packetAcceptor)
+    private record ReceiverAdapter(Transport owner, StorageBinaryDataPacketAcceptor packetAcceptor)
             implements StorageBinaryDataReceiver {
         public void receiveTypeDictionary(final String value) {
-            this.owner().enterDeliveryCallback();
-            try {
-                this.packetAcceptor().acceptTypeDictionary(value);
-            } finally {
-                this.owner().exitDeliveryCallback();
-            }
+            this.owner().runInDeliveryCallback(() -> this.packetAcceptor().acceptTypeDictionary(value));
         }
 
         public void receiveData(final org.eclipse.serializer.persistence.binary.types.Binary value) {
-            this.owner().enterDeliveryCallback();
-            try {
+            this.owner().runInDeliveryCallback(() -> {
                 this.packetAcceptor().acceptData(value);
                 this.packetAcceptor().awaitApplied();
-            } finally {
-                this.owner().exitDeliveryCallback();
-            }
+            });
         }
 
         @Override
         public boolean receiveDataOwned(final org.eclipse.serializer.persistence.binary.types.Binary value) {
-            this.owner().enterDeliveryCallback();
-            try {
-                return this.packetAcceptor().acceptDataOwned(value);
-            } finally {
-                this.owner().exitDeliveryCallback();
-            }
+            return this.owner().callInDeliveryCallback(() -> this.packetAcceptor().acceptDataOwned(value));
         }
 
         @Override
@@ -1412,12 +1423,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         @Override
         public void awaitApplied() {
-            this.owner().enterDeliveryCallback();
-            try {
-                this.packetAcceptor().awaitApplied();
-            } finally {
-                this.owner().exitDeliveryCallback();
-            }
+            this.owner().runInDeliveryCallback(this.packetAcceptor()::awaitApplied);
         }
     }
 
@@ -1428,7 +1434,7 @@ public final class AeronClusterReplicationTransportProvider {
             UUID clusterId,
             UUID nodeId,
             UUID storeGeneration,
-            long epoch) implements ClusterStorageBinaryDataClient {
+            long epoch) implements StorageBinaryDataClient {
         public void start() {
             this.delegate().start();
         }

@@ -1,9 +1,9 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,7 +20,7 @@ public final class AeronProviderDriverFailureChildMain {
         Files.createDirectories(root.resolve("control"));
         final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
                 .create(properties(root));
-        final ClusterStorageBinaryDataClient client = transport.client(null, "store", null, null, false);
+        final StorageBinaryDataClient client = transport.client(null, "store", null, null, false);
         final ReplicationHealth health = transport.health(() -> true, client);
         final var positionProvider = transport.positionProvider("store");
         positionProvider.init();
@@ -35,11 +35,11 @@ public final class AeronProviderDriverFailureChildMain {
         }
     }
 
-    private static NodelibraryPropertiesProvider properties(final Path root) {
+    private static NodeLibraryPropertiesProvider properties(final Path root) {
         final UUID cluster = UUID.randomUUID();
         final UUID node = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        return new NodelibraryPropertiesProvider.Env() {
+        return new NodeLibraryPropertiesProvider.Env() {
             @Override
             public String replicationRole() {
                 return "writer";

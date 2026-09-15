@@ -27,21 +27,22 @@ public final class StorageBinaryDataImporter {
     ) {
         notNull(storage);
         notNull(sourceBuffers);
-        return importAndReset(storage, copyBuffers(sourceBuffers));
+        final ByteBuffer[] ownedBuffers = copyBuffers(sourceBuffers);
+        try {
+            return importAndReset(storage, ownedBuffers);
+        } catch (final RuntimeException | Error failure) {
+            releaseAfterFailure(ownedBuffers, failure);
+            throw failure;
+        }
     }
 
     private static ByteBuffer[] importAndReset(final StorageConnection storage, final ByteBuffer[] importedBuffers) {
-        try {
-            /* Storage.importData consumes the supplied views synchronously and does not
-             * retain them. Reset the owned buffers afterwards because their positions are
-             * needed by the deferred materializer. */
-            storage.importData(org.eclipse.serializer.util.X.Enum(importedBuffers));
-            for (final ByteBuffer imported : importedBuffers) imported.position(0);
-            return importedBuffers;
-        } catch (final RuntimeException | Error failure) {
-            release(importedBuffers);
-            throw failure;
-        }
+        /* Storage.importData consumes the supplied views synchronously and does not
+         * retain them. Reset the owned buffers afterwards because their positions are
+         * needed by the deferred materializer. */
+        storage.importData(org.eclipse.serializer.util.X.Enum(importedBuffers));
+        for (final ByteBuffer imported : importedBuffers) imported.position(0);
+        return importedBuffers;
     }
 
     private static ByteBuffer[] copyBuffers(final ByteBuffer[] sourceBuffers) {
@@ -64,16 +65,18 @@ public final class StorageBinaryDataImporter {
             }
             return ownedBuffers;
         } catch (final RuntimeException | Error failure) {
-            release(ownedBuffers);
+            releaseAfterFailure(ownedBuffers, failure);
             throw failure;
         }
     }
 
-        /// Imports already-direct buffers without allocating a second native copy.
+    /// Imports already-direct buffers without allocating a second native copy.
     ///
     /// @param storage destination Store connection
     /// @param buffers buffers offered by the transport
     /// @return `true` when all buffers were direct and ownership was imported
+    /// @throws RuntimeException if import fails; the caller retains ownership and
+    ///                          must release the buffers
     public static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers) {
         notNull(storage);
         notNull(buffers);
@@ -83,12 +86,15 @@ public final class StorageBinaryDataImporter {
                 throw new IllegalArgumentException("import buffers must be normalized to position zero");
             }
         }
+        importAndReset(storage, buffers);
+        return true;
+    }
+
+    private static void releaseAfterFailure(final ByteBuffer[] buffers, final Throwable failure) {
         try {
-            importAndReset(storage, buffers);
-            return true;
-        } catch (final RuntimeException | Error failure) {
             release(buffers);
-            throw failure;
+        } catch (final Throwable cleanupFailure) {
+            if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
         }
     }
 

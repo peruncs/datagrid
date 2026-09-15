@@ -8,7 +8,7 @@ import org.eclipse.serializer.persistence.types.*;
 import org.eclipse.serializer.persistence.types.PersistenceStorer.Creator;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.store.storage.types.*;
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
 
 import java.nio.ByteBuffer;
@@ -79,7 +79,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
     Lazy<T> root();
 
     @Override
-    ClusterStorageManager<T> start() throws NodelibraryException;
+    ClusterStorageManager<T> start() throws NodeLibraryException;
 
         /// Runs node-specific work immediately before Store shuts down.
     interface ShutdownCallback {
@@ -307,12 +307,12 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         @SuppressWarnings("unchecked")
-        public Lazy<T> root() throws NodelibraryException {
+        public Lazy<T> root() throws NodeLibraryException {
             return this.delegate.root();
         }
 
         @Override
-        public ClusterStorageManager<T> start() throws NodelibraryException {
+        public ClusterStorageManager<T> start() throws NodeLibraryException {
             this.delegate.start();
             return this;
         }
@@ -377,7 +377,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public void exportChannels(final StorageLiveFileProvider fileProvider, final boolean performGarbageCollection) {
-            this.validateState();
             this.delegate.exportChannels(fileProvider, performGarbageCollection);
         }
 
@@ -386,7 +385,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
                 final StorageEntityTypeExportFileProvider exportFileProvider,
                 final Predicate<? super StorageEntityTypeHandler> isExportType
         ) {
-            this.validateState();
             return this.delegate.exportTypes(exportFileProvider, isExportType);
         }
 
@@ -434,13 +432,11 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public boolean issueCacheCheck(final long nanoTimeBudget, final StorageEntityCacheEvaluator entityEvaluator) {
-            this.validateState();
             return this.delegate.issueCacheCheck(nanoTimeBudget, entityEvaluator);
         }
 
         @Override
         public boolean issueFileCheck(final long nanoTimeBudget) {
-            this.validateState();
             return this.delegate.issueFileCheck(nanoTimeBudget);
         }
 
@@ -449,31 +445,26 @@ public interface ClusterStorageManager<T> extends StorageManager {
                 final StorageLiveFileProvider targetFileProvider,
                 final PersistenceTypeDictionaryExporter typeDictionaryExporter
         ) {
-            this.validateState();
             this.delegate.issueFullBackup(targetFileProvider, typeDictionaryExporter);
         }
 
         @Override
         public boolean issueGarbageCollection(final long nanoTimeBudget) {
-            this.validateState();
             return this.delegate.issueGarbageCollection(nanoTimeBudget);
         }
 
         @Override
         public void issueTransactionsLogCleanup() {
-            this.validateState();
             this.delegate.issueTransactionsLogCleanup();
         }
 
         @Override
         public boolean issueStorageFlush() {
-            this.validateState();
             return this.delegate.issueStorageFlush();
         }
 
         @Override
         public StorageIntegrityCheckResult issueIntegrityCheck(final long nanoTimeBudget) {
-            this.validateState();
             return this.delegate.issueIntegrityCheck(nanoTimeBudget);
         }
 
@@ -773,7 +764,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public PersistenceTarget<Binary> target() {
-                ClusterStorageManager.Default.this.validateState();
                 return this.delegate.target();
             }
 
@@ -821,21 +811,18 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public PersistenceStorer reinitialize() {
-                ClusterStorageManager.Default.this.validateState();
                 this.delegate.reinitialize();
                 return this;
             }
 
             @Override
             public PersistenceStorer reinitialize(final long initialCapacity) {
-                ClusterStorageManager.Default.this.validateState();
                 this.delegate.reinitialize(initialCapacity);
                 return this;
             }
 
             @Override
             public PersistenceStorer ensureCapacity(final long desiredCapacity) {
-                ClusterStorageManager.Default.this.validateState();
                 this.delegate.ensureCapacity(desiredCapacity);
                 return this;
             }

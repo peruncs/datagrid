@@ -6,7 +6,7 @@ import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.driver.ThreadingMode;
 import org.agrona.SystemUtil;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 
 import java.io.IOException;
@@ -87,7 +87,7 @@ record AeronSettings(
         retentionReaders = retentionReaders == null ? Set.of() : Set.copyOf(retentionReaders);
     }
 
-    static AeronSettings fromEnvironment(final NodelibraryPropertiesProvider properties) {
+    static AeronSettings fromEnvironment(final NodeLibraryPropertiesProvider properties) {
         if (properties == null) throw new NullPointerException("properties");
         if (!properties.replicationRoleConfigured()) {
             throw new IllegalArgumentException(
@@ -303,7 +303,7 @@ record AeronSettings(
         return settings;
     }
 
-    private static Set<UUID> retentionReaders(final NodelibraryPropertiesProvider properties) {
+    private static Set<UUID> retentionReaders(final NodeLibraryPropertiesProvider properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", null);
         if (configured == null || configured.isBlank()) return Set.of();
         final HashSet<UUID> readers = new HashSet<>();
@@ -317,7 +317,7 @@ record AeronSettings(
         return Set.copyOf(readers);
     }
 
-    private static byte[] retentionSecret(final NodelibraryPropertiesProvider properties) {
+    private static byte[] retentionSecret(final NodeLibraryPropertiesProvider properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET", null);
         final String configuredFile = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE", null);
         if (configured != null && !configured.isBlank() && configuredFile != null && !configuredFile.isBlank()) {
@@ -387,7 +387,7 @@ record AeronSettings(
         }
     }
 
-    private static ThreadingMode threadingMode(final NodelibraryPropertiesProvider properties) {
+    private static ThreadingMode threadingMode(final NodeLibraryPropertiesProvider properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_THREADING_MODE",
                 properties.isProdMode() ? "DEDICATED" : "SHARED");
         return switch (configured.trim().toUpperCase(java.util.Locale.ROOT)) {
@@ -398,7 +398,7 @@ record AeronSettings(
         };
     }
 
-    private static void put(final Properties values, final NodelibraryPropertiesProvider properties,
+    private static void put(final Properties values, final NodeLibraryPropertiesProvider properties,
                             final String property, final String environment) {
         final String value = value(properties, environment, null);
         if (value != null) {
@@ -415,16 +415,16 @@ record AeronSettings(
         return left.trim().replace('-', '_').equalsIgnoreCase(right.trim().replace('-', '_'));
     }
 
-    private static String value(final NodelibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static String value(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
         /* The provider owns the precedence rule.  Falling back directly to the
          * process environment here would let an ambient variable override a
-         * deliberately isolated application/test provider. Nodelibrary's Env
+         * deliberately isolated application/test provider. NodeLibrary's Env
          * implementation already reads environment variables at its boundary. */
         final String configured = properties.replicationProperty(name);
         return configured == null || configured.isBlank() ? fallback : configured;
     }
 
-    private static String channel(final NodelibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static String channel(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
         final String channel = value(properties, name, fallback).trim();
         if (channel.isEmpty() || channel.chars().anyMatch(Character::isWhitespace) ||
             channel.equals("aeron:udp") ||
@@ -581,7 +581,7 @@ record AeronSettings(
         }
     }
 
-    private static int parseInt(final NodelibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static int parseInt(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
         try {
             return Integer.parseInt(value(properties, name, fallback).trim());
         } catch (final NumberFormatException failure) {
@@ -589,7 +589,7 @@ record AeronSettings(
         }
     }
 
-    private static long parseLong(final NodelibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static long parseLong(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
         try {
             return Long.parseLong(value(properties, name, fallback).trim());
         } catch (final NumberFormatException failure) {
@@ -612,14 +612,6 @@ record AeronSettings(
     @Override
     public byte[] retentionSecret() {
         return this.retentionSecret == null ? null : this.retentionSecret.clone();
-    }
-
-        /// Returns the transport-owned key without cloning. This accessor is package
-    /// private deliberately: only the owning transport may use the key, and it
-    /// clears the array when the transport closes. Public callers always receive a
-    /// defensive copy from [#retentionSecret()].
-    byte[] retentionSecretUnsafe() {
-        return this.retentionSecret;
     }
 
     @Override

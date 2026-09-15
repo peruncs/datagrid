@@ -21,8 +21,8 @@ import java.util.zip.CRC32C;
 /// The publisher stages frames in one direct buffer so a large Store binary is
 /// not flattened into a second heap copy.
 final class AeronReplicationPublisher implements AutoCloseable {
-    private static final Cleaner CLEANER = Cleaner.create();
-    private static final UnsafeBuffer EMPTY_BUFFER = new UnsafeBuffer();
+    private static final LazyConstant<Cleaner> CLEANER = LazyConstant.of(Cleaner::create);
+    private static final LazyConstant<UnsafeBuffer> EMPTY_BUFFER = LazyConstant.of(UnsafeBuffer::new);
     private final AeronOfferRetryer offerer;
     private final int maxMessageLength;
     private final AeronReplicationConfiguration configuration;
@@ -34,9 +34,11 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private final UnsafeBuffer envelopeBuffer;
     private final DirectBufferCleanup directBufferCleanup;
     private final Cleaner.Cleanable cleanable;
+    private final AeronReplicationEnvelope.ChecksumContext envelopeChecksum =
+            new AeronReplicationEnvelope.ChecksumContext();
     private final byte[] crcScratch = new byte[16 * 1024];
     /* Publisher methods are synchronized, so one reusable CRC instance is enough
-     * and avoids retaining a ThreadLocal value on every caller thread. */
+     * and avoids retaining checksum state on every caller thread. */
     private final CRC32C dataCrc = new CRC32C();
     private final CRC32C chunkCrc = new CRC32C();
     /* All sequence operations are protected by this publisher's monitor. Keeping
@@ -112,7 +114,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.envelopeStorage = ByteBuffer.allocateDirect(maxMessageLength);
         this.envelopeBuffer = new UnsafeBuffer(this.envelopeStorage);
         this.directBufferCleanup = new DirectBufferCleanup(this.envelopeStorage);
-        this.cleanable = CLEANER.register(this, this.directBufferCleanup);
+        this.cleanable = CLEANER.get().register(this, this.directBufferCleanup);
     }
 
     private static AeronOfferRetryer.Offerer offerer(final ExclusivePublication publication) {
@@ -382,6 +384,11 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 this.computeDataCrc(dataBuffers, bufferCount, dataLength));
     }
 
+        /// Returns the maximum combined dictionary and Store-binary size.
+    synchronized int maxTransactionBytes() {
+        return this.configuration.maxTransactionBytes();
+    }
+
         /// Publishes Store data directly from the caller's buffer sequence.
     ///
     /// The returned value is the CRC32C of the complete logical Store binary.
@@ -393,7 +400,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         crc.reset();
         if (length == 0) {
             this.offerEncoded(sequence, AeronReplicationEnvelope.Kind.STORE_BINARY,
-                    0, 0, 1, 0, 0, EMPTY_BUFFER, 0, 0);
+                    0, 0, 1, 0, 0, EMPTY_BUFFER.get(), 0, 0);
             return 0;
         }
 
@@ -574,26 +581,31 @@ final class AeronReplicationPublisher implements AutoCloseable {
                               final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
                               final int commitCrc32c, final org.agrona.DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
-        final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
-                this.epoch, sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
-                payload == null ? EMPTY_BUFFER : payload, payloadOffset, payloadChunkLength);
-        if (encodedLength > this.maxMessageLength) {
-            throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
-        }
-        return this.offerer.offer(this.envelopeBuffer, encodedLength);
+        return AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
+            final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
+                    this.epoch, sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
+                    payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength);
+            if (encodedLength > this.maxMessageLength) {
+                throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+            }
+            return this.offerer.offer(this.envelopeBuffer, encodedLength);
+        });
     }
 
     private void offerDataChunk(final long sequence, final int payloadLength, final int chunkIndex,
                                 final int chunkCount, final int chunkOffset, final int payloadChunkLength, final int payloadCrc32c) {
-        final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.envelopeBuffer, 0,
-                this.clusterId, this.epoch, sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
-                chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
-                AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
-                payloadCrc32c);
-        if (encodedLength > this.maxMessageLength) {
-            throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
-        }
-        this.offerer.offer(this.envelopeBuffer, encodedLength);
+        AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
+            final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.envelopeBuffer, 0,
+                    this.clusterId, this.epoch, sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
+                    chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
+                    AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
+                    payloadCrc32c);
+            if (encodedLength > this.maxMessageLength) {
+                throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+            }
+            this.offerer.offer(this.envelopeBuffer, encodedLength);
+            return null;
+        });
     }
 
         /// Replays an abort callback after a publication failure, retaining callback failures.
@@ -604,7 +616,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
         try {
             transaction.invokeAbortAction(abortPosition);
-        } catch (final RuntimeException callbackFailure) {
+        } catch (final RuntimeException | Error callbackFailure) {
             failure.addSuppressed(callbackFailure);
         }
     }
@@ -612,7 +624,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private long offerMarker(final long sequence, final AeronReplicationEnvelope.Kind kind,
                              final int payloadLength, final int chunkCount, final int commitCrc32c) {
         return this.offerEncoded(sequence, kind, payloadLength, 0, Math.max(1, chunkCount), 0,
-                commitCrc32c, EMPTY_BUFFER, 0, 0);
+                commitCrc32c, EMPTY_BUFFER.get(), 0, 0);
     }
 
         /// Advances the next sequence when an external cursor or promotion supplies a newer index.

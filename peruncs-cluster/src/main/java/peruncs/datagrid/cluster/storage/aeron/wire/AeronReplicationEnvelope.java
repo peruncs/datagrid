@@ -2,12 +2,14 @@ package peruncs.datagrid.cluster.storage.aeron.wire;
 
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
-import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.ReplicationLimits;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage;
 
 import java.nio.ByteOrder;
+import java.util.Arrays;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.zip.CRC32C;
 
 /// The small envelope around one piece of a replicated Store transaction.
@@ -25,48 +27,44 @@ public final class AeronReplicationEnvelope {
     public static final short VERSION = 2;
         /// Header bytes, including the final header CRC32C at offset 64.
     public static final int HEADER_LENGTH = 68;
-    /* The reusable checksum state is safe only for the polling thread that owns
-     * the current decode. Do not re-enter checksum computation from a callback. */
-    private static final ThreadLocal<CRC32C> DIRECT_CRC = ThreadLocal.withInitial(CRC32C::new);
     private static final int CRC_SCRATCH_BYTES = 16 * 1024;
-    private static final ThreadLocal<byte[]> CRC_SCRATCH =
-            ThreadLocal.withInitial(() -> new byte[CRC_SCRATCH_BYTES]);
+    /* A checksum context is explicitly owned by a decode or encode operation and
+     * is carried through nested codec calls with ScopedValue. It is never retained
+     * by a platform or virtual thread. */
+    private static final ScopedValue<ChecksumContext> CHECKSUM_CONTEXT = ScopedValue.newInstance();
     private static final int HEADER_CRC_OFFSET = 64;
 
     private AeronReplicationEnvelope() {
     }
 
+        /// Reusable checksum state owned by one codec operation.
+    public static final class ChecksumContext {
+        private final CRC32C crc = new CRC32C();
+        private final byte[] scratch = new byte[CRC_SCRATCH_BYTES];
+
+        private int compute(final DirectBuffer payload, final int offset, final int length) {
+            final CRC32C checksum = this.crc;
+            checksum.reset();
+            for (int copied = 0; copied < length; ) {
+                final int amount = Math.min(this.scratch.length, length - copied);
+                payload.getBytes(offset + copied, this.scratch, 0, amount);
+                checksum.update(this.scratch, 0, amount);
+                copied += amount;
+            }
+            return (int) checksum.getValue();
+        }
+    }
+
+        /// Runs an encode or decode operation with caller-owned checksum state.
+    public static <T> T withChecksumContext(final ChecksumContext context, final Supplier<T> operation) {
+        if (context == null) throw new NullPointerException("context");
+        if (operation == null) throw new NullPointerException("operation");
+        return ScopedValue.where(CHECKSUM_CONTEXT, context).call(operation::get);
+    }
+
         /// Returns whether a wire kind carries transaction data rather than a terminal marker.
     public static boolean isPayloadKindCode(final int code) {
         return code == Kind.TYPE_DICTIONARY.code || code == Kind.STORE_BINARY.code;
-    }
-
-        /// Encodes an envelope into a new byte array.
-    ///
-    /// This allocation-friendly form is intended for tests and small callers.
-    /// The writer uses the direct-buffer overload to keep Store data off
-    /// the heap.
-    public static byte[] encode(
-            final UUID clusterId,
-            final long epoch,
-            final long sequence,
-            final Kind kind,
-            final int payloadLength,
-            final int chunkIndex,
-            final int chunkCount,
-            final int chunkOffset,
-            final int commitCrc32c,
-            final byte[] payload
-    ) {
-        if (payload == null) throw new NullPointerException("payload");
-        if (payload.length > ReplicationLimits.MAX_MESSAGE_BYTES) {
-            throw new IllegalArgumentException("envelope payload exceeds replication message limit");
-        }
-        final byte[] encoded = new byte[Math.addExact(HEADER_LENGTH, payload.length)];
-        final UnsafeBuffer target = new UnsafeBuffer(encoded);
-        encode(target, 0, clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
-                chunkOffset, commitCrc32c, new UnsafeBuffer(payload), 0, payload.length);
-        return encoded;
     }
 
         /// Encodes directly into a caller-owned Agrona buffer. The writer uses this
@@ -129,6 +127,7 @@ public final class AeronReplicationEnvelope {
     /// @param chunkLength   bytes in this frame
     /// @param payloadCrc32c checksum of the staged payload bytes
     /// @return encoded frame length
+    /// @throws IllegalStateException if no caller-owned checksum context is bound
     public static int encodeWithPayloadCrc(
             final MutableDirectBuffer target,
             final int targetOffset,
@@ -145,6 +144,30 @@ public final class AeronReplicationEnvelope {
             final int payloadOffset,
             final int chunkLength,
             final int payloadCrc32c
+    ) {
+        final ChecksumContext context = checksumContext();
+        return encodeWithPayloadCrcInternal(target, targetOffset, clusterId, epoch, sequence, kind, payloadLength,
+                chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength,
+                payloadCrc32c, context);
+    }
+
+    private static int encodeWithPayloadCrcInternal(
+            final MutableDirectBuffer target,
+            final int targetOffset,
+            final UUID clusterId,
+            final long epoch,
+            final long sequence,
+            final Kind kind,
+            final int payloadLength,
+            final int chunkIndex,
+            final int chunkCount,
+            final int chunkOffset,
+            final int commitCrc32c,
+            final DirectBuffer payload,
+            final int payloadOffset,
+            final int chunkLength,
+            final int payloadCrc32c,
+            final ChecksumContext context
     ) {
         validate(clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
                 chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength);
@@ -167,7 +190,7 @@ public final class AeronReplicationEnvelope {
         target.putLong(targetOffset + 48, clusterId.getMostSignificantBits(), ByteOrder.BIG_ENDIAN);
         target.putLong(targetOffset + 56, clusterId.getLeastSignificantBits(), ByteOrder.BIG_ENDIAN);
         target.putInt(targetOffset + HEADER_CRC_OFFSET,
-                crc32c(target, targetOffset, HEADER_CRC_OFFSET), ByteOrder.BIG_ENDIAN);
+                context.compute(target, targetOffset, HEADER_CRC_OFFSET), ByteOrder.BIG_ENDIAN);
         // The publisher can stage a multi-buffer chunk directly in the destination
         // payload area. Avoid copying that already-staged range a second time.
         if (payload != target || payloadOffset != targetOffset + HEADER_LENGTH) {
@@ -193,8 +216,8 @@ public final class AeronReplicationEnvelope {
         if (clusterId == null || kind == null || payload == null)
             throw new NullPointerException("clusterId, kind, and payload are required");
         if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
-            payloadLength > ReplicationLimits.MAX_MESSAGE_BYTES || chunkIndex < 0 ||
-            chunkCount <= 0 || chunkCount > ReplicationLimits.MAX_PACKET_COUNT ||
+            payloadLength > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
+            chunkCount <= 0 || chunkCount > StorageBinaryDataMessage.MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
             payloadOffset > payload.capacity() - chunkLength) {
             throw new IllegalArgumentException("invalid envelope field");
@@ -256,7 +279,20 @@ public final class AeronReplicationEnvelope {
             final int length,
             final EnvelopeView view
     ) {
+        return withChecksumContext(view.checksumContext, () -> decodeViewInternal(source, offset, length, view));
+    }
+
+    private static EnvelopeView decodeViewInternal(
+            final DirectBuffer source,
+            final int offset,
+            final int length,
+            final EnvelopeView view
+    ) {
         if (view == null) throw new NullPointerException("view");
+        /* Invalidate a reused view before reading any new bytes. If parsing
+         * fails halfway through, callers cannot accidentally observe the
+         * previous frame through a stale view. */
+        view.clear();
         if (source == null || offset < 0 || length < HEADER_LENGTH || length > source.capacity() ||
             offset > source.capacity() - length) {
             throw new ReplicationWireException("truncated envelope");
@@ -281,8 +317,8 @@ public final class AeronReplicationEnvelope {
         final int chunkCount = source.getInt(offset + 32, ByteOrder.BIG_ENDIAN);
         final int chunkOffset = source.getInt(offset + 36, ByteOrder.BIG_ENDIAN);
         if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
-            payloadLength > ReplicationLimits.MAX_MESSAGE_BYTES || chunkIndex < 0 ||
-            chunkCount <= 0 || chunkCount > ReplicationLimits.MAX_PACKET_COUNT ||
+            payloadLength > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
+            chunkCount <= 0 || chunkCount > StorageBinaryDataMessage.MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 ||
             (kind != Kind.COMMIT && kind != Kind.ABORT &&
              (length - HEADER_LENGTH > payloadLength ||
@@ -325,24 +361,21 @@ public final class AeronReplicationEnvelope {
     }
 
         /// Computes the same checksum directly from an Agrona buffer range.
+    /// A caller-owned context must be bound with [#withChecksumContext(ChecksumContext,
+    /// Supplier)]. This requirement keeps the direct-buffer path allocation-free.
     public static int crc32c(final DirectBuffer payload, final int offset, final int length) {
         if (payload == null || offset < 0 || length < 0 || offset > payload.capacity() - length) {
             throw new IllegalArgumentException("invalid CRC32C range");
         }
-        final CRC32C crc = DIRECT_CRC.get();
-        crc.reset();
-        /* Always use the DirectBuffer abstraction. In addition to working for
-         * custom implementations, this handles heap, direct, and sliced buffers
-         * without depending on their backing-buffer coordinate system. The bounded
-         * thread-local scratch keeps this allocation-free after warm-up. */
-        final byte[] scratch = CRC_SCRATCH.get();
-        for (int copied = 0; copied < length; ) {
-            final int amount = Math.min(scratch.length, length - copied);
-            payload.getBytes(offset + copied, scratch, 0, amount);
-            crc.update(scratch, 0, amount);
-            copied += amount;
+        return checksumContext().compute(payload, offset, length);
+    }
+
+    private static ChecksumContext checksumContext() {
+        if (!CHECKSUM_CONTEXT.isBound()) {
+            throw new IllegalStateException(
+                    "A direct-buffer checksum requires withChecksumContext and caller-owned state");
         }
-        return (int) crc.getValue();
+        return CHECKSUM_CONTEXT.get();
     }
 
         /// Identifies the data or terminal marker carried by an envelope.
@@ -378,6 +411,7 @@ public final class AeronReplicationEnvelope {
 
         /// Reusable view over one decoded envelope; it does not own the payload.
     public static final class EnvelopeView {
+        private final ChecksumContext checksumContext = new ChecksumContext();
         private DirectBuffer source;
         private int payloadOffset;
         private int payloadLengthOnWire;
@@ -393,6 +427,22 @@ public final class AeronReplicationEnvelope {
         private int commitCrc32c;
 
         public EnvelopeView() {
+        }
+
+        private void clear() {
+            this.source = null;
+            this.payloadOffset = 0;
+            this.payloadLengthOnWire = 0;
+            this.clusterMostSignificantBits = 0L;
+            this.clusterLeastSignificantBits = 0L;
+            this.epoch = 0L;
+            this.sequence = 0L;
+            this.kind = null;
+            this.payloadLength = 0;
+            this.chunkIndex = 0;
+            this.chunkCount = 0;
+            this.chunkOffset = 0;
+            this.commitCrc32c = 0;
         }
 
         void set(final DirectBuffer source, final int payloadOffset, final int payloadLengthOnWire,
@@ -499,8 +549,9 @@ public final class AeronReplicationEnvelope {
             if (clusterId == null || kind == null || payload == null) {
                 throw new NullPointerException("envelope identity, kind, and payload are required");
             }
-            if (payloadLength < 0 || payloadLength > ReplicationLimits.MAX_MESSAGE_BYTES ||
-                chunkIndex < 0 || chunkCount <= 0 || chunkCount > ReplicationLimits.MAX_PACKET_COUNT ||
+            payload = payload.clone();
+            if (payloadLength < 0 || payloadLength > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH ||
+                chunkIndex < 0 || chunkCount <= 0 || chunkCount > StorageBinaryDataMessage.MAX_PACKET_COUNT ||
                 chunkIndex >= chunkCount || chunkOffset < 0) {
                 throw new ReplicationWireException("invalid owned envelope bounds");
             }
@@ -522,6 +573,30 @@ public final class AeronReplicationEnvelope {
         @Override
         public byte[] payload() {
             return this.payload.clone();
+        }
+
+        @Override
+        public boolean equals(final Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Envelope envelope)) return false;
+            return this.epoch == envelope.epoch
+                    && this.sequence == envelope.sequence
+                    && this.payloadLength == envelope.payloadLength
+                    && this.chunkIndex == envelope.chunkIndex
+                    && this.chunkCount == envelope.chunkCount
+                    && this.chunkOffset == envelope.chunkOffset
+                    && this.commitCrc32c == envelope.commitCrc32c
+                    && Objects.equals(this.clusterId, envelope.clusterId)
+                    && this.kind == envelope.kind
+                    && Arrays.equals(this.payload, envelope.payload);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hash(this.clusterId, this.epoch, this.sequence, this.kind,
+                    this.payloadLength, this.chunkIndex, this.chunkCount, this.chunkOffset,
+                    this.commitCrc32c);
+            return 31 * result + Arrays.hashCode(this.payload);
         }
     }
 

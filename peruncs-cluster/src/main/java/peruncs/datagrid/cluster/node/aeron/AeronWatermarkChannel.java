@@ -54,8 +54,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         this.subscription = subscription;
         this.receiver = receiver;
         this.closeTimeoutNanos = closeTimeoutNanos;
-        this.worker = new Thread(this::run, "eclipse-datagrid-aeron-watermarks");
-        this.worker.setDaemon(true);
+        this.worker = Thread.ofVirtual().name("eclipse-datagrid-aeron-watermarks").unstarted(this::run);
         this.worker.start();
     }
 

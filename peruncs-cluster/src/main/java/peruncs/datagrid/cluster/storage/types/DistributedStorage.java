@@ -32,7 +32,7 @@ public final class DistributedStorage {
         final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
         connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(
                 distributor,
-                delegate -> StorageBinaryTargetDistributing.New(delegate, distributor)
+                delegate -> StorageBinaryReplicationTarget.New(delegate, distributor)
         ));
         return foundation;
     }

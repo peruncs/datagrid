@@ -1,15 +1,12 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.backup.BackupTarget;
-
-
 /// Configuration contract shared by cluster lifecycle code and the Aeron provider.
 /// [#replicationTransport()] selects an explicit `aeron` or `none` selection.
-public interface NodelibraryPropertiesProvider {
+public interface NodeLibraryPropertiesProvider {
         /// Creates an environment-backed provider.
     ///
     /// @return properties provider
-    static NodelibraryPropertiesProvider Env() {
+    static NodeLibraryPropertiesProvider Env() {
         return new Env();
     }
 
@@ -61,16 +58,6 @@ public interface NodelibraryPropertiesProvider {
     ///
     /// @return retained backup count
     Integer keptBackupsCount();
-
-        /// Returns the backup target.
-    ///
-    /// @return backup target
-    BackupTarget backupTarget();
-
-        /// Returns the backup proxy URL.
-    ///
-    /// @return proxy URL
-    String backupProxyServiceUrl();
 
         /// Returns the storage check interval in minutes.
     ///
@@ -130,7 +117,7 @@ public interface NodelibraryPropertiesProvider {
     Long dataMergerCachedDataLimit();
 
         /// Reads node properties from environment variables.
-    class Env implements NodelibraryPropertiesProvider {
+    class Env implements NodeLibraryPropertiesProvider {
                 /// Creates an environment-backed provider.
         public Env() {
         }
@@ -159,7 +146,7 @@ public interface NodelibraryPropertiesProvider {
         @Override
         public String replicationRole() {
             final String role = this.envString("ECLIPSE_DATAGRID_REPLICATION_ROLE");
-            return role == null || role.isBlank() ? NodelibraryPropertiesProvider.super.replicationRole() : role;
+            return role == null || role.isBlank() ? NodeLibraryPropertiesProvider.super.replicationRole() : role;
         }
 
         @Override
@@ -169,18 +156,8 @@ public interface NodelibraryPropertiesProvider {
         }
 
         @Override
-        public BackupTarget backupTarget() {
-            return BackupTarget.parse(this.envString(EnvKeys.BACKUP_TARGET));
-        }
-
-        @Override
         public Integer keptBackupsCount() {
             return this.envInteger(EnvKeys.KEPT_BACKUPS_COUNT);
-        }
-
-        @Override
-        public String backupProxyServiceUrl() {
-            return this.envString(EnvKeys.BACKUP_PROXY_SERVICE_URL);
         }
 
         @Override
@@ -286,12 +263,8 @@ public interface NodelibraryPropertiesProvider {
             public static final String BACKUP_PATH = "ECLIPSE_DATAGRID_BACKUP_PATH";
                         /// Backup-node environment variable.
             public static final String IS_BACKUP_NODE = "IS_BACKUP_NODE";
-                        /// Backup-target environment variable.
-            public static final String BACKUP_TARGET = "BACKUP_TARGET";
                         /// Retained-backups environment variable.
             public static final String KEPT_BACKUPS_COUNT = "KEPT_BACKUPS_COUNT";
-                        /// Backup proxy URL environment variable.
-            public static final String BACKUP_PROXY_SERVICE_URL = "BACKUP_PROXY_SERVICE_URL";
                         /// Storage-check interval environment variable.
             public static final String STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES =
                     "STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES";

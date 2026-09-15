@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.store;
 
 import org.eclipse.store.storage.types.StorageController;
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 
 import static org.eclipse.serializer.util.X.notNull;
@@ -23,8 +23,8 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         /// Reports whether Store and replication are ready.
     ///
     /// @return `true` when ready
-    /// @throws NodelibraryException if readiness cannot be checked
-    boolean isReady() throws NodelibraryException;
+    /// @throws NodeLibraryException if readiness cannot be checked
+    boolean isReady() throws NodeLibraryException;
 
         /// Reports whether Store and replication are healthy.
     ///
@@ -71,14 +71,14 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
 
         /// Initializes the health checks.
     ///
-    /// @throws NodelibraryException if initialization fails
-    void init() throws NodelibraryException;
+    /// @throws NodeLibraryException if initialization fails
+    void init() throws NodeLibraryException;
 
         /// Combines Store readiness with provider health and lifecycle state.
     final class Default implements StorageNodeHealthCheck {
         private final StorageController storageController;
         private final ReplicationHealth replicationHealth;
-        private boolean active = true;
+        private volatile boolean active = true;
 
         private Default(
                 final StorageController storageController,
@@ -89,7 +89,7 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         }
 
         @Override
-        public void init() throws NodelibraryException {
+        public void init() throws NodeLibraryException {
             this.replicationHealth.init();
         }
 
@@ -124,7 +124,7 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         }
 
         @Override
-        public boolean isReady() throws NodelibraryException {
+        public boolean isReady() throws NodeLibraryException {
             return this.active && this.storageReady() && this.replicationHealth.isReady();
         }
 

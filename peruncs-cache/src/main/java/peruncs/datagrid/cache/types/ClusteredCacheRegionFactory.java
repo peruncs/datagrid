@@ -11,10 +11,11 @@ import org.hibernate.cache.internal.DefaultCacheKeysFactory;
 import org.hibernate.cache.spi.CacheKeysFactory;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.hibernate.engine.spi.SharedSessionContractImplementor;
-import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageComProvider;
+import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageCommunicationProvider;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageReceiver;
 
-import java.lang.reflect.InvocationTargetException;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 
 /// This region factory adds clustered invalidation to the Store cache factory.
@@ -27,11 +28,11 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
             System.getLogger(ClusteredCacheRegionFactory.class.getName());
 
         /// Listener configuration created during session-factory preparation.
-    private ClusteredCacheEntryListenerConfiguration cacheEntryListenerConfiguration;
+    private volatile ClusteredCacheEntryListenerConfiguration cacheEntryListenerConfiguration;
         /// Receiver created during session-factory preparation.
-    private AeronClusteredCacheMessageReceiver cacheMessageReceiver;
+    private volatile AeronClusteredCacheMessageReceiver cacheMessageReceiver;
         /// Local cache manager used by the message acceptor.
-    private CacheManager cacheManager;
+    private volatile CacheManager cacheManager;
 
         /// Creates a factory with Hibernate's default cache key strategy.
     public ClusteredCacheRegionFactory() {
@@ -46,7 +47,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     }
 
     private static ClusteredCacheEntryListenerConfiguration createEntryListenerConfiguration(
-            final AeronClusteredCacheMessageComProvider comProvider,
+            final AeronClusteredCacheMessageCommunicationProvider comProvider,
             @SuppressWarnings("rawtypes") final Map properties,
             final Serializer<byte[]> serializer
     ) {
@@ -69,7 +70,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
             final var serializer = Serializer.Bytes(SerializerFoundation.New()
                     .registerEntityTypes(typesProvider.provideTypes()));
 
-            final var comProvider = new AeronClusteredCacheMessageComProvider();
+            final var comProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final var messageAcceptor = new ClusteredCacheMessageAcceptor(this.cacheManager);
 
             this.cacheMessageReceiver = comProvider.provideMessageReceiver(properties, serializer, messageAcceptor);
@@ -77,14 +78,12 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
                     createEntryListenerConfiguration(comProvider, properties, serializer);
             this.cacheMessageReceiver.start();
         } catch (final RuntimeException | Error failure) {
-            boolean clusteredResourcesReleased = false;
             try {
                 this.disposeClusteredResources();
-                clusteredResourcesReleased = true;
             } catch (final Throwable cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
             }
-            if (clusteredResourcesReleased) {
+            if (this.cacheEntryListenerConfiguration == null && this.cacheMessageReceiver == null) {
                 try {
                     super.releaseFromUse();
                 } catch (final Throwable releaseFailure) {
@@ -143,14 +142,15 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
 
         /// Resolves the serializer type provider from a Hibernate setting.
     ///
-    /// The provider class must expose a public no-argument constructor;
-    /// private or package-private constructors are rejected.
+    /// The provider must be supplied as an already-created object. Reflective
+    /// class loading is deliberately unsupported because this configuration is
+    /// reached from Hibernate metadata and can otherwise instantiate arbitrary
+    /// application classes.
     ///
-    /// @param settings   session factory settings used for class loading
+    /// @param settings   session factory settings (reserved for superclass API compatibility)
     /// @param properties Hibernate cache properties
     /// @return resolved serializer type provider
-    /// @throws CacheException when the provider class cannot be instantiated
-    @SuppressWarnings("unchecked")
+    /// @throws CacheException when the provider is not an instance or registers unsupported types
     protected SerializationTypesProvider resolveSerializationTypesProvider(
             final SessionFactoryOptions settings,
             @SuppressWarnings("rawtypes") // superclass uses raw type
@@ -160,26 +160,17 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         if (setting == null) {
             return new SerializationTypesProvider.Default();
         }
-        if (setting instanceof final SerializationTypesProvider p) {
-            return p;
+        if (!(setting instanceof final SerializationTypesProvider provider)) {
+            throw new CacheException(
+                    "Serialization types provider must be supplied as an instance of %s".formatted(
+                            SerializationTypesProvider.class.getName()));
         }
-
-        try {
-            final Class<? extends SerializationTypesProvider> typesProviderClass;
-            if (setting instanceof Class<?> candidate) {
-                if (!SerializationTypesProvider.class.isAssignableFrom(candidate)) {
-                    throw new CacheException(
-                            "Configured serialization types provider does not implement %s: %s".formatted(SerializationTypesProvider.class.getName(), candidate.getName()));
-                }
-                typesProviderClass = (Class<? extends SerializationTypesProvider>) candidate;
-            } else {
-                typesProviderClass = this.loadClass(setting.toString(), settings);
-            }
-            return typesProviderClass.getConstructor().newInstance();
-        } catch (final ClassNotFoundException | InstantiationException | IllegalAccessException | NoSuchMethodException |
-                       InvocationTargetException e) {
-            throw new CacheException("Could not instantiate SerializationTypesProvider: %s".formatted(setting), e);
+        final Collection<Class<?>> types = provider.provideTypes();
+        if (types == null || types.size() != 1 || !types.equals(List.of(TimestampsRegionUpdateMessage.class))) {
+            throw new CacheException(
+                    "Clustered cache serialization may register only TimestampsRegionUpdateMessage");
         }
+        return provider;
     }
 
     @Override

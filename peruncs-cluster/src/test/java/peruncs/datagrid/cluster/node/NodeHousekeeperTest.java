@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.NodeHousekeeper;
 import peruncs.datagrid.cluster.node.backup.StorageBackupTaskExecutor;
 import peruncs.datagrid.cluster.node.store.StorageLimitGate;
 
@@ -54,14 +53,15 @@ class NodeHousekeeperTest {
         assertEquals(1, backups.backupRequests.get());
     }
 
-        /// A busy rejection without a running backup surfaces the failure.
+        /// A failed start is treated as a harmless concurrent-start rejection.
     @Test
-    void backupWorkRethrowsWhenNothingIsRunning() {
+    void backupWorkSkipsWhenStartIsRejected() {
         final BackupFake backups = new BackupFake();
         backups.rejectWithoutRunning.set(true);
         final Runnable task = NodeHousekeeper.backupWork(backups);
 
-        assertThrows(IllegalStateException.class, task::run);
+        assertDoesNotThrow(task::run);
+        assertEquals(1, backups.backupRequests.get());
     }
 
         /// The limit task records measurements in the gate.
@@ -105,6 +105,11 @@ class NodeHousekeeperTest {
                     IllegalArgumentException.class,
                     () -> housekeeper.schedule("task", () -> {
                     }, Duration.ofMillis(-1))
+            );
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> housekeeper.schedule("task", () -> {
+                    }, Duration.ofNanos(1))
             );
             assertThrows(
                     IllegalArgumentException.class,
@@ -201,21 +206,27 @@ class NodeHousekeeperTest {
         private final AtomicReference<Boolean> running = new AtomicReference<>(false);
 
         @Override
-        public void runBackup(final boolean useManualSlot) {
+        public StorageBackupTaskExecutor.BackupStartResult runBackup(final boolean useManualSlot) {
             this.backupRequests.incrementAndGet();
             this.manualSlot.set(useManualSlot);
             if (this.rejectWithoutRunning.get()) {
-                throw new IllegalStateException("Storage backup is already running");
+                return StorageBackupTaskExecutor.BackupStartResult.BUSY;
             }
             if (this.busy.get()) {
                 this.running.set(true);
-                throw new IllegalStateException("Storage backup is already running");
+                return StorageBackupTaskExecutor.BackupStartResult.BUSY;
             }
+            return StorageBackupTaskExecutor.BackupStartResult.STARTED;
         }
 
         @Override
         public boolean isRunningBackup() {
             return this.running.get();
+        }
+
+        @Override
+        public Throwable backupFailure() {
+            return null;
         }
 
         @Override
@@ -225,6 +236,11 @@ class NodeHousekeeperTest {
         @Override
         public boolean isRunningChecks() {
             return false;
+        }
+
+        @Override
+        public Throwable failure() {
+            return null;
         }
 
         @Override

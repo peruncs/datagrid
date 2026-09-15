@@ -7,7 +7,7 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.storage.types.DistributedStorage;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
@@ -47,11 +47,10 @@ public final class AeronStoreProcessChildMain {
              * exporter notifications.  A rejected ARCHIVE_FIRST transaction must
              * publish its retained dictionary again even though the Store exporter
              * quite correctly reports that type only once. */
-            AeronCrashHooks.install((name, ignored) ->
+            AeronCrashHooks.callWithHook((name, ignored) ->
             {
                 if ("AFTER_DICTIONARY_CHUNKS".equals(name)) dictionaryChunks.incrementAndGet();
-            });
-            try {
+            }, () -> {
                 final StorageBinaryDataDistributor distributor = transport.distributor("store", false);
                 final UnaryOperator<PersistenceTarget<Binary>> targetFactory = delegate ->
                         transport.persistenceTargetFactory("store", distributor).apply(new PersistenceTarget<>() {
@@ -109,9 +108,8 @@ public final class AeronStoreProcessChildMain {
                 final long sequence = transport.positionProvider("store").latestSequence();
                 Files.writeString(root.resolve("control").resolve(mode),
                         "channels=%s;dictionaries=%s;sequence=%s".formatted(sawFourChannels.get(), dictionaryChunks.get(), sequence));
-            } finally {
-                AeronCrashHooks.clear();
-            }
+                return null;
+            });
         }
     }
 
@@ -123,9 +121,9 @@ public final class AeronStoreProcessChildMain {
         return EmbeddedStorage.Foundation(configuration);
     }
 
-    private static NodelibraryPropertiesProvider properties(
+    private static NodeLibraryPropertiesProvider properties(
             final Path root, final UUID clusterId, final UUID nodeId, final UUID generation) {
-        return new NodelibraryPropertiesProvider.Env() {
+        return new NodeLibraryPropertiesProvider.Env() {
             @Override
             public String replicationRole() {
                 return "writer";

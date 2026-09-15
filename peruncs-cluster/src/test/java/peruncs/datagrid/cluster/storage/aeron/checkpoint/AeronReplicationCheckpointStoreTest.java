@@ -2,7 +2,10 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
+import peruncs.datagrid.cluster.storage.types.Crc32c;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -46,6 +49,24 @@ class AeronReplicationCheckpointStoreTest {
         Files.write(path, bytes);
         assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(path));
         Files.deleteIfExists(path);
+    }
+
+    @Test
+    void rejectsUnsupportedReservedFieldsEvenWithValidChecksum() throws Exception {
+        final Path path = Files.createTempFile("datagrid-checkpoint-reserved", ".bin");
+        try {
+            AeronReplicationCheckpointStore.write(path, checkpoint());
+            final byte[] bytes = Files.readAllBytes(path);
+            final ByteBuffer encoded = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
+            encoded.putShort(9, (short) 1);
+            encoded.putInt(AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES,
+                    Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
+            Files.write(path, bytes);
+
+            assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(path));
+        } finally {
+            Files.deleteIfExists(path);
+        }
     }
 
         /// Verifies atomically replaces existing checkpoint and creates parent.
@@ -129,10 +150,11 @@ class AeronReplicationCheckpointStoreTest {
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 7, 4096, 0, 0, 0);
         try {
-            AtomicFileStoreCrashHook.install((phase, ignored) -> phases.add(phase));
-            AeronReplicationCheckpointStore.write(path, readerCursor);
+            AtomicFileStoreCrashHook.callWithHook((phase, ignored) -> phases.add(phase), () -> {
+                AeronReplicationCheckpointStore.write(path, readerCursor);
+                return null;
+            });
         } finally {
-            AtomicFileStoreCrashHook.clear();
             Files.deleteIfExists(path);
         }
         assertEquals(java.util.List.of(

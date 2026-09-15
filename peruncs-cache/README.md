@@ -4,7 +4,7 @@ Clustered Hibernate second-level cache over Aeron (`peruncs.datagrid.cache`).
 
 `ClusteredCacheRegionFactory` extends the Store Hibernate region factory. At
 session-factory preparation it builds one serializer, one
-`AeronClusteredCacheMessageComProvider`, one receiver, and one listener
+`AeronClusteredCacheMessageCommunicationProvider`, one receiver, and one listener
 configuration; the receiver starts before local cache events are redirected
 to the cluster. On release it closes those resources before the local caches.
 

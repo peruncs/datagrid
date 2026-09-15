@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -17,16 +17,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Direct validation tests for configuration combinations that must fail before runtime startup.
 class AeronSettingsTest {
-    private static NodelibraryPropertiesProvider properties(final Map<String, String> overrides) {
+    private static NodeLibraryPropertiesProvider properties(final Map<String, String> overrides) {
         return properties(overrides, false);
     }
 
-    private static NodelibraryPropertiesProvider properties(final Map<String, String> overrides, final boolean production) {
+    private static NodeLibraryPropertiesProvider properties(final Map<String, String> overrides, final boolean production) {
         final Path root = Path.of(System.getProperty("java.io.tmpdir"), "aeron-settings-%s".formatted(UUID.randomUUID()));
         final UUID cluster = UUID.randomUUID();
         final UUID node = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        return new NodelibraryPropertiesProvider.Env() {
+        return new NodeLibraryPropertiesProvider.Env() {
             @Override
             public boolean isProdMode() {
                 return production;

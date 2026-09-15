@@ -28,16 +28,15 @@ public final class NodeHousekeeper implements AutoCloseable {
     private final ScheduledThreadPoolExecutor scheduler;
     private final List<ScheduledTask> pending = new ArrayList<>();
     private boolean started;
+    private boolean closing;
     private boolean closed;
 
     private NodeHousekeeper(final int threads) {
         final AtomicInteger threadCount = new AtomicInteger();
         this.scheduler = new ScheduledThreadPoolExecutor(threads, task ->
-        {
-            final Thread thread = new Thread(task, "datagrid-housekeeper-%s".formatted(threadCount.incrementAndGet()));
-            thread.setDaemon(true);
-            return thread;
-        });
+                Thread.ofVirtual()
+                        .name("datagrid-housekeeper-%s".formatted(threadCount.incrementAndGet()))
+                        .unstarted(task));
         this.scheduler.setRemoveOnCancelPolicy(true);
         this.scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
@@ -54,8 +53,11 @@ public final class NodeHousekeeper implements AutoCloseable {
         try {
             scheduled.task().run();
             LOGGER.log(System.Logger.Level.DEBUG, "Finished housekeeper task '%s'".formatted(scheduled.name()));
-        } catch (final Throwable failure) {
+        } catch (final RuntimeException failure) {
             LOGGER.log(System.Logger.Level.ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
+        } catch (final Error failure) {
+            LOGGER.log(System.Logger.Level.ERROR, "Fatal housekeeper task '%s' failure".formatted(scheduled.name()), failure);
+            throw failure;
         }
     }
 
@@ -72,14 +74,8 @@ public final class NodeHousekeeper implements AutoCloseable {
         return () ->
         {
             LOGGER.log(System.Logger.Level.INFO, "Issuing full backup");
-            try {
-                backupExecutor.runBackup(false);
-            } catch (final IllegalStateException busy) {
-                if (backupExecutor.isRunningBackup()) {
-                    LOGGER.log(System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
-                    return;
-                }
-                throw busy;
+            if (backupExecutor.runBackup(false) == StorageBackupTaskExecutor.BackupStartResult.BUSY) {
+                LOGGER.log(System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
             }
         };
     }
@@ -117,7 +113,7 @@ public final class NodeHousekeeper implements AutoCloseable {
     /// @param task     the work to run
     /// @param interval delay between the end of one run and the start of the next
     public synchronized void schedule(final String name, final Runnable task, final Duration interval) {
-        if (this.closed) {
+        if (this.closed || this.closing) {
             throw new IllegalStateException("Node housekeeper is closed");
         }
         if (this.started) {
@@ -130,13 +126,23 @@ public final class NodeHousekeeper implements AutoCloseable {
         if (interval == null || interval.isZero() || interval.isNegative()) {
             throw new IllegalArgumentException("Housekeeper task '%s' interval must be positive".formatted(name));
         }
+        final long intervalMillis;
+        try {
+            intervalMillis = interval.toMillis();
+        } catch (final ArithmeticException overflow) {
+            throw new IllegalArgumentException("Housekeeper task '%s' interval is too large".formatted(name), overflow);
+        }
+        if (intervalMillis <= 0L) {
+            throw new IllegalArgumentException(
+                    "Housekeeper task '%s' interval must be at least one millisecond".formatted(name));
+        }
         LOGGER.log(System.Logger.Level.INFO, "Scheduling housekeeper task '%s' every %s".formatted(name, interval));
-        this.pending.add(new ScheduledTask(name, task, interval));
+        this.pending.add(new ScheduledTask(name, task, intervalMillis));
     }
 
         /// Starts firing the scheduled tasks. The first run of each task waits one interval.
     public synchronized void start() {
-        if (this.closed) {
+        if (this.closed || this.closing) {
             throw new IllegalStateException("Node housekeeper is closed");
         }
         if (this.started) {
@@ -144,11 +150,10 @@ public final class NodeHousekeeper implements AutoCloseable {
         }
         this.started = true;
         for (final ScheduledTask scheduled : this.pending) {
-            final long intervalMillis = scheduled.interval().toMillis();
             this.scheduler.scheduleWithFixedDelay(
                     () -> runGuarded(scheduled),
-                    intervalMillis,
-                    intervalMillis,
+                    scheduled.intervalMillis(),
+                    scheduled.intervalMillis(),
                     TimeUnit.MILLISECONDS
             );
         }
@@ -161,19 +166,25 @@ public final class NodeHousekeeper implements AutoCloseable {
         if (this.closed) {
             return;
         }
-        this.closed = true;
+        this.closing = true;
         LOGGER.log(System.Logger.Level.INFO, "Shutting down node housekeeper");
         this.scheduler.shutdownNow();
         try {
             if (!this.scheduler.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                 LOGGER.log(System.Logger.Level.WARNING, "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                throw new IllegalStateException(
+                        "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            LOGGER.log(System.Logger.Level.WARNING, "Interrupted while stopping node housekeeper", interrupted);
+            throw new IllegalStateException("Interrupted while stopping node housekeeper", interrupted);
+        }
+        synchronized (this) {
+            this.closed = true;
+            this.closing = false;
         }
     }
 
-    private record ScheduledTask(String name, Runnable task, Duration interval) {
+    private record ScheduledTask(String name, Runnable task, long intervalMillis) {
     }
 }

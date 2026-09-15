@@ -8,15 +8,23 @@ public final class AtomicFileStoreCrashHook {
     private AtomicFileStoreCrashHook() {
     }
 
-        /// Installs a hook on the calling thread.
+        /// Runs an action with a hook bound to its dynamic scope.
     ///
     /// @param hook callback for crash-test phases
-    public static void install(final BiConsumer<String, Path> hook) {
-        AtomicFileStore.setTestHook(hook);
+    public static void runWithHook(final BiConsumer<String, Path> hook, final Runnable action) {
+        AtomicFileStore.runWithTestHook(hook, action);
     }
 
-        /// Clears the calling thread's hook.
-    public static void clear() {
-        AtomicFileStore.clearTestHook();
+        /// Calls an operation with a hook bound to its dynamic scope.
+    public static <T, X extends Throwable> T callWithHook(
+            final BiConsumer<String, Path> hook,
+            final java.lang.ScopedValue.CallableOp<? extends T, X> operation
+    ) throws X {
+        return AtomicFileStore.callWithTestHook(hook, operation);
+    }
+
+    /// Captures the current hook for an explicitly created unstructured thread.
+    public static Runnable inheritCurrent(final Runnable action) {
+        return AtomicFileStore.inheritCurrentTestHook(action);
     }
 }

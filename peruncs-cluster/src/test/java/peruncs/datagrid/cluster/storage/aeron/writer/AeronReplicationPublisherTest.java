@@ -280,21 +280,16 @@ class AeronReplicationPublisherTest {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
                     return length;
                 }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            try {
-                CrashHook.install((name, ignored) ->
-                {
-                    if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
-                });
-                assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
-                        null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
-                publisher.close();
-                assertEquals(List.of(
-                        AeronReplicationEnvelope.Kind.STORE_BINARY,
-                        AeronReplicationEnvelope.Kind.ABORT
-                ), kinds);
-            } finally {
-                CrashHook.clear();
-            }
+            CrashHook.runWithHook((name, ignored) ->
+            {
+                if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
+            }, () -> assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
+                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})})));
+            publisher.close();
+            assertEquals(List.of(
+                    AeronReplicationEnvelope.Kind.STORE_BINARY,
+                    AeronReplicationEnvelope.Kind.ABORT
+            ), kinds);
         }
     }
 

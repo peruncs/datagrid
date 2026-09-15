@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.config;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
-import peruncs.datagrid.cluster.storage.types.ReplicationLimits;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -94,11 +94,11 @@ class AeronReplicationConfigurationTest {
     void validatesMaximumPacketCount() {
         assertDoesNotThrow(() -> AeronReplicationConfiguration.builder()
                 .chunkSize(1)
-                .maxTransactionBytes(ReplicationLimits.MAX_PACKET_COUNT)
+                .maxTransactionBytes(StorageBinaryDataMessage.MAX_PACKET_COUNT)
                 .build());
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
                 .chunkSize(1)
-                .maxTransactionBytes(ReplicationLimits.MAX_PACKET_COUNT + 1)
+                .maxTransactionBytes(StorageBinaryDataMessage.MAX_PACKET_COUNT + 1)
                 .build());
     }
 

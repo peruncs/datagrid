@@ -67,20 +67,23 @@ public final class AeronEndToEndBenchmark {
 
     private static void publishOne(final TransactionAssembler assembler, final UnsafeBuffer source,
                                    final UnsafeBuffer frame, final UnsafeBuffer empty, final int chunkSize, final UUID clusterId, final long sequence) {
-        final int length = source.capacity();
-        final int count = chunkCount(length, chunkSize);
-        final int crc = AeronReplicationEnvelope.crc32c(source, 0, length);
-        for (int index = 0, offset = 0; offset < length; index++) {
-            final int size = Math.min(chunkSize, length - offset);
-            final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1,
-                    sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, length, index, count, offset, 0,
-                    source, offset, size);
+        AeronReplicationEnvelope.withChecksumContext(new AeronReplicationEnvelope.ChecksumContext(), () -> {
+            final int length = source.capacity();
+            final int count = chunkCount(length, chunkSize);
+            final int crc = AeronReplicationEnvelope.crc32c(source, 0, length);
+            for (int index = 0, offset = 0; offset < length; index++) {
+                final int size = Math.min(chunkSize, length - offset);
+                final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1,
+                        sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, length, index, count, offset, 0,
+                        source, offset, size);
+                assembler.onFragment(frame, 0, encoded, null);
+                offset += size;
+            }
+            final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1, sequence,
+                    AeronReplicationEnvelope.Kind.COMMIT, length, 0, count, 0, crc, empty, 0, 0);
             assembler.onFragment(frame, 0, encoded, null);
-            offset += size;
-        }
-        final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1, sequence,
-                AeronReplicationEnvelope.Kind.COMMIT, length, 0, count, 0, crc, empty, 0, 0);
-        assembler.onFragment(frame, 0, encoded, null);
+            return null;
+        });
     }
 
     private static int chunkCount(final int length, final int chunkSize) {

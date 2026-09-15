@@ -6,6 +6,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -31,56 +33,69 @@ public interface StorageTaskExecutor extends AutoCloseable {
     /// @return `true` when running
     boolean isRunningChecks();
 
+        /// Reports the failure of the most recently completed storage check, if any.
+    ///
+    /// @return the most recent check failure, or `null` after a successful check
+    Throwable failure();
+
         /// Stops outstanding maintenance work and releases executor state.
     @Override
     default void close() {
     }
 
         /// Implements the single-flight storage-check state machine.
-    class Abstract implements StorageTaskExecutor {
-        private static final System.Logger LOGGER = System.getLogger(Abstract.class.getName());
+    final class Default implements StorageTaskExecutor {
+        private static final System.Logger LOGGER = System.getLogger(StorageTaskExecutor.class.getName());
         private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
         private final StorageConnection connection;
         private final ExecutorService executor;
+        private final AtomicReference<Throwable> failure = new AtomicReference<>();
 
-        private Future<?> checksTask;
-        private boolean closed;
+        private final AtomicReference<Future<?>> checksTask = new AtomicReference<>();
+        private final AtomicBoolean closing = new AtomicBoolean();
+        private final AtomicBoolean closed = new AtomicBoolean();
 
                 /// Creates the shared executor state.
         ///
         /// @param connection Store connection
-        protected Abstract(final StorageConnection connection) {
+        private Default(final StorageConnection connection) {
             this.connection = connection;
-            this.executor = Executors.newSingleThreadExecutor(task ->
-            {
-                final Thread thread = new Thread(task, "EclipseStore-StorageChecks");
-                thread.setDaemon(true);
-                return thread;
-            });
+            this.executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
+                    .name("EclipseStore-StorageChecks", 0L)
+                    .factory());
         }
 
         @Override
-        public synchronized void runChecks() {
-            if (this.closed) throw new IllegalStateException("Storage task executor is closed");
-            if (this.checksTask == null || this.checksTask.isDone()) {
+        public void runChecks() {
+            if (this.closed.get() || this.closing.get()) {
+                throw new IllegalStateException("Storage task executor is closed");
+            }
+            while (true) {
+                final Future<?> current = this.checksTask.get();
+                if (current != null && !current.isDone()) return;
                 LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage checks");
-                this.checksTask = this.executor.submit(this::runChecksTask);
+                final Future<?> next = this.executor.submit(this::runChecksTask);
+                if (this.checksTask.compareAndSet(current, next)) return;
+                next.cancel(false);
             }
         }
 
         @Override
-        public synchronized boolean isRunningChecks() {
-            return this.checksTask != null && !this.checksTask.isDone();
+        public boolean isRunningChecks() {
+            final Future<?> task = this.checksTask.get();
+            return task != null && !task.isDone();
+        }
+
+        @Override
+        public Throwable failure() {
+            return this.failure.get();
         }
 
         @Override
         public void close() {
-            final Future<?> task;
-            synchronized (this) {
-                if (this.closed) return;
-                this.closed = true;
-                task = this.checksTask;
-            }
+            if (this.closed.get()) return;
+            this.closing.set(true);
+            final Future<?> task = this.checksTask.get();
             if (task != null) task.cancel(true);
             this.executor.shutdownNow();
             try {
@@ -92,6 +107,8 @@ public interface StorageTaskExecutor extends AutoCloseable {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted while stopping storage checks", interrupted);
             }
+            this.closed.set(true);
+            this.closing.set(false);
         }
 
         private void runChecksTask() {
@@ -99,16 +116,15 @@ public interface StorageTaskExecutor extends AutoCloseable {
                 this.connection.issueFullGarbageCollection();
                 this.connection.issueFullCacheCheck();
                 this.connection.issueFullFileCheck();
-            } catch (final Throwable failure) {
+                this.failure.set(null);
+            } catch (final Exception failure) {
+                this.failure.set(failure);
                 LOGGER.log(System.Logger.Level.ERROR, "Storage checks failed", failure);
+            } catch (final Error failure) {
+                this.failure.set(failure);
+                LOGGER.log(System.Logger.Level.ERROR, "Fatal storage-check failure", failure);
+                throw failure;
             }
-        }
-    }
-
-        /// Provides the standard storage-check executor.
-    final class Default extends Abstract implements StorageTaskExecutor {
-        private Default(final StorageConnection connection) {
-            super(connection);
         }
     }
 }

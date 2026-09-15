@@ -2,19 +2,21 @@ package peruncs.datagrid.cache.types;
 
 import org.eclipse.store.cache.types.CacheManager;
 
+import javax.cache.processor.EntryProcessor;
 import java.util.Objects;
 
 /// This acceptor applies remote timestamp updates to caches already open here.
 ///
 /// It keeps the greatest timestamp seen for each table. A message for an
 /// unopened cache is ignored because opening that cache will establish its own
-/// local state. The compare-and-set is performed while holding the cache
-/// monitor, matching the monitor used by the cache's silent write operation;
-/// the silent update prevents a received invalidation from being sent back to
-/// the cluster.
+/// local state. The EntryProcessor comparison and mutation run under the
+/// cache's per-key lock, so a concurrent local timestamp write cannot be lost.
+/// The listener filter marks this synchronous remote update as silent to prevent
+/// a broadcast loop.
 public class ClusteredCacheMessageAcceptor {
     private static final System.Logger LOGGER =
             System.getLogger(ClusteredCacheMessageAcceptor.class.getName());
+    private static final ScopedValue<Boolean> REMOTE_UPDATE = ScopedValue.newInstance();
     private final CacheManager cacheManager;
 
         /// Creates an acceptor for the supplied local cache manager.
@@ -39,24 +41,31 @@ public class ClusteredCacheMessageAcceptor {
             return;
         }
 
-        synchronized (cache) {
-            final Object stored = cache.get(message.tableName());
-            final Long previousTimestamp = stored instanceof final Long value ? value : null;
+        final EntryProcessor<Object, Object, Boolean> update = (entry, ignored) -> {
+            final Object stored = entry.getValue();
+            final Long previousTimestamp = stored instanceof Long value ? value : null;
             if (stored != null && previousTimestamp == null) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Ignoring query-cache timestamp table=%s with a non-timestamp stored value of type %s".formatted(message.tableName(), stored.getClass().getName()));
-                return;
+                return false;
             }
-
             if (previousTimestamp != null && previousTimestamp >= message.timestamp()) {
                 LOGGER.log(System.Logger.Level.DEBUG,
                         "Received outdated query-cache timestamp table=%s, timestamp=%s. Currently stored timestamp=%s".formatted(message.tableName(), message.timestamp(), previousTimestamp));
-                return;
+                return false;
             }
-
-            cache.putSilent(message.tableName(), message.timestamp());
+            entry.setValue(message.timestamp());
+            return true;
+        };
+        final boolean updated = ScopedValue.where(REMOTE_UPDATE, Boolean.TRUE)
+                .call(() -> Boolean.TRUE.equals(cache.invoke(message.tableName(), update)));
+        if (updated) {
             LOGGER.log(System.Logger.Level.DEBUG,
                     "Updating query-cache timestamp table=%s, timestamp=%s%s".formatted(message.tableName(), message.timestamp(), '.'));
         }
+    }
+
+    static boolean isRemoteUpdate() {
+        return Boolean.TRUE.equals(REMOTE_UPDATE.orElse(Boolean.FALSE));
     }
 }

@@ -4,8 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that a reader cursor cannot be mistaken for another recording.
 class AeronReplicationCursorTest {
@@ -62,6 +61,8 @@ class AeronReplicationCursorTest {
                 id, id, id, 0, 1, -2, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCursor(
                 id, id, id, 0, 1, 0, -2));
+        assertDoesNotThrow(() -> new AeronReplicationCursor(id, id, id, 0, 1, -1, 0));
+        assertDoesNotThrow(() -> new AeronReplicationCursor(id, id, id, 0, 1, 0, -1));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCursor(
                 id, id, id, 0, 1, 0, Long.MAX_VALUE));
     }

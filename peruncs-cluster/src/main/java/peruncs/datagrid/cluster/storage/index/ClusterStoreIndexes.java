@@ -57,14 +57,16 @@ public final class ClusterStoreIndexes {
             final DocumentPopulator<E> documentPopulator
     ) {
         final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
-        if (checkedMap.index().get(LuceneIndex.class) != null) {
-            throw new IllegalStateException("a clustered map already has a Lucene index");
+        synchronized (checkedMap.index()) {
+            if (checkedMap.index().get(LuceneIndex.class) != null) {
+                throw new IllegalStateException("a clustered map already has a Lucene index");
+            }
+            final LuceneIndex<E> registered = checkedMap.index().register(
+                    LuceneIndex.Category(embeddedLuceneContext(documentPopulator))
+            );
+            if (registered == null) throw new IllegalStateException("failed to register clustered Lucene index");
+            return registered;
         }
-        final LuceneIndex<E> registered = checkedMap.index().register(
-                LuceneIndex.Category(embeddedLuceneContext(documentPopulator))
-        );
-        if (registered == null) throw new IllegalStateException("failed to register clustered Lucene index");
-        return registered;
     }
 
         /// Rejects a Lucene context that stores files outside the Store graph.
@@ -97,6 +99,30 @@ public final class ClusterStoreIndexes {
                 configuration,
                 Objects.requireNonNull(vectorizer, "vectorizer")
         );
+    }
+
+        /// Registers an in-graph vector index on a map, creating its index group once.
+    ///
+    /// @param <E>           entity type
+    /// @param map           target map
+    /// @param name          index name
+    /// @param configuration vector configuration
+    /// @param vectorizer    entity-to-vector mapping
+    /// @return the new vector index
+    public static <E> VectorIndex<E> registerVector(
+            final GigaMap<E> map,
+            final String name,
+            final VectorIndexConfiguration configuration,
+            final Vectorizer<? super E> vectorizer
+    ) {
+        final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
+        synchronized (checkedMap.index()) {
+            VectorIndices<E> indices = checkedMap.index().get(VectorIndices.Category());
+            if (indices == null) {
+                indices = checkedMap.index().register(VectorIndices.Category());
+            }
+            return addVector(indices, name, configuration, vectorizer);
+        }
     }
 
         /// Rejects any JVector configuration that uses an external directory.

@@ -44,17 +44,7 @@ public record AeronAuthenticatedWatermark(
     public static final int ENCODED_LENGTH = IDENTITY_LENGTH + AUTHENTICATION_LENGTH;
     private static final String ALGORITHM = "HmacSHA256";
     private static final UUID UUID_ZERO = new UUID(0L, 0L);
-    private static final ThreadLocal<Mac> MAC = ThreadLocal.withInitial(() -> {
-        try {
-            return Mac.getInstance(ALGORITHM);
-        } catch (final GeneralSecurityException failure) {
-            throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
-        }
-    });
-    private static final ThreadLocal<byte[]> AUTHENTICATION_SCRATCH =
-            ThreadLocal.withInitial(() -> new byte[AUTHENTICATION_LENGTH]);
-    private static final ThreadLocal<byte[]> CANONICAL_SCRATCH =
-            ThreadLocal.withInitial(() -> new byte[IDENTITY_LENGTH]);
+    private static final ScopedValue<Mac> MAC = ScopedValue.newInstance();
 
         /// Creates a watermark and copies the authentication bytes so the token is
     /// immutable after construction.
@@ -153,7 +143,11 @@ public record AeronAuthenticatedWatermark(
         if (target == null || target.length != ENCODED_LENGTH)
             throw new IllegalArgumentException("watermark target must contain exactly %s bytes".formatted(ENCODED_LENGTH));
         putCanonical(target, readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
-        authenticateInto(target, IDENTITY_LENGTH, secret, target, IDENTITY_LENGTH);
+        withMac(() ->
+        {
+            authenticateInto(target, IDENTITY_LENGTH, secret, target, IDENTITY_LENGTH);
+            return null;
+        });
     }
 
         /// Decodes a token; authentication is checked separately with
@@ -315,9 +309,12 @@ public record AeronAuthenticatedWatermark(
     }
 
     private static byte[] authenticate(final byte[] value, final byte[] secret) {
-        final byte[] authentication = new byte[AUTHENTICATION_LENGTH];
-        authenticateInto(value, value.length, secret, authentication, 0);
-        return authentication;
+        return withMac(() ->
+        {
+            final byte[] authentication = new byte[AUTHENTICATION_LENGTH];
+            authenticateInto(value, value.length, secret, authentication, 0);
+            return authentication;
+        });
     }
 
     private static void authenticateInto(final byte[] value, final int length,
@@ -329,6 +326,15 @@ public record AeronAuthenticatedWatermark(
             mac.init(new SecretKeySpec(secret, ALGORITHM));
             mac.update(value, 0, length);
             mac.doFinal(target, targetOffset);
+        } catch (final GeneralSecurityException failure) {
+            throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
+        }
+    }
+
+    private static <T> T withMac(final java.util.function.Supplier<T> operation) {
+        if (MAC.isBound()) return operation.get();
+        try {
+            return ScopedValue.where(MAC, Mac.getInstance(ALGORITHM)).call(operation::get);
         } catch (final GeneralSecurityException failure) {
             throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
         }
@@ -365,12 +371,20 @@ public record AeronAuthenticatedWatermark(
     /// @param secret HMAC secret
     /// @return `true` when the token was signed with the secret
     public boolean verify(final byte[] secret) {
-        final byte[] canonical = CANONICAL_SCRATCH.get();
-        putCanonical(canonical, this.readerId, this.clusterId, this.storeGeneration, this.writerEpoch,
-                this.recordingId, this.sequence, this.position);
-        final byte[] expected = AUTHENTICATION_SCRATCH.get();
-        authenticateInto(canonical, IDENTITY_LENGTH, secret, expected, 0);
-        return MessageDigest.isEqual(this.authentication, expected);
+        return withMac(() ->
+        {
+            final byte[] canonical = new byte[IDENTITY_LENGTH];
+            final byte[] expected = new byte[AUTHENTICATION_LENGTH];
+            try {
+                putCanonical(canonical, this.readerId, this.clusterId, this.storeGeneration, this.writerEpoch,
+                        this.recordingId, this.sequence, this.position);
+                authenticateInto(canonical, IDENTITY_LENGTH, secret, expected, 0);
+                return MessageDigest.isEqual(this.authentication, expected);
+            } finally {
+                Arrays.fill(canonical, (byte) 0);
+                Arrays.fill(expected, (byte) 0);
+            }
+        });
     }
 
         /// Encodes the signed token for a cursor or a control message.

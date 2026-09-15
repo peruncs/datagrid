@@ -16,7 +16,7 @@ class AeronProviderDriverFailureTest {
     void deadOwnedDriverFailsHealthWithoutExitingTheJvm(@TempDir final Path root) throws Exception {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
-        final Process child = new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+        final Process child = new ProcessBuilder(java, "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", classpath, "-Ddg.driver.failure.root=%s".formatted(root),
                 AeronProviderDriverFailureChildMain.class.getName()).redirectErrorStream(true).start();
         try {

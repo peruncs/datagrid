@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport.StorageControllerAdapter;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
@@ -12,7 +12,7 @@ import java.util.function.Supplier;
 /// Cached health view for one Aeron provider client and storage controller.
 final class AeronHealth implements ReplicationHealth {
     private final StorageControllerAdapter storage;
-    private final ClusterStorageBinaryDataClient client;
+    private final StorageBinaryDataClient client;
     private final BooleanSupplier closed;
     private final BooleanSupplier driverFailed;
     private final BooleanSupplier capacityAvailable;
@@ -26,7 +26,7 @@ final class AeronHealth implements ReplicationHealth {
     private final BooleanSupplier watermarkFailed;
     private volatile boolean active = true;
 
-    AeronHealth(final StorageControllerAdapter storage, final ClusterStorageBinaryDataClient client,
+    AeronHealth(final StorageControllerAdapter storage, final StorageBinaryDataClient client,
                 final BooleanSupplier closed, final BooleanSupplier driverFailed, final BooleanSupplier capacityAvailable,
                 final BooleanSupplier writerReady, final BooleanSupplier writerRole,
                 final Supplier<ReplicationHealth.State> checkpointState, final LongSupplier archiveUsableSpace,
@@ -47,7 +47,7 @@ final class AeronHealth implements ReplicationHealth {
         this.watermarkFailed = Objects.requireNonNull(watermarkFailed, "watermarkFailed");
     }
 
-    boolean matches(final StorageControllerAdapter storage, final ClusterStorageBinaryDataClient client) {
+    boolean matches(final StorageControllerAdapter storage, final StorageBinaryDataClient client) {
         return this.storage == storage && this.client == client;
     }
 

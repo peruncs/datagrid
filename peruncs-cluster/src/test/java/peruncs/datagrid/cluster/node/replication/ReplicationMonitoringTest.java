@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.StorageNodeManager;
 import peruncs.datagrid.cluster.node.http.ClusterRestRequestController;
 
@@ -64,7 +64,7 @@ class ReplicationMonitoringTest {
         };
 
         final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(
-                manager, NodelibraryPropertiesProvider.Env());
+                manager, NodeLibraryPropertiesProvider.Env());
         final String metrics = controller.getReplicationMetrics();
         assertTrue(metrics.contains("cluster_replication_current_sequence{transport=\"aeron\"} 7"));
         assertTrue(metrics.contains("cluster_replication_latest_sequence{transport=\"aeron\"} 10"));

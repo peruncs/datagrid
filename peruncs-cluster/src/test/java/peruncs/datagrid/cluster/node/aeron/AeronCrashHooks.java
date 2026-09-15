@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
+import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
 
 import java.util.function.BiConsumer;
 
@@ -9,18 +10,28 @@ public final class AeronCrashHooks {
     private AeronCrashHooks() {
     }
 
-        /// Installs the writer and provider hooks on the calling test thread.
+        /// Runs an action with writer and provider hooks bound to its scope.
     ///
     /// @param hook callback that receives the crash seam name and sequence
-    public static void install(final BiConsumer<String, Long> hook) {
-        CrashHook.install(hook);
-        AeronClusterReplicationTransportProvider.setCrashHook(hook);
+    public static void runWithHook(final BiConsumer<String, Long> hook, final Runnable action) {
+        CrashHook.runWithHook(hook, () ->
+                AeronClusterReplicationTransportProvider.runWithCrashHook(hook, action));
     }
 
-        /// Clears all writer and provider hooks on the calling test thread.
-    public static void clear() {
-        CrashHook.clear();
-        AeronClusterReplicationTransportProvider.clearCrashHook();
+        /// Calls an operation with writer and provider hooks bound to its scope.
+    public static <T, X extends Throwable> T callWithHook(
+            final BiConsumer<String, Long> hook,
+            final java.lang.ScopedValue.CallableOp<? extends T, X> operation
+    ) throws X {
+        return CrashHook.callWithHook(hook,
+                () -> AeronClusterReplicationTransportProvider.callWithCrashHook(hook, operation));
+    }
+
+    /// Captures all crash-test bindings for an explicitly created worker thread.
+    public static Runnable inheritCurrent(final Runnable action) {
+        return CrashHook.inheritCurrent(
+                AeronClusterReplicationTransportProvider.inheritCurrentCrashHook(
+                        AtomicFileStoreCrashHook.inheritCurrent(action)));
     }
 
         /// Returns the checkpoint sequence associated with the current write callback.

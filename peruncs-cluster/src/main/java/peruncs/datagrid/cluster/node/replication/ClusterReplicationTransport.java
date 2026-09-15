@@ -2,8 +2,10 @@ package peruncs.datagrid.cluster.node.replication;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryTargetDistributing;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacketAcceptor;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryReplicationTarget;
 
 import java.util.function.UnaryOperator;
 
@@ -26,19 +28,19 @@ public interface ClusterReplicationTransport extends AutoCloseable {
             }
 
             @Override
-            public ClusterStorageBinaryDataDistributor distributor(final String streamName, final boolean asynchronous) {
-                return ClusterStorageBinaryDataDistributor.NoOp();
+            public StorageBinaryDataDistributor distributor(final String streamName, final boolean asynchronous) {
+                return StorageBinaryDataDistributor.NoOp();
             }
 
             @Override
-            public ClusterStorageBinaryDataClient client(
-                    final ClusterStorageBinaryDataPacketAcceptor packetAcceptor,
+            public StorageBinaryDataClient client(
+                    final StorageBinaryDataPacketAcceptor packetAcceptor,
                     final String streamName,
                     final AfterDataMessageConsumedListener cursorListener,
                     final ReplicationCursor startingCursor,
                     final boolean commitPosition
             ) {
-                return ClusterStorageBinaryDataClient.NoOp(startingCursor);
+                return StorageBinaryDataClient.NoOp(startingCursor);
             }
 
             @Override
@@ -71,7 +73,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
             @Override
             public ReplicationHealth health(
                     final StorageControllerAdapter storage,
-                    final ClusterStorageBinaryDataClient client
+                    final StorageBinaryDataClient client
             ) {
                 return new ReplicationHealth() {
                     public boolean isReady() {
@@ -108,7 +110,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     /// @param streamName   logical stream name
     /// @param asynchronous whether publication may be asynchronous
     /// @return binary distributor
-    ClusterStorageBinaryDataDistributor distributor(String streamName, boolean asynchronous);
+    StorageBinaryDataDistributor distributor(String streamName, boolean asynchronous);
 
         /// Creates a reader-side client starting at the supplied durable cursor.
     ///
@@ -118,8 +120,8 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     /// @param startingCursor durable starting cursor
     /// @param commitPosition whether reader positions are committed
     /// @return binary data client
-    ClusterStorageBinaryDataClient client(
-            ClusterStorageBinaryDataPacketAcceptor packetAcceptor,
+    StorageBinaryDataClient client(
+            StorageBinaryDataPacketAcceptor packetAcceptor,
             String streamName,
             AfterDataMessageConsumedListener cursorListener,
             ReplicationCursor startingCursor,
@@ -144,7 +146,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     /// @return health view
     ReplicationHealth health(
             StorageControllerAdapter storage,
-            ClusterStorageBinaryDataClient client
+            StorageBinaryDataClient client
     );
 
         /// Creates a target wrapper for coordinated publication.
@@ -156,7 +158,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
             final String streamName,
             final StorageBinaryDataDistributor distributor
     ) {
-        return delegate -> StorageBinaryTargetDistributing.New(delegate, distributor);
+        return delegate -> StorageBinaryReplicationTarget.New(delegate, distributor);
     }
 
     @Override

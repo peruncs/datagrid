@@ -3,139 +3,158 @@ package peruncs.datagrid.cluster.node.backup;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
-import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 
-import java.lang.reflect.Proxy;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/// Verifies filesystem archive publication, restore, listing, and deletion.
 class FilesystemVolumeBackupBackendTest {
-    private static void createBackupShape(
-            final Path root,
-            final boolean storage,
-            final boolean manifest,
-            final boolean ready
-    ) throws Exception {
-        if (storage) Files.createDirectories(root.resolve("storage"));
-        if (manifest) Files.write(root.resolve("manifest"), ReplicationCursorStore.encode(
-                new ReplicationCursor("none", null, 0L, new byte[0])));
-        if (ready) Files.writeString(root.resolve("ready"), "");
+    private static final ReplicationCursor CURSOR =
+            new ReplicationCursor("test", null, 3L, new byte[]{7});
+
+    private static StorageConnection noOpStorageConnection() {
+        return new TestStorageConnection();
     }
 
-        /// The manager passes the connection through; this test only verifies marker ordering.
-    private static StorageConnection noOpStorageConnection() {
-        return (StorageConnection) Proxy.newProxyInstance(
-                StorageConnection.class.getClassLoader(),
-                new Class<?>[]{StorageConnection.class},
-                (proxy, method, arguments) -> null);
+    private static void createArchive(
+            final Path volume,
+            final String archiveName,
+            final String data,
+            final ReplicationCursor cursor,
+            final boolean metadata
+    ) throws Exception {
+        final Path source = Files.createTempDirectory(volume, ".archive-source-");
+        try {
+            Files.createDirectories(source.resolve(StorageBackupBackend.STORAGE_ENTRY));
+            if (data != null) {
+                Files.writeString(source.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), data);
+            }
+            if (metadata) {
+                Files.write(source.resolve(StorageBackupBackend.MANIFEST_ENTRY), ReplicationCursorStore.encode(cursor));
+                Files.writeString(source.resolve(StorageBackupBackend.READY_ENTRY), "");
+            }
+            BackupArchive.compressStorage(source, volume.resolve(archiveName));
+        } finally {
+            peruncs.datagrid.cluster.node.store.StorageFileOperations.deleteDirectory(source);
+        }
+    }
+
+    private static void createUserArchive(final Path volume, final String data) throws Exception {
+        try (OutputStream output = Files.newOutputStream(
+                volume.resolve(BackupArchive.USER_UPLOADED_STORAGE_ARCHIVE));
+             ZipOutputStream zip = new ZipOutputStream(output)) {
+            zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/data"));
+            zip.write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
     }
 
     @Test
-    void listsOnlyBackupsWithDurableReadyMarker(@TempDir final Path backupVolume) throws Exception {
-        final Path complete = backupVolume.resolve("100");
-        createBackupShape(complete, true, true, true);
+    void listsArchiveFilesAndIgnoresDirectoriesAndMalformedNames(@TempDir final Path backupVolume) throws Exception {
+        createArchive(backupVolume, "100.zip", "one", CURSOR, true);
+        createArchive(backupVolume, "300.manual.zip", "manual", CURSOR, true);
+        Files.createDirectories(backupVolume.resolve("400"));
+        Files.writeString(backupVolume.resolve("123.evil.zip"), "not a backup");
+        Files.writeString(backupVolume.resolve("500.zip.tmp"), "not a backup");
 
-        final Path incomplete = backupVolume.resolve("200");
-        createBackupShape(incomplete, true, true, false);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
 
-        final Path manual = backupVolume.resolve("300.manual");
-        createBackupShape(manual, true, true, true);
-
-        /* A crashed copy and an operator upload must not be parsed as generated
-         * backups.  The latter is intentionally handled by its separate API. */
-        createBackupShape(backupVolume.resolve("400"), true, false, true);
-        Files.createDirectories(backupVolume.resolve("user-uploaded-storage"));
-        Files.createDirectories(backupVolume.resolve("not-a-backup"));
-
-        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(
-                backupVolume);
-
-        final List<BackupMetadata> backups = backend.listBackups();
-
-        assertEquals(List.of(new BackupMetadata(100L, false), new BackupMetadata(300L, true)), backups);
+        assertEquals(List.of(new BackupMetadata(100L, false), new BackupMetadata(300L, true)),
+                backend.listBackups());
         assertEquals(new BackupMetadata(300L, true), backend.getLastBackup(0).orElseThrow());
         assertEquals(new BackupMetadata(100L, false), backend.getLastBackup(1).orElseThrow());
     }
 
     @Test
-    void readsManifestAndDownloadsIntoNewDestination(@TempDir final Path backupVolume, @TempDir final Path root)
+    void readsManifestAndRestoresStorage(@TempDir final Path backupVolume, @TempDir final Path root)
             throws Exception {
-        final Path complete = backupVolume.resolve("10");
-        createBackupShape(complete, true, true, true);
-        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(
-                backupVolume);
-
-        assertEquals(0L, backend.getCursorFromPreviousBackup(0).orElseThrow().logicalSequence());
+        createArchive(backupVolume, "10.zip", "payload", CURSOR, true);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
         final Path destination = root.resolve("new");
+
+        assertEquals(CURSOR, backend.getCursorFromPreviousBackup(0).orElseThrow());
         backend.downloadLatestBackup(destination);
-        assertTrue(Files.isDirectory(destination.resolve("storage")));
-        assertFalse(Files.exists(destination.resolve("manifest")));
-        assertFalse(Files.exists(destination.resolve("ready")));
-        assertThrows(NodelibraryException.class, () -> backend.downloadLatestBackup(destination));
+
+        assertEquals("payload", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+        assertFalse(Files.exists(destination.resolve(StorageBackupBackend.MANIFEST_ENTRY)));
+        assertFalse(Files.exists(destination.resolve(StorageBackupBackend.READY_ENTRY)));
+        assertThrows(NodeLibraryException.class, () -> backend.downloadLatestBackup(destination));
     }
 
     @Test
-    void listsByNumericTimestampAndDeleteIsIdempotent(@TempDir final Path backupVolume) throws Exception {
-        createBackupShape(backupVolume.resolve("9"), true, true, true);
-        createBackupShape(backupVolume.resolve("10"), true, true, true);
-        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(
-                backupVolume);
+    void publishesAnAtomicZipAndCursor(@TempDir final Path backupVolume) throws Exception {
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        final BackupMetadata metadata = new BackupMetadata(11L, false);
 
-        assertEquals(List.of(new BackupMetadata(9L, false), new BackupMetadata(10L, false)), backend.listBackups());
+        backend.createAndUploadBackup(noOpStorageConnection(), CURSOR, metadata);
+
+        final Path archive = backupVolume.resolve("11.zip");
+        assertTrue(Files.isRegularFile(archive));
+        assertEquals(List.of(metadata), backend.listBackups());
+        assertEquals(CURSOR, ReplicationCursorStore.decode(BackupArchive.readManifest(archive)));
+    }
+
+    @Test
+    void roundTripsStorageAndCursorThroughTheVolumeArchive(
+            @TempDir final Path backupVolume,
+            @TempDir final Path root
+    ) throws Exception {
+        createArchive(backupVolume, "20.zip", "round-trip", CURSOR, true);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        final Path destination = root.resolve("destination");
+
+        backend.downloadBackup(destination, new BackupMetadata(20L, false));
+
+        assertEquals("round-trip", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+        assertEquals(CURSOR, backend.getCursorFromPreviousBackup(0).orElseThrow());
+    }
+
+    @Test
+    void deletesArchivesIdempotently(@TempDir final Path backupVolume) throws Exception {
+        createArchive(backupVolume, "9.zip", "nine", CURSOR, true);
+        createArchive(backupVolume, "10.zip", "ten", CURSOR, true);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+
         backend.deleteBackup(new BackupMetadata(10L, false));
         backend.deleteBackup(new BackupMetadata(10L, false));
+
         assertEquals(List.of(new BackupMetadata(9L, false)), backend.listBackups());
     }
 
     @Test
-    void publishesManifestAndReadyOnlyAfterStorageBackupCompletes(@TempDir final Path backupVolume) throws Exception {
-        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
-        final BackupMetadata metadata = new BackupMetadata(11L, false);
-        final ReplicationCursor cursor = new ReplicationCursor("test", null, 3L, new byte[]{7});
-        Files.createDirectories(backupVolume.resolve("11").resolve(BackupFileNames.STORAGE));
-
-        backend.createAndUploadBackup(noOpStorageConnection(), cursor, metadata);
-
-        assertEquals(List.of(metadata), backend.listBackups());
-        assertArrayEquals(ReplicationCursorStore.encode(cursor),
-                Files.readAllBytes(backupVolume.resolve("11").resolve(BackupFileNames.MANIFEST)));
-    }
-
-    @Test
-    void failedCopyDoesNotLeavePartialDestinationStorage(@TempDir final Path backupVolume, @TempDir final Path root)
+    void restoresAndDeletesUserUploadedArchive(@TempDir final Path backupVolume, @TempDir final Path root)
             throws Exception {
-        final Path source = backupVolume.resolve("12").resolve(BackupFileNames.STORAGE);
-        Files.createDirectories(source);
-        Files.writeString(source.resolve("first"), "copied before failure");
-        Files.createSymbolicLink(source.resolve("unsafe"), root.resolve("outside"));
+        createUserArchive(backupVolume, "user");
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
         final Path destination = root.resolve("destination");
 
-        assertThrows(NodelibraryException.class,
-                () -> backend.downloadBackup(destination, new BackupMetadata(12L, false)));
-        assertFalse(Files.exists(destination.resolve(BackupFileNames.STORAGE)));
+        assertTrue(backend.hasUserUploadedStorage());
+        backend.downloadUserUploadedStorage(destination);
+        assertEquals("user", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+        backend.deleteUserUploadedStorage();
+        assertFalse(backend.hasUserUploadedStorage());
     }
 
     @Test
-    void rejectsAnExistingPathReachedThroughASymbolicAncestor(@TempDir final Path root) throws Exception {
-        final Path real = root.resolve("real");
-        Files.createDirectories(real.resolve("child"));
-        final Path symbolic = root.resolve("symbolic");
-        try {
-            Files.createSymbolicLink(symbolic, real);
-        } catch (final UnsupportedOperationException | java.nio.file.FileSystemException unsupported) {
-            org.junit.jupiter.api.Assumptions.assumeTrue(false, "symbolic links are unavailable");
-        }
+    void rejectsExistingStorageDestination(@TempDir final Path backupVolume, @TempDir final Path root)
+            throws Exception {
+        createArchive(backupVolume, "12.zip", "payload", CURSOR, true);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        final Path destination = root.resolve("destination");
+        Files.createDirectories(destination.resolve(StorageBackupBackend.STORAGE_ENTRY));
 
-        assertThrows(java.io.IOException.class,
-                () -> StorageFileOperations.ensureNoSymbolicLinks(symbolic.resolve("child")));
+        assertThrows(NodeLibraryException.class,
+                () -> backend.downloadBackup(destination, new BackupMetadata(12L, false)));
     }
 
     @Test
@@ -161,7 +180,7 @@ class FilesystemVolumeBackupBackendTest {
 
             @Override
             public void createAndUploadBackup(
-                    final org.eclipse.store.storage.types.StorageConnection connection,
+                    final StorageConnection connection,
                     final ReplicationCursor cursor,
                     final BackupMetadata backup
             ) {

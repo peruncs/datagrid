@@ -30,8 +30,8 @@ public final class AeronReplicationCheckpointStore {
     public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException {
         if (path == null || checkpoint == null) throw new NullPointerException("path and checkpoint");
         /* The encoded bytes are intentionally owned by this invocation. A callback
-         * (including a crash hook) can therefore not overwrite a shared ThreadLocal
-         * buffer while AtomicFileStore is still consuming it. Checkpoint writes are
+         * (including a crash hook) can therefore not overwrite a buffer owned by
+         * this write while AtomicFileStore is still consuming it. Checkpoint writes are
          * infrequent and the fixed-size allocation is preferable to an escaping,
          * re-entrancy-sensitive mutable buffer. */
         final byte[] bytes = encode(checkpoint);
@@ -89,8 +89,9 @@ public final class AeronReplicationCheckpointStore {
             final var recordType = AeronReplicationCheckpoint.RecordType.from(Byte.toUnsignedInt(buffer.get()));
             final var mode = AeronReplicationCheckpoint.DurabilityMode.from(Byte.toUnsignedInt(buffer.get()));
             final var state = AeronReplicationCheckpoint.State.from(Byte.toUnsignedInt(buffer.get()));
-            buffer.getShort();
-            buffer.get();
+            if (buffer.getShort() != 0 || buffer.get() != 0) {
+                throw new IOException("unsupported Aeron checkpoint reserved fields");
+            }
             return new AeronReplicationCheckpoint(recordType, mode, state,
                     readUuid(buffer), readUuid(buffer), readUuid(buffer),
                     buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),

@@ -4,23 +4,23 @@ package peruncs.datagrid.cluster.node.exceptions;
 import org.eclipse.serializer.exceptions.BaseException;
 
 /// Base runtime exception for node lifecycle and storage failures.
-public class NodelibraryException extends BaseException {
+public class NodeLibraryException extends BaseException {
         /// Creates an exception without a message.
-    public NodelibraryException() {
+    public NodeLibraryException() {
         super();
     }
 
         /// Creates an exception with a message.
     ///
     /// @param message error message
-    public NodelibraryException(final String message) {
+    public NodeLibraryException(final String message) {
         super(message);
     }
 
         /// Creates an exception with a cause.
     ///
     /// @param cause underlying cause
-    public NodelibraryException(final Throwable cause) {
+    public NodeLibraryException(final Throwable cause) {
         super(cause);
     }
 
@@ -28,7 +28,7 @@ public class NodelibraryException extends BaseException {
     ///
     /// @param message error message
     /// @param cause   underlying cause
-    public NodelibraryException(final String message, final Throwable cause) {
+    public NodeLibraryException(final String message, final Throwable cause) {
         super(message, cause);
     }
 
@@ -38,7 +38,7 @@ public class NodelibraryException extends BaseException {
     /// @param cause              underlying cause
     /// @param enableSuppression  whether suppression is enabled
     /// @param writableStackTrace whether the stack trace may be written
-    public NodelibraryException(
+    public NodeLibraryException(
             final String message,
             final Throwable cause,
             final boolean enableSuppression,

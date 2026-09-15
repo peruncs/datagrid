@@ -6,7 +6,7 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryTargetDistributing;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryReplicationTarget;
 import peruncs.datagrid.cluster.storage.types.StorageTypeDictionaryExporterDistributing;
 
 import java.util.function.UnaryOperator;
@@ -24,7 +24,7 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
     private final InstanceDispatcherLogic previous;
 
     public DistributedStorageConfigurator(final StorageBinaryDataDistributor distributor) {
-        this(distributor, delegate -> StorageBinaryTargetDistributing.New(delegate, distributor), null);
+        this(distributor, delegate -> StorageBinaryReplicationTarget.New(delegate, distributor), null);
     }
 
     public DistributedStorageConfigurator(

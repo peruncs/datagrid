@@ -1,66 +1,72 @@
 package peruncs.datagrid.cluster.node.exceptions;
 
 
-import peruncs.datagrid.cluster.node.http.HttpHeader;
+import peruncs.datagrid.cluster.node.http.HttpResponseHeader;
 
 import java.util.Collection;
-import java.util.Collections;
+import java.util.List;
 
-/// When a subclass of this is thrown it should be mapped to the corresponding
-/// http status. (e.g. [InternalServerErrorException] should map to a
-/// status code 500 response)
-public abstract class HttpResponseException extends NodelibraryException {
-        /// Creates an HTTP response exception without a message.
-    protected HttpResponseException() {
-        super();
-    }
+/// Reports a node failure together with its HTTP mapping.
+public final class HttpResponseException extends NodeLibraryException {
+    private final int statusCode;
+    private final List<HttpResponseHeader> extraHeaders;
 
-        /// Creates an HTTP response exception with a message.
-    ///
-    /// @param message error message
-    protected HttpResponseException(final String message) {
-        super(message);
-    }
-
-        /// Creates an HTTP response exception with a cause.
-    ///
-    /// @param cause underlying cause
-    protected HttpResponseException(final Throwable cause) {
-        super(cause);
-    }
-
-        /// Creates an HTTP response exception with a message and cause.
-    ///
-    /// @param message error message
-    /// @param cause   underlying cause
-    protected HttpResponseException(final String message, final Throwable cause) {
-        super(message, cause);
-    }
-
-        /// Creates an HTTP response exception with full throwable settings.
-    ///
-    /// @param message            error message
-    /// @param cause              underlying cause
-    /// @param enableSuppression  whether suppression is enabled
-    /// @param writableStackTrace whether the stack trace may be written
-    protected HttpResponseException(
+    private HttpResponseException(
             final String message,
             final Throwable cause,
-            final boolean enableSuppression,
-            final boolean writableStackTrace
+            final int statusCode,
+            final List<HttpResponseHeader> extraHeaders
     ) {
-        super(message, cause, enableSuppression, writableStackTrace);
+        super(message, cause);
+        if (statusCode < 400 || statusCode > 599) {
+            throw new IllegalArgumentException("statusCode must be an HTTP error status");
+        }
+        this.statusCode = statusCode;
+        this.extraHeaders = List.copyOf(extraHeaders);
+    }
+
+        /// Creates a bad-request response.
+    public static HttpResponseException badRequest() {
+        return badRequest(null, null);
+    }
+
+        /// Creates a bad-request response with a message.
+    public static HttpResponseException badRequest(final String message) {
+        return badRequest(message, null);
+    }
+
+        /// Creates a bad-request response with a message and cause.
+    public static HttpResponseException badRequest(final String message, final Throwable cause) {
+        return new HttpResponseException(message, cause, 400, List.of());
+    }
+
+        /// Creates a response for a node that is not the distributor.
+    public static HttpResponseException notADistributor(final String message) {
+        return new HttpResponseException(message, null, 400, List.of(
+                new HttpResponseHeader("StorageNode-NAD", Boolean.TRUE.toString())));
+    }
+
+        /// Creates an internal-server-error response.
+    public static HttpResponseException internalServerError() {
+        return new HttpResponseException(null, null, 500, List.of());
+    }
+
+        /// Creates an internal-server-error response with a cause.
+    public static HttpResponseException internalServerError(final Throwable cause) {
+        return new HttpResponseException(null, cause, 500, List.of());
     }
 
         /// Returns the HTTP status code represented by this exception.
     ///
     /// @return HTTP status code
-    public abstract int statusCode();
+    public int statusCode() {
+        return this.statusCode;
+    }
 
         /// Returns additional response headers.
     ///
     /// @return response headers
-    public Collection<HttpHeader> extraHeaders() {
-        return Collections.emptyList();
+    public Collection<HttpResponseHeader> extraHeaders() {
+        return this.extraHeaders;
     }
 }

@@ -14,13 +14,10 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.*;
 import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
-import peruncs.datagrid.cluster.storage.types.DistributedStorage;
-import peruncs.datagrid.cluster.storage.types.ObjectGraphUpdateHandler;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.types.*;
 
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -102,11 +99,11 @@ class AeronStoreIntegrationIT {
              StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(cursorPath)) {
             final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
             final EmbeddedStorageManager reader = readerFoundation.start();
-            final ClusterStorageBinaryDataMerger merger = ClusterStorageBinaryDataMerger.New(
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
                     readerFoundation.getConnectionFoundation(), reader.createConnection(),
                     ObjectGraphUpdateHandler.Synchronized(), 0L, 1L);
-            final ClusterStorageBinaryDataPacketAcceptor acceptor = ClusterStorageBinaryDataPacketAcceptor.New(merger);
-            final ClusterStorageBinaryDataClient client = transport.client(acceptor, "store", new AfterDataMessageConsumedListener() {
+            final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(merger);
+            final StorageBinaryDataClient client = transport.client(acceptor, "store", new AfterDataMessageConsumedListener() {
                         @Override
                         public void onApplied(final ReplicationCursor cursor) {
                             cursorManager.set(cursor);
@@ -199,7 +196,7 @@ class AeronStoreIntegrationIT {
             throws Exception {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
-        final Process child = new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+        final Process child = new ProcessBuilder(java, "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", classpath,
                 "-Ddg.aeron.store.root=%s".formatted(root),
                 "-Ddg.aeron.store.cluster=%s".formatted(clusterId),
@@ -257,12 +254,12 @@ class AeronStoreIntegrationIT {
         return EmbeddedStorage.Foundation(configuration);
     }
 
-    static NodelibraryPropertiesProvider properties(
+    static NodeLibraryPropertiesProvider properties(
             final Path root, final UUID clusterId, final UUID nodeId, final UUID generation) {
         return properties(root, clusterId, nodeId, generation, "writer", -1L, 40124, 40123, 40125);
     }
 
-    static NodelibraryPropertiesProvider properties(
+    static NodeLibraryPropertiesProvider properties(
             final Path root,
             final UUID clusterId,
             final UUID nodeId,
@@ -277,7 +274,7 @@ class AeronStoreIntegrationIT {
                 controlPort, livePort, watermarkPort, null, Set.of());
     }
 
-    static NodelibraryPropertiesProvider properties(
+    static NodeLibraryPropertiesProvider properties(
             final Path root,
             final UUID clusterId,
             final UUID nodeId,
@@ -290,7 +287,7 @@ class AeronStoreIntegrationIT {
             final String retentionSecret,
             final Set<UUID> retentionReaders
     ) {
-        return new NodelibraryPropertiesProvider.Env() {
+        return new NodeLibraryPropertiesProvider.Env() {
             @Override
             public String replicationRole() {
                 return role;
@@ -723,7 +720,7 @@ class AeronStoreIntegrationIT {
         final UUID clusterId = UUID.randomUUID();
         final UUID nodeId = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final NodelibraryPropertiesProvider properties = properties(root, clusterId, nodeId, generation);
+        final NodeLibraryPropertiesProvider properties = properties(root, clusterId, nodeId, generation);
         try {
             final Root value = new Root();
             value.values.addAll(List.of("one", "two", "three", "four"));
@@ -786,14 +783,13 @@ class AeronStoreIntegrationIT {
         final UUID clusterId = UUID.randomUUID();
         final UUID nodeId = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final NodelibraryPropertiesProvider properties = properties(root, clusterId, nodeId, generation);
+        final NodeLibraryPropertiesProvider properties = properties(root, clusterId, nodeId, generation);
         try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(properties)) {
             final AtomicInteger dictionaryChunks = new AtomicInteger();
-            AeronCrashHooks.install((name, ignored) ->
+            AeronCrashHooks.callWithHook((name, ignored) ->
             {
                 if ("AFTER_DICTIONARY_CHUNKS".equals(name)) dictionaryChunks.incrementAndGet();
-            });
-            try {
+            }, () -> {
                 final StorageBinaryDataDistributor distributor = transport.distributor("store", false);
                 final AtomicBoolean rejectNext = new AtomicBoolean();
                 final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory = delegate ->
@@ -823,9 +819,8 @@ class AeronStoreIntegrationIT {
                 } finally {
                     manager.shutdown();
                 }
-            } finally {
-                AeronCrashHooks.clear();
-            }
+                return null;
+            });
         } finally {
             delete(root);
         }
@@ -856,8 +851,8 @@ class AeronStoreIntegrationIT {
         private final ClusterReplicationTransport transport;
         private final StoredReplicationCursorManager cursorManager;
         private final EmbeddedStorageManager storage;
-        private final ClusterStorageBinaryDataPacketAcceptor acceptor;
-        private final ClusterStorageBinaryDataClient client;
+        private final StorageBinaryDataPacketAcceptor acceptor;
+        private final StorageBinaryDataClient client;
         private boolean closed;
 
         private ReaderNode(
@@ -878,10 +873,10 @@ class AeronStoreIntegrationIT {
                 this.cursorManager = StoredReplicationCursorManager.NewAtomic(nodeRoot.resolve("cursor"));
                 final EmbeddedStorageFoundation<?> foundation = foundation(storePath);
                 this.storage = foundation.start();
-                final ClusterStorageBinaryDataMerger merger = ClusterStorageBinaryDataMerger.New(
+                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
                         foundation.getConnectionFoundation(), this.storage.createConnection(),
                         ObjectGraphUpdateHandler.Synchronized(), 0L, 1L);
-                this.acceptor = ClusterStorageBinaryDataPacketAcceptor.New(merger);
+                this.acceptor = StorageBinaryDataPacketAcceptor.New(merger);
                 this.client = this.transport.client(this.acceptor, "store", new AfterDataMessageConsumedListener() {
                     @Override
                     public void onApplied(final ReplicationCursor cursor) {

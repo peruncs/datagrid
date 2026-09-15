@@ -2,9 +2,9 @@ package peruncs.datagrid.cluster.storage.aeron.reader;
 
 import io.aeron.FragmentAssembler;
 import io.aeron.Subscription;
+import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.util.UUID;
@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /// Test-only live reader used by low-level UDP tests. Production clustering
 /// uses [StorageBinaryDataClientAeronArchive]; both readers share
 /// [TransactionAssembler] for commit-gated delivery and CRC validation.
-public final class StorageBinaryDataClientAeron implements StorageBinaryDataClient {
+public final class StorageBinaryDataClientAeron implements Disposable {
     private final Subscription subscription;
     private final TransactionAssembler assembler;
     private final AtomicBoolean active = new AtomicBoolean();
@@ -45,13 +45,11 @@ public final class StorageBinaryDataClientAeron implements StorageBinaryDataClie
         }
     }
 
-    @Override
     public synchronized void start() {
         if (this.disposed) throw new IllegalStateException("Aeron reader is disposed");
         if (this.active.getAndSet(true)) return;
         this.stopped = new CountDownLatch(1);
-        this.thread = new Thread(this::run, "datagrid-aeron-reader");
-        this.thread.setDaemon(true);
+        this.thread = Thread.ofVirtual().name("datagrid-aeron-reader").unstarted(this::run);
         this.thread.start();
     }
 

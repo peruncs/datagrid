@@ -76,11 +76,12 @@ class ClusteredCacheRegionFactoryTest {
     }
 
     @Test
-    void resolveSerializationTypesProviderAcceptsPublicConstructor() {
+    void resolveSerializationTypesProviderAcceptsConfiguredInstance() {
         final ClusteredCacheRegionFactory factory = new ClusteredCacheRegionFactory();
 
         final SerializationTypesProvider provider = factory.resolveSerializationTypesProvider(
-                null, Map.of(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER, PublicTypesProvider.class));
+                null, Map.of(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER,
+                        new PublicTypesProvider()));
 
         assertInstanceOf(PublicTypesProvider.class, provider);
     }
@@ -92,7 +93,7 @@ class ClusteredCacheRegionFactoryTest {
         assertThrows(CacheException.class,
                 () -> factory.resolveSerializationTypesProvider(null,
                         Map.of(ClusteredConfigurationPropertyNames.SERIALIZATION_TYPES_PROVIDER, String.class)),
-                "a configured class with the wrong serialization contract must fail at configuration time");
+                "reflective or wrongly typed providers must fail at configuration time");
     }
 
         /// Types provider with a public no-argument constructor.
@@ -102,7 +103,7 @@ class ClusteredCacheRegionFactoryTest {
 
         @Override
         public Collection<Class<?>> provideTypes() {
-            return List.of();
+            return List.of(TimestampsRegionUpdateMessage.class);
         }
     }
 }

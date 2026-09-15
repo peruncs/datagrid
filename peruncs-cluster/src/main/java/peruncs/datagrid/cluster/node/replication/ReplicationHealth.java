@@ -1,14 +1,14 @@
 package peruncs.datagrid.cluster.node.replication;
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 /// Aeron transport health.
 public interface ReplicationHealth extends AutoCloseable {
         /// Returns true only when the node may serve the configured replication role.
     ///
     /// @return `true` when ready
-    /// @throws NodelibraryException if readiness cannot be checked
-    boolean isReady() throws NodelibraryException;
+    /// @throws NodeLibraryException if readiness cannot be checked
+    boolean isReady() throws NodeLibraryException;
 
         /// Returns true when the provider is operating without a fatal condition.
     ///
@@ -55,7 +55,7 @@ public interface ReplicationHealth extends AutoCloseable {
     }
 
         /// Initializes provider-side health probes and counters.
-    void init() throws NodelibraryException;
+    void init() throws NodeLibraryException;
 
     @Override
     void close();

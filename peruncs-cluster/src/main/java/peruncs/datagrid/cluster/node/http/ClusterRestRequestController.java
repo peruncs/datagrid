@@ -1,12 +1,10 @@
 package peruncs.datagrid.cluster.node.http;
 
 import peruncs.datagrid.cluster.node.ClusterNodeManager;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.StorageNodeManager;
 import peruncs.datagrid.cluster.node.backup.BackupNodeManager;
-import peruncs.datagrid.cluster.node.exceptions.BadRequestException;
 import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
-import peruncs.datagrid.cluster.node.exceptions.InternalServerErrorException;
 import peruncs.datagrid.cluster.node.http.StorageNodeRestRouteConfigurations.PostBackup;
 
 import java.util.function.Supplier;
@@ -25,7 +23,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
     /// @return request controller
     static ClusterRestRequestController StorageNode(
             final StorageNodeManager storageNodeManager,
-            final NodelibraryPropertiesProvider properties
+            final NodeLibraryPropertiesProvider properties
     ) {
         return new StorageNode(notNull(storageNodeManager), notNull(properties));
     }
@@ -44,7 +42,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
     /// @return request controller
     static ClusterRestRequestController BackupNode(
             final BackupNodeManager backupNodeManager,
-            final NodelibraryPropertiesProvider properties
+            final NodeLibraryPropertiesProvider properties
     ) {
         return new BackupNode(notNull(backupNodeManager), notNull(properties));
     }
@@ -59,8 +57,6 @@ public interface ClusterRestRequestController extends AutoCloseable {
     ///
     /// @throws HttpResponseException if the request fails
     void postActivateDistributorStart() throws HttpResponseException;
-
-    // TODO: Rename to get statistics or monitoring etc.
 
         /// Finishes distributor activation.
     ///
@@ -88,9 +84,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
     ///
     /// @return metrics text
     /// @throws HttpResponseException if the request fails
-    default String getReplicationMetrics() throws HttpResponseException {
-        return "";
-    }
+    String getReplicationMetrics() throws HttpResponseException;
 
         /// Starts a backup.
     ///
@@ -139,13 +133,13 @@ public interface ClusterRestRequestController extends AutoCloseable {
         private static final System.Logger LOGGER = System.getLogger(ClusterRestRequestController.class.getName());
 
         private final ClusterNodeManager nodeManager;
-        private final NodelibraryPropertiesProvider properties;
+        private final NodeLibraryPropertiesProvider properties;
 
                 /// Creates the shared request controller.
         ///
         /// @param nodeManager node manager
         /// @param properties  node properties
-        protected Abstract(final ClusterNodeManager nodeManager, final NodelibraryPropertiesProvider properties) {
+        protected Abstract(final ClusterNodeManager nodeManager, final NodeLibraryPropertiesProvider properties) {
             this.nodeManager = nodeManager;
             this.properties = properties;
         }
@@ -175,7 +169,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
             this.handleRequest(() ->
             {
                 if (!this.nodeManager.isHealthy()) {
-                    throw new InternalServerErrorException();
+                    throw HttpResponseException.internalServerError();
                 }
             });
         }
@@ -185,7 +179,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
             this.handleRequest(() ->
             {
                 if (!this.nodeManager.isReady()) {
-                    throw new InternalServerErrorException();
+                    throw HttpResponseException.internalServerError();
                 }
             });
         }
@@ -195,15 +189,12 @@ public interface ClusterRestRequestController extends AutoCloseable {
             return this.handleRequest(() ->
             {
                 final long storageSizeBytes = this.nodeManager.readStorageSizeBytes();
-                return String.format(
-                        """
-                                # HELP cluster_storage_used_bytes How many bytes are currently used up by the storage.
-                                # TYPE cluster_storage_used_bytes gauge
-                                cluster_storage_used_bytes{namespace="%s",pod="%s"} %s""",
-                        metricLabel(this.properties.myNamespace()),
-                        metricLabel(this.properties.myPodName()),
-                        storageSizeBytes
-                );
+                final StringBuilder metrics = new StringBuilder(256);
+                appendMetric(metrics, "cluster_storage_used_bytes",
+                        "How many bytes are currently used up by the storage.",
+                        "namespace='%s',pod='%s'".formatted(metricLabel(this.properties.myNamespace()), metricLabel(this.properties.myPodName())),
+                        storageSizeBytes);
+                return metrics.toString();
             });
         }
 
@@ -216,8 +207,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         /// @return Prometheus exposition text
         @Override
         public String getReplicationMetrics() throws HttpResponseException {
-            return this.handleRequest(() ->
-            {
+            return this.handleRequest(() -> {
                 final long current = this.nodeManager.getCurrentMessageIndex();
                 final long latest = this.nodeManager.getLatestMessageIndex();
                 final long lag = Math.max(0, latest - current);
@@ -227,55 +217,78 @@ public interface ClusterRestRequestController extends AutoCloseable {
                 final long appliedSequence = this.nodeManager.getAppliedSequence();
                 final String transport = metricLabel(this.nodeManager.getReplicationTransport());
                 final String state = this.nodeManager.getReplicationState().name().toLowerCase(java.util.Locale.ROOT);
-                return String.format(
-                        "# HELP cluster_replication_current_sequence Last committed sequence applied locally.\n# TYPE cluster_replication_current_sequence gauge\ncluster_replication_current_sequence{transport=\"%s\"} %d\n# HELP cluster_replication_latest_sequence Latest writer sequence observed.\n# TYPE cluster_replication_latest_sequence gauge\ncluster_replication_latest_sequence{transport=\"%s\"} %d\n# HELP cluster_replication_lag_transactions Transactions behind latest.\n# TYPE cluster_replication_lag_transactions gauge\ncluster_replication_lag_transactions{transport=\"%s\"} %d\n# HELP cluster_replication_state Provider lifecycle state (one label is 1).\n# TYPE cluster_replication_state gauge\ncluster_replication_state{transport=\"%s\",state=\"%s\"} 1\n# HELP cluster_replication_ready Whether the node is ready.\n# TYPE cluster_replication_ready gauge\ncluster_replication_ready{transport=\"%s\"} %d\n# HELP cluster_replication_healthy Whether the node is healthy.\n# TYPE cluster_replication_healthy gauge\ncluster_replication_healthy{transport=\"%s\"} %d\n# HELP cluster_replication_archive_usable_space_bytes Archive free bytes, or -1 when unavailable.\n# TYPE cluster_replication_archive_usable_space_bytes gauge\ncluster_replication_archive_usable_space_bytes{transport=\"%s\"} %d\n# HELP cluster_replication_writer_durable_position Last terminal recording position, or -1.\n# TYPE cluster_replication_writer_durable_position gauge\ncluster_replication_writer_durable_position{transport=\"%s\"} %d\n# HELP cluster_replication_writer_durable_sequence Last terminal writer sequence, or -1.\n# TYPE cluster_replication_writer_durable_sequence gauge\ncluster_replication_writer_durable_sequence{transport=\"%s\"} %d\n# HELP cluster_replication_applied_sequence Last sequence applied by this node, or -1.\n# TYPE cluster_replication_applied_sequence gauge\ncluster_replication_applied_sequence{transport=\"%s\"} %d",
-                        transport, current, transport, latest, transport, lag, transport, state,
-                        transport, this.nodeManager.isReady() ? 1 : 0,
-                        transport, this.nodeManager.isHealthy() ? 1 : 0,
-                        transport, archiveFree, transport, durablePosition, transport, durableSequence,
-                        transport, appliedSequence
-                );
+                final String transportLabels = "transport=\"" + transport + "\"";
+                final StringBuilder metrics = new StringBuilder(2048);
+                appendMetric(metrics, "cluster_replication_current_sequence",
+                        "Last committed sequence applied locally.", transportLabels, current);
+                appendMetric(metrics, "cluster_replication_latest_sequence",
+                        "Latest writer sequence observed.", transportLabels, latest);
+                appendMetric(metrics, "cluster_replication_lag_transactions",
+                        "Transactions behind latest.", transportLabels, lag);
+                appendMetric(metrics, "cluster_replication_state",
+                        "Provider lifecycle state (one label is 1).",
+                        transportLabels + ",state=\"" + state + "\"", 1);
+                appendMetric(metrics, "cluster_replication_ready", "Whether the node is ready.",
+                        transportLabels, this.nodeManager.isReady() ? 1 : 0);
+                appendMetric(metrics, "cluster_replication_healthy", "Whether the node is healthy.",
+                        transportLabels, this.nodeManager.isHealthy() ? 1 : 0);
+                appendMetric(metrics, "cluster_replication_archive_usable_space_bytes",
+                        "Archive free bytes, or -1 when unavailable.", transportLabels, archiveFree);
+                appendMetric(metrics, "cluster_replication_writer_durable_position",
+                        "Last terminal recording position, or -1.", transportLabels, durablePosition);
+                appendMetric(metrics, "cluster_replication_writer_durable_sequence",
+                        "Last terminal writer sequence, or -1.", transportLabels, durableSequence);
+                appendMetric(metrics, "cluster_replication_applied_sequence",
+                        "Last sequence applied by this node, or -1.", transportLabels, appliedSequence);
+                return metrics.toString();
             });
+        }
+
+        private static void appendMetric(final StringBuilder metrics, final String name,
+                                         final String help, final String labels, final long value) {
+            metrics.append("# HELP ").append(name).append(' ').append(help).append('\n')
+                    .append("# TYPE ").append(name).append(" gauge\n")
+                    .append(name).append('{').append(labels).append("} ").append(value).append('\n');
         }
 
         @Override
         public boolean postActivateDistributorFinish() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public boolean getDistributor() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public boolean getUpdates() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postResumeUpdates() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postActivateDistributorStart() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postBackup(PostBackup.Body body) throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public boolean getBackup() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postUpdates() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
                 /// Runs a request and maps failures to HTTP exceptions.
@@ -292,7 +305,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
                 }
 
                 LOGGER.log(System.Logger.Level.ERROR, "Failed to handle request", e);
-                throw new InternalServerErrorException();
+                throw HttpResponseException.internalServerError();
             }
         }
 
@@ -312,7 +325,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
                 }
 
                 LOGGER.log(System.Logger.Level.ERROR, "Failed to handle request", e);
-                throw new InternalServerErrorException();
+                throw HttpResponseException.internalServerError();
             }
         }
     }
@@ -322,7 +335,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         private static final System.Logger LOGGER = System.getLogger(StorageNode.class.getName());
         private final StorageNodeManager storageNodeManager;
 
-        private StorageNode(final StorageNodeManager storageNodeManager, final NodelibraryPropertiesProvider properties) {
+        private StorageNode(final StorageNodeManager storageNodeManager, final NodeLibraryPropertiesProvider properties) {
             super(storageNodeManager, properties);
             this.storageNodeManager = storageNodeManager;
         }
@@ -359,7 +372,7 @@ public interface ClusterRestRequestController extends AutoCloseable {
         private static final System.Logger LOGGER = System.getLogger(BackupNode.class.getName());
         private final BackupNodeManager backupNodeManager;
 
-        private BackupNode(final BackupNodeManager backupNodeManager, final NodelibraryPropertiesProvider properties) {
+        private BackupNode(final BackupNodeManager backupNodeManager, final NodeLibraryPropertiesProvider properties) {
             super(backupNodeManager, properties);
             this.backupNodeManager = backupNodeManager;
         }
@@ -367,6 +380,9 @@ public interface ClusterRestRequestController extends AutoCloseable {
         @Override
         public void postBackup(PostBackup.Body body) throws HttpResponseException {
             LOGGER.log(System.Logger.Level.TRACE, "Handling postDataGridBackup request");
+            if (body == null || body.getUseManualSlot() == null) {
+                throw HttpResponseException.badRequest("backup request must specify useManualSlot");
+            }
             this.handleRequest(() -> this.backupNodeManager.createStorageBackup(unbox(body.getUseManualSlot())));
         }
 
@@ -412,67 +428,72 @@ public interface ClusterRestRequestController extends AutoCloseable {
 
         @Override
         public boolean getDistributor() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postActivateDistributorStart() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public boolean postActivateDistributorFinish() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void getHealth() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void getHealthReady() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public String getStorageBytes() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
+        }
+
+        @Override
+        public String getReplicationMetrics() throws HttpResponseException {
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postBackup(PostBackup.Body body) throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public boolean getBackup() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postUpdates() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public boolean getUpdates() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postResumeUpdates() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public void postGc() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override
         public boolean getGc() throws HttpResponseException {
-            throw new BadRequestException();
+            throw HttpResponseException.badRequest();
         }
 
         @Override

@@ -1,0 +1,207 @@
+package peruncs.datagrid.cluster.node.backup;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
+import peruncs.datagrid.cluster.node.store.StorageFileOperations;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/// Verifies archive safety limits and the stable backup archive format.
+class BackupArchiveTest {
+    private static void writeArchive(final Path archive, final Entry... entries) throws Exception {
+        try (OutputStream file = Files.newOutputStream(archive);
+             ZipOutputStream zip = new ZipOutputStream(file)) {
+            for (final Entry source : entries) {
+                final ZipEntry entry = new ZipEntry(source.name());
+                if (source.data() != null) entry.setSize(source.data().length);
+                zip.putNextEntry(entry);
+                if (source.data() != null) zip.write(source.data());
+                zip.closeEntry();
+            }
+        }
+    }
+
+    @Test
+    void rejectsTraversalBeforeInstallingStorage(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("unsafe.zip");
+        writeArchive(archive, new Entry("../escaped", "bad"));
+
+        assertThrows(NodeLibraryException.class,
+                () -> BackupArchive.extractArchive(root.resolve("extracted"), archive, true));
+        assertFalse(Files.exists(root.resolve("escaped")));
+    }
+
+    @Test
+    void extractsValidArchive(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("valid.zip");
+        writeArchive(archive,
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload"),
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
+                new Entry(StorageBackupBackend.READY_ENTRY, ""));
+
+        BackupArchive.extractArchive(root.resolve("extracted"), archive, true);
+
+        assertEquals("payload", Files.readString(root.resolve("extracted").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+    }
+
+    @Test
+    void readsCursorManifestWithoutExtractingStorage(@TempDir final Path root) throws Exception {
+        final ReplicationCursor expected = new ReplicationCursor("test", null, 9L, new byte[]{4, 5});
+        final Path archive = root.resolve("cursor.zip");
+        writeArchive(archive,
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, ReplicationCursorStore.encode(expected)),
+                new Entry(StorageBackupBackend.READY_ENTRY, (String) null));
+
+        assertEquals(expected, ReplicationCursorStore.decode(BackupArchive.readManifest(archive)));
+        assertFalse(Files.exists(root.resolve("extracted")));
+    }
+
+    @Test
+    void rejectsDuplicateArchiveEntries(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("duplicate.zip");
+        writeDuplicateArchive(archive);
+
+        final Path extracted = root.resolve("extracted");
+        assertThrows(NodeLibraryException.class,
+                () -> BackupArchive.extractArchive(extracted, archive, true));
+        StorageFileOperations.cleanup(extracted, null);
+        assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+    }
+
+    @Test
+    void rejectsMissingManifest(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("missing-manifest.zip");
+        writeArchive(archive, new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null));
+
+        assertThrows(IOException.class, () -> BackupArchive.readManifest(archive));
+    }
+
+    @Test
+    void rejectsManifestLargerThanLimit(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("large-manifest.zip");
+        writeArchive(archive, new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[(1 << 20) + 1]));
+
+        assertThrows(IOException.class, () -> BackupArchive.readManifest(archive));
+    }
+
+    @Test
+    void rejectsMalformedBackupFilename() {
+        assertFalse(BackupArchive.isBackupFileName("123.evil.zip"));
+        assertThrows(NodeLibraryException.class,
+                () -> BackupArchive.parseMetadata("123.evil.zip", Path.of("backups")));
+    }
+
+    private static void writeDuplicateArchive(final Path archive) throws IOException {
+        final Entry[] entries = {
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "first"),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "second"),
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
+                new Entry(StorageBackupBackend.READY_ENTRY, (String) null)
+        };
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        final int[] offsets = new int[entries.length];
+        for (int index = 0; index < entries.length; index++) {
+            offsets[index] = bytes.size();
+            writeLocalEntry(bytes, entries[index]);
+        }
+        final int centralDirectoryOffset = bytes.size();
+        for (int index = 0; index < entries.length; index++) {
+            writeCentralEntry(bytes, entries[index], offsets[index]);
+        }
+        final int centralDirectoryLength = bytes.size() - centralDirectoryOffset;
+        writeLeInt(bytes, 0x06054b50);
+        writeLeShort(bytes, 0);
+        writeLeShort(bytes, 0);
+        writeLeShort(bytes, entries.length);
+        writeLeShort(bytes, entries.length);
+        writeLeInt(bytes, centralDirectoryLength);
+        writeLeInt(bytes, centralDirectoryOffset);
+        writeLeShort(bytes, 0);
+        Files.write(archive, bytes.toByteArray());
+    }
+
+    private static void writeLocalEntry(final OutputStream output, final Entry entry) throws IOException {
+        final byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        final byte[] data = entry.data() == null ? new byte[0] : entry.data();
+        writeLeInt(output, 0x04034b50);
+        writeLeShort(output, 20);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeInt(output, crc32(data));
+        writeLeInt(output, data.length);
+        writeLeInt(output, data.length);
+        writeLeShort(output, name.length);
+        writeLeShort(output, 0);
+        output.write(name);
+        output.write(data);
+    }
+
+    private static void writeCentralEntry(final OutputStream output, final Entry entry, final int offset)
+            throws IOException {
+        final byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        final byte[] data = entry.data() == null ? new byte[0] : entry.data();
+        writeLeInt(output, 0x02014b50);
+        writeLeShort(output, 20);
+        writeLeShort(output, 20);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeInt(output, crc32(data));
+        writeLeInt(output, data.length);
+        writeLeInt(output, data.length);
+        writeLeShort(output, name.length);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeShort(output, 0);
+        writeLeInt(output, entry.name().endsWith("/") ? 0x10 : 0);
+        writeLeInt(output, offset);
+        output.write(name);
+    }
+
+    private static int crc32(final byte[] data) {
+        final CRC32 crc = new CRC32();
+        crc.update(data);
+        return (int) crc.getValue();
+    }
+
+    private static void writeLeShort(final OutputStream output, final int value) throws IOException {
+        output.write(value & 0xff);
+        output.write((value >>> 8) & 0xff);
+    }
+
+    private static void writeLeInt(final OutputStream output, final int value) throws IOException {
+        writeLeShort(output, value);
+        writeLeShort(output, value >>> 16);
+    }
+
+    private record Entry(String name, byte[] data) {
+        private Entry(final String name, final String data) {
+            this(name, data == null ? null : data.getBytes(StandardCharsets.UTF_8));
+        }
+
+        private Entry(final String name, final byte[] data) {
+            this.name = name;
+            this.data = data == null ? null : data.clone();
+        }
+    }
+}

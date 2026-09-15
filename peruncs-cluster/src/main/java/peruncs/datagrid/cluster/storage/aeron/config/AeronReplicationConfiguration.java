@@ -1,9 +1,11 @@
 package peruncs.datagrid.cluster.storage.aeron.config;
 
+import io.aeron.driver.Configuration;
+import io.aeron.logbuffer.FrameDescriptor;
 import org.agrona.BitUtil;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
-import peruncs.datagrid.cluster.storage.types.ReplicationLimits;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataMessage;
 
 import java.util.Objects;
 import java.util.Properties;
@@ -25,7 +27,7 @@ public final class AeronReplicationConfiguration {
         /// Default largest accepted transaction in bytes.
     public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
         /// Hard upper bound for the largest accepted transaction in bytes.
-    public static final int MAX_SUPPORTED_TRANSACTION_BYTES = ReplicationLimits.MAX_MESSAGE_BYTES;
+    public static final int MAX_SUPPORTED_TRANSACTION_BYTES = StorageBinaryDataMessage.MAX_MESSAGE_LENGTH;
     private static final String PREFIX = "eclipsestore.distribution.aeron.";
         /// Property that sets the Aeron term length in bytes.
     public static final String TERM_LENGTH_PROPERTY = PREFIX + "term-length";
@@ -179,7 +181,7 @@ public final class AeronReplicationConfiguration {
     }
 
     private static int maxMessageLengthForTermLength(final int termLength) {
-        return Math.min(termLength / 8, 16 * 1024 * 1024);
+        return Math.min(FrameDescriptor.computeMaxMessageLength(termLength), 16 * 1024 * 1024);
     }
 
         /// Returns the Aeron term length in bytes.
@@ -377,8 +379,10 @@ public final class AeronReplicationConfiguration {
             if (!BitUtil.isPowerOfTwo(this.termLength) || this.termLength < 64 * 1024) {
                 throw new IllegalArgumentException("termLength must be a power of two >= 64 KiB");
             }
-            if (this.mtuLength < 512 || this.mtuLength > 64 * 1024 || (this.mtuLength & 7) != 0) {
-                throw new IllegalArgumentException("mtuLength must be an aligned value between 512 and 65536");
+            try {
+                Configuration.validateMtuLength(this.mtuLength);
+            } catch (final RuntimeException failure) {
+                throw new IllegalArgumentException("Invalid Aeron MTU length: " + this.mtuLength, failure);
             }
             if (this.maxTransactionBytes <= 0 || this.maxTransactionBytes > MAX_SUPPORTED_TRANSACTION_BYTES) {
                 throw new IllegalArgumentException(
@@ -388,9 +392,9 @@ public final class AeronReplicationConfiguration {
                 throw new IllegalArgumentException("chunkSize must be positive and <= maxTransactionBytes");
             }
             final long packetCount = (this.maxTransactionBytes + (long) this.chunkSize - 1L) / this.chunkSize;
-            if (packetCount > ReplicationLimits.MAX_PACKET_COUNT) {
+            if (packetCount > StorageBinaryDataMessage.MAX_PACKET_COUNT) {
                 throw new IllegalArgumentException(
-                        "maxTransactionBytes requires more than %s packets".formatted(ReplicationLimits.MAX_PACKET_COUNT));
+                        "maxTransactionBytes requires more than %s packets".formatted(StorageBinaryDataMessage.MAX_PACKET_COUNT));
             }
             if (this.offerTimeoutNanos <= 0 || this.recordingStartTimeoutNanos <= 0 ||
                 this.recordedPositionTimeoutNanos <= 0 || this.recordingStopTimeoutNanos <= 0 ||

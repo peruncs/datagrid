@@ -44,7 +44,6 @@ public abstract class AeronClusteredCacheMessageSender
     private final AeronClusteredCacheSenderSequence.SequenceLease sequence;
     private final Object sequenceLock;
     private final Runnable releaseSequence;
-    private final Serializer<byte[]> serializer;
     private final long publishTimeoutNanos;
     private final int maxPayloadBytes;
     /* Every publication is serialized by sequenceLock, so one stateful idle
@@ -87,7 +86,7 @@ public abstract class AeronClusteredCacheMessageSender
         this.sequence = sequence;
         this.sequenceLock = sequenceLock;
         this.releaseSequence = releaseSequence;
-        this.serializer = serializer;
+        java.util.Objects.requireNonNull(serializer, "serializer");
         this.publishTimeoutNanos = publishTimeoutNanos;
         this.maxPayloadBytes = maxPayloadBytes;
     }
@@ -97,9 +96,9 @@ public abstract class AeronClusteredCacheMessageSender
     /// @param resources           shared Aeron resources for this node
     /// @param senderId            sender identity used so the node ignores its own frames
     /// @param sequence            sequence source shared by every sender of this identity
-    /// @param serializer          serializer shared with the receiver
+    /// @param serializer          configured cache serializer contract
     /// @param publishTimeoutNanos maximum time to wait for the publication to accept a frame
-    /// @param maxPayloadBytes     maximum accepted serialized payload size
+    /// @param maxPayloadBytes     maximum accepted payload size
     /// @return timestamp-cache sender
     static AeronClusteredCacheMessageSender UpdateTimestamps(
             final AeronClusteredCacheResources resources,
@@ -148,8 +147,8 @@ public abstract class AeronClusteredCacheMessageSender
         for (final CacheEntryEvent<?, ?> event : events) {
             final byte[] payload;
             try {
-                payload = this.serializer.serialize(this.createMessage(event));
-            } catch (final Exception failure) {
+                payload = AeronClusteredCachePayloadCodec.encode(this.createMessage(event));
+            } catch (final RuntimeException failure) {
                 throw new CacheEntryListenerException("Failed to serialize clustered-cache message", failure);
             }
             this.publish(payload);
@@ -222,7 +221,8 @@ public abstract class AeronClusteredCacheMessageSender
         /// Returns the sender-owned off-heap buffer that fits the given payload,
     /// growing (and releasing the previous) buffer when needed.
     private UnsafeBuffer scratchFor(final int payloadLength) {
-        final int required = AeronClusteredCacheMessageCodec.HEADER_LENGTH + payloadLength;
+        final int required = AeronClusteredCacheMessageCodec.HEADER_LENGTH +
+                AeronClusteredCacheMessageCodec.CRC_LENGTH + payloadLength;
         UnsafeBuffer buffer = this.scratch;
         if (buffer == null || buffer.capacity() < required) {
             this.releaseScratch();

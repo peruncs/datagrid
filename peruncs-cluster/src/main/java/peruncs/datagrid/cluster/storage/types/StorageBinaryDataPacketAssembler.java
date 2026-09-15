@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.storage.types;
 
-import org.eclipse.serializer.memory.XMemory;
-
 import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -59,14 +59,14 @@ public final class StorageBinaryDataPacketAssembler {
         for (final StorageBinaryDataMessage message : messages) {
             if (last != null && (last.type() != message.type() ||
                                  message.type() == StorageBinaryDataMessage.MessageType.TYPE_DICTIONARY)) {
-                sender.accept(last, List.copyOf(buffers));
+                sender.accept(last, buffers);
                 buffers.clear();
             }
             buffers.add(message.data());
             last = message;
         }
         if (last != null) {
-            sender.accept(last, List.copyOf(buffers));
+            sender.accept(last, buffers);
         }
     }
 
@@ -78,7 +78,15 @@ public final class StorageBinaryDataPacketAssembler {
         if (data == null || data.remaining() > StorageBinaryDataMessage.MAX_MESSAGE_LENGTH) {
             throw new StorageBinaryDataException("type dictionary exceeds maximum message length");
         }
-        return new String(XMemory.toArray(data.duplicate()), StandardCharsets.UTF_8);
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(data.duplicate())
+                    .toString();
+        } catch (final CharacterCodingException failure) {
+            throw new StorageBinaryDataException("type dictionary is not valid UTF-8", failure);
+        }
     }
 
         /// Result of consuming a packet batch, including a possibly incomplete message.

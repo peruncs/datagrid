@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies the shared allocation-free CRC32C helper.
 class Crc32cTest {
-        /// A reused thread-local accumulator must start each message from zero.
+        /// A caller-owned accumulator must start each message from zero.
     @Test
     void accumulatorResetsBetweenMessages() {
         final var first = Crc32c.accumulator();

@@ -49,21 +49,22 @@ import static peruncs.datagrid.cache.types.ClusteredCachePropertyParsers.*;
 /// publication to accept a frame and fails the local cache operation on timeout.
 /// The offer timeout bounds the publication handshake; the driver timeout
 /// bounds the Aeron client's connection to the MediaDriver separately.
-public class AeronClusteredCacheMessageComProvider {
+public class AeronClusteredCacheMessageCommunicationProvider {
     private static final System.Logger LOGGER =
-            System.getLogger(AeronClusteredCacheMessageComProvider.class.getName());
+            System.getLogger(AeronClusteredCacheMessageCommunicationProvider.class.getName());
 
     private static final String DEFAULT_CHANNEL = "aeron:ipc";
     private static final int DEFAULT_STREAM_ID = 2001;
     private static final long DEFAULT_OFFER_TIMEOUT_MILLIS = 5_000L;
     private static final long DEFAULT_DRIVER_TIMEOUT_MILLIS = 10_000L;
     private static final int DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20;
-    private static final int MAX_PAYLOAD_BYTES = Integer.MAX_VALUE - AeronClusteredCacheMessageCodec.HEADER_LENGTH;
+    private static final int MAX_PAYLOAD_BYTES = Integer.MAX_VALUE - AeronClusteredCacheMessageCodec.HEADER_LENGTH -
+            AeronClusteredCacheMessageCodec.CRC_LENGTH;
     /* A configured node id identifies all cache providers in one JVM, while the
      * random incarnation in the wire identity changes after a process restart.
      * Deriving the identity directly avoids an unbounded process-wide map keyed by
      * configuration strings while preserving same-node self suppression. */
-    private static final UUID PROCESS_INCARNATION = UUID.randomUUID();
+    private static final LazyConstant<UUID> PROCESS_INCARNATION = LazyConstant.of(UUID::randomUUID);
 
     private AeronClusteredCacheResources resources;
     private byte[] senderId;
@@ -82,7 +83,7 @@ public class AeronClusteredCacheMessageComProvider {
     private boolean receiverSequenceReleased;
 
         /// Creates a provider with no Aeron resources yet.
-    public AeronClusteredCacheMessageComProvider() {
+    public AeronClusteredCacheMessageCommunicationProvider() {
     }
 
     private static int maxPayloadBytes(@SuppressWarnings("rawtypes") final Map properties) {
@@ -368,11 +369,12 @@ public class AeronClusteredCacheMessageComProvider {
         final String normalized = configuredUuid == null ? null : configuredUuid.toString();
         if (this.senderId == null) {
             this.configuredNodeId = normalized;
+            final UUID processIncarnation = PROCESS_INCARNATION.get();
             this.senderId = configured == null
                     ? uuidBytes(UUID.randomUUID())
                     : uuidBytes(new UUID(
-                    PROCESS_INCARNATION.getMostSignificantBits() ^ configuredUuid.getMostSignificantBits(),
-                    PROCESS_INCARNATION.getLeastSignificantBits() ^ configuredUuid.getLeastSignificantBits()));
+                    processIncarnation.getMostSignificantBits() ^ configuredUuid.getMostSignificantBits(),
+                    processIncarnation.getLeastSignificantBits() ^ configuredUuid.getLeastSignificantBits()));
         } else if (!Objects.equals(this.configuredNodeId, normalized)) {
             throw new IllegalArgumentException(
                     "Conflicting %s: the provider is already bound to node id %s, requested %s".formatted(AeronClusteredConfigurationPropertyNames.NODE_ID, this.configuredNodeId, configured));

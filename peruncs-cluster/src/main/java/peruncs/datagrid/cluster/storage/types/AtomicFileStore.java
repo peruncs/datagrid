@@ -20,28 +20,38 @@ public final class AtomicFileStore {
         /// Selects cursor-specific crash-test phases.
     public static final String PHASE_CURSOR = "CURSOR";
     private static final System.Logger LOGGER = System.getLogger(AtomicFileStore.class.getName());
-    private static final ThreadLocal<BiConsumer<String, Path>> TEST_HOOK = new ThreadLocal<>();
+    private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
     private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY =
             PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
 
     private AtomicFileStore() {
     }
 
-        /// Installs a thread-confined crash-test hook; production callers must leave
-    /// it unset. A blocking hook belongs only in a forked child because file
-    /// writes may run while a provider monitor is held.
-    static void setTestHook(final BiConsumer<String, Path> hook) {
-        if (hook == null) TEST_HOOK.remove();
-        else TEST_HOOK.set(hook);
+        /// Runs file operations with a crash-test hook bound to their dynamic scope.
+    static void runWithTestHook(final BiConsumer<String, Path> hook, final Runnable action) {
+        if (hook == null) throw new NullPointerException("hook");
+        if (action == null) throw new NullPointerException("action");
+        ScopedValue.where(TEST_HOOK, hook).run(action);
     }
 
-        /// Clears the package-local crash-test hook.
-    static void clearTestHook() {
-        TEST_HOOK.remove();
+        /// Calls a file operation with a crash-test hook bound to its scope.
+    static <T, X extends Throwable> T callWithTestHook(
+            final BiConsumer<String, Path> hook,
+            final ScopedValue.CallableOp<? extends T, X> operation
+    ) throws X {
+        if (hook == null) throw new NullPointerException("hook");
+        if (operation == null) throw new NullPointerException("operation");
+        return ScopedValue.where(TEST_HOOK, hook).call(operation);
+    }
+
+    static Runnable inheritCurrentTestHook(final Runnable action) {
+        if (action == null) throw new NullPointerException("action");
+        final BiConsumer<String, Path> hook = TEST_HOOK.isBound() ? TEST_HOOK.get() : null;
+        return hook == null ? action : () -> ScopedValue.where(TEST_HOOK, hook).run(action);
     }
 
     private static void testPoint(final String phase, final Path path) {
-        final BiConsumer<String, Path> hook = TEST_HOOK.get();
+        final BiConsumer<String, Path> hook = TEST_HOOK.isBound() ? TEST_HOOK.get() : null;
         if (hook != null) hook.accept(phase, path);
     }
 
@@ -80,14 +90,13 @@ public final class AtomicFileStore {
         if (parent == null) {
             throw new IOException("Metadata path has no parent directory: %s".formatted(path));
         }
+        rejectSymbolicLinks(absolute);
         Files.createDirectories(parent);
         Path temporary;
         try {
             temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null, OWNER_ONLY);
-        } catch (final UnsupportedOperationException ignored) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "POSIX permissions are unavailable for replication metadata temporary file %s".formatted(absolute));
-            temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null);
+        } catch (final UnsupportedOperationException failure) {
+            throw new IOException("Owner-only permissions are unavailable for replication metadata " + absolute, failure);
         }
         try {
             testPoint(beforePhase, absolute);
@@ -145,6 +154,7 @@ public final class AtomicFileStore {
         if (parent == null) {
             throw new IOException("Metadata path has no parent directory: %s".formatted(path));
         }
+        rejectSymbolicLinks(absolute);
         Files.createDirectories(parent);
         final Path probe = parent.resolve("%s.probe-%s".formatted(absolute.getFileName(), UUID.randomUUID()));
         try {
@@ -186,6 +196,7 @@ public final class AtomicFileStore {
     /// @throws IOException if the file or, when requested, its parent directory cannot be synced
     public static void delete(final Path path, final boolean forceParentDirectory) throws IOException {
         final Path absolute = path.toAbsolutePath();
+        rejectSymbolicLinks(absolute);
         if (Files.deleteIfExists(absolute)) {
             if (forceParentDirectory) forceDirectory(absolute.getParent());
         }
@@ -199,6 +210,28 @@ public final class AtomicFileStore {
             channel.force(true);
         } catch (final UnsupportedOperationException failure) {
             throw new IOException("Directory fsync is unavailable for replication metadata %s".formatted(parent), failure);
+        }
+    }
+
+    private static void rejectSymbolicLinks(final Path path) throws IOException {
+        for (Path current = path.toAbsolutePath(); current != null; current = current.getParent()) {
+            if (Files.isSymbolicLink(current) && !isSystemPrivateAlias(current)) {
+                throw new IOException("Replication metadata path must not contain a symbolic link: " + current);
+            }
+        }
+    }
+
+    private static boolean isSystemPrivateAlias(final Path path) {
+        final Path root = path.getRoot();
+        if (root == null || !root.equals(path.getParent())) return false;
+        final Path name = path.getFileName();
+        if (name == null) return false;
+        try {
+            final Path target = Files.readSymbolicLink(path);
+            return target.equals(Path.of("private").resolve(name)) ||
+                   target.equals(Path.of("/private").resolve(name));
+        } catch (final IOException ignored) {
+            return false;
         }
     }
 

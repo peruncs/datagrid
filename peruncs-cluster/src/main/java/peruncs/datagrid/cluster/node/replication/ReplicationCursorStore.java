@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.SeekableByteChannel;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -74,6 +76,7 @@ public final class ReplicationCursorStore {
     /// @return encoded bytes with trailing CRC
     /// @throws IOException if the cursor does not fit the format limits
     public static byte[] encode(final ReplicationCursor cursor) throws IOException {
+        if (cursor == null) throw new NullPointerException("cursor");
         final byte[] transport = cursor.transport().getBytes(StandardCharsets.UTF_8);
         if (transport.length > MAX_TRANSPORT_BYTES) throw new IOException("transport name is too long");
         final byte[] position = cursor.providerPosition();
@@ -97,6 +100,7 @@ public final class ReplicationCursorStore {
     /// @return decoded cursor
     /// @throws IOException if the bytes are truncated, corrupt, or malformed
     public static ReplicationCursor decode(final byte[] bytes) throws IOException {
+        if (bytes == null) throw new IOException("replication cursor is null");
         if (bytes.length < FIXED_BYTES) {
             throw new IOException("truncated replication cursor");
         }
@@ -104,7 +108,9 @@ public final class ReplicationCursorStore {
         final int expected = buffer.getInt(bytes.length - CRC_BYTES);
         if (expected != Crc32c.compute(bytes, 0, bytes.length - CRC_BYTES)) throw new IOException("cursor CRC32C mismatch");
         if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION) throw new IOException("unknown cursor format");
-        buffer.getShort();
+        if (buffer.getShort() != 0) {
+            throw new IOException("unsupported replication cursor flags");
+        }
         final int transportLength = buffer.getInt();
         if (transportLength < 1 || transportLength > MAX_TRANSPORT_BYTES || transportLength > buffer.remaining()) {
             throw new IOException("invalid transport length");
@@ -123,9 +129,14 @@ public final class ReplicationCursorStore {
             throw new IOException("replication cursor contains trailing bytes");
         }
         try {
-            return new ReplicationCursor(new String(transport, StandardCharsets.UTF_8),
+            final String transportName = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(transport))
+                    .toString();
+            return new ReplicationCursor(transportName,
                     generation.equals(NULL_GENERATION) ? null : generation, sequence, position);
-        } catch (final IllegalArgumentException invalidCursor) {
+        } catch (final CharacterCodingException | IllegalArgumentException invalidCursor) {
             throw new IOException("invalid replication cursor values", invalidCursor);
         }
     }

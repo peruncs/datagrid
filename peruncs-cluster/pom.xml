@@ -16,7 +16,7 @@
 	<artifactId>peruncs-cluster</artifactId>
 
 	<name>peruncs-cluster</name>
-	<description>Peruncs Data Grid Cluster Nodelibrary with Aeron replication</description>
+	<description>Peruncs Data Grid Cluster Node Library with Aeron replication</description>
 	<url>https://github.com/peruncs/datagrid</url>
 
 	<properties>
@@ -53,14 +53,6 @@
 			<groupId>io.aeron</groupId>
 			<artifactId>aeron-driver</artifactId>
 			<version>${aeron.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>com.fasterxml.jackson.core</groupId>
-			<artifactId>jackson-core</artifactId>
-		</dependency>
-		<dependency>
-			<groupId>com.fasterxml.jackson.core</groupId>
-			<artifactId>jackson-databind</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.eclipse.store</groupId>
@@ -103,7 +95,7 @@
 					<!-- Keep test fixtures on the class path; production code is JPMS-compiled,
 					     while forked children intentionally receive the complete dependency class path. -->
 					<useModulePath>false</useModulePath>
-					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/java.util.zip=ALL-UNNAMED</argLine>
+					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 				</configuration>
 			</plugin>
 			<plugin>
@@ -113,7 +105,7 @@
 				<configuration>
 					<!-- Keep forked integration fixtures on the class path. -->
 					<useModulePath>false</useModulePath>
-					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/java.util.zip=ALL-UNNAMED</argLine>
+					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 				</configuration>
 				<executions>
 					<execution>

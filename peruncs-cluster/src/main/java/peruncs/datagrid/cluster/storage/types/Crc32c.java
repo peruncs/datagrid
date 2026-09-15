@@ -4,21 +4,16 @@ import java.util.zip.CRC32C;
 
 /// Shared CRC32C implementation for replication wire and checkpoint data.
 public final class Crc32c {
-    private static final ThreadLocal<CRC32C> LOCAL = ThreadLocal.withInitial(CRC32C::new);
-
     private Crc32c() {
     }
 
-        /// Returns a resettable CRC32C accumulator for the current thread.
+        /// Returns a fresh resettable CRC32C accumulator.
     ///
-    /// The caller owns the returned accumulator until the next call on the same
-    /// thread. Callers that share an accumulator must provide their own locking.
+    /// The caller owns the returned accumulator and may use it without locking.
     ///
     /// @return reset CRC32C accumulator
     public static CRC32C accumulator() {
-        final CRC32C crc = LOCAL.get();
-        crc.reset();
-        return crc;
+        return new CRC32C();
     }
 
         /// Returns the CRC32C of a byte range.
@@ -31,8 +26,7 @@ public final class Crc32c {
         if (bytes == null || offset < 0 || length < 0 || offset > bytes.length - length) {
             throw new IllegalArgumentException("invalid CRC32C range");
         }
-        final CRC32C crc = LOCAL.get();
-        crc.reset();
+        final CRC32C crc = accumulator();
         crc.update(bytes, offset, length);
         return (int) crc.getValue();
     }

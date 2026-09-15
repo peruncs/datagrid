@@ -1,8 +1,8 @@
 /// Clustered Hibernate second-level cache over Aeron.
 ///
 /// `ClusteredCacheRegionFactory` extends the Store Hibernate region factory.
-/// At session-factory preparation it builds one serializer, one Aeron
-/// provider, one receiver, and one listener configuration; the receiver
+/// At session-factory preparation it builds one fixed-schema payload codec,
+/// one Aeron provider, one receiver, and one listener configuration; the receiver
 /// starts before local cache events are redirected to the cluster. The
 /// region factory, acceptor, and serialization type provider live in
 /// `...cache.types`; the Aeron sender, receiver, codec, and provider in
@@ -14,7 +14,7 @@
 /// name and a timestamp. They travel on a volatile Aeron N-writer/N-reader
 /// broadcast, not a durable log — there is no broker, no archive, and no
 /// replay. Each frame holds a 16-byte sender identity, a per-sender
-/// sequence, and an Eclipse Serializer payload; a node ignores frames
+/// sequence, a CRC32C, and a fixed UTF-8 payload schema; a node ignores frames
 /// carrying its own identity, or the identity shared through a configured
 /// `node-id`. The default channel `aeron:ipc` is single-host;
 /// multi-host deployments must configure dynamic MDC UDP. Channels carry no

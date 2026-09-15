@@ -17,7 +17,7 @@ class AeronReaderLifecycleTest {
         final AtomicBoolean active = new AtomicBoolean(true);
         final AtomicBoolean closed = new AtomicBoolean();
         final CountDownLatch stopped = new CountDownLatch(1);
-        final Thread pollingThread = new Thread(() ->
+        final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
         {
             try {
                 Thread.sleep(30_000L);
@@ -60,7 +60,7 @@ class AeronReaderLifecycleTest {
         final AtomicBoolean closed = new AtomicBoolean();
         final CountDownLatch stopped = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
-        final Thread pollingThread = new Thread(() ->
+        final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
         {
             try {
                 while (!release.await(1L, TimeUnit.MILLISECONDS)) {
@@ -78,7 +78,6 @@ class AeronReaderLifecycleTest {
                 stopped.countDown();
             }
         });
-        pollingThread.setDaemon(true);
         pollingThread.start();
         try {
             assertThrows(IllegalStateException.class, () -> AeronReaderLifecycle.stopAndClose(
@@ -102,7 +101,7 @@ class AeronReaderLifecycleTest {
         final AtomicBoolean closed = new AtomicBoolean();
         final CountDownLatch stopped = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
-        final Thread pollingThread = new Thread(() ->
+        final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
         {
             try {
                 release.await();
@@ -116,10 +115,9 @@ class AeronReaderLifecycleTest {
                 stopped.countDown();
             }
         });
-        pollingThread.setDaemon(true);
         pollingThread.start();
         final AtomicBoolean interrupted = new AtomicBoolean();
-        final Thread disposer = new Thread(() ->
+        final Thread disposer = Thread.ofVirtual().unstarted(() ->
         {
             try {
                 AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, () -> closed.set(true));
@@ -145,7 +143,7 @@ class AeronReaderLifecycleTest {
         /// A live polling thread must always provide the latch that owns its exit.
     @Test
     void rejectsMissingExitLatchForLivePollingThread() {
-        final Thread pollingThread = new Thread(() -> {
+        final Thread pollingThread = Thread.ofVirtual().unstarted(() -> {
         });
         assertThrows(NullPointerException.class, () -> AeronReaderLifecycle.stopAndClose(
                 new AtomicBoolean(true), pollingThread, null, () -> {

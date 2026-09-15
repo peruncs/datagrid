@@ -357,7 +357,7 @@ class ProviderCrashMatrixIT {
                     Thread.sleep(1_000L);
                 }
                 while (System.nanoTime() < restartDeadline);
-                assertFalse(outcome.contains("Active media driver detected"),
+                assertFalse(isActiveDriverRetry(outcome),
                         "recording never became stopped before recovery retry deadline; attempts=%s outcome=%s\n%s".formatted(restartAttempts, outcome, diagnostics(base.resolve("control"))));
                 final CrashOutcome result = CrashOutcome.parse(outcome);
                 assertNotHarnessError(result, outcome);
@@ -430,7 +430,7 @@ class ProviderCrashMatrixIT {
                     this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                     assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
                     outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
-                    if (!outcome.contains("Active media driver detected")) break;
+                    if (!isActiveDriverRetry(outcome)) break;
                     assertEquals(storeSizeBeforeRetry, fileSize(base.resolve("store.records")),
                             "phase2 changed the Store fixture before recovery on retry %s".formatted(restartAttempts));
                     Thread.sleep(1_000L);
@@ -500,7 +500,7 @@ class ProviderCrashMatrixIT {
         final Path stderr = control.resolve("%s-stderr.log".formatted(mode));
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final ProcessBuilder builder = new ProcessBuilder(javaExecutable,
-                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
                 "-Ddg.crash.base=%s".formatted(base),
                 "-Ddg.crash.mode=%s".formatted(mode),

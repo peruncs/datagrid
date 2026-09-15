@@ -50,4 +50,23 @@ class ReplicationCursorStoreTest {
         assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.read(path));
         Files.deleteIfExists(path);
     }
+
+        /// Verifies flags and UTF-8 are validated before cursor construction.
+    @Test
+    void rejectsUnknownFlagsAndMalformedUtf8() throws Exception {
+        final byte[] flags = ReplicationCursorStore.encode(
+                new ReplicationCursor("aeron", null, 3, new byte[]{1}));
+        ByteBuffer.wrap(flags).putShort(6, (short) 1);
+        ByteBuffer.wrap(flags).putInt(flags.length - Integer.BYTES,
+                Crc32c.compute(flags, 0, flags.length - Integer.BYTES));
+        assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.decode(flags));
+
+        final byte[] malformed = ReplicationCursorStore.encode(
+                new ReplicationCursor("aeron", null, 3, new byte[]{1}));
+        malformed[12] = (byte) 0xc3;
+        malformed[13] = 0x28;
+        ByteBuffer.wrap(malformed).putInt(malformed.length - Integer.BYTES,
+                Crc32c.compute(malformed, 0, malformed.length - Integer.BYTES));
+        assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.decode(malformed));
+    }
 }

@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node;
 
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 
 /// This manager reports node readiness and starts storage maintenance work.
@@ -24,8 +24,8 @@ public interface ClusterNodeManager extends AutoCloseable {
         /// Reports whether the node can serve requests.
     ///
     /// @return `true` when the node is ready
-    /// @throws NodelibraryException if readiness cannot be determined
-    boolean isReady() throws NodelibraryException;
+    /// @throws NodeLibraryException if readiness cannot be determined
+    boolean isReady() throws NodeLibraryException;
 
         /// Reports whether the node and its transport are healthy.
     ///
@@ -35,8 +35,8 @@ public interface ClusterNodeManager extends AutoCloseable {
         /// Reads the current Store size.
     ///
     /// @return storage size in bytes
-    /// @throws NodelibraryException if the size cannot be read
-    long readStorageSizeBytes() throws NodelibraryException;
+    /// @throws NodeLibraryException if the size cannot be read
+    long readStorageSizeBytes() throws NodeLibraryException;
 
         /// Monitoring hook; nodes without a replication stream return `-1`.
     ///

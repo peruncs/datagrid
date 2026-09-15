@@ -2,11 +2,11 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.serializer.concurrency.XThreads;
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -38,7 +38,7 @@ public interface StorageBackupManager {
             final int maxBackupCount,
             final StorageBackupBackend storageBackupBackend,
             final Supplier<ReplicationCursor> cursorSupplier,
-            final ClusterStorageBinaryDataClient dataClient,
+            final StorageBinaryDataClient dataClient,
             final ReplicationLogRetention retention
     ) {
         return new Default(
@@ -61,50 +61,50 @@ public interface StorageBackupManager {
     /// backup; log retention then advances through the previous backup.
     ///
     /// @param useManualSlot whether to use the manual slot
-    /// @throws NodelibraryException if backup creation fails
-    void createStorageBackup(boolean useManualSlot) throws NodelibraryException;
+    /// @throws NodeLibraryException if backup creation fails
+    void createStorageBackup(boolean useManualSlot) throws NodeLibraryException;
 
         /// Downloads the latest backup.
     ///
     /// @param targetRootPath destination root
-    /// @throws NodelibraryException if download fails
-    void downloadLatestBackup(Path targetRootPath) throws NodelibraryException;
+    /// @throws NodeLibraryException if download fails
+    void downloadLatestBackup(Path targetRootPath) throws NodeLibraryException;
 
         /// Lists available backups.
     ///
     /// @return backup metadata
-    /// @throws NodelibraryException if listing fails
-    List<BackupMetadata> listBackups() throws NodelibraryException;
+    /// @throws NodeLibraryException if listing fails
+    List<BackupMetadata> listBackups() throws NodeLibraryException;
 
         /// Deletes one backup.
     ///
     /// @param backup backup to delete
-    /// @throws NodelibraryException if deletion fails
-    void deleteBackup(BackupMetadata backup) throws NodelibraryException;
+    /// @throws NodeLibraryException if deletion fails
+    void deleteBackup(BackupMetadata backup) throws NodeLibraryException;
 
         /// Downloads one backup.
     ///
     /// @param storageDestinationParentPath destination parent
     /// @param backup                       backup to download
-    /// @throws NodelibraryException if download fails
-    void downloadBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodelibraryException;
+    /// @throws NodeLibraryException if download fails
+    void downloadBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeLibraryException;
 
         /// Reports whether user storage exists.
     ///
     /// @return `true` when user storage exists
-    /// @throws NodelibraryException if the check fails
-    boolean hasUserUploadedStorage() throws NodelibraryException;
+    /// @throws NodeLibraryException if the check fails
+    boolean hasUserUploadedStorage() throws NodeLibraryException;
 
         /// Downloads user storage.
     ///
     /// @param storageDestinationParentPath destination parent
-    /// @throws NodelibraryException if download fails
-    void downloadUserUploadedStorage(Path storageDestinationParentPath) throws NodelibraryException;
+    /// @throws NodeLibraryException if download fails
+    void downloadUserUploadedStorage(Path storageDestinationParentPath) throws NodeLibraryException;
 
         /// Deletes user storage.
     ///
-    /// @throws NodelibraryException if deletion fails
-    void deleteUserUploadedStorage() throws NodelibraryException;
+    /// @throws NodeLibraryException if deletion fails
+    void deleteUserUploadedStorage() throws NodeLibraryException;
 
         /// Implements the stop, backup, retention, and resume sequence.
     class Default implements StorageBackupManager {
@@ -117,7 +117,7 @@ public interface StorageBackupManager {
         private final int maxBackupCount;
         private final StorageBackupBackend backend;
         private final Supplier<ReplicationCursor> cursorSupplier;
-        private final ClusterStorageBinaryDataClient dataClient;
+        private final StorageBinaryDataClient dataClient;
         private final ReplicationLogRetention retention;
         private final ReentrantLock backupLock = new ReentrantLock();
 
@@ -126,7 +126,7 @@ public interface StorageBackupManager {
                 final int maxBackupCount,
                 final StorageBackupBackend backupBackend,
                 final Supplier<ReplicationCursor> cursorSupplier,
-                final ClusterStorageBinaryDataClient dataClient,
+                final StorageBinaryDataClient dataClient,
                 final ReplicationLogRetention retention
         ) {
             this.storageConnection = storageConnection;
@@ -138,7 +138,7 @@ public interface StorageBackupManager {
         }
 
         @Override
-        public void createStorageBackup(final boolean useManualSlot) throws NodelibraryException {
+        public void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException {
             this.backupLock.lock();
             try {
                 LOGGER.log(System.Logger.Level.TRACE, "Creating new storage backup");
@@ -160,10 +160,10 @@ public interface StorageBackupManager {
                      * owns a live polling thread.  Never treat that intermediate state as a
                      * safe backup boundary.  STOPPED/NOT_STARTED remain valid for simple
                      * clients that never expose a stop-at-latest operation. */
-                    final ClusterStorageBinaryDataClient.StopOutcome outcome = this.dataClient.stopResult().outcome();
-                    if (outcome == ClusterStorageBinaryDataClient.StopOutcome.STOPPING ||
-                        outcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-                        outcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED) {
+                    final StorageBinaryDataClient.StopOutcome outcome = this.dataClient.stopResult().outcome();
+                    if (outcome == StorageBinaryDataClient.StopOutcome.STOPPING ||
+                        outcome == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
+                        outcome == StorageBinaryDataClient.StopOutcome.FAILED) {
                         throw new IllegalStateException(
                                 "Cannot create backup while replication reader stop is unresolved: %s".formatted(outcome));
                     }
@@ -220,7 +220,7 @@ public interface StorageBackupManager {
                      * the client stopped.  Calling resume() from this finally block would mask
                      * the original backup error and race a still-draining poller. */
                     if (isRunning && this.dataClient.failure() == null &&
-                        this.dataClient.stopResult().outcome() == ClusterStorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
+                        this.dataClient.stopResult().outcome() == StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
                         try {
                             this.dataClient.resume();
                         } catch (final RuntimeException | Error resumeFailure) {
@@ -244,7 +244,7 @@ public interface StorageBackupManager {
                 }
             }
             if (timestamp == Long.MAX_VALUE) {
-                throw new NodelibraryException("No unique timestamp is available for a new backup");
+                throw new NodeLibraryException("No unique timestamp is available for a new backup");
             }
             return timestamp;
         }
@@ -253,40 +253,40 @@ public interface StorageBackupManager {
         public void downloadLatestBackup(final Path targetRootPath) {
             final var backup = this.backend.latestBackup(false);
             if (backup == null) {
-                throw new NodelibraryException("No backups are available to download");
+                throw new NodeLibraryException("No backups are available to download");
             }
             this.downloadBackup(targetRootPath, backup);
         }
 
         @Override
-        public void deleteBackup(final BackupMetadata backup) throws NodelibraryException {
+        public void deleteBackup(final BackupMetadata backup) throws NodeLibraryException {
             this.backend.deleteBackup(backup);
         }
 
         @Override
-        public void deleteUserUploadedStorage() throws NodelibraryException {
+        public void deleteUserUploadedStorage() throws NodeLibraryException {
             this.backend.deleteUserUploadedStorage();
         }
 
         @Override
         public void downloadBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
-                throws NodelibraryException {
+                throws NodeLibraryException {
             this.backend.downloadBackup(storageDestinationParentPath, backup);
         }
 
         @Override
         public void downloadUserUploadedStorage(final Path storageDestinationParentPath)
-                throws NodelibraryException {
+                throws NodeLibraryException {
             this.backend.downloadUserUploadedStorage(storageDestinationParentPath);
         }
 
         @Override
-        public boolean hasUserUploadedStorage() throws NodelibraryException {
+        public boolean hasUserUploadedStorage() throws NodeLibraryException {
             return this.backend.hasUserUploadedStorage();
         }
 
         @Override
-        public List<BackupMetadata> listBackups() throws NodelibraryException {
+        public List<BackupMetadata> listBackups() throws NodeLibraryException {
             return this.backend.listBackups();
         }
 
@@ -295,17 +295,17 @@ public interface StorageBackupManager {
             this.dataClient.stopAtLatestMessage();
             final long deadline = ReplicationRetry.deadlineNanos(STOP_TIMEOUT_NANOS);
             while (true) {
-                final ClusterStorageBinaryDataClient.StopResult result = this.dataClient.stopResult();
-                final ClusterStorageBinaryDataClient.StopOutcome outcome = result.outcome();
-                if (outcome == ClusterStorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
+                final StorageBinaryDataClient.StopResult result = this.dataClient.stopResult();
+                final StorageBinaryDataClient.StopOutcome outcome = result.outcome();
+                if (outcome == StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
                     return;
                 }
                 final RuntimeException failure = this.dataClient.failure();
                 if (failure != null) {
                     throw new IllegalStateException("Cannot create backup after replication reader failure", failure);
                 }
-                if (outcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-                    outcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED) {
+                if (outcome == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
+                    outcome == StorageBinaryDataClient.StopOutcome.FAILED) {
                     throw new IllegalStateException("Cannot create backup after replication reader stop %s".formatted(outcome));
                 }
                 if (ReplicationRetry.expired(deadline)) {

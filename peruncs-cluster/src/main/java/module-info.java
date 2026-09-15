@@ -57,6 +57,16 @@
 /// an incomplete quorum, or during an active replay, history is preserved.
 /// The quorum, not any single request, authorizes deletion.
 ///
+/// # Filesystem backups
+///
+/// Backups are compressed ZIP archives on the configured filesystem volume.
+/// A generated archive contains `storage/`, `manifest`, and `ready`, and is
+/// atomically moved into the volume only after export completes. Archive
+/// extraction validates names, links, entry uniqueness, size limits, and the
+/// required metadata before atomically installing Store files. User-uploaded
+/// storage uses `user-uploaded-storage.zip` and does not use the removed HTTP
+/// backup transport.
+///
 /// # Indexes live inside the object graph
 ///
 /// Replication ships the object graph, so anything kept outside it would
@@ -75,9 +85,6 @@ module peruncs.datagrid.cluster
     requires org.eclipse.store.storage;
     requires org.eclipse.serializer.afs;
     requires org.eclipse.store.afs.nio;
-    requires com.fasterxml.jackson.core;
-    requires com.fasterxml.jackson.databind;
-    requires java.net.http;
     requires io.aeron.client;
     requires io.aeron.archive;
     requires io.aeron.driver;

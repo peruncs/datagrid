@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
@@ -46,12 +46,12 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
     }
 
     @Override
-    public void init() throws NodelibraryException {
+    public void init() throws NodeLibraryException {
         if (this.writer.getAsBoolean()) this.ensureWriter.run();
     }
 
     @Override
-    public ReplicationCursor latest() throws NodelibraryException {
+    public ReplicationCursor latest() throws NodeLibraryException {
         if (!this.writer.getAsBoolean()) {
             throw new ReplicationPositionUnavailableException("Aeron reader cannot establish the writer's latest durable boundary without watermark delivery");
         }

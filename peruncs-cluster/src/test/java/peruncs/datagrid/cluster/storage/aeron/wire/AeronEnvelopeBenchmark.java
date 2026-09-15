@@ -60,14 +60,25 @@ public final class AeronEnvelopeBenchmark {
         final int chunkCount = Math.toIntExact(((long) payloadLength + chunkSize - 1L) / chunkSize);
         final UnsafeBuffer target = new UnsafeBuffer(ByteBuffer.allocateDirect(
                 AeronReplicationEnvelope.HEADER_LENGTH + chunkSize));
-        for (int i = 0; i < warmup; i++)
-            encodeTransaction(target, payload, clusterId, epoch, i,
-                    payloadLength, chunkSize, chunkCount);
+        final var checksum = new AeronReplicationEnvelope.ChecksumContext();
+        for (int i = 0; i < warmup; i++) {
+            final int sequence = i;
+            AeronReplicationEnvelope.withChecksumContext(checksum, () -> {
+                encodeTransaction(target, payload, clusterId, epoch, sequence,
+                        payloadLength, chunkSize, chunkCount);
+                return null;
+            });
+        }
         final AllocationCounter allocation = AllocationCounter.start();
         final long start = System.nanoTime();
-        for (int i = 0; i < iterations; i++)
-            encodeTransaction(target, payload, clusterId, epoch, i + warmup,
-                    payloadLength, chunkSize, chunkCount);
+        for (int i = 0; i < iterations; i++) {
+            final int sequence = i + warmup;
+            AeronReplicationEnvelope.withChecksumContext(checksum, () -> {
+                encodeTransaction(target, payload, clusterId, epoch, sequence,
+                        payloadLength, chunkSize, chunkCount);
+                return null;
+            });
+        }
         final long elapsed = System.nanoTime() - start;
         final long allocated = allocation.bytesSinceStart();
         final long copied = Math.multiplyExact((long) payloadLength, iterations);

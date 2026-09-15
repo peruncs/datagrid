@@ -1,15 +1,15 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
-import peruncs.datagrid.cluster.node.exceptions.NotADistributorException;
+import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataClient;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataDistributor;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -30,9 +30,9 @@ public interface StorageNodeManager extends ClusterNodeManager {
     /// @param replicationTransport   transport id
     /// @return storage node manager
     static StorageNodeManager New(
-            final ClusterStorageBinaryDataDistributor dataDistributor,
+            final StorageBinaryDataDistributor dataDistributor,
             final StorageTaskExecutor storageTaskExecutor,
-            final ClusterStorageBinaryDataClient dataClient,
+            final StorageBinaryDataClient dataClient,
             final StorageNodeHealthCheck healthCheck,
             final StorageDiskSpaceReader storageDiskSpaceReader,
             final ReplicationPositionProvider positionProvider,
@@ -56,8 +56,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// Finishes the reader-to-distributor transition.
     ///
     /// @return `true` when the transition completed
-    /// @throws NotADistributorException if the node is not ready
-    boolean finishDistributionSwitch() throws NotADistributorException;
+    /// @throws HttpResponseException if the node is not ready
+    boolean finishDistributionSwitch() throws HttpResponseException;
 
         /// Returns the last applied or published logical replication sequence, or `-1`.
     long getCurrentMessageIndex();
@@ -75,9 +75,9 @@ public interface StorageNodeManager extends ClusterNodeManager {
     final class Default implements StorageNodeManager {
         private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
-        private final ClusterStorageBinaryDataDistributor dataDistributor;
+        private final StorageBinaryDataDistributor dataDistributor;
         private final StorageTaskExecutor storageTaskExecutor;
-        private final ClusterStorageBinaryDataClient dataClient;
+        private final StorageBinaryDataClient dataClient;
         private final StorageNodeHealthCheck healthCheck;
         private final StorageDiskSpaceReader storageDiskSpaceReader;
         private final ReplicationPositionProvider positionProvider;
@@ -98,9 +98,9 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// @param positionProvider       position provider
         /// @param replicationTransport   transport id
         public Default(
-                final ClusterStorageBinaryDataDistributor dataDistributor,
+                final StorageBinaryDataDistributor dataDistributor,
                 final StorageTaskExecutor storageTaskExecutor,
-                final ClusterStorageBinaryDataClient dataClient,
+                final StorageBinaryDataClient dataClient,
                 final StorageNodeHealthCheck healthCheck,
                 final StorageDiskSpaceReader storageDiskSpaceReader,
                 final ReplicationPositionProvider positionProvider,
@@ -129,17 +129,17 @@ public interface StorageNodeManager extends ClusterNodeManager {
         }
 
         @Override
-        public boolean isReady() throws NodelibraryException {
-            return this.healthCheck.isReady();
+        public boolean isReady() throws NodeLibraryException {
+            return this.storageTaskExecutor.failure() == null && this.healthCheck.isReady();
         }
 
         @Override
         public boolean isHealthy() {
-            return this.healthCheck.isHealthy();
+            return this.storageTaskExecutor.failure() == null && this.healthCheck.isHealthy();
         }
 
         @Override
-        public long readStorageSizeBytes() throws NodelibraryException {
+        public long readStorageSizeBytes() throws NodeLibraryException {
             return this.storageDiskSpaceReader.readUsedDiskSpaceBytes();
         }
 
@@ -193,11 +193,11 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// instead of promoting over an unresolved boundary.
         ///
         /// @return `true` once this node distributes
-        /// @throws NotADistributorException if no switch was started
+        /// @throws HttpResponseException if no switch was started
         @Override
-        public synchronized boolean finishDistributionSwitch() throws NotADistributorException {
+        public synchronized boolean finishDistributionSwitch() throws HttpResponseException {
             if (!this.isSwitchingToDistributor) {
-                throw new NotADistributorException("switchToDistribution() has to be called first");
+                throw HttpResponseException.notADistributor("switchToDistribution() has to be called first");
             }
 
             if (this.isDistributor) {
@@ -217,10 +217,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
             if (this.dataClient.isRunning()) {
                 return false;
             }
-            final ClusterStorageBinaryDataClient.StopOutcome stopOutcome = this.dataClient.stopResult().outcome();
-            if (stopOutcome == ClusterStorageBinaryDataClient.StopOutcome.STOPPING ||
-                stopOutcome == ClusterStorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-                stopOutcome == ClusterStorageBinaryDataClient.StopOutcome.FAILED) {
+            final StorageBinaryDataClient.StopOutcome stopOutcome = this.dataClient.stopResult().outcome();
+            if (stopOutcome != StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
                 throw new IllegalStateException("Cannot promote before replication reader stopped at a resolved boundary: %s".formatted(stopOutcome));
             }
 
@@ -268,7 +266,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
                  * into a node failure. */
                 LOGGER.log(System.Logger.Level.DEBUG, "Latest replication position is unavailable for this node role", unavailable);
                 return -1L;
-            } catch (final NodelibraryException failure) {
+            } catch (final NodeLibraryException failure) {
                 throw new IllegalStateException("Failed to read latest replication position", failure);
             }
         }
@@ -311,32 +309,33 @@ public interface StorageNodeManager extends ClusterNodeManager {
             if (this.closed) {
                 return;
             }
-            RuntimeException failure = null;
+            Throwable failure = null;
             try {
                 this.dataDistributor.dispose();
-            } catch (final RuntimeException closeFailure) {
+            } catch (final RuntimeException | Error closeFailure) {
                 failure = closeFailure;
             }
             try {
                 this.dataClient.dispose();
-            } catch (final RuntimeException closeFailure) {
+            } catch (final RuntimeException | Error closeFailure) {
                 if (failure == null) failure = closeFailure;
                 else failure.addSuppressed(closeFailure);
             }
             try {
                 this.healthCheck.close();
-            } catch (final RuntimeException closeFailure) {
+            } catch (final RuntimeException | Error closeFailure) {
                 if (failure == null) failure = closeFailure;
                 else failure.addSuppressed(closeFailure);
             }
             try {
                 this.closePositionProvider();
-            } catch (final RuntimeException closeFailure) {
+            } catch (final RuntimeException | Error closeFailure) {
                 if (failure == null) failure = closeFailure;
                 else failure.addSuppressed(closeFailure);
             }
             if (failure != null) {
-                throw new IllegalStateException("failed to close storage node resources", failure);
+                if (failure instanceof Error error) throw error;
+                throw new NodeLibraryException("failed to close storage node resources", failure);
             }
             this.closed = true;
         }

@@ -7,6 +7,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -16,7 +17,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// explicitly instead of being silently discarded, so callers can retry or
 /// report the busy state to an operator.
 public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
-        /// Creates a backup task executor.
+    /// Creates a backup task executor.
     ///
     /// @param connection    Store connection
     /// @param backupManager backup manager
@@ -25,52 +26,94 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         return new Default(notNull(connection), notNull(backupManager));
     }
 
-        /// Starts a backup task.
+    /// Starts a backup if no backup is currently active.
     ///
     /// @param useManualSlot whether to use the manual slot
-    void runBackup(boolean useManualSlot);
+    /// @return the submission result; `BUSY` is an explicit, retryable outcome
+    BackupStartResult runBackup(boolean useManualSlot);
+
+    /// Describes whether a backup request was accepted by the single-flight executor.
+    enum BackupStartResult {
+        /// The backup task was submitted.
+        STARTED,
+        /// Another backup is still running; no task was queued.
+        BUSY
+    }
 
         /// Reports whether a backup task is running.
     ///
     /// @return `true` when running
     boolean isRunningBackup();
 
-        /// Provides one backup thread and the inherited storage-check thread.
-    final class Default extends StorageTaskExecutor.Abstract implements StorageBackupTaskExecutor {
+        /// Reports the failure of the most recently completed backup, if any.
+    ///
+    /// A failed asynchronous task must remain observable by health checks and
+    /// operators; logging it and allowing the executor future to complete
+    /// normally would make the failure indistinguishable from success.
+    ///
+    /// @return the most recent backup failure, or `null` after a successful backup
+    Throwable backupFailure();
+
+    /// Provides one virtual backup executor and the inherited storage-check executor.
+    final class Default implements StorageBackupTaskExecutor {
         private static final System.Logger LOGGER = System.getLogger(StorageBackupTaskExecutor.class.getName());
         private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
+        private final StorageTaskExecutor storageChecks;
         private final StorageBackupManager backupManager;
         private final ExecutorService backupExecutor;
 
         private Future<?> backupTask;
-        private boolean backupCloseRequested;
+        private final AtomicReference<Throwable> backupFailure = new AtomicReference<>();
+        private boolean backupClosing;
+        private boolean backupClosed;
 
         private Default(final StorageConnection connection, final StorageBackupManager backupManager) {
-            super(connection);
+            this.storageChecks = StorageTaskExecutor.New(connection);
             this.backupManager = backupManager;
-            this.backupExecutor = Executors.newSingleThreadExecutor(task ->
-            {
-                final Thread thread = new Thread(task, "EclipseStore-StorageBackup");
-                thread.setDaemon(true);
-                return thread;
-            });
+            this.backupExecutor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
+                    .name("EclipseStore-StorageBackup", 0L)
+                    .factory());
         }
 
         @Override
-        public synchronized void runBackup(final boolean useManualSlot) {
-            if (this.backupCloseRequested) throw new IllegalStateException("Storage backup task executor is closed");
+        public void runChecks() {
+            this.storageChecks.runChecks();
+        }
+
+        @Override
+        public boolean isRunningChecks() {
+            return this.storageChecks.isRunningChecks();
+        }
+
+        @Override
+        public Throwable failure() {
+            return this.storageChecks.failure();
+        }
+
+        @Override
+        public synchronized BackupStartResult runBackup(final boolean useManualSlot) {
+            if (this.backupClosing || this.backupClosed) {
+                throw new IllegalStateException("Storage backup task executor is closed");
+            }
             if (this.backupTask != null && !this.backupTask.isDone()) {
-                throw new IllegalStateException("Storage backup is already running");
+                return BackupStartResult.BUSY;
             }
             LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage backup");
             this.backupTask = this.backupExecutor.submit(() ->
             {
                 try {
                     this.backupManager.createStorageBackup(useManualSlot);
-                } catch (final Throwable failure) {
+                    this.backupFailure.set(null);
+                } catch (final Exception failure) {
+                    this.backupFailure.set(failure);
                     LOGGER.log(System.Logger.Level.ERROR, "Storage backup failed", failure);
+                } catch (final Error failure) {
+                    this.backupFailure.set(failure);
+                    LOGGER.log(System.Logger.Level.ERROR, "Fatal storage-backup failure", failure);
+                    throw failure;
                 }
             });
+            return BackupStartResult.STARTED;
         }
 
         @Override
@@ -78,34 +121,48 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             return this.backupTask != null && !this.backupTask.isDone();
         }
 
+        @Override
+        public Throwable backupFailure() {
+            return this.backupFailure.get();
+        }
+
         /// Stops the backup executor, cancelling a running backup first.
         ///
-        /// A second call is a no-op once closing was requested. An
-        /// overrunning backup is interrupted after a bounded wait, and any
-        /// failure is aggregated with the inherited storage-check shutdown
-        /// instead of masking it.
+        /// A repeated call retries an incomplete shutdown. An overrunning
+        /// backup is interrupted after a bounded wait, and any failure is
+        /// aggregated with the inherited storage-check shutdown instead of
+        /// masking it.
         @Override
         public void close() {
             final Future<?> task;
+            final boolean closeBackup;
             synchronized (this) {
-                if (this.backupCloseRequested) return;
-                this.backupCloseRequested = true;
+                closeBackup = !this.backupClosed;
+                if (closeBackup) this.backupClosing = true;
                 task = this.backupTask;
             }
             Throwable failure = null;
-            if (task != null) task.cancel(true);
-            this.backupExecutor.shutdownNow();
-            try {
-                if (!this.backupExecutor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                    failure = new IllegalStateException(
-                            "Storage backup did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+            if (closeBackup) {
+                if (task != null) task.cancel(true);
+                this.backupExecutor.shutdownNow();
+                try {
+                    if (!this.backupExecutor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                        failure = new IllegalStateException(
+                                "Storage backup did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                    }
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    failure = new IllegalStateException("Interrupted while stopping storage backup", interrupted);
                 }
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                failure = new IllegalStateException("Interrupted while stopping storage backup", interrupted);
+                if (failure == null) {
+                    synchronized (this) {
+                        this.backupClosed = true;
+                        this.backupClosing = false;
+                    }
+                }
             }
             try {
-                super.close();
+                this.storageChecks.close();
             } catch (final Throwable closeFailure) {
                 if (failure == null) failure = closeFailure;
                 else failure.addSuppressed(closeFailure);

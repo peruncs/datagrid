@@ -1,54 +1,122 @@
 package peruncs.datagrid.cluster.storage.types;
 
-
 import org.eclipse.serializer.typing.Disposable;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 
-/// Minimal lifecycle contract for a reader-side binary replication client.
+/// Aeron reader lifecycle. The Aeron reader exposes a [ReplicationCursor].
+/// A client must not report a message as consumed until the Store merger has
+/// accepted the complete committed binary.
 public interface StorageBinaryDataClient extends Disposable {
-        /// Returns the most recent stop outcome, or [StopOutcome#NOT_STARTED].
+        /// Starts reading from the configured transport.
+    void start();
+
+        /// Creates a neutral client for tests and disabled replication.
     ///
-    /// @return current stop outcome
+    /// @param startingCursor initial cursor, or `null`
+    /// @return neutral client
+    static StorageBinaryDataClient NoOp(final ReplicationCursor startingCursor) {
+        final ReplicationCursor cursor = startingCursor == null
+                ? new ReplicationCursor("none", null, -1, new byte[0])
+                : startingCursor;
+        return new StorageBinaryDataClient() {
+
+            @Override
+            public void start() {
+            }
+
+            @Override
+            public void stopAtLatestMessage() {
+            }
+
+            @Override
+            public ReplicationCursor cursor() {
+                return cursor;
+            }
+
+            @Override
+            public boolean isRunning() {
+                return false;
+            }
+
+            @Override
+            public RuntimeException failure() {
+                return null;
+            }
+
+            @Override
+            public void resume() {
+            }
+
+            @Override
+            public void dispose() {
+            }
+        };
+    }
+
+        /// Stops at the latest complete message boundary.
+    void stopAtLatestMessage();
+
+        /// Returns the latest applied replication cursor.
+    ///
+    /// @return replication cursor
+    ReplicationCursor cursor();
+
+        /// Reports whether the reader is running.
+    ///
+    /// @return `true` when running
+    boolean isRunning();
+
+        /// Returns a terminal reader failure, or `null` while the client is healthy.
+    /// Implementations must expose the same terminal failure observed by their
+    /// polling/consumer thread; returning a synthetic `null` hides a failed
+    /// reader from readiness and backup coordination.
+    ///
+    /// @return terminal failure, or `null`
+    RuntimeException failure();
+
+        /// Returns the latest lifecycle result. Implementations that can distinguish a
+    /// resolved transaction boundary should override this method; the fallback
+    /// treats a stopped client without a reported failure as a resolved boundary.
     default StopOutcome stopOutcome() {
-        return StopOutcome.NOT_STARTED;
+        if (this.failure() != null) return StopOutcome.FAILED;
+        return this.isRunning() ? StopOutcome.RUNNING : StopOutcome.RESOLVED_BOUNDARY;
     }
 
         /// Returns the stop outcome together with the last resolved cursor.
     ///
-    /// @return current stop result
+    /// @return stop result
     default StopResult stopResult() {
-        return new StopResult(this.stopOutcome(), -1L, -1L);
+        final ReplicationCursor cursor = this.cursor();
+        return new StopResult(this.stopOutcome(), cursor.logicalSequence(), -1L);
     }
 
-        /// Starts reading from the configured transport.
-    void start();
+        /// Reports whether the reader is live.
+    ///
+    /// @return `true` when live
+    default boolean isLive() {
+        return isRunning();
+    }
 
-        /// Result of a requested stop-at-latest operation.
+        /// Resumes reading after a stop.
+    ///
+    /// @throws NodeLibraryException if resume fails
+    void resume() throws NodeLibraryException;
+
+        /// Lifecycle outcomes for a replication reader.
     enum StopOutcome {
-                /// No stop request has been made.
         NOT_STARTED,
-                /// The client is still reading.
         RUNNING,
-                /// The client is waiting for the stop boundary.
         STOPPING,
-                /// The stop boundary has been found.
         RESOLVED_BOUNDARY,
-                /// The boundary was not found before the deadline.
         TIMED_OUT,
-                /// The stop operation failed.
         FAILED,
-                /// The client has stopped.
         STOPPED,
-                /// The client has been closed.
         CLOSED
     }
 
         /// Immutable result of a stop-at-latest request.
-    ///
-    /// @param outcome  stop outcome
-    /// @param sequence last resolved sequence, or `-1`
-    /// @param position last resolved position, or `-1`
     record StopResult(StopOutcome outcome, long sequence, long position) {
-                /// Validates the stop outcome.
         public StopResult {
             if (outcome == null) throw new NullPointerException("outcome");
         }

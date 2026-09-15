@@ -24,13 +24,13 @@ import java.util.concurrent.atomic.LongAdder;
 /// [BackoffIdleStrategy]. This keeps the polling thread responsive while
 /// spending almost no CPU when the cluster is idle. It polls the subscription,
 /// reassembles fragmented frames, ignores frames published by its own sender
-/// identity, and deserializes the rest into the neutral acceptor.
+/// identity, and decodes the rest with the fixed timestamp-update payload codec.
 ///
 /// Self-suppression compares the 16-byte sender identity in the frame
 /// against the identity shared by this node's sender and receiver; a matching
-/// frame is skipped without copying or deserializing its payload.
+/// frame is skipped without copying or decoding its payload.
 ///
-/// A malformed or undeserializable frame stops this receiver and is exposed
+/// A malformed or undecodable frame stops this receiver and is exposed
 /// through [#failure()]. A volatile broadcast cannot prove that a bad
 /// frame was harmless or reconstruct a missing invalidation; continuing would
 /// make the local cache permanently stale. The same fail-closed rule applies
@@ -55,7 +55,6 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
     private final AeronClusteredCacheResources resources;
     private final byte[] senderId;
     private final Runnable releaseSequence;
-    private final Serializer<byte[]> serializer;
     private final ClusteredCacheMessageAcceptor messageAcceptor;
     private final int maxPayloadBytes;
     private final FragmentAssembler assembler = new FragmentAssembler(this::onFragment);
@@ -71,15 +70,15 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
     private volatile Thread agentThread;
     private volatile boolean disposed;
     private volatile boolean running;
-    private CountDownLatch stopped;
+    private volatile CountDownLatch stopped;
 
         /// Creates a receiver for one provider.
     ///
     /// @param resources       shared Aeron resources for this node
     /// @param senderId        sender identity used to ignore this node's frames
-    /// @param serializer      serializer shared with the sender
+    /// @param serializer      configured cache serializer contract
     /// @param messageAcceptor target for accepted invalidations
-    /// @param maxPayloadBytes maximum accepted serialized payload size
+    /// @param maxPayloadBytes maximum accepted payload size
     AeronClusteredCacheMessageReceiver(
             final AeronClusteredCacheResources resources,
             final byte[] senderId,
@@ -91,12 +90,13 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         this.resources = Objects.requireNonNull(resources, "resources");
         this.senderId = Objects.requireNonNull(senderId, "senderId").clone();
         this.releaseSequence = Objects.requireNonNull(releaseSequence, "releaseSequence");
-        this.serializer = Objects.requireNonNull(serializer, "serializer");
+        Objects.requireNonNull(serializer, "serializer");
         this.messageAcceptor = Objects.requireNonNull(messageAcceptor, "messageAcceptor");
         if (senderId.length != Long.BYTES * 2) {
             throw new IllegalArgumentException("sender id must be exactly 16 bytes");
         }
-        if (maxPayloadBytes < 1 || maxPayloadBytes > Integer.MAX_VALUE - AeronClusteredCacheMessageCodec.HEADER_LENGTH) {
+        if (maxPayloadBytes < 1 || maxPayloadBytes > Integer.MAX_VALUE -
+                AeronClusteredCacheMessageCodec.HEADER_LENGTH - AeronClusteredCacheMessageCodec.CRC_LENGTH) {
             throw new IllegalArgumentException("maxPayloadBytes is outside the supported frame size");
         }
         this.maxPayloadBytes = maxPayloadBytes;
@@ -122,8 +122,7 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             this.subscription = this.resources.subscription();
             this.stopped = new CountDownLatch(1);
             this.running = true;
-            final Thread worker = new Thread(this::run, ROLE_NAME);
-            worker.setDaemon(true);
+            final Thread worker = Thread.ofVirtual().name(ROLE_NAME).unstarted(this::run);
             this.agentThread = worker;
             worker.start();
         } catch (final RuntimeException | Error failure) {
@@ -251,10 +250,10 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         try {
             final byte[] payload = AeronClusteredCacheMessageCodec.decodePayload(
                     buffer, offset, length, this.maxPayloadBytes);
-            message = this.serializer.deserialize(payload);
+            message = AeronClusteredCachePayloadCodec.decode(payload);
         } catch (final RuntimeException failure) {
             this.malformed.increment();
-            this.failClosed("Undeserializable Aeron clustered-cache invalidation", failure);
+            this.failClosed("Undecodable Aeron clustered-cache invalidation", failure);
             return;
         }
         try {

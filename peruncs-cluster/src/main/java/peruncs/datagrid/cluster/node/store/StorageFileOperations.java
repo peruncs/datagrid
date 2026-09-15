@@ -1,10 +1,11 @@
 package peruncs.datagrid.cluster.node.store;
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -24,21 +25,37 @@ public final class StorageFileOperations {
     /// @param source restored staging directory
     /// @param destination live storage directory, which must not exist yet
     public static void installStorage(final Path source, final Path destination) {
+        final Object sourceFileKey;
         try {
+            ensureNoSymbolicLinks(source);
             ensureNoSymbolicLinks(destination.getParent());
+            sourceFileKey = stableFileKey(source);
         } catch (final IOException failure) {
-            throw new NodelibraryException("Backup destination contains a symbolic link", failure);
+            throw new NodeLibraryException("Backup source or destination path is unsafe", failure);
         }
         if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
-            throw new NodelibraryException("Backup destination already contains storage: %s".formatted(destination));
+            throw new NodeLibraryException("Backup destination already contains storage: %s".formatted(destination));
         }
         try {
+            /* Recheck immediately before the rename. The source is an internally
+             * staged directory and the destination must remain a plain path for
+             * the entire install boundary; the post-move check catches providers
+             * that report an unexpected link target after an atomic rename. */
+            ensureNoSymbolicLinks(source);
+            ensureNoSymbolicLinks(destination.getParent());
+            if (!sourceFileKey.equals(stableFileKey(source))) {
+                throw new IOException("Staged backup source changed before installation");
+            }
             Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE);
+            ensureNoSymbolicLinks(destination);
+            if (!sourceFileKey.equals(stableFileKey(destination))) {
+                throw new IOException("Installed backup does not match its staged source");
+            }
             forceDirectory(destination.getParent());
         } catch (final AtomicMoveNotSupportedException unsupported) {
-            throw new NodelibraryException("Atomic backup restore is not supported", unsupported);
+            throw new NodeLibraryException("Atomic backup restore is not supported", unsupported);
         } catch (final IOException failure) {
-            throw new NodelibraryException("Failed to install restored storage", failure);
+            throw new NodeLibraryException("Failed to install restored storage", failure);
         }
     }
 
@@ -49,7 +66,7 @@ public final class StorageFileOperations {
     public static void cleanup(final Path path, final Throwable primaryFailure) {
         try {
             deleteDirectory(path);
-        } catch (final NodelibraryException cleanupFailure) {
+        } catch (final NodeLibraryException cleanupFailure) {
             if (primaryFailure != null) {
                 primaryFailure.addSuppressed(cleanupFailure);
             } else {
@@ -71,6 +88,30 @@ public final class StorageFileOperations {
             if (Files.isSymbolicLink(current) && !isSystemPrivateAlias(current)) {
                 throw new IOException("Path contains a symbolic link: %s".formatted(current));
             }
+        }
+    }
+
+    /// Opens an existing regular file and verifies that its identity did not
+    /// change between the path check and the open.
+    ///
+    /// @param path file to open
+    /// @return an open read-only channel owned by the caller
+    /// @throws IOException if the path is unsafe, not regular, or changed during opening
+    public static FileChannel openRegularFile(final Path path) throws IOException {
+        ensureNoSymbolicLinks(path);
+        final BasicFileAttributes before = regularAttributes(path);
+        final FileChannel channel = FileChannel.open(path,
+                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+        boolean open = false;
+        try {
+            final BasicFileAttributes after = regularAttributes(path);
+            if (!sameFileIdentity(before, after)) {
+                throw new IOException("File changed while it was being opened: %s".formatted(path));
+            }
+            open = true;
+            return channel;
+        } finally {
+            if (!open) channel.close();
         }
     }
 
@@ -102,6 +143,32 @@ public final class StorageFileOperations {
                 PosixFilePermission.OWNER_EXECUTE));
     }
 
+    private static Object stableFileKey(final Path path) throws IOException {
+        final Object fileKey = Files.readAttributes(path, BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS).fileKey();
+        if (fileKey == null) {
+            throw new IOException("Filesystem does not expose a stable file identity: %s".formatted(path));
+        }
+        return fileKey;
+    }
+
+    private static BasicFileAttributes regularAttributes(final Path path) throws IOException {
+        final BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS);
+        if (!attributes.isRegularFile()) {
+            throw new IOException("Expected a regular file: %s".formatted(path));
+        }
+        if (attributes.fileKey() == null) {
+            throw new IOException("Filesystem does not expose a stable file identity: %s".formatted(path));
+        }
+        return attributes;
+    }
+
+    private static boolean sameFileIdentity(final BasicFileAttributes first,
+                                            final BasicFileAttributes second) {
+        return first.fileKey() != null && first.fileKey().equals(second.fileKey());
+    }
+
     /// Forces directory metadata to stable storage.
     ///
     /// @param directory directory to force
@@ -117,7 +184,12 @@ public final class StorageFileOperations {
     /// Deletes a directory tree idempotently; a missing root is not an error.
     ///
     /// @param path root to delete
-    public static void deleteDirectory(final Path path) throws NodelibraryException {
+    public static void deleteDirectory(final Path path) throws NodeLibraryException {
+        try {
+            ensureNoSymbolicLinks(path);
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Directory path contains a symbolic link: %s".formatted(path), failure);
+        }
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
@@ -127,14 +199,14 @@ public final class StorageFileOperations {
                 try {
                     Files.delete(file);
                 } catch (final IOException e) {
-                    throw new NodelibraryException("Failed to delete file at %s".formatted(file), e);
+                    throw new NodeLibraryException("Failed to delete file at %s".formatted(file), e);
                 }
             });
         } catch (final NoSuchFileException ignored) {
             /* A concurrent cleanup may remove the root after the existence check.
              * Deletion is intentionally idempotent for backup retry paths. */
         } catch (final IOException e) {
-            throw new NodelibraryException("Failed to iterate files at %s".formatted(path), e);
+            throw new NodeLibraryException("Failed to iterate files at %s".formatted(path), e);
         }
     }
 }

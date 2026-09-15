@@ -56,13 +56,13 @@ class StoredReplicationCursorManagerTest {
         final Path path = directory.resolve("offset");
         final AtomicReference<String> phase = new AtomicReference<>();
         try {
-            AtomicFileStoreCrashHook.install((name, ignored) -> phase.compareAndSet(null, name));
-            try (StoredReplicationCursorManager manager = StoredReplicationCursorManager.NewAtomic(path)) {
-                manager.set(new ReplicationCursor("aeron", UUID.randomUUID(), 1L, new byte[]{4}));
-            }
+            AtomicFileStoreCrashHook.runWithHook((name, ignored) -> phase.compareAndSet(null, name), () -> {
+                try (StoredReplicationCursorManager manager = StoredReplicationCursorManager.NewAtomic(path)) {
+                    manager.set(new ReplicationCursor("aeron", UUID.randomUUID(), 1L, new byte[]{4}));
+                }
+            });
             assertEquals("BEFORE_CURSOR_TEMP_WRITE", phase.get());
         } finally {
-            AtomicFileStoreCrashHook.clear();
             try (var files = Files.walk(directory)) {
                 files.sorted(java.util.Comparator.reverseOrder()).forEach(file ->
                 {

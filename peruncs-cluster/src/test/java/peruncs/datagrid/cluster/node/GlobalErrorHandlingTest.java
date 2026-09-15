@@ -1,8 +1,7 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.GlobalErrorHandling;
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -19,7 +18,7 @@ class GlobalErrorHandlingTest {
     @Test
     void wrapsCheckedFailuresWithoutTerminatingTheJvm() {
         final Exception failure = new Exception("boom");
-        final NodelibraryException reported = assertThrows(NodelibraryException.class,
+        final NodeLibraryException reported = assertThrows(NodeLibraryException.class,
                 () -> GlobalErrorHandling.handleFatalError(failure));
         assertSame(failure, reported.getCause());
     }

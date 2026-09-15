@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.node.replication;
 
-import peruncs.datagrid.cluster.node.exceptions.NodelibraryException;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 import java.util.UUID;
 
@@ -19,8 +19,8 @@ public interface ReplicationLogRetention extends AutoCloseable {
     ///
     /// @param cursor deletion boundary
     /// @return result of the bounded maintenance attempt
-    /// @throws NodelibraryException if deletion fails
-    MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodelibraryException;
+    /// @throws NodeLibraryException if deletion fails
+    MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodeLibraryException;
 
         /// Records one authenticated reader acknowledgement for a later aggregate
     /// retention request. Providers without reader-watermark support reject this

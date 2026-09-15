@@ -59,7 +59,7 @@ class AeronCrashMatrixIT {
     private Process launch(final Path base, final String mode, final boolean wait)
             throws IOException, InterruptedException {
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        final Process process = new ProcessBuilder(javaExecutable, "-cp", ChildJava.classpath(),
+        final Process process = new ProcessBuilder(javaExecutable, "--enable-preview", "-cp", ChildJava.classpath(),
                 "-Ddg.crash.base=%s".formatted(base), "-Ddg.crash.mode=%s".formatted(mode),
                 AeronCrashChildMain.class.getName()).redirectErrorStream(true).start();
         if (wait) {

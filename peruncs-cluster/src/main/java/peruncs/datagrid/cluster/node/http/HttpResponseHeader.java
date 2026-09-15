@@ -4,5 +4,5 @@ package peruncs.datagrid.cluster.node.http;
 ///
 /// @param key   header name
 /// @param value header value
-public record HttpHeader(String key, String value) {
+public record HttpResponseHeader(String key, String value) {
 }

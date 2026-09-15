@@ -25,7 +25,7 @@ class ExternalArchiveCrashIT {
         Files.deleteIfExists(base.resolve("control/archive-outcome"));
         Files.deleteIfExists(base.resolve("control/archive-stop"));
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        return new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+        return new ProcessBuilder(java, "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
                 "-Ddg.archive.base=%s".formatted(base),
                 "-Ddg.archive.reseed=%s".formatted(reseed),
@@ -44,7 +44,7 @@ class ExternalArchiveCrashIT {
         Files.deleteIfExists(control.resolve("milestone.reached"));
         Files.deleteIfExists(control.resolve("outcome"));
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        return new ProcessBuilder(java, "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+        return new ProcessBuilder(java, "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
                 "-Ddg.crash.base=%s".formatted(base),
                 "-Ddg.crash.mode=%s".formatted(mode),

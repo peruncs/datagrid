@@ -3,46 +3,25 @@ package peruncs.datagrid.cluster.storage.types;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /// Tests storage binary data distributor behavior.
 class StorageBinaryDataDistributorTest {
-    private static Thread thread(
-            final String name,
-            final StorageBinaryDataDistributor distributor,
-            final String dictionary,
-            final CountDownLatch ready,
-            final CountDownLatch release
-    ) {
-        return new Thread(() ->
-        {
-            distributor.distributeTypeDictionary(dictionary);
-            ready.countDown();
-            try {
-                release.await();
-                distributor.distributeData(null);
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }, name);
-    }
-
-        /// Verifies preservation of concurrent type dictionaries with their committing thread.
+        /// Verifies the one-writer dictionary handoff without thread-bound state.
     @Test
-    void keepsConcurrentTypeDictionariesWithTheirCommittingThread()
-            throws Exception {
-        final Map<String, String> dictionaries = new ConcurrentHashMap<>();
+    void carriesDictionariesToTheNextTransaction() {
+        final List<String> dictionaries = new ArrayList<>();
         final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
-            private final ThreadLocal<String> pending = new ThreadLocal<>();
+            private final AtomicReference<String> pending = new AtomicReference<>();
 
             @Override
             public void distributeData(final Binary ignored) {
-                dictionaries.put(Thread.currentThread().getName(), this.pending.get());
+                dictionaries.add(this.pending.getAndSet(null));
             }
 
             @Override
@@ -56,18 +35,11 @@ class StorageBinaryDataDistributorTest {
         };
         final StorageBinaryDataDistributor.Caching caching =
                 (StorageBinaryDataDistributor.Caching) StorageBinaryDataDistributor.Caching(delegate);
-        final CountDownLatch ready = new CountDownLatch(2);
-        final CountDownLatch release = new CountDownLatch(1);
-        final Thread first = thread("writer-1", caching, "dictionary-1", ready, release);
-        final Thread second = thread("writer-2", caching, "dictionary-2", ready, release);
-        first.start();
-        second.start();
-        ready.await();
-        release.countDown();
-        first.join();
-        second.join();
-        assertEquals("dictionary-1", dictionaries.get("writer-1"));
-        assertEquals("dictionary-2", dictionaries.get("writer-2"));
+        caching.distributeTypeDictionary("dictionary-1");
+        caching.distributeData(null);
+        caching.distributeTypeDictionary("dictionary-2");
+        caching.distributeData(null);
+        assertEquals(List.of("dictionary-1", "dictionary-2"), dictionaries);
     }
 
         /// Verifies that the dictionary is cleared after delegate failure.

@@ -19,7 +19,7 @@ import java.util.function.LongSupplier;
 /// restart can distinguish a committed transaction from an uncertain one.
 ///
 /// This is an Aeron-only write coordinator. Store integration must use
-/// [AeronStorageBinaryTargetDistributing]; exposing this object as the
+/// [AeronStorageBinaryReplicationTarget]; exposing this object as the
 /// distributor would allow publication without local Store
 /// acceptance and would bypass the durable fence.
 public final class AeronReplicationWriteCoordinator implements AutoCloseable {
@@ -39,6 +39,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
      * failure after that point must not overwrite a durable COMMITTED record with
      * COMMITTING_UNCERTAIN. */
     private boolean commitMarkerPublished;
+    private boolean commitInProgress;
 
     AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher) {
         this(publisher, ReplicationDurabilityMode.ARCHIVE_FIRST,
@@ -87,8 +88,16 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.writeLock.lock();
         try {
             synchronized (this) {
-                this.pendingDictionary = typeDictionaryData == null ? null :
-                        typeDictionaryData.getBytes(StandardCharsets.UTF_8);
+                this.ensureNotCommitting();
+                if (typeDictionaryData == null) {
+                    this.pendingDictionary = null;
+                } else {
+                    final byte[] encoded = typeDictionaryData.getBytes(StandardCharsets.UTF_8);
+                    if (encoded.length > this.publisher.maxTransactionBytes()) {
+                        throw new IllegalArgumentException("type dictionary exceeds maxTransactionBytes");
+                    }
+                    this.pendingDictionary = encoded;
+                }
             }
         } finally {
             this.writeLock.unlock();
@@ -100,6 +109,9 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         if (operation == null) throw new NullPointerException("operation");
         this.writeLock.lock();
         try {
+            synchronized (this) {
+                this.ensureNotCommitting();
+            }
             operation.run();
         } finally {
             this.writeLock.unlock();
@@ -110,7 +122,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     ///
     /// This entry point is for the neutral distributor, which has no local
     /// persistence target to fence. Store writes should use
-    /// [AeronStorageBinaryTargetDistributing] so local acceptance and
+    /// [AeronStorageBinaryReplicationTarget] so local acceptance and
     /// publication remain one operation.
     ///
     /// @param data binary to publish
@@ -125,7 +137,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
         /// Commits a token. If the result is unclear, records that fact before
     /// rethrowing so restart cannot silently reuse the sequence.
-    synchronized void commitOrMarkUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
+    void commitOrMarkUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
         this.commitMarkerPublished = false;
         try {
             this.commit(prepared);
@@ -165,6 +177,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// ENQUEUED fence. The returned token must be committed or closed; listener
     /// failure fails the publisher closed.
     synchronized AeronReplicationPublisher.PreparedTransaction prepare(final Binary data) {
+        this.ensureNotCommitting();
         if (data == null) {
             throw new NullPointerException("data");
         }
@@ -266,6 +279,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     synchronized void markEnqueued(final AeronReplicationPublisher.PreparedTransaction prepared) {
+        this.ensureNotCommitting();
         final LocalEnqueue local = this.localAcceptanceFence;
         if (local != null && local.sequence() == prepared.sequence()) {
             // ENQUEUE_THEN_ARCHIVE fenced the local write before preparation; do
@@ -292,6 +306,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// before the reserved sequence is durably recorded. The returned sequence is
     /// the one that preparation must later reuse.
     synchronized long markLocalEnqueue(final Binary data) {
+        this.ensureNotCommitting();
         if (data == null) throw new NullPointerException("data");
         if (this.localAcceptanceFence != null) {
             throw new IllegalStateException("an Aeron local acceptance fence is already pending");
@@ -355,6 +370,9 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private void ensureWriteAdmitted(final int dataLength) {
         final long dictionaryLength = this.pendingDictionary == null ? 0L : this.pendingDictionary.length;
         final long requiredBytes = Math.addExact(dataLength, dictionaryLength);
+        if (requiredBytes > this.publisher.maxTransactionBytes()) {
+            throw new IllegalArgumentException("Store transaction exceeds maxTransactionBytes");
+        }
         if (!this.writeAdmission.test(requiredBytes)) {
             throw new IllegalStateException(
                     "Aeron Archive has insufficient free capacity for transaction bytes=%s".formatted(requiredBytes));
@@ -377,6 +395,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.writeLock.lock();
         try {
             synchronized (this) {
+                this.ensureNotCommitting();
                 if (this.localAcceptanceFence != null || this.publisher.hasPendingTransaction()) {
                     throw new IllegalStateException("cannot run Archive maintenance while a transaction is pending");
                 }
@@ -389,6 +408,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
         /// Clears the pre-enqueue fence when the Store rejected the write.
     synchronized void clearLocalEnqueue() {
+        this.ensureNotCommitting();
         final LocalEnqueue local = this.localAcceptanceFence;
         if (local == null) return;
         try {
@@ -430,6 +450,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// non-terminal so restart fails closed instead of assuming the Archive has
     /// the local transaction; recovery must reseed or explicitly repair the gap.
     synchronized void markEnqueueWithoutArchive() {
+        this.ensureNotCommitting();
         final AeronReplicationPublisher.FailedPrepare failed = this.publisher.failedPrepare();
         final LocalEnqueue local = this.localAcceptanceFence;
         if (failed == null && local == null) {
@@ -465,28 +486,49 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.clearBufferScratch();
     }
 
-    synchronized void commit(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        this.commitMarkerPublished = false;
-        final long position = this.publisher.commit(prepared);
-        this.commitMarkerPublished = true;
-        try {
-            CrashHook.invoke("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", prepared.sequence());
-            this.notifyState(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
-                    prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), position);
-        } catch (final RuntimeException | Error failure) {
-            this.publisher.failClosed();
-            throw failure;
+    void commit(final AeronReplicationPublisher.PreparedTransaction prepared) {
+        final boolean writeLockHeld = this.writeLock.isHeldByCurrentThread();
+        synchronized (this) {
+            this.ensureNotCommitting();
+            this.commitInProgress = true;
+            this.commitMarkerPublished = false;
         }
-        /* The dictionary is part of the durable transaction. Keep it available until
-         * the COMMITTED checkpoint has been written successfully; a checkpoint failure
-         * must never make a retry publish data whose type definitions were dropped. */
-        this.pendingDictionary = null;
-        this.localAcceptanceFence = null;
-        this.clearBufferScratch();
-        this.commitMarkerPublished = false;
+        if (writeLockHeld) this.writeLock.unlock();
+        try {
+            /* publisher.commit() offers the marker under its own short monitor and
+             * waits for the Archive acknowledgement afterwards. Do not retain either
+             * coordinator lock during that potentially slow wait. */
+            final long position = this.publisher.commit(prepared);
+            synchronized (this) {
+                this.commitMarkerPublished = true;
+            }
+            try {
+                CrashHook.invoke("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", prepared.sequence());
+                this.notifyState(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
+                        prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), position);
+            } catch (final RuntimeException | Error failure) {
+                this.publisher.failClosed();
+                throw failure;
+            }
+            /* The dictionary is part of the durable transaction. Keep it available until
+             * the COMMITTED checkpoint has been written successfully; a checkpoint failure
+             * must never make a retry publish data whose type definitions were dropped. */
+            synchronized (this) {
+                this.pendingDictionary = null;
+                this.localAcceptanceFence = null;
+                this.clearBufferScratch();
+                this.commitMarkerPublished = false;
+            }
+        } finally {
+            if (writeLockHeld) this.writeLock.lock();
+            synchronized (this) {
+                this.commitInProgress = false;
+            }
+        }
     }
 
     synchronized void abort(final AeronReplicationPublisher.PreparedTransaction prepared) {
+        this.ensureNotCommitting();
         try {
             /* prepare() registers the rejection callback on the token. The publisher
              * invokes it for every successful abort path, including direct publisher
@@ -526,6 +568,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     synchronized void markCommittingUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
+        this.ensureNotCommitting();
         try {
             this.notifyState(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, prepared.sequence(),
                     prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), -1);
@@ -538,6 +581,12 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private void notifyState(final AeronReplicationCheckpoint.State state, final long sequence,
                              final int dataLength, final int dataChunkCount, final int dataCrc32c, final long position) {
         this.listener.onState(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
+    }
+
+    private void ensureNotCommitting() {
+        if (this.commitInProgress) {
+            throw new IllegalStateException("Aeron commit is in progress");
+        }
     }
 
         /// Closes the publisher owned by this coordinator.
@@ -557,6 +606,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     private synchronized void disposeLocked() {
+        this.ensureNotCommitting();
         /* ENQUEUE_THEN_ARCHIVE may be interrupted after the Store accepted data
          * but before the Archive terminal marker was published.  Never turn that
          * local acceptance into an ABORT during shutdown: close the publication

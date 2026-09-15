@@ -58,14 +58,14 @@ class AeronWatermarkChannelTest {
             try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 79)) {
                 reader.publish(watermarkBytes());
                 assertTrue(receiverEntered.await(5, TimeUnit.SECONDS));
-                final Thread closer = new Thread(() ->
+                final Thread closer = Thread.ofVirtual().name("watermark-close-test").unstarted(() ->
                 {
                     try {
                         writer.close();
                     } catch (final Throwable failure) {
                         closeFailure.set(failure);
                     }
-                }, "watermark-close-test");
+                });
                 closer.start();
                 releaseReceiver.countDown();
                 closer.join(5_000L);
@@ -139,7 +139,7 @@ class AeronWatermarkChannelTest {
             try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 80)) {
                 reader.publish(watermarkBytes());
                 assertTrue(receiverEntered.await(5, TimeUnit.SECONDS));
-                final Thread interruptedCloser = new Thread(() ->
+                final Thread interruptedCloser = Thread.ofVirtual().name("interrupted-watermark-close-test").unstarted(() ->
                 {
                     Thread.currentThread().interrupt();
                     try {
@@ -147,7 +147,7 @@ class AeronWatermarkChannelTest {
                     } catch (final Throwable failure) {
                         firstFailure.set(failure);
                     }
-                }, "interrupted-watermark-close-test");
+                });
                 interruptedCloser.start();
                 interruptedCloser.join(5_000L);
                 assertInstanceOf(IllegalStateException.class, firstFailure.get());

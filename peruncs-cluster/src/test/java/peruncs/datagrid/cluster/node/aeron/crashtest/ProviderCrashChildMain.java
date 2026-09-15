@@ -4,16 +4,15 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.node.NodelibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
 import peruncs.datagrid.cluster.node.aeron.AeronCrashHooks;
-import peruncs.datagrid.cluster.node.backup.BackupTarget;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.ClusterStorageBinaryDataDistributor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.types.AtomicFileStoreCrashHook;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -30,6 +29,8 @@ import java.util.zip.CRC32C;
 /// Forked provider process for deterministic writer crash cells. The parent
 /// kills this process after the exact milestone; this class never self-kills.
 public final class ProviderCrashChildMain {
+    private static final long SUBSCRIBER_DRIVER_TIMEOUT_MILLIS = 1_000L;
+    private static final long SUBSCRIBER_STARTUP_TIMEOUT_MILLIS = 60_000L;
     private static final java.util.Set<String> SUPPORTED_POINTS = java.util.Set.of(
             "BEFORE_PUBLICATION_CONNECTED", "BEFORE_PREPARE", "AFTER_DICTIONARY_CHUNKS", "AFTER_DATA_CHUNKS", "AFTER_PREPARE",
             "AFTER_PREPARE_BEFORE_LOCAL_WRITE", "AFTER_LOCAL_WRITE_BEFORE_COMMIT",
@@ -230,9 +231,9 @@ public final class ProviderCrashChildMain {
         }
     }
 
-    private static void installCrashHooks(final Path control, final String point) {
+    private static BiConsumer<String, Long> crashHook(final Path control, final String point) {
         final long targetSequence = Long.getLong("dg.crash.sequence", 1L);
-        final BiConsumer<String, Long> hook = (name, sequence) ->
+        return (name, sequence) ->
         {
             if (sequence != targetSequence &&
                 !(sequence == -1L && "BEFORE_PUBLICATION_CONNECTED".equals(point))) return;
@@ -243,17 +244,11 @@ public final class ProviderCrashChildMain {
             writeMilestone(control.resolve("milestone.reached"), name, sequence);
             awaitParent(control.resolve("release"));
         };
-        AeronCrashHooks.install(hook);
-        invokeAtomicFileHook(control, point, targetSequence);
     }
 
-    private static void clearCrashHooks() {
-        AeronCrashHooks.clear();
-        AtomicFileStoreCrashHook.clear();
-    }
-
-    private static void invokeAtomicFileHook(final Path control, final String point, final long targetSequence) {
-        final BiConsumer<String, Path> hook = (phase, path) ->
+    private static BiConsumer<String, Path> atomicFileHook(final Path control, final String point) {
+        final long targetSequence = Long.getLong("dg.crash.sequence", 1L);
+        return (phase, path) ->
         {
             /* The in-flight fence is deliberately not a terminal checkpoint.
              * Do not let a generic file hook kill a checkpoint cell on the wrong
@@ -271,7 +266,6 @@ public final class ProviderCrashChildMain {
             writeMilestone(control.resolve("milestone.reached"), mapped, sequence);
             awaitParent(control.resolve("release"));
         };
-        AtomicFileStoreCrashHook.install(hook);
     }
 
     private static long checkpointSequence() {
@@ -319,6 +313,8 @@ public final class ProviderCrashChildMain {
         private final Path control;
         private final ReplicationDurabilityMode durability;
         private final String barrierPoint;
+        private final BiConsumer<String, Long> crashHook;
+        private final BiConsumer<String, Path> atomicFileHook;
         private final AtomicBoolean running = new AtomicBoolean();
         private final AtomicBoolean subscriberReady = new AtomicBoolean();
         private final AtomicBoolean runtimeReady = new AtomicBoolean();
@@ -333,11 +329,21 @@ public final class ProviderCrashChildMain {
             this.control = control;
             this.durability = durability;
             this.barrierPoint = barrierPoint;
+            this.crashHook = crashHook(control, barrierPoint);
+            this.atomicFileHook = atomicFileHook(control, barrierPoint);
         }
 
         private void start() {
-            installCrashHooks(this.control, this.barrierPoint);
+            AeronCrashHooks.runWithHook(this.crashHook, () ->
+                    AtomicFileStoreCrashHook.runWithHook(this.atomicFileHook, this::startInternal));
+        }
+
+        private void startInternal() {
             this.transport = new AeronClusterReplicationTransportProvider().create(new ChildProperties(this.base, this.durability));
+            /* The subscriber must be allowed to connect before the writer factory
+             * waits for the Archive recording to become active. Waiting for the
+             * persistence target first creates a circular startup dependency. */
+            this.runtimeReady.set(true);
             // With a separate Archive the archive's remote subscription is the
             // publication's reader. A second local subscription would bind the same
             // UDP endpoint and make the external recording impossible to start.
@@ -349,40 +355,95 @@ public final class ProviderCrashChildMain {
 
         private void startSubscriber() {
             this.running.set(true);
-            this.subscriberThread = new Thread(() ->
+            this.subscriberThread = Thread.ofVirtual().name("crash-matrix-subscriber").unstarted(
+                    AeronCrashHooks.inheritCurrent(() ->
             {
-                try {
-                    while (this.running.get() && !this.runtimeReady.get()) sleep();
-                    if (!this.running.get()) return;
-                    final Path aeronDir = this.base.resolve(
-                            Boolean.getBoolean("dg.crash.externalArchive") ? "writer-aeron" : "aeron");
-                    while (this.running.get() && !Files.exists(aeronDir.resolve("cnc.dat"))) sleep();
-                    if (!this.running.get()) return;
+                while (this.running.get() && !this.runtimeReady.get()) sleep();
+                if (!this.running.get()) return;
+                final Path aeronDir = this.base.resolve(
+                        Boolean.getBoolean("dg.crash.externalArchive") ? "writer-aeron" : "aeron");
+                final long deadline = System.nanoTime() +
+                                      java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(SUBSCRIBER_STARTUP_TIMEOUT_MILLIS);
+                Throwable lastFailure = null;
+                while (this.running.get() && !this.subscriberReady.get() && System.nanoTime() < deadline) {
+                    while (this.running.get() && !Files.exists(aeronDir.resolve("cnc.dat")) &&
+                           System.nanoTime() < deadline) sleep();
+                    if (!this.running.get() || System.nanoTime() >= deadline) return;
+                    this.subscriberFailure = null;
                     try (io.aeron.Aeron aeron = io.aeron.Aeron.connect(
-                            new io.aeron.Aeron.Context().aeronDirectoryName(aeronDir.toString()));
+                            new io.aeron.Aeron.Context()
+                                    .aeronDirectoryName(aeronDir.toString())
+                                    .driverTimeoutMs(SUBSCRIBER_DRIVER_TIMEOUT_MILLIS)
+                                    .errorHandler(failure -> this.subscriberFailure = failure));
                          io.aeron.Subscription subscription = aeron.addSubscription(subscriberLiveChannel(), STREAM_ID)) {
+                        /* Aeron.connect can map a stale cnc.dat before its conductor
+                         * discovers that the old driver was killed. Give that
+                         * conductor one timeout window before publishing readiness. */
+                        final long handshakeDeadline = System.nanoTime() +
+                                java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
+                                        SUBSCRIBER_DRIVER_TIMEOUT_MILLIS + 100L);
+                        while (this.running.get() && this.subscriberFailure == null &&
+                               System.nanoTime() < handshakeDeadline) sleep();
+                        if (!this.running.get()) return;
+                        if (isDriverTimeout(this.subscriberFailure)) {
+                            lastFailure = this.subscriberFailure;
+                            continue;
+                        }
+                        if (this.subscriberFailure != null) {
+                            throw new IllegalStateException("subscriber conductor failed", this.subscriberFailure);
+                        }
                         this.subscriberReady.set(true);
-                        while (this.running.get()) subscription.poll((buffer, offset, length, header) -> {
-                        }, 50);
+                        while (this.running.get() && this.subscriberFailure == null) {
+                            subscription.poll((buffer, offset, length, header) -> {
+                            }, 50);
+                        }
+                        if (isDriverTimeout(this.subscriberFailure)) {
+                            lastFailure = this.subscriberFailure;
+                            this.subscriberReady.set(false);
+                            continue;
+                        }
+                        if (this.subscriberFailure != null) {
+                            throw new IllegalStateException("subscriber conductor failed", this.subscriberFailure);
+                        }
+                        return;
+                    } catch (final io.aeron.exceptions.DriverTimeoutException timeout) {
+                        lastFailure = timeout;
+                        this.subscriberReady.set(false);
+                        if (this.running.get()) sleep();
+                    } catch (final Throwable failure) {
+                        this.subscriberFailure = failure;
+                        return;
                     }
-                } catch (final Throwable failure) {
-                    this.subscriberFailure = failure;
                 }
-            }, "crash-matrix-subscriber");
-            this.subscriberThread.setDaemon(true);
+                if (this.running.get() && !this.subscriberReady.get()) {
+                    this.subscriberFailure = new IllegalStateException(
+                            "subscriber did not connect before restart timeout", lastFailure);
+                }
+            }));
             this.subscriberThread.start();
         }
 
+        private static boolean isDriverTimeout(final Throwable failure) {
+            for (Throwable current = failure; current != null; current = current.getCause()) {
+                if (current instanceof io.aeron.exceptions.DriverTimeoutException) return true;
+            }
+            return false;
+        }
+
         private void write(final byte[] payload) {
-            if (this.subscriberFailure != null)
+            AeronCrashHooks.runWithHook(this.crashHook, () ->
+                    AtomicFileStoreCrashHook.runWithHook(this.atomicFileHook, () -> this.writeInternal(payload)));
+        }
+
+        private void writeInternal(final byte[] payload) {
+            if (this.subscriberFailure != null && !isDriverTimeout(this.subscriberFailure))
                 throw new IllegalStateException("subscriber failed: %s".formatted(this.subscriberFailure), this.subscriberFailure);
-            final ClusterStorageBinaryDataDistributor distributor = this.transport.distributor(STREAM, false);
+            final StorageBinaryDataDistributor distributor = this.transport.distributor(STREAM, false);
             if (this.writes > 0 && "AFTER_DICTIONARY_CHUNKS".equals(this.barrierPoint)) {
                 distributor.distributeTypeDictionary("crash.Type");
             }
             final PersistenceTarget<Binary> target = this.transport.persistenceTargetFactory(STREAM, distributor)
                     .apply(new FileStoreTarget(this.base.resolve("store.records"), this.writes));
-            this.runtimeReady.set(true);
             this.awaitSubscriber();
             final Binary binary = ChunksWrapper.New(XMemory.toDirectByteBuffer(payload));
             target.write(binary);
@@ -391,14 +452,20 @@ public final class ProviderCrashChildMain {
 
         private void awaitSubscriber() {
             if (this.subscriberThread == null) return;
-            final long deadline = System.nanoTime() + 10_000_000_000L;
-            while (!this.subscriberReady.get() && this.subscriberFailure == null &&
-                   System.nanoTime() < deadline) {
+            final long deadline = System.nanoTime() +
+                                  java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(SUBSCRIBER_STARTUP_TIMEOUT_MILLIS);
+            while (!this.subscriberReady.get() && System.nanoTime() < deadline) {
+                if (this.subscriberFailure != null && !isDriverTimeout(this.subscriberFailure)) {
+                    throw new IllegalStateException("subscriber failed: %s".formatted(this.subscriberFailure),
+                            this.subscriberFailure);
+                }
                 sleep();
             }
-            if (this.subscriberFailure != null)
+            if (this.subscriberFailure != null && !isDriverTimeout(this.subscriberFailure))
                 throw new IllegalStateException("subscriber failed: %s".formatted(this.subscriberFailure), this.subscriberFailure);
-            if (!this.subscriberReady.get()) throw new IllegalStateException("subscriber did not start");
+            if (!this.subscriberReady.get()) {
+                throw new IllegalStateException("subscriber did not start", this.subscriberFailure);
+            }
         }
 
         private AeronReplicationCheckpoint checkpoint() {
@@ -420,7 +487,6 @@ public final class ProviderCrashChildMain {
                     Thread.currentThread().interrupt();
                 }
             }
-            clearCrashHooks();
             if (this.transport != null) this.transport.close();
         }
     }
@@ -464,7 +530,7 @@ public final class ProviderCrashChildMain {
         }
     }
 
-    private static final class ChildProperties implements NodelibraryPropertiesProvider {
+    private static final class ChildProperties implements NodeLibraryPropertiesProvider {
         private final Path base;
         private final ReplicationDurabilityMode durability;
         private final boolean externalArchive;
@@ -508,16 +574,6 @@ public final class ProviderCrashChildMain {
         @Override
         public Integer keptBackupsCount() {
             return 0;
-        }
-
-        @Override
-        public BackupTarget backupTarget() {
-            return BackupTarget.ONPREM;
-        }
-
-        @Override
-        public String backupProxyServiceUrl() {
-            return null;
         }
 
         @Override
