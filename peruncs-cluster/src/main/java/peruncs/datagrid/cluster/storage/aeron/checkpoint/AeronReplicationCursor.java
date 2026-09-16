@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
+import java.util.Objects;
 import java.util.UUID;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
@@ -48,7 +49,7 @@ public record AeronReplicationCursor(
     /// @param encoded serialized cursor bytes
     /// @return decoded cursor
     public static AeronReplicationCursor decode(final byte[] encoded) {
-        if (encoded == null) throw new NullPointerException("encoded");
+        Objects.requireNonNull(encoded, "encoded");
         if (encoded.length != ENCODED_LENGTH)
             throw new IllegalArgumentException("invalid Aeron cursor encoding length");
         final int expectedCrc = getInt(encoded, PAYLOAD_LENGTH);

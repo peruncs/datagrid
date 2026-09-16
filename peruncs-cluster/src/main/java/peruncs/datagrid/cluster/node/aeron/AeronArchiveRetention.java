@@ -285,7 +285,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                     "Aeron reader retirement requires a deployed reader-to-writer watermark channel");
         }
         this.ensureStateRestored();
-        if (readerId == null) throw new NullPointerException("readerId");
+        Objects.requireNonNull(readerId, "readerId");
         final AeronAuthenticatedWatermark previous = this.quorum.latest(readerId);
         if (!this.quorum.retire(readerId)) return;
         try {
@@ -497,7 +497,8 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 }
                 watermarks.add(watermark);
             }
-            if (buffer.remaining() < Integer.BYTES) throw new IOException("truncated retirement state");
+            if (buffer.remaining() < Integer.BYTES)
+                throw new IOException("truncated retirement state");
             final int retiredCount = buffer.getInt();
             if (retiredCount < 0 || retiredCount > 1024 || buffer.remaining() != retiredCount * 16)
                 throw new IOException("invalid retirement state count");
@@ -614,8 +615,9 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     record RecordingPositions(LongUnaryOperator startPosition, LongUnaryOperator stopPosition,
                               LongUnaryOperator recordingPosition) {
         RecordingPositions {
-            if (startPosition == null || stopPosition == null || recordingPosition == null)
-                throw new NullPointerException("recording position suppliers");
+            Objects.requireNonNull(startPosition, "startPosition");
+            Objects.requireNonNull(stopPosition, "stopPosition");
+            Objects.requireNonNull(recordingPosition, "recordingPosition");
         }
     }
 }

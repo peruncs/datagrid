@@ -31,7 +31,7 @@ class StorageNodeManagerRolesTest {
         /// A fixed writer reports itself as the distributor and derives its
         /// health from the distributor instead of a reader health check.
     @Test
-    void writerManagerIsDistributor() throws Exception {
+    void writerManagerIsDistributor() {
         final StorageNodeManager manager = StorageNodeManager.New(
                 stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
                 stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),

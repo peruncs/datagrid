@@ -23,10 +23,8 @@ import java.util.Objects;
 /// context with manual Store-boundary commits, while JVector keeps its source
 /// vectors in the Store and rebuilds its transient graph on each node.
 public final class ClusterStoreIndexes {
-    private static final String EXTERNAL_LUCENE_MESSAGE =
-            "Cluster replication supports only embedded Lucene indexes; external directories are not supported";
-    private static final String EXTERNAL_VECTOR_MESSAGE =
-            "Cluster replication supports only in-graph JVector indexes; external index directories are not supported";
+    private static final String EXTERNAL_LUCENE_MESSAGE = "Cluster replication supports only embedded Lucene indexes; external directories are not supported";
+    private static final String EXTERNAL_VECTOR_MESSAGE = "Cluster replication supports only in-graph JVector indexes; external index directories are not supported";
         /* Registration check-then-act must not lock on the foreign index object:
          * any other code synchronizing on it could deadlock with registration,
          * and nothing else honors that monitor. One executor guards both. */
@@ -57,10 +55,7 @@ public final class ClusterStoreIndexes {
     /// @return the newly registered index
     /// @throws IllegalStateException if the map already has a Lucene index
     @SuppressWarnings("unchecked") // Lucene's class token cannot retain its entity type.
-    public static <E> LuceneIndex<E> registerLucene(
-            final GigaMap<E> map,
-            final DocumentPopulator<E> documentPopulator
-    ) {
+    public static <E> LuceneIndex<E> registerLucene(final GigaMap<E> map, final DocumentPopulator<E> documentPopulator) {
         final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
         return REGISTRATION.write(() ->
         {
@@ -98,8 +93,7 @@ public final class ClusterStoreIndexes {
             final VectorIndices<E> indices,
             final String name,
             final VectorIndexConfiguration configuration,
-            final Vectorizer<? super E> vectorizer
-    ) {
+            final Vectorizer<? super E> vectorizer) {
         validateVectorConfiguration(configuration);
         final VectorIndices<E> checkedIndices = Objects.requireNonNull(indices, "indices");
         final String checkedName = Objects.requireNonNull(name, "name");
@@ -120,14 +114,12 @@ public final class ClusterStoreIndexes {
             final GigaMap<E> map,
             final String name,
             final VectorIndexConfiguration configuration,
-            final Vectorizer<? super E> vectorizer
-    ) {
+            final Vectorizer<? super E> vectorizer) {
         final GigaMap<E> checkedMap = Objects.requireNonNull(map, "map");
         validateVectorConfiguration(configuration);
         final String checkedName = Objects.requireNonNull(name, "name");
         final Vectorizer<? super E> checkedVectorizer = Objects.requireNonNull(vectorizer, "vectorizer");
-        return REGISTRATION.write(() ->
-        {
+        return REGISTRATION.write(() -> {
             VectorIndices<E> indices = checkedMap.index().get(VectorIndices.Category());
             if (indices == null) {
                 indices = checkedMap.index().register(VectorIndices.Category());
@@ -140,8 +132,7 @@ public final class ClusterStoreIndexes {
             final VectorIndices<E> indices,
             final String name,
             final VectorIndexConfiguration configuration,
-            final Vectorizer<? super E> vectorizer
-    ) {
+            final Vectorizer<? super E> vectorizer) {
         if (indices.get(name) != null) {
             throw new IllegalStateException("a vector index named \"" + name + "\" is already registered");
         }

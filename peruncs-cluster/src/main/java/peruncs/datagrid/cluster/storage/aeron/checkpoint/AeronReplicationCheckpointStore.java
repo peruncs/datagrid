@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Objects;
 import java.util.UUID;
 
 /// Persists restart records without coupling them to the wire format.
@@ -19,17 +20,16 @@ import java.util.UUID;
 /// A new record is forced to a temporary file before it replaces the old
 /// one. Reads validate the complete record and its checksum. A failed write
 /// therefore leaves the previous restart boundary available.
-public final class AeronReplicationCheckpointStore {
-    private AeronReplicationCheckpointStore() {
-    }
+public interface AeronReplicationCheckpointStore {
 
-        /// Replaces `path` only after the complete record is on disk.
+    /// Replaces `path` only after the complete record is on disk.
     ///
     /// @param path       checkpoint file
     /// @param checkpoint record to persist
     /// @throws IOException if the record cannot be written or forced to disk
-    public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException {
-        if (path == null || checkpoint == null) throw new NullPointerException("path and checkpoint");
+    static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException {
+        Objects.requireNonNull(path, "path");
+        Objects.requireNonNull(checkpoint, "checkpoint");
         /* The encoded bytes are intentionally owned by this invocation. A callback
          * (including a crash hook) can therefore not overwrite a buffer owned by
          * this write while AtomicFileStore is still consuming it. Checkpoint writes are
@@ -69,12 +69,12 @@ public final class AeronReplicationCheckpointStore {
         return bytes;
     }
 
-        /// Reads a record and rejects a torn, corrupt, or incompatible file.
+    /// Reads a record and rejects a torn, corrupt, or incompatible file.
     ///
     /// @param path checkpoint file
     /// @return validated checkpoint
     /// @throws IOException if the file is missing, truncated, or invalid
-    public static AeronReplicationCheckpoint read(final Path path) throws IOException {
+    static AeronReplicationCheckpoint read(final Path path) throws IOException {
         final byte[] bytes = readFixedRecord(path);
         final int expected = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
                 .getInt(AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES);
@@ -103,7 +103,7 @@ public final class AeronReplicationCheckpointStore {
     }
 
     private static byte[] readFixedRecord(final Path path) throws IOException {
-        if (path == null) throw new NullPointerException("path");
+        Objects.requireNonNull(path, "path");
         /* Keep the file descriptor open while reading and request NOFOLLOW_LINKS.
          * The old size/readAllBytes sequence allowed a symlink swap between the
          * validation and read, which could make recovery consume attacker-controlled

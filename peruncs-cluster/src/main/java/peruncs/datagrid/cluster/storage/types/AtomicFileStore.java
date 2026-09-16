@@ -9,6 +9,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiConsumer;
@@ -24,16 +25,15 @@ public final class AtomicFileStore {
     public static final String PHASE_CURSOR = "CURSOR";
     private static final System.Logger LOGGER = System.getLogger(AtomicFileStore.class.getName());
     private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
-    private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY =
-            PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+    private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY = PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
 
     private AtomicFileStore() {
     }
 
         /// Runs file operations with a crash-test hook bound to their dynamic scope.
     static void runWithTestHook(final BiConsumer<String, Path> hook, final Runnable action) {
-        if (hook == null) throw new NullPointerException("hook");
-        if (action == null) throw new NullPointerException("action");
+        Objects.requireNonNull(hook, "hook");
+        Objects.requireNonNull(action, "action");
         ScopedValue.where(TEST_HOOK, hook).run(action);
     }
 
@@ -42,13 +42,13 @@ public final class AtomicFileStore {
             final BiConsumer<String, Path> hook,
             final ScopedValue.CallableOp<? extends T, X> operation
     ) throws X {
-        if (hook == null) throw new NullPointerException("hook");
-        if (operation == null) throw new NullPointerException("operation");
+        Objects.requireNonNull(hook, "hook");
+        Objects.requireNonNull(operation, "operation");
         return ScopedValue.where(TEST_HOOK, hook).call(operation);
     }
 
     static Runnable inheritCurrentTestHook(final Runnable action) {
-        if (action == null) throw new NullPointerException("action");
+        Objects.requireNonNull(action, "action");
         final BiConsumer<String, Path> hook = TEST_HOOK.isBound() ? TEST_HOOK.get() : null;
         return hook == null ? action : () -> ScopedValue.where(TEST_HOOK, hook).run(action);
     }
@@ -148,7 +148,7 @@ public final class AtomicFileStore {
     /// @param bytes complete file contents
     /// @throws IOException if writing or replacement fails
     public static void writeBytes(final Path path, final byte[] bytes) throws IOException {
-        if (bytes == null) throw new NullPointerException("bytes");
+        Objects.requireNonNull(bytes, "bytes");
         write(path, channel -> writeFully(channel, java.nio.ByteBuffer.wrap(bytes)));
     }
 

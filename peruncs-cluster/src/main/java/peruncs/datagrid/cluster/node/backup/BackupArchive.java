@@ -10,10 +10,7 @@ import java.io.OutputStream;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -86,7 +83,7 @@ final class BackupArchive {
             final boolean requireBackupMetadata,
             final BackupArchiveLimits limits
     ) throws NodeLibraryException {
-        if (limits == null) throw new NullPointerException("limits");
+        Objects.requireNonNull(limits, "limits");
         final Path root = destination.toAbsolutePath().normalize();
         try {
             StorageFileOperations.ensureNoSymbolicLinks(root);

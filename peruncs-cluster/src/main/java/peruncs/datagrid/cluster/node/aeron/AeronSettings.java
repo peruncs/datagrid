@@ -89,7 +89,7 @@ record AeronSettings(
     }
 
     static AeronSettings fromEnvironment(final NodeLibraryPropertiesProvider properties) {
-        if (properties == null) throw new NullPointerException("properties");
+        Objects.requireNonNull(properties, "properties");
         if (!properties.replicationRoleConfigured()) {
             throw new IllegalArgumentException(
                     "ECLIPSE_DATAGRID_REPLICATION_ROLE must be explicitly configured for Aeron");
@@ -100,7 +100,7 @@ record AeronSettings(
                     "ECLIPSE_DATAGRID_REPLICATION_ROLE must be writer, reader, or backup-reader");
         }
         final String role = configuredRole.trim().toLowerCase(java.util.Locale.ROOT);
-        if (!role.equals("writer") && !role.equals("reader") && !role.equals("backup-reader")) {
+        if (!role.equals(NodeLibraryPropertiesProvider.WRITER_ROLE) && !role.equals(NodeLibraryPropertiesProvider.READER_ROLE) && !role.equals(NodeLibraryPropertiesProvider.BACKUP_READER_ROLE)) {
             throw new IllegalArgumentException("ECLIPSE_DATAGRID_REPLICATION_ROLE must be writer, reader, or backup-reader");
         }
         /* The replication framing is configured with typed builder values read
@@ -211,11 +211,11 @@ record AeronSettings(
         }
         final byte[] retentionSecret = retentionSecret(properties);
         final Set<UUID> retentionReaders = retentionReaders(properties);
-        if ("writer".equals(role) && (retentionSecret != null) == retentionReaders.isEmpty()) {
+        if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(role) && (retentionSecret != null) == retentionReaders.isEmpty()) {
             throw new IllegalArgumentException(
                     "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET and ECLIPSE_DATAGRID_AERON_RETENTION_READERS must be configured together");
         }
-        if (externalArchive && "writer".equals(role) &&
+        if (externalArchive && NodeLibraryPropertiesProvider.WRITER_ROLE.equals(role) &&
             (retentionSecret != null || !retentionReaders.isEmpty())) {
             throw new IllegalArgumentException(
                     "authenticated retention requires an embedded Aeron Archive writer");
@@ -249,7 +249,7 @@ record AeronSettings(
          * dynamic MDC. The external topology uses this URI for both the publication
          * and the remote Archive recording subscription; that Aeron pairing is a
          * point-to-point endpoint and cannot reuse the embedded MDC URI. */
-        if ("writer".equals(role) && !externalArchive) {
+        if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(role) && !externalArchive) {
             validateWriterTopology(liveChannel);
         }
         if (properties.isProdMode() && (wildcardEndpoint(liveChannel) || wildcardEndpoint(replayChannel) ||

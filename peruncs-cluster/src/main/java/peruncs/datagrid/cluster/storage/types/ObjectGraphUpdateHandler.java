@@ -42,8 +42,7 @@ public interface ObjectGraphUpdateHandler {
     static void runStructured(
             final ObjectGraphUpdateHandler handler,
             final Runnable updater,
-            final Duration timeout
-    ) throws InterruptedException {
+            final Duration timeout) throws InterruptedException {
         notNull(handler);
         notNull(updater);
         notNull(timeout);

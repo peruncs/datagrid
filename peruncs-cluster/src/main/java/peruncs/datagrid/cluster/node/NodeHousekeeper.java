@@ -27,9 +27,9 @@ final class NodeHousekeeper implements AutoCloseable {
     private boolean closing;
     private boolean closed;
 
-    private NodeHousekeeper(final int threads) {
+    private NodeHousekeeper() {
         final AtomicInteger threadCount = new AtomicInteger();
-        this.scheduler = new ScheduledThreadPoolExecutor(threads, task ->
+        this.scheduler = new ScheduledThreadPoolExecutor(THREADS, task ->
                 Thread.ofVirtual()
                         .name("datagrid-housekeeper-%s".formatted(threadCount.incrementAndGet()))
                         .unstarted(task));
@@ -41,7 +41,7 @@ final class NodeHousekeeper implements AutoCloseable {
     ///
     /// @return a housekeeper ready for scheduling
     public static NodeHousekeeper New() {
-        return new NodeHousekeeper(THREADS);
+        return new NodeHousekeeper();
     }
 
     private static void runGuarded(final ScheduledTask scheduled) {

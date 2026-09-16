@@ -9,44 +9,44 @@ import java.util.List;
 import java.util.Objects;
 
 /// Exposes Store binary buffers to the replication transport without mutating them.
-final class StorageBinaryDataChunker {
-    private StorageBinaryDataChunker() {
-    }
+interface StorageBinaryDataChunker {
 
-        /// Collects duplicate source views in channel order.
+    /// Collects duplicate source views in channel order.
     ///
     /// @param data source Store binary
     /// @return duplicate views in channel order
-    public static List<ByteBuffer> buffers(final Binary data) {
+    static List<ByteBuffer> buffers(final Binary data) {
         Objects.requireNonNull(data, "data");
         final List<ByteBuffer> buffers = new ArrayList<>();
         data.iterateChannelChunks(chunk ->
         {
-            if (chunk == null) throw new StorageBinaryDataException("binary contains a null channel");
+            if (chunk == null)
+                throw new StorageBinaryDataException("binary contains a null channel");
             for (final ByteBuffer buffer : chunk.buffers()) {
-                if (buffer == null) throw new StorageBinaryDataException("binary contains a null channel buffer");
+                if (buffer == null)
+                    throw new StorageBinaryDataException("binary contains a null channel buffer");
                 buffers.add(buffer.duplicate());
             }
         });
         return buffers;
     }
 
-        /// Returns duplicate source views in channel order.
+    /// Returns duplicate source views in channel order.
     ///
     /// @param data source Store binary
     /// @return duplicate views in channel order
-    public static ByteBuffer[] bufferArray(final Binary data) {
+    static ByteBuffer[] bufferArray(final Binary data) {
         return buffers(data).toArray(ByteBuffer[]::new);
     }
 
-        /// Returns the original direct buffers of an owned binary and normalizes them
+    /// Returns the original direct buffers of an owned binary and normalizes them
     /// in place for Store import. This method is only for a caller that has
     /// already taken ownership of the binary and therefore may transfer release
     /// responsibility for the returned buffers.
     ///
     /// @param data owned binary
     /// @return original direct buffers, positioned at zero
-    public static ByteBuffer[] ownedArray(final Binary data) {
+    static ByteBuffer[] ownedArray(final Binary data) {
         Objects.requireNonNull(data, "data");
         /* One pass with one list: each buffer is validated and normalized inline,
          * so no boxed length list and no second loop. Normalizing before a later
@@ -72,13 +72,13 @@ final class StorageBinaryDataChunker {
         return buffers.toArray(ByteBuffer[]::new);
     }
 
-        /// Returns import-ready duplicate views with position zero. Serializer's
+    /// Returns import-ready duplicate views with position zero. Serializer's
     /// [ChunksWrapper] stores its logical length in the source position;
     /// ordinary binaries expose the remaining bytes instead.
     ///
     /// @param data source Store binary
     /// @return import-ready duplicate views
-    public static ByteBuffer[] importArray(final Binary data) {
+    static ByteBuffer[] importArray(final Binary data) {
         Objects.requireNonNull(data, "data");
         final ByteBuffer[] source = bufferArray(data);
         final ByteBuffer[] result = new ByteBuffer[source.length];
@@ -98,7 +98,7 @@ final class StorageBinaryDataChunker {
         return result;
     }
 
-        /// Returns the logical payload length of one channel buffer.
+    /// Returns the logical payload length of one channel buffer.
     ///
     /// Serializer's [ChunksWrapper] stores its logical length in the source
     /// position; ordinary binaries expose the remaining bytes instead. This is

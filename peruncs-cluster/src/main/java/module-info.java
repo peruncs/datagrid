@@ -39,12 +39,14 @@
 ///
 /// Every applied commit advances a durable `ReplicationCursor` of
 /// transport, Store generation, logical sequence, and provider position,
-/// while writers persist an authenticated checkpoint binding cluster,
-/// Store generation, epoch, recording, and sequence. Startup reconciles
-/// the two so a cursor from another Store generation never resumes an
-/// unrelated recording. Restarts stay routine instead of reseeds as long
-/// as Archive and cursor survive together; cursor and checkpoint writes
-/// are CRC-protected and atomic, and torn files are rejected.
+/// while writers persist a checkpoint binding cluster, Store generation,
+/// epoch, recording, and sequence. Startup reconciles the two so a cursor
+/// from another Store generation never resumes an unrelated recording.
+/// Restarts stay routine instead of reseeds as long as Archive and cursor
+/// survive together; cursor and checkpoint writes are CRC-protected and
+/// atomic, and torn files are rejected. The checkpoint and cursor files are
+/// checksum-protected, not authenticated: their trust boundary is the
+/// filesystem, so the metadata directory must stay owner-only and local.
 ///
 /// # Quorum-gated retention
 ///

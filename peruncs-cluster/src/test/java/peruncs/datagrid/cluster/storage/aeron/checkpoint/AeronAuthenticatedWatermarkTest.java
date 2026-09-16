@@ -148,6 +148,20 @@ class AeronAuthenticatedWatermarkTest {
     }
 
     @Test
+    void aggregateSignsLeastAdvancedBoundary() {
+        final AeronAuthenticatedWatermark advanced = AeronAuthenticatedWatermark.sign(
+                READER_ONE, CLUSTER, GENERATION, 3, 17, 2, 200, SECRET);
+        final AeronAuthenticatedWatermark lagging = AeronAuthenticatedWatermark.sign(
+                READER_TWO, CLUSTER, GENERATION, 3, 17, 1, 100, SECRET);
+        final AeronAuthenticatedWatermark aggregate = AeronAuthenticatedWatermark.aggregate(
+                java.util.List.of(advanced, lagging), SECRET);
+        assertEquals(new UUID(0L, 0L), aggregate.readerId());
+        assertEquals(1, aggregate.sequence());
+        assertEquals(100, aggregate.position());
+        assertTrue(aggregate.verify(SECRET));
+    }
+
+    @Test
     void validatorRejectsRestoringAnIdentityMismatchedToken() {
         try (final AeronAuthenticatedWatermark.Validator validator =
                 new AeronAuthenticatedWatermark.Validator(SECRET)) {

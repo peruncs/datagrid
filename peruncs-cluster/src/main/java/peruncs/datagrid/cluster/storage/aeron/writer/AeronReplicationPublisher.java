@@ -9,6 +9,7 @@ import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.lang.ref.Cleaner;
 import java.nio.ByteBuffer;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
@@ -140,8 +141,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
 
     private static int actualMaxMessageLength(final ExclusivePublication publication,
                                               final AeronReplicationConfiguration configuration) {
-        if (publication == null) throw new NullPointerException("publication");
-        if (configuration == null) throw new NullPointerException("configuration");
+        Objects.requireNonNull(publication, "publication");
+        Objects.requireNonNull(configuration, "configuration");
         final int actual = publication.maxMessageLength();
         if (actual <= 0) {
             throw new IllegalArgumentException("Aeron publication has no usable message capacity");
@@ -150,12 +151,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
     }
 
     private static long totalRemaining(final ByteBuffer[] buffers, final int count) {
-        if (buffers == null) throw new NullPointerException("dataBuffers");
+        Objects.requireNonNull(buffers, "dataBuffers");
         if (count < 0 || count > buffers.length) throw new IllegalArgumentException("invalid data buffer count");
         long length = 0;
         for (int index = 0; index < count; index++) {
             final ByteBuffer buffer = buffers[index];
-            if (buffer == null) throw new NullPointerException("dataBuffers contains null");
+            Objects.requireNonNull(buffer, "dataBuffers contains null");
             length = Math.addExact(length, buffer.remaining());
         }
         return length;
@@ -291,8 +292,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
             int failedCrc32c = 0;
             try {
                 failedCrc32c = this.computeDataCrc(dataBuffers, bufferCount, dataLength);
-            } catch (final Error crcFailure) {
-                throw crcFailure;
             } catch (final RuntimeException crcFailure) {
                 failure.addSuppressed(crcFailure);
             }
@@ -303,8 +302,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 this.offerMarker(sequence, AeronReplicationEnvelope.Kind.ABORT, dataLength, dataChunks, 0);
                 this.failed = true;
                 CrashHook.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
-            } catch (final Error abortFailure) {
-                throw abortFailure;
             } catch (final RuntimeException abortFailure) {
                 failure.addSuppressed(abortFailure);
             }
@@ -504,9 +501,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-        /// Publishes the commit marker and waits for the configured durability boundary.
-    long commit(final PreparedTransaction transaction) {
-        final long commitPosition;
+        /// Enters the single terminal-marker section for one prepared transaction.
+    ///
+    /// @param transaction prepared transaction
+    private void beginTerminal(final PreparedTransaction transaction) {
         synchronized (this) {
             this.ensureOpen();
             this.validate(transaction);
@@ -514,6 +512,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
             if (this.terminalOperation) throw new IllegalStateException("publisher terminal operation is already running");
             this.terminalOperation = true;
         }
+    }
+
+        /// Publishes the commit marker and waits for the configured durability boundary.
+    long commit(final PreparedTransaction transaction) {
+        final long commitPosition;
+        this.beginTerminal(transaction);
         /* The offer retries under back pressure for the whole offer timeout; do
          * not hold the state monitor across it, or health probes and close()
          * stall behind the marker. offerLock keeps the shared envelope buffer
@@ -544,13 +548,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         /// Publishes an abort marker after the local Store rejects the transaction.
     long abort(final PreparedTransaction transaction) {
         final long offeredPosition;
-        synchronized (this) {
-            this.ensureOpen();
-            this.validate(transaction);
-            if (transaction.terminal) throw new IllegalStateException("prepared transaction is already terminal");
-            if (this.terminalOperation) throw new IllegalStateException("publisher terminal operation is already running");
-            this.terminalOperation = true;
-        }
+        this.beginTerminal(transaction);
         /* As with the commit marker, run the retrying offer outside the state
          * monitor so close() and monitoring do not stall behind back pressure. */
         try {
@@ -942,7 +940,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         ///
         /// @param action receives the recorded abort position
         void onAbort(final java.util.function.LongConsumer action) {
-            if (action == null) throw new NullPointerException("action");
+            Objects.requireNonNull(action, "action");
             boolean invoke;
             synchronized (this.owner) {
                 if (this.abortAction != null && this.abortAction != action) {

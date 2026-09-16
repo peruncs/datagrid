@@ -610,6 +610,11 @@ public final class ProviderCrashChildMain {
         }
 
         @Override
+        public Long dataMergerApplyTimeoutMs() {
+            return null;
+        }
+
+        @Override
         public String replicationProperty(final String name) {
             return switch (name) {
                 case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID" -> this.clusterId.toString();

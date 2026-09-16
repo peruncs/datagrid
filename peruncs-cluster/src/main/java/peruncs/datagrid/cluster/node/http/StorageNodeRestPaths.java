@@ -9,6 +9,14 @@ package peruncs.datagrid.cluster.node.http;
 /// aligned with the controller methods. Media types are the embedder's choice;
 /// the controller returns typed values and never renders JSON or Prometheus
 /// text itself.
+///
+/// The mutating routes ([#BACKUP], [#GC], [#UPDATES], [#RESUME_UPDATES],
+/// [#ACTIVATE_DISTRIBUTOR_START], and [#ACTIVATE_DISTRIBUTOR_FINISH]) are
+/// privileged operations and carry no authentication of their own. The
+/// embedding application must authenticate and authorize them before
+/// delegating; only the health and readiness probes ([#HEALTH],
+/// [#HEALTH_READY]) and the read-only metrics are safe to expose to a probe
+/// endpoint.
 public final class StorageNodeRestPaths {
         /// Root path shared by all node endpoints.
     public static final String ROOT_PATH = "/eclipse-datagrid";

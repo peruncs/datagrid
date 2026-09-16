@@ -31,13 +31,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Exercises the Aeron target with a real four-channel Embedded Store across a restart.
 class AeronStoreIntegrationIT {
-    private static ReplicationCursor latest(final ClusterReplicationTransport transport) throws Exception {
+    private static ReplicationCursor latest(final ClusterReplicationTransport transport) {
         final ReplicationPositionProvider positionProvider = transport.positionProvider("store");
         positionProvider.init();
         return positionProvider.latest();
     }
 
-    private static long latestSequence(final ClusterReplicationTransport transport) throws Exception {
+    private static long latestSequence(final ClusterReplicationTransport transport) {
         final ReplicationPositionProvider positionProvider = transport.positionProvider("store");
         positionProvider.init();
         return positionProvider.latestSequence();
@@ -101,7 +101,7 @@ class AeronStoreIntegrationIT {
             final EmbeddedStorageManager reader = readerFoundation.start();
             final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
                     readerFoundation.getConnectionFoundation(), reader.createConnection(),
-                    ObjectGraphUpdateHandler.Synchronized(), 0L, 1L);
+                    ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
             final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(merger);
             final StorageBinaryDataClient client = transport.client(acceptor, "store", new AfterDataMessageConsumedListener() {
                         @Override
@@ -875,7 +875,7 @@ class AeronStoreIntegrationIT {
                 this.storage = foundation.start();
                 final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
                         foundation.getConnectionFoundation(), this.storage.createConnection(),
-                        ObjectGraphUpdateHandler.Synchronized(), 0L, 1L);
+                        ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
                 this.acceptor = StorageBinaryDataPacketAcceptor.New(merger);
                 this.client = this.transport.client(this.acceptor, "store", new AfterDataMessageConsumedListener() {
                     @Override

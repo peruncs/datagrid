@@ -86,7 +86,7 @@ public final class AeronFullPathBenchmark {
                 final EmbeddedStorageManager reader = readerFoundation.start();
                 final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
                         readerFoundation.getConnectionFoundation(), reader.createConnection(),
-                        ObjectGraphUpdateHandler.Synchronized(), 0L, 1L);
+                        ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
                 final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(merger);
                 final AtomicLong resolved = new AtomicLong(baseline.logicalSequence());
                 final StorageBinaryDataClient client = readerTransport.client(acceptor, "store",

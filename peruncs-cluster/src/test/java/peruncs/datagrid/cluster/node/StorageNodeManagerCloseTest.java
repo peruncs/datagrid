@@ -96,7 +96,7 @@ class StorageNodeManagerCloseTest {
 
         /// Reader resources released by promotion are skipped by a later close.
     @Test
-    void promotionThenCloseSkipsReaderResources() throws Exception {
+    void promotionThenCloseSkipsReaderResources() {
         final CountingHandler distributor = new CountingHandler();
         final CountingHandler client = new CountingHandler();
         final CountingHandler health = new CountingHandler();

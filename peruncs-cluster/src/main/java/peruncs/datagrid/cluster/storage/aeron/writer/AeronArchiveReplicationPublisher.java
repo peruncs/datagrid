@@ -15,6 +15,7 @@ import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfigurati
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongPredicate;
@@ -26,6 +27,10 @@ import java.util.function.LongPredicate;
 /// The Archive and Aeron client are borrowed from the transport; this class
 /// closes only the publication and its recording.
 public final class AeronArchiveReplicationPublisher implements AutoCloseable {
+    /* The Archive control channel is not thread-safe, so every control
+     * operation synchronizes on this shared client: the lock domain follows
+     * the resource, which also keeps co-users of the same client mutually
+     * excluded. Never synchronize these paths on any other monitor. */
     private final AeronArchive archive;
     private final ExclusivePublication publication;
     private final AeronReplicationPublisher publisher;
@@ -711,7 +716,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final ReplicationDurabilityMode durabilityMode,
             final CheckpointWriter writer,
             final LongPredicate writeAdmission) {
-        if (writer == null) throw new NullPointerException("writer");
+        Objects.requireNonNull(writer, "writer");
         return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer,
                 writeAdmission);
     }

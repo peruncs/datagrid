@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node.replication;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
+import java.util.Objects;
 import java.util.UUID;
 
 /// Provider-specific retention hook; unsupported providers retain history and report it explicitly.
@@ -54,7 +55,7 @@ public interface ReplicationLogRetention extends AutoCloseable {
     record MaintenanceResult(Status status, long position, String detail) {
                 /// Normalizes the result detail and validates the status.
         public MaintenanceResult {
-            if (status == null) throw new NullPointerException("status");
+            Objects.requireNonNull(status, "status");
             detail = detail == null ? "" : detail;
         }
 

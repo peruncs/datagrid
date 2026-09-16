@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
@@ -35,7 +36,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
                           final Runnable ensureWriter,
                           final Supplier<AeronWriterBoundary> writerBoundary, final Supplier<UUID> clusterId,
                           final Supplier<UUID> nodeId, final Supplier<UUID> storeGeneration, final LongSupplier epoch) {
-        this.writer = Objects.requireNonNull(writer, "writer");
+        this.writer = Objects.requireNonNull(writer, NodeLibraryPropertiesProvider.WRITER_ROLE);
         this.initialized = Objects.requireNonNull(initialized, "initialized");
         this.ensureWriter = Objects.requireNonNull(ensureWriter, "ensureWriter");
         this.writerBoundary = Objects.requireNonNull(writerBoundary, "writerBoundary");

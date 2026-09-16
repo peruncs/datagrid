@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static java.lang.System.Logger.Level.WARNING;
 import static org.eclipse.serializer.math.XMath.notNegative;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
@@ -51,20 +52,22 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
     /// @param objectGraphUpdateHandler graph update handler
     /// @param cachingTimeoutMs         maximum wait for a cached batch
     /// @param cachedBinaryLimit        maximum cached binary count
+    /// @param applyTimeoutMs           maximum wait for one materialization batch
     /// @return binary merger
     static StorageBinaryDataMerger New(
             final BinaryPersistenceFoundation<?> foundation,
             final StorageConnection storage,
             final ObjectGraphUpdateHandler objectGraphUpdateHandler,
             final long cachingTimeoutMs,
-            final long cachedBinaryLimit
-    ) {
+            final long cachedBinaryLimit,
+            final long applyTimeoutMs) {
         return new Default(
                 notNull(foundation),
                 notNull(storage),
                 notNull(objectGraphUpdateHandler),
                 notNegative(cachingTimeoutMs),
-                positive(cachedBinaryLimit)
+                positive(cachedBinaryLimit),
+                positive(applyTimeoutMs)
         );
     }
 
@@ -85,13 +88,20 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         long CACHING_TIMEOUT_MS = 10_000L;
                 /// Default cached binary count.
         long CACHING_LIMIT = 50L;
+                /// Default maximum wait for one materialization batch, in milliseconds.
+        long APPLY_TIMEOUT_MS = 60_000L;
     }
 
         /// Applies imported data on one bounded worker and reports failures.
     class Default implements StorageBinaryDataMerger {
         private static final System.Logger LOGGER = System.getLogger(StorageBinaryDataMerger.class.getName());
         private static final long MAX_CACHED_BYTES = 1L << 30;
-        private static final long APPLY_TIMEOUT_SECONDS = 60L;
+        /* One slow batch must not brick the reader: a GC pause or a slow disk
+         * can exceed the apply timeout while the worker is still progressing.
+         * The bounded wait is retried this many times before latching a
+         * terminal failure; a genuinely wedged worker still fails after the
+         * budget, so shutdown stays bounded. */
+        private static final int APPLY_TIMEOUT_RETRIES = 2;
         private final ExecutorService executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
                 .name("eclipse-datagrid-store-materializer", 0L)
                 .factory());
@@ -108,6 +118,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
         private final long cachingTimeoutMs;
         private final long cacheLimit;
+        private final long applyTimeoutMs;
+        /* The worker's own structured-scope deadline covers the caller's whole
+         * retry budget, so a slow-but-progressing batch is absorbed by the
+         * caller's retries instead of being declared terminal by the worker on
+         * the first per-attempt expiry. */
+        private final long materializationBudgetMs;
         private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
         private final AtomicLong cachedBufferCount = new AtomicLong();
         private volatile boolean flushRequested;
@@ -121,13 +137,20 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 final StorageConnection storage,
                 final ObjectGraphUpdateHandler objectGraphUpdateHandler,
                 final long cachingTimeoutMs,
-                final long cacheLimit
+                final long cacheLimit,
+                final long applyTimeoutMs
         ) {
             this.foundation = foundation;
             this.storage = storage;
             this.objectGraphUpdateHandler = objectGraphUpdateHandler;
             this.cachingTimeoutMs = cachingTimeoutMs;
             this.cacheLimit = cacheLimit;
+            this.applyTimeoutMs = applyTimeoutMs;
+            try {
+                this.materializationBudgetMs = Math.multiplyExact(applyTimeoutMs, APPLY_TIMEOUT_RETRIES + 1L);
+            } catch (final ArithmeticException overflow) {
+                throw new IllegalArgumentException("applyTimeoutMs is too large: %s".formatted(applyTimeoutMs), overflow);
+            }
         }
 
                 /// Aeron transfers its assembled direct buffers before this callback starts.
@@ -166,8 +189,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 /// Imports Aeron-owned direct buffers without a second native allocation.
         @Override
         public boolean receiveDataOwned(final Binary data) {
-            final ByteBuffer[] buffers = StorageBinaryDataChunker.ownedArray(
-                    org.eclipse.serializer.util.X.notNull(data));
+            final ByteBuffer[] buffers = StorageBinaryDataChunker.ownedArray(org.eclipse.serializer.util.X.notNull(data));
             if (this.failure.get() != null) {
                 StorageBinaryDataImporter.release(buffers);
                 throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
@@ -276,6 +298,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                             this.cachedBytes = Math.subtractExact(this.cachedBytes, incomingBytes);
                             this.cachedBufferCount.addAndGet(-ownedBuffers.length);
                             queued = false;
+                            /* A shutdown racing this admission must surface as the
+                             * documented disposal refusal, not a raw executor
+                             * rejection. */
+                            if (failure instanceof RejectedExecutionException && this.disposed) {
+                                throw new IllegalStateException("Storage binary merger is disposed", failure);
+                            }
                             throw failure;
                         }
                     }
@@ -286,12 +314,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 if (this.cachedBufferCount.get() > this.cacheLimit) {
                     try {
                         /* The worker is signalled before this wait when it is still in its
-                         * coalescing delay. Waiting on the future once avoids a timed polling
-                         * loop that can spin after interruption and gives backpressure one
-                         * unambiguous completion point. The wait is bounded: a hung
-                         * materializer must fail the merger instead of hanging the
-                         * delivery thread forever. */
-                        this.updateFuture.get(APPLY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                         * coalescing delay. The wait is bounded and retried a small number
+                         * of times: a hung materializer must fail the merger instead of
+                         * hanging the delivery thread forever, while a merely slow one is
+                         * given the retry budget before the reader is failed. */
+                        this.awaitMaterialization(this.updateFuture, "import data task");
                     } catch (final InterruptedException e) {
                         Thread.currentThread().interrupt();
                         throw new IllegalStateException("Interrupted while waiting for import data task", e);
@@ -398,7 +425,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                                     release.run();
                                 }
                             },
-                            Duration.ofSeconds(APPLY_TIMEOUT_SECONDS));
+                            Duration.ofMillis(this.materializationBudgetMs));
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                     /* The structured scope closes only after its child terminates;
@@ -568,7 +595,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 // grace period and then kill the process. But any other case we will await the task orderly like this.
                 terminated = this.executor.awaitTermination(30, TimeUnit.SECONDS);
                 if (!terminated) {
-                    LOGGER.log(System.Logger.Level.WARNING, "Timed out waiting for storage graph updates; interrupting remaining work");
+                    LOGGER.log(WARNING, "Timed out waiting for storage graph updates; interrupting remaining work");
                     this.executor.shutdownNow();
                     terminated = this.executor.awaitTermination(5, TimeUnit.SECONDS);
                     if (!terminated) {
@@ -630,7 +657,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             final Future<?> pending = this.updateFuture;
             if (pending == null) return;
             try {
-                pending.get(APPLY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                this.awaitMaterialization(pending, "imported Store data materialization");
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 this.recordFailure("Interrupted while waiting for imported Store data materialization", e);
@@ -641,17 +668,44 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 if (mergerFailure != null) {
                     throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
                 }
-                final RuntimeException terminal = this.recordFailure(
-                        "Failed to materialize imported Store data", e.getCause() == null ? e : e.getCause());
+                final RuntimeException terminal = this.recordFailure("Failed to materialize imported Store data", e.getCause() == null ? e : e.getCause());
                 this.releaseCachedData();
                 throw terminal;
             } catch (final TimeoutException e) {
-                final RuntimeException terminal = this.recordFailure(
-                        "Timed out waiting for imported Store data materialization", e);
+                final RuntimeException terminal = this.recordFailure("Timed out waiting for imported Store data materialization", e);
                 /* Only queued buffers are safe to release here. The callback represented by
                  * pending may still own the batch whose wait timed out. */
                 this.releaseCachedData();
                 throw terminal;
+            }
+        }
+
+        /// Waits for one materialization future with a bounded retry budget.
+        ///
+        /// Returns normally when the future completes. The caller handles
+        /// interruption and execution failure immediately; only a timeout is
+        /// retried, because the worker may simply be slower than the configured
+        /// budget while still making progress. When the budget expires the last
+        /// [TimeoutException] is rethrown for the caller to record and clean up.
+        ///
+        /// @param pending   materialization worker future
+        /// @param operation operation name for retry diagnostics
+        /// @throws InterruptedException if the waiting thread is interrupted
+        /// @throws ExecutionException   if the worker failed
+        /// @throws TimeoutException     if the retry budget expired
+        private void awaitMaterialization(final Future<?> pending, final String operation)
+                throws InterruptedException, ExecutionException, TimeoutException {
+            int retries = APPLY_TIMEOUT_RETRIES;
+            while (true) {
+                try {
+                    pending.get(this.applyTimeoutMs, TimeUnit.MILLISECONDS);
+                    return;
+                } catch (final TimeoutException timeout) {
+                    if (retries-- <= 0) {
+                        throw timeout;
+                    }
+                    LOGGER.log(WARNING, "%s did not finish within %s ms; retrying (%s retries left)".formatted(operation, this.applyTimeoutMs, retries + 1));
+                }
             }
         }
 

@@ -18,10 +18,7 @@ public interface StorageTypeDictionaryExporterDistributing extends PersistenceTy
     /// @param delegate    local dictionary exporter
     /// @param distributor destination for the dictionary
     /// @return distributing exporter
-    static StorageTypeDictionaryExporterDistributing New(
-            final PersistenceTypeDictionaryExporter delegate,
-            final StorageBinaryDataDistributor distributor
-    ) {
+    static StorageTypeDictionaryExporterDistributing New(final PersistenceTypeDictionaryExporter delegate, final StorageBinaryDataDistributor distributor) {
         return new StorageTypeDictionaryExporterDistributing.Default(
                 notNull(delegate),
                 PersistenceTypeDictionaryAssembler.New(), // use default assembler

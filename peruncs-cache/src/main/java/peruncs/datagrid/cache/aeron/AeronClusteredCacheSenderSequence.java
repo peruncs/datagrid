@@ -1,6 +1,7 @@
 package peruncs.datagrid.cache.aeron;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /// Process-wide monotonic sequence shared by every sender of one configured
 /// node identity on one channel.
@@ -40,7 +41,9 @@ final class AeronClusteredCacheSenderSequence {
     }
 
     private static final class Entry {
-        private final Object lock = new Object();
+        /* A ReentrantLock rather than a monitor so a competing sender can bound
+         * its wait for the shared sequence instead of queueing indefinitely. */
+        private final ReentrantLock lock = new ReentrantLock();
         private long sequence;
     }
 
@@ -65,7 +68,7 @@ final class AeronClusteredCacheSenderSequence {
             this.entry.sequence++;
         }
 
-        Object lock() {
+        ReentrantLock lock() {
             return this.entry.lock;
         }
 

@@ -59,8 +59,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
             final long initialPosition,
             final StorageBinaryDataReceiver receiver,
             final Runnable transactionResolved,
-            final ReaderDeliveryListener deliveryListener
-    ) {
+            final ReaderDeliveryListener deliveryListener) {
         this.subscription = Objects.requireNonNull(subscription, "subscription");
         try {
             final AeronReplicationConfiguration requiredConfiguration =
@@ -112,8 +111,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
             final long epoch,
             final long initialSequence,
             final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved
-    ) {
+            final Runnable transactionResolved) {
         return New(aeron, archiveContext, recordingId, startPosition, liveChannel, liveStreamId,
                 replayChannel, replayStreamId, configuration, clusterId, epoch, initialSequence, receiver,
                 transactionResolved, null, startPosition);

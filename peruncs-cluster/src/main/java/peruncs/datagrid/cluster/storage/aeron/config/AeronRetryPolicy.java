@@ -8,24 +8,25 @@ import org.agrona.concurrent.IdleStrategy;
 /// All values are nanoseconds. The defaults preserve the historical behavior
 /// of the writer and Archive await loops; override them only to trade CPU
 /// burn against reaction time on slow or distant Archives.
+///
+/// @param idleMaxSpins                   maximum spin iterations before yielding in one idle step
+/// @param idleMaxYields                  maximum yield iterations before parking in one idle step
+/// @param idleMinParkNanos               minimum park duration in one idle step
+/// @param idleMaxParkNanos               maximum park duration in one idle step
+/// @param jitterBaseNanos                first-attempt delay for full-jitter offer spacing
+/// @param jitterCapNanos                 maximum delay for full-jitter offer spacing
+/// @param archiveProbeDelayNanos         spacing between Archive progress probes while awaiting a position
+/// @param catalogProbeInitialDelayNanos  initial spacing between Archive catalog probes while awaiting start
+/// @param catalogProbeMaxDelayNanos      maximum spacing between Archive catalog probes while awaiting start
 public record AeronRetryPolicy(
-        /// Maximum spin iterations before yielding in one idle step.
         int idleMaxSpins,
-        /// Maximum yield iterations before parking in one idle step.
         int idleMaxYields,
-        /// Minimum park duration in one idle step.
         long idleMinParkNanos,
-        /// Maximum park duration in one idle step.
         long idleMaxParkNanos,
-        /// First-attempt delay for full-jitter offer spacing.
         long jitterBaseNanos,
-        /// Maximum delay for full-jitter offer spacing.
         long jitterCapNanos,
-        /// Spacing between Archive progress probes while awaiting a position.
         long archiveProbeDelayNanos,
-        /// Initial spacing between Archive catalog probes while awaiting start.
         long catalogProbeInitialDelayNanos,
-        /// Maximum spacing between Archive catalog probes while awaiting start.
         long catalogProbeMaxDelayNanos
 ) {
     /// Creates the historical retry pacing.
@@ -69,7 +70,6 @@ public record AeronRetryPolicy(
     ///
     /// @return idle strategy using this policy's spin, yield, and park bounds
     public IdleStrategy idleStrategy() {
-        return new BackoffIdleStrategy(
-                this.idleMaxSpins, this.idleMaxYields, this.idleMinParkNanos, this.idleMaxParkNanos);
+        return new BackoffIdleStrategy(this.idleMaxSpins, this.idleMaxYields, this.idleMinParkNanos, this.idleMaxParkNanos);
     }
 }

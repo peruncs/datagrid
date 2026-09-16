@@ -7,6 +7,7 @@ import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -31,8 +32,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private final LongPredicate writeAdmission;
     /* The single lock for all coordinator state below. It is reentrant: write
      * admission holds it across a whole Store transaction while the state
-     * transitions nest inside. Only commit() releases it, and only across the
-     * slow Archive acknowledgement wait. */
+     * transitions nest inside. It is released only across the slow Archive
+     * acknowledgement wait: commitOrMarkUncertain releases the caller's hold
+     * after setting the commit guard, and commit() releases its own hold after
+     * re-checking the writer identity. */
     private final ReentrantLock writeLock = new ReentrantLock();
     /* Writer identity pinned at claim time. The publisher seeds its sequence
      * from the checkpoint (recording ID + epoch) at construction; these values
@@ -79,10 +82,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                                      final ReplicationDurabilityMode durabilityMode,
                                      final AeronArchiveReplicationPublisher.CheckpointWriter listener,
                                      final LongPredicate writeAdmission) {
-        if (publisher == null) throw new NullPointerException("publisher");
-        if (durabilityMode == null) throw new NullPointerException("durabilityMode");
-        if (listener == null) throw new NullPointerException("listener");
-        if (writeAdmission == null) throw new NullPointerException("writeAdmission");
+        Objects.requireNonNull(publisher, "publisher");
+        Objects.requireNonNull(durabilityMode, "durabilityMode");
+        Objects.requireNonNull(listener, "listener");
+        Objects.requireNonNull(writeAdmission, "writeAdmission");
         this.publisher = publisher;
         this.durabilityMode = durabilityMode;
         this.listener = listener;
@@ -136,7 +139,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
         /// Serializes one complete Store acceptance/publication transaction.
     void executeWriteAtomically(final WriteOperation operation) {
-        if (operation == null) throw new NullPointerException("operation");
+        Objects.requireNonNull(operation, "operation");
         this.writeLock.lock();
         try {
             this.ensureNotCommitting();
@@ -166,8 +169,21 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
         /// Commits a token. If the result is unclear, records that fact before
     /// rethrowing so restart cannot silently reuse the sequence.
+    ///
+    /// Must be called with the write lock held (the write-admission path
+    /// does). Admission and the commit guard are set under that hold, then the
+    /// lock is released for the commit and reacquired before this returns, so
+    /// the caller's own unlock still balances exactly.
     void commitOrMarkUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
         this.commitMarkerPublished = false;
+        /* Set the guard while the caller's lock is still held. Releasing first
+         * would let a second writer pass ensureNotCommitting() and prepare
+         * concurrently with this commit, leaving two pending transactions
+         * against one single-pending publisher. */
+        this.ensureNotCommitting();
+        this.ensureWriterIdentity();
+        this.commitInProgress = true;
+        this.writeLock.unlock();
         try {
             this.commit(prepared);
         } catch (final Error failure) {
@@ -175,14 +191,22 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
              * attempt checkpoint I/O here: the existing PREPARING/ENQUEUED fence is
              * already the fail-closed recovery evidence, and allocating a second
              * marker can mask the original Error. */
+            this.writeLock.lock();
+            this.commitInProgress = false;
+            this.commitDone.signalAll();
             this.publisher.failClosed();
             throw failure;
         } catch (final RuntimeException failure) {
+            this.writeLock.lock();
+            /* Clear the guard before marking uncertain: commit() clears it on
+             * every path inside its own try, but a failure before that (for
+             * example an identity change) leaves the guard set, and
+             * markCommittingUncertain requires it clear. */
+            this.commitInProgress = false;
+            this.commitDone.signalAll();
             if (!this.commitMarkerPublished) {
                 try {
                     this.markCommittingUncertain(prepared);
-                } catch (final Error uncertainFailure) {
-                    throw uncertainFailure;
                 } catch (final RuntimeException uncertainFailure) {
                     failure.addSuppressed(uncertainFailure);
                 }
@@ -195,6 +219,11 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             }
             throw failure;
         } finally {
+            /* Restore the caller's hold: commit() releases the lock for its slow
+             * wait, and the catch paths above reacquire it before rethrowing. */
+            if (!this.writeLock.isHeldByCurrentThread()) {
+                this.writeLock.lock();
+            }
             this.commitMarkerPublished = false;
         }
     }
@@ -217,9 +246,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private AeronReplicationPublisher.PreparedTransaction prepareLocked(final Binary data) {
         this.ensureNotCommitting();
         this.ensureWriterIdentity();
-        if (data == null) {
-            throw new NullPointerException("data");
-        }
+        Objects.requireNonNull(data, "data");
         if (this.publisher.hasPendingTransaction()) {
             throw new IllegalStateException("an Aeron prepared transaction is already pending");
         }
@@ -364,7 +391,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
     private long markLocalEnqueueLocked(final Binary data) {
         this.ensureNotCommitting();
-        if (data == null) throw new NullPointerException("data");
+        Objects.requireNonNull(data, "data");
         if (this.localAcceptanceFence != null) {
             throw new IllegalStateException("an Aeron local acceptance fence is already pending");
         }
@@ -411,8 +438,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             if (this.localAcceptanceFence != null) {
                 try {
                     this.publisher.releaseReservedSequence(this.localAcceptanceFence.sequence());
-                } catch (final Error releaseFailure) {
-                    throw releaseFailure;
                 } catch (final RuntimeException releaseFailure) {
                     failure.addSuppressed(releaseFailure);
                 }
@@ -448,7 +473,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// @param maintenance bounded Archive maintenance operation
     /// @return operation result
     public long withWritesPaused(final LongSupplier maintenance) {
-        if (maintenance == null) throw new NullPointerException("maintenance");
+        Objects.requireNonNull(maintenance, "maintenance");
         this.writeLock.lock();
         try {
             this.awaitNoCommit();
@@ -547,8 +572,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             if (failed == null && this.publisher.hasSequenceReservation()) {
                 try {
                     this.publisher.abandonReservedSequence(sequence);
-                } catch (final Error reservationFailure) {
-                    throw reservationFailure;
                 } catch (final RuntimeException reservationFailure) {
                     failure.addSuppressed(reservationFailure);
                 }
@@ -559,22 +582,30 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.clearBufferScratch();
     }
 
+        /// Publishes the commit marker and waits for the durability boundary.
+    ///
+    /// The caller must hold no write lock: the commit releases it for the
+    /// Archive wait, and requiring a zero entry hold count turns a nested call
+    /// into an immediate failure instead of a silent lock-accounting bug.
+    /// Admission is granted by [commitOrMarkUncertain]; the commit guard is
+    /// set here as well (idempotently) so a direct caller is still protected.
     void commit(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        final boolean writeLockHeld = this.writeLock.isHeldByCurrentThread();
-        if (!writeLockHeld) this.writeLock.lock();
+        if (this.writeLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "Aeron commit must be called with the write lock released");
+        }
+        this.writeLock.lock();
         try {
-            this.ensureNotCommitting();
             this.ensureWriterIdentity();
             this.commitInProgress = true;
             this.commitMarkerPublished = false;
         } finally {
-            if (!writeLockHeld) this.writeLock.unlock();
+            this.writeLock.unlock();
         }
         /* publisher.commit() offers the marker outside its state monitor and
-         * waits for the Archive acknowledgement afterwards. Do not retain the
+         * waits for the Archive acknowledgement afterwards. Do not hold the
          * write lock during that potentially slow wait; commitInProgress keeps
          * other writers out until the terminal state below is recorded. */
-        if (writeLockHeld) this.writeLock.unlock();
         try {
             final long position = this.publisher.commit(prepared);
             this.writeLock.lock();
@@ -598,22 +629,18 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             } finally {
                 this.commitInProgress = false;
                 this.commitDone.signalAll();
-                if (!writeLockHeld) this.writeLock.unlock();
+                this.writeLock.unlock();
             }
         } catch (final RuntimeException | Error failure) {
             /* The marker offer itself failed before any terminal state was
              * recorded. Clear the guard so commitOrMarkUncertain can mark the
-             * transaction uncertain instead of wedging the coordinator. The
-             * lock may already be held when the failure came from the
-             * post-commit section after reacquiring; only lock when free so
-             * every exit path restores exactly the entry hold count. */
-            final boolean commitLockHeld = this.writeLock.isHeldByCurrentThread();
-            if (!commitLockHeld) this.writeLock.lock();
+             * transaction uncertain instead of wedging the coordinator. */
+            this.writeLock.lock();
             try {
                 this.commitInProgress = false;
                 this.commitDone.signalAll();
             } finally {
-                if (!writeLockHeld) this.writeLock.unlock();
+                this.writeLock.unlock();
             }
             throw failure;
         }
@@ -646,7 +673,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
         /// Collects channel buffers into the reusable writer-owned array.
     private int collectBuffers(final Binary data) {
-        if (data == null) throw new NullPointerException("data");
+        Objects.requireNonNull(data, "data");
         this.bufferScratchCount = 0;
         data.iterateChannelChunks(channel ->
         {

@@ -8,6 +8,7 @@ import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Comparator;
 import java.util.Locale;
+import java.util.Objects;
 
 /// Shared filesystem operations used by backup backends and node setup.
 ///
@@ -101,7 +102,8 @@ public final class StorageFileOperations {
     /// @param destination move target, which must not exist
     /// @throws IOException if a path is unsafe, the move fails, or an identity changed
     public static void moveFileAtomically(final Path source, final Path destination) throws IOException {
-        if (source == null || destination == null) throw new NullPointerException("source and destination are required");
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(destination, "destination");
         final Path parent = destination.getParent();
         if (parent == null) throw new IOException("Move destination has no parent directory: %s".formatted(destination));
         ensureNoSymbolicLinks(source);
@@ -128,7 +130,7 @@ public final class StorageFileOperations {
     /// @return `true` when a file was deleted
     /// @throws IOException if the path is unsafe or an identity changed
     public static boolean deleteRegularFile(final Path path) throws IOException {
-        if (path == null) throw new NullPointerException("path is required");
+        Objects.requireNonNull(path, "path is required");
         ensureNoSymbolicLinks(path);
         try {
             /* Validates the path is a regular file with a stable identity; the

@@ -46,8 +46,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
     ) {
         if ((publication == null) == (subscription == null))
             throw new IllegalArgumentException("exactly one Aeron watermark endpoint is required");
-        if (subscription != null && receiver == null)
-            throw new NullPointerException("receiver");
+        if (subscription != null) Objects.requireNonNull(receiver, "receiver");
         if (publication != null && receiver != null)
             throw new IllegalArgumentException("writer watermark channels cannot have a receiver");
         if (closeTimeoutNanos <= 0) throw new IllegalArgumentException("closeTimeoutNanos must be positive");
@@ -115,7 +114,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
     /// unsent value with the latest durable progress. The caller may reuse or
     /// mutate its array as soon as this method returns.
     synchronized void publish(final byte[] encoded) {
-        if (encoded == null) throw new NullPointerException("encoded");
+        Objects.requireNonNull(encoded, "encoded");
         if (encoded.length != AeronAuthenticatedWatermark.ENCODED_LENGTH)
             throw new IllegalArgumentException("Aeron watermark encoding must contain exactly %s bytes".formatted(AeronAuthenticatedWatermark.ENCODED_LENGTH));
         final RuntimeException terminal = this.failure.get();

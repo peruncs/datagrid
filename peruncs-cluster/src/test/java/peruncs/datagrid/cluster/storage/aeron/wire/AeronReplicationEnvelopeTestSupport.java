@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.wire;
 
 import org.agrona.concurrent.UnsafeBuffer;
 
+import java.util.Objects;
 import java.util.UUID;
 
 /// Provides heap-backed envelope fixtures without exposing a heap encoder in production.
@@ -21,7 +22,7 @@ public final class AeronReplicationEnvelopeTestSupport {
             final int commitCrc32c,
             final byte[] payload
     ) {
-        if (payload == null) throw new NullPointerException("payload");
+        Objects.requireNonNull(payload, "payload");
         if (payload.length > AeronReplicationEnvelope.MAX_MESSAGE_LENGTH) {
             throw new IllegalArgumentException("envelope payload exceeds replication message limit");
         }

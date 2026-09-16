@@ -6,6 +6,7 @@ import org.agrona.MutableDirectBuffer;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
+import java.util.Objects;
 import java.util.zip.CRC32C;
 
 /// Fixed framing for one clustered-cache invalidation frame.
@@ -51,9 +52,8 @@ final class AeronClusteredCacheMessageCodec {
     /// @return encoded frame length
     static int encode(final MutableDirectBuffer buffer, final byte[] senderId, final long sequence,
                       final byte[] payload) {
-        if (buffer == null || payload == null) {
-            throw new NullPointerException("buffer and payload");
-        }
+        Objects.requireNonNull(buffer, "buffer");
+        Objects.requireNonNull(payload, "payload");
         if (senderId == null || senderId.length != Long.BYTES * 2) {
             throw new IllegalArgumentException("sender id must be exactly 16 bytes");
         }

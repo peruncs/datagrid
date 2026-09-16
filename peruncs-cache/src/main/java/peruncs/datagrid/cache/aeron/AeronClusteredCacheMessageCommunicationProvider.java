@@ -7,6 +7,7 @@ import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
 /// This provider builds the Aeron sender and receiver for clustered cache
 /// invalidation.
@@ -59,7 +60,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     private AeronClusteredCacheResources resources;
     private byte[] senderId;
     private AeronClusteredCacheSenderSequence.SequenceLease sequenceLease;
-    private Object sequenceLock;
+    private ReentrantLock sequenceLock;
     private String configuredNodeId;
     private AeronClusteredCacheMessageSender sender;
     private long senderOfferTimeoutNanos;
@@ -325,7 +326,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             final int streamId = configuration.streamId();
             if (this.configuredNodeId == null) {
                 this.sequenceLease = AeronClusteredCacheSenderSequence.SequenceLease.local();
-                this.sequenceLock = new Object();
+                this.sequenceLock = new ReentrantLock();
             } else {
                 this.sequenceLease = AeronClusteredCacheSenderSequence.acquire(this.senderId, channel, streamId);
                 this.sequenceLock = this.sequenceLease.lock();

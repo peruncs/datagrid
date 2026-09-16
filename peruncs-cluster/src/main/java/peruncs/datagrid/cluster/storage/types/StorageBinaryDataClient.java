@@ -1,8 +1,9 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.typing.Disposable;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+
+import java.util.Objects;
 
 /// Aeron reader lifecycle. The Aeron reader exposes a [ReplicationCursor].
 /// A client must not report a message as consumed until the Store merger has
@@ -13,7 +14,7 @@ public interface StorageBinaryDataClient extends Disposable {
 
         /// Creates a neutral client for tests and disabled replication.
     ///
-    /// @param startingCursor initial cursor, or `null`
+    /// @param startingCursor initial cursor, or `null` for the fixed `none` cursor
     /// @return neutral client
     static StorageBinaryDataClient NoOp(final ReplicationCursor startingCursor) {
         final ReplicationCursor cursor = startingCursor == null
@@ -100,8 +101,9 @@ public interface StorageBinaryDataClient extends Disposable {
 
         /// Resumes reading after a stop.
     ///
-    /// @throws NodeLibraryException if resume fails
-    void resume() throws NodeLibraryException;
+    /// Implementations fail with an unchecked transport exception when resume
+    /// is not possible; the node layer wraps it for reporting.
+    void resume();
 
         /// Lifecycle outcomes for a replication reader.
     enum StopOutcome {
@@ -118,7 +120,7 @@ public interface StorageBinaryDataClient extends Disposable {
         /// Immutable result of a stop-at-latest request.
     record StopResult(StopOutcome outcome, long sequence, long position) {
         public StopResult {
-            if (outcome == null) throw new NullPointerException("outcome");
+            Objects.requireNonNull(outcome, "outcome");
         }
     }
 }

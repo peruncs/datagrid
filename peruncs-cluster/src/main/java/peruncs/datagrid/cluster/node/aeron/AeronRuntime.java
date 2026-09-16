@@ -7,12 +7,14 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.exceptions.ActiveDriverException;
 import org.agrona.ErrorHandler;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -101,7 +103,7 @@ final class AeronRuntime implements AutoCloseable {
     ///                                     a filesystem without POSIX permission support
     static void ensurePrivateDirectory(final Path path, final boolean failIfPermissionsUnsupported) {
         try {
-            if (path == null) throw new NullPointerException("path");
+            Objects.requireNonNull(path, "path");
             rejectSymbolicLinkComponents(path);
             try {
                 Files.createDirectories(path,
@@ -169,7 +171,7 @@ final class AeronRuntime implements AutoCloseable {
         final Path checkpointParent = this.settings.checkpointPath().toAbsolutePath().getParent();
         if (checkpointParent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
         ensurePrivateDirectory(checkpointParent, this.settings.productionMode());
-        final boolean embeddedWriter = "writer".equals(this.settings.role()) && !this.settings.externalArchive();
+        final boolean embeddedWriter = NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && !this.settings.externalArchive();
         if (embeddedWriter) ensurePrivateDirectory(this.settings.archiveDirectory(), this.settings.productionMode());
         final MediaDriver.Context media = new MediaDriver.Context()
                 .aeronDirectoryName(this.settings.aeronDirectory().toString())

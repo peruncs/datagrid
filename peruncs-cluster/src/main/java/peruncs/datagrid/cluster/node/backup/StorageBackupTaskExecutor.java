@@ -10,6 +10,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static java.lang.System.Logger.Level.ERROR;
+import static java.lang.System.Logger.Level.INFO;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// This executor runs backups and storage checks without blocking a request.
@@ -47,9 +49,9 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         final System.Logger logger = System.getLogger(StorageBackupTaskExecutor.class.getName());
         return () ->
         {
-            logger.log(System.Logger.Level.INFO, "Issuing full backup");
+            logger.log(INFO, "Issuing full backup");
             if (this.runBackup(false) == BackupStartResult.BUSY) {
-                logger.log(System.Logger.Level.INFO, "Skipping scheduled backup because one is already running");
+                logger.log(INFO, "Skipping scheduled backup because one is already running");
             }
         };
     }
@@ -128,10 +130,10 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                     this.backupFailure.set(null);
                 } catch (final Exception failure) {
                     this.backupFailure.set(failure);
-                    LOGGER.log(System.Logger.Level.ERROR, "Storage backup failed", failure);
+                    LOGGER.log(ERROR, "Storage backup failed", failure);
                 } catch (final Error failure) {
                     this.backupFailure.set(failure);
-                    LOGGER.log(System.Logger.Level.ERROR, "Fatal storage-backup failure", failure);
+                    LOGGER.log(ERROR, "Fatal storage-backup failure", failure);
                     throw failure;
                 }
             });
@@ -169,8 +171,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                 this.backupExecutor.shutdownNow();
                 try {
                     if (!this.backupExecutor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                        failure = new IllegalStateException(
-                                "Storage backup did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                        failure = new IllegalStateException("Storage backup did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
                     }
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();

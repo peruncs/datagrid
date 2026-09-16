@@ -19,9 +19,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -678,6 +681,77 @@ class AeronReplicationWriteCoordinatorTest {
             assertFalse(writer.isAlive(), "commit leaked a write-lock hold; second writer blocked");
             assertTrue(admitted.get());
         } finally {
+            coordinator.dispose();
+        }
+    }
+
+        /// A commit nested inside a held write lock is rejected immediately
+        /// instead of silently corrupting the lock accounting.
+    @Test
+    void commitInsideHeldWriteLockIsRejected() {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
+        final var prepared = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+        try {
+            assertThrows(IllegalStateException.class,
+                    () -> coordinator.executeWriteAtomically(() -> coordinator.commit(prepared)),
+                    "commit must require the write lock to be released");
+        } finally {
+            coordinator.abort(prepared);
+            coordinator.dispose();
+        }
+    }
+
+        /// While a commit waits for its Archive position, a second writer must
+        /// be refused: the commit guard is set under the caller's lock before
+        /// the lock is released for the slow wait.
+    @Test
+    void commitRefusesConcurrentPrepareWhileWaiting() throws Exception {
+        final CountDownLatch commitWaitEntered = new CountDownLatch(1);
+        final CountDownLatch releaseCommit = new CountDownLatch(1);
+        final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0, position ->
+                {
+                    commitWaitEntered.countDown();
+                    try {
+                        releaseCommit.await(30, TimeUnit.SECONDS);
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return position;
+                });
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
+        final var prepared = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+        final Thread committing = Thread.ofVirtual().start(() ->
+        {
+            try {
+                coordinator.executeWriteAtomically(() -> coordinator.commitOrMarkUncertain(prepared));
+            } catch (final Throwable failure) {
+                commitFailure.set(failure);
+            }
+        });
+        try {
+            assertTrue(commitWaitEntered.await(10, TimeUnit.SECONDS), "the commit never reached its position wait");
+
+            final IllegalStateException refused = assertThrows(
+                    IllegalStateException.class,
+                    () -> coordinator.executeWriteAtomically(() -> coordinator.prepare(
+                            ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})))));
+            assertTrue(refused.getMessage().contains("commit is in progress"),
+                    "a concurrent writer must be refused by the commit guard: " + refused.getMessage());
+        } finally {
+            releaseCommit.countDown();
+            committing.join(TimeUnit.SECONDS.toMillis(10));
+            assertFalse(committing.isAlive(), "the commit did not finish after the position was released");
+            assertNull(commitFailure.get(), "the commit must succeed: " + commitFailure.get());
             coordinator.dispose();
         }
     }

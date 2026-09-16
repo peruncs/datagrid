@@ -6,6 +6,7 @@ import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
+import static java.lang.System.Logger.Level.INFO;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// This manager exposes node health while coordinating backups and replication.
@@ -160,7 +161,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
 
         @Override
         public void close() {
-            LOGGER.log(System.Logger.Level.INFO, "Closing BackupNodeManager.");
+            LOGGER.log(INFO, "Closing BackupNodeManager.");
             Throwable failure = null;
             try {
                 this.dataClient.dispose();
@@ -175,7 +176,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
             }
             if (failure instanceof Error error) throw error;
             if (failure instanceof RuntimeException runtime) throw runtime;
-            if (failure != null) throw new IllegalStateException("failed to close backup node resources", failure);
+            if (failure != null) throw new NodeLibraryException("failed to close backup node resources", failure);
         }
 
         private boolean isStorageAvailable() {

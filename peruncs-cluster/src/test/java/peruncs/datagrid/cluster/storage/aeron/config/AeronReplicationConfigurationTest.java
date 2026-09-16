@@ -107,4 +107,22 @@ class AeronReplicationConfigurationTest {
         assertThrows(NullPointerException.class, () -> AeronReplicationConfiguration.builder()
                 .durabilityMode(null));
     }
+
+        /// Verifies a custom retry policy is carried into the built configuration
+        /// and drives the reader idle strategy.
+    @Test
+    void propagatesCustomRetryPolicy() {
+        final AeronRetryPolicy custom = new AeronRetryPolicy(
+                4, 8, 2L, 500_000L,
+                2_000L, 2_000_000L,
+                5_000_000L,
+                500_000L, 50_000_000L);
+
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .retryPolicy(custom)
+                .build();
+
+        assertSame(custom, configuration.retryPolicy());
+        assertInstanceOf(org.agrona.concurrent.BackoffIdleStrategy.class, configuration.retryPolicy().idleStrategy());
+    }
 }

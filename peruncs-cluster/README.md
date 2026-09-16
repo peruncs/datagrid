@@ -28,6 +28,12 @@ endpoints when production mode is enabled.
 The provider owns its embedded MediaDriver/Archive lifecycle and closes those
 resources from the DataGrid storage-manager shutdown callback.
 
+Every node setting uses the `ECLIPSE_DATAGRID_` prefix. The earlier bare names
+(`IS_BACKUP_NODE`, `GC_INTERVAL_MINUTES`, ...) and the `MSCNL_*` names are
+still accepted as a fallback when the prefixed name is unset; the prefixed name
+wins when both are set, and a consumed legacy name is logged once as
+deprecated so operators can migrate.
+
 For a reader, set `ECLIPSE_DATAGRID_AERON_RECORDING_ID` to the writer's
 recording. Reader identity/checkpoint persistence is supplied by the
 node deployment; this provider does not invent an identity from the
@@ -137,6 +143,12 @@ renders JSON or Prometheus text itself.
 | `/updates` | GET, POST | Whether replication is paused / pause it |
 | `/resume-updates` | POST | Resume replication |
 | `/gc` | GET, POST | Whether storage checks run / start them |
+
+The `POST` routes (`/backup`, `/gc`, `/updates`, `/resume-updates`,
+`/activate-distributor/*`) are privileged and carry no authentication of their
+own: the embedding application MUST authenticate and authorize them before
+delegating to the controller. Only `/health`, `/health/ready`, and the
+read-only metrics are safe to expose to an unauthenticated probe endpoint.
 
 The Prometheus-compatible `/replication-metrics` reports `transport="aeron"`,
 replay/live state, current/latest sequence, lag, readiness, and health,

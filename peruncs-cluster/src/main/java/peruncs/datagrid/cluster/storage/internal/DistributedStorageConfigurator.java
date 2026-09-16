@@ -27,10 +27,7 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
         this(distributor, delegate -> StorageBinaryReplicationTarget.New(delegate, distributor), null);
     }
 
-    public DistributedStorageConfigurator(
-            final StorageBinaryDataDistributor distributor,
-            final UnaryOperator<PersistenceTarget<Binary>> targetFactory
-    ) {
+    public DistributedStorageConfigurator(final StorageBinaryDataDistributor distributor, final UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
         this(distributor, targetFactory, null);
     }
 
@@ -38,8 +35,7 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
     public DistributedStorageConfigurator(
             final StorageBinaryDataDistributor distributor,
             final UnaryOperator<PersistenceTarget<Binary>> targetFactory,
-            final InstanceDispatcherLogic previous
-    ) {
+            final InstanceDispatcherLogic previous) {
         super();
         this.distributor = notNull(distributor);
         this.targetFactory = notNull(targetFactory);
@@ -75,10 +71,9 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
     }
 
         /// Combines the two Store extension contracts when one subject implements both.
-    private record TargetAndDictionaryExporter(
-            PersistenceTarget<Binary> target,
-            PersistenceTypeDictionaryExporter dictionaryExporter
-    ) implements PersistenceTarget<Binary>, PersistenceTypeDictionaryExporter {
+    private record TargetAndDictionaryExporter(PersistenceTarget<Binary> target, PersistenceTypeDictionaryExporter dictionaryExporter)
+                implements PersistenceTarget<Binary>, PersistenceTypeDictionaryExporter {
+
         private TargetAndDictionaryExporter {
             notNull(target);
             notNull(dictionaryExporter);

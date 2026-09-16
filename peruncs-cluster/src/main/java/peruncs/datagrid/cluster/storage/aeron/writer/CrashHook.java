@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
+import java.util.Objects;
 import java.util.function.BiConsumer;
 
 /// Scoped seam used by deterministic crash tests.
@@ -27,8 +28,8 @@ final class CrashHook {
     ///
     /// @param hook callback invoked at an armed crash point, or `null`
     static void runWithHook(final BiConsumer<String, Long> hook, final Runnable action) {
-        if (hook == null) throw new NullPointerException("hook");
-        if (action == null) throw new NullPointerException("action");
+        Objects.requireNonNull(hook, "hook");
+        Objects.requireNonNull(action, "action");
         ScopedValue.where(CURRENT, hook).run(action);
     }
 
@@ -37,8 +38,8 @@ final class CrashHook {
             final BiConsumer<String, Long> hook,
             final ScopedValue.CallableOp<? extends T, X> operation
     ) throws X {
-        if (hook == null) throw new NullPointerException("hook");
-        if (operation == null) throw new NullPointerException("operation");
+        Objects.requireNonNull(hook, "hook");
+        Objects.requireNonNull(operation, "operation");
         return ScopedValue.where(CURRENT, hook).call(operation);
     }
 
@@ -46,7 +47,7 @@ final class CrashHook {
     /// Structured task scopes inherit scoped values automatically; an independently
     /// started worker must opt in explicitly.
     static Runnable inheritCurrent(final Runnable action) {
-        if (action == null) throw new NullPointerException("action");
+        Objects.requireNonNull(action, "action");
         final BiConsumer<String, Long> hook = CURRENT.isBound() ? CURRENT.get() : null;
         return hook == null ? action : () -> ScopedValue.where(CURRENT, hook).run(action);
     }

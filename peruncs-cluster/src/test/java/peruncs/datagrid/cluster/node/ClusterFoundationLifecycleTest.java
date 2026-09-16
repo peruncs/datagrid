@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /// Verifies the foundation's single close boundary.
 class ClusterFoundationLifecycleTest {
     @Test
-    void closeIsIdempotentAndPreventsRestart() throws Exception {
+    void closeIsIdempotentAndPreventsRestart() {
         final ClusterFoundation foundation = ClusterFoundation.New().build();
         foundation.close();
         foundation.close();
@@ -23,7 +23,7 @@ class ClusterFoundationLifecycleTest {
     }
 
     @Test
-    void builderConfigurationIsCopiedIntoTheNode(@TempDir final Path storagePath) throws Exception {
+    void builderConfigurationIsCopiedIntoTheNode(@TempDir final Path storagePath) {
         final ClusterFoundation.Builder builder = ClusterFoundation.New()
                 .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
                         .setConfiguration(StorageConfiguration.Builder()

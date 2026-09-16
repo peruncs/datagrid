@@ -13,17 +13,22 @@ import javax.cache.event.CacheEntryCreatedListener;
 import javax.cache.event.CacheEntryEvent;
 import javax.cache.event.CacheEntryListenerException;
 import javax.cache.event.CacheEntryUpdatedListener;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.ReentrantLock;
 
 /// Publishes clustered-cache invalidations on one Aeron publication.
 ///
 /// This sender is synchronous and fails the local cache operation when the
-/// invalidation cannot be accepted. A listener callback offers the frame and waits
-/// until the publication accepts it, retrying transient back pressure and reconnection
-/// with an idle strategy for at most the configured publish timeout. A closed
-/// or exhausted publication fails immediately, and a timeout fails with
+/// invalidation cannot be accepted. A listener callback acquires the shared
+/// sequence lock and offers the frame, waiting until the publication accepts
+/// it, retrying transient back pressure and reconnection with an idle strategy
+/// for at most the configured publish timeout. That one budget also bounds the
+/// wait for the sequence lock when another sender of the same node identity
+/// holds it, so a competing sender cannot queue indefinitely. A closed or
+/// exhausted publication fails immediately, and a timeout fails with
 /// [CacheEntryListenerException]. Nothing is silently dropped.
 ///
 /// Observability: published and offer-retry counters are package-private
@@ -38,10 +43,14 @@ public final class AeronClusteredCacheMessageSender
         /// A scratch buffer larger than this is released after the frame is offered.
     private static final int MAX_RETAINED_SCRATCH_BYTES = 64 * 1024;
     private static final long DISPOSE_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5L);
+    /* A saturated configured timeout must not overflow the timed tryLock; the
+     * lock is only ever held for another sender's offer, so a ten-year cap is
+     * indistinguishable from "wait until the deadline". */
+    private static final long MAX_LOCK_WAIT_NANOS = TimeUnit.DAYS.toNanos(3_650L);
     private final AeronClusteredCacheResources resources;
     private final byte[] senderId;
     private final AeronClusteredCacheSenderSequence.SequenceLease sequence;
-    private final Object sequenceLock;
+    private final ReentrantLock sequenceLock;
     private final Runnable releaseSequence;
     private final long publishTimeoutNanos;
     private final int maxPayloadBytes;
@@ -58,7 +67,9 @@ public final class AeronClusteredCacheMessageSender
      * disposal holds lifecycleMonitor only while waiting for admitted callbacks,
      * and resources.closePublication() never calls back into this sender. This
      * avoids a lifecycle/sequence/resources cycle while retaining one contiguous
-     * sequence-and-offer critical section for shared node identities. */
+     * sequence-and-offer critical section for shared node identities. The
+     * sequence lock is taken with a bounded tryLock so a competing sender cannot
+     * queue behind it indefinitely. */
     private UnsafeBuffer scratch;
     /* The publication is looked up once and cached; the resources monitor is
      * only entered on the first publish of this sender. */
@@ -71,13 +82,13 @@ public final class AeronClusteredCacheMessageSender
             final AeronClusteredCacheResources resources,
             final byte[] senderId,
             final AeronClusteredCacheSenderSequence.SequenceLease sequence,
-            final Object sequenceLock,
+            final ReentrantLock sequenceLock,
             final Runnable releaseSequence,
             final long publishTimeoutNanos,
             final int maxPayloadBytes
     ) {
         this.resources = resources;
-        this.senderId = java.util.Objects.requireNonNull(senderId, "senderId").clone();
+        this.senderId = Objects.requireNonNull(senderId, "senderId").clone();
         if (this.senderId.length != Long.BYTES * 2) {
             throw new IllegalArgumentException("sender id must be exactly 16 bytes");
         }
@@ -100,7 +111,7 @@ public final class AeronClusteredCacheMessageSender
             final AeronClusteredCacheResources resources,
             final byte[] senderId,
             final AeronClusteredCacheSenderSequence.SequenceLease sequence,
-            final Object sequenceLock,
+            final ReentrantLock sequenceLock,
             final Runnable releaseSequence,
             final long publishTimeoutNanos,
             final int maxPayloadBytes
@@ -185,25 +196,33 @@ public final class AeronClusteredCacheMessageSender
                         "Aeron clustered-cache transport has failed", resourceFailure);
             }
 
-            synchronized (this.sequenceLock) {
-                try {
-                    buffer = this.scratchFor(payload.length);
-                    /* Do not consume a sequence until the publication has accepted the
-                     * frame. A timed-out offer is not visible to receivers. */
-                    final ConcurrentPublication publication = this.ensurePublication();
-                    final long sequence = this.sequence.current();
-                    if (sequence == Long.MAX_VALUE) {
-                        throw new CacheEntryListenerException("Aeron clustered-cache sender sequence exhausted");
-                    }
-                    final int length = AeronClusteredCacheMessageCodec.encode(
-                            buffer, this.senderId, sequence, payload);
-                    this.offer(publication, buffer, length);
-                    this.sequence.advance();
-                } finally {
-                    if (buffer != null && buffer.capacity() > MAX_RETAINED_SCRATCH_BYTES) {
-                        this.releaseScratch();
-                    }
+            /* The sequence lock is process-wide for a configured node id, so a
+             * competing sender can hold it for the whole offer timeout. Bound
+             * the wait by the same publish deadline instead of queueing
+             * indefinitely behind it. */
+            final long deadline = saturatingDeadline(this.publishTimeoutNanos);
+            if (!this.acquireSequenceLock(deadline)) {
+                throw new CacheEntryListenerException(
+                        "Aeron clustered-cache publish did not acquire the shared sequence within %s ms".formatted(this.publishTimeoutNanos / 1_000_000L));
+            }
+            try {
+                buffer = this.scratchFor(payload.length);
+                /* Do not consume a sequence until the publication has accepted the
+                 * frame. A timed-out offer is not visible to receivers. */
+                final ConcurrentPublication publication = this.ensurePublication();
+                final long sequence = this.sequence.current();
+                if (sequence == Long.MAX_VALUE) {
+                    throw new CacheEntryListenerException("Aeron clustered-cache sender sequence exhausted");
                 }
+                final int length = AeronClusteredCacheMessageCodec.encode(
+                        buffer, this.senderId, sequence, payload);
+                this.offer(publication, buffer, length, deadline);
+                this.sequence.advance();
+            } finally {
+                if (buffer != null && buffer.capacity() > MAX_RETAINED_SCRATCH_BYTES) {
+                    this.releaseScratch();
+                }
+                this.sequenceLock.unlock();
             }
         } catch (final CacheEntryListenerException failure) {
             throw failure;
@@ -219,6 +238,21 @@ public final class AeronClusteredCacheMessageSender
                     }
                 }
             }
+        }
+    }
+
+        /// Acquires the shared sequence lock within the publish deadline.
+    ///
+    /// @param deadline publish deadline in nanoseconds
+    /// @return `true` when the lock was acquired
+    private boolean acquireSequenceLock(final long deadline) {
+        try {
+            return this.sequenceLock.tryLock(
+                    Math.min(remainingNanos(deadline), MAX_LOCK_WAIT_NANOS), TimeUnit.NANOSECONDS);
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new CacheEntryListenerException(
+                    "Aeron clustered-cache publish was interrupted while waiting for the shared sequence", interrupted);
         }
     }
 
@@ -268,10 +302,15 @@ public final class AeronClusteredCacheMessageSender
     }
 
         /// Offers a frame, waiting for connection and back pressure up to the
-    /// publish timeout. The caller is a synchronous JCache listener, so this
+    /// publish deadline. The caller is a synchronous JCache listener, so this
     /// method either succeeds or throws; it never returns without publishing.
-    private void offer(final ConcurrentPublication publication, final UnsafeBuffer buffer, final int length) {
-        final long deadline = saturatingDeadline(this.publishTimeoutNanos);
+    ///
+    /// @param publication publication to offer on
+    /// @param buffer      encoded frame
+    /// @param length      encoded frame length
+    /// @param deadline    shared publish deadline in nanoseconds
+    private void offer(final ConcurrentPublication publication, final UnsafeBuffer buffer, final int length,
+                       final long deadline) {
         try {
             while (true) {
                 final RuntimeException resourceFailure = this.resources.failure();

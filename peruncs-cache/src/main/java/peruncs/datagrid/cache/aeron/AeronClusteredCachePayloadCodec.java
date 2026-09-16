@@ -7,6 +7,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 
 /// Encodes the only message permitted on the clustered-cache wire.
 ///
@@ -21,7 +22,7 @@ final class AeronClusteredCachePayloadCodec {
     }
 
     static byte[] encode(final TimestampsRegionUpdateMessage message) {
-        if (message == null) throw new NullPointerException("message");
+        Objects.requireNonNull(message, "message");
         final byte[] cacheName = message.cacheName().getBytes(StandardCharsets.UTF_8);
         final byte[] tableName = message.tableName().getBytes(StandardCharsets.UTF_8);
         if (cacheName.length > MAX_NAME_BYTES || tableName.length > MAX_NAME_BYTES) {

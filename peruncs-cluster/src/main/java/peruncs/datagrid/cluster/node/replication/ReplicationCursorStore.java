@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -56,8 +57,7 @@ public final class ReplicationCursorStore {
     /// @return stored cursor
     /// @throws IOException if the cursor is missing or invalid
     public static ReplicationCursor read(final Path path) throws IOException {
-        try (SeekableByteChannel channel = Files.newByteChannel(path,
-                Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
+        try (SeekableByteChannel channel = Files.newByteChannel(path, Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
             final long size = channel.size();
             if (size < 0L || size > MAX_CURSOR_BYTES) {
                 throw new IOException("replication cursor is too large");
@@ -76,7 +76,7 @@ public final class ReplicationCursorStore {
     /// @return encoded bytes with trailing CRC
     /// @throws IOException if the cursor does not fit the format limits
     public static byte[] encode(final ReplicationCursor cursor) throws IOException {
-        if (cursor == null) throw new NullPointerException("cursor");
+        Objects.requireNonNull(cursor, "cursor");
         final byte[] transport = cursor.transport().getBytes(StandardCharsets.UTF_8);
         if (transport.length > MAX_TRANSPORT_BYTES) throw new IOException("transport name is too long");
         final byte[] position = cursor.providerPositionBytes();
@@ -106,8 +106,10 @@ public final class ReplicationCursorStore {
         }
         final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
         final int expected = buffer.getInt(bytes.length - CRC_BYTES);
-        if (expected != Crc32c.compute(bytes, 0, bytes.length - CRC_BYTES)) throw new IOException("cursor CRC32C mismatch");
-        if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION) throw new IOException("unknown cursor format");
+        if (expected != Crc32c.compute(bytes, 0, bytes.length - CRC_BYTES))
+            throw new IOException("cursor CRC32C mismatch");
+        if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION)
+            throw new IOException("unknown cursor format");
         if (buffer.getShort() != 0) {
             throw new IOException("unsupported replication cursor flags");
         }
@@ -134,8 +136,7 @@ public final class ReplicationCursorStore {
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
                     .decode(ByteBuffer.wrap(transport))
                     .toString();
-            return ReplicationCursor.of(transportName,
-                    generation.equals(NULL_GENERATION) ? null : generation, sequence, position);
+            return ReplicationCursor.of(transportName, generation.equals(NULL_GENERATION) ? null : generation, sequence, position);
         } catch (final CharacterCodingException | IllegalArgumentException invalidCursor) {
             throw new IOException("invalid replication cursor values", invalidCursor);
         }

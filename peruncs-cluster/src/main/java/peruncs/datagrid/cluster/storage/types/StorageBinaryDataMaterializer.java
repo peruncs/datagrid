@@ -4,6 +4,7 @@ import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterat
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.ByteBuffer;
+import java.util.Objects;
 
 import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
 
@@ -22,7 +23,8 @@ final class StorageBinaryDataMaterializer {
     /// @param storage Store connection owning the persistence manager
     /// @param buffers direct buffers imported into `storage`
     public static void materialize(final StorageConnection storage, final ByteBuffer[] buffers) {
-        if (storage == null || buffers == null) throw new NullPointerException("storage and buffers");
+        Objects.requireNonNull(storage, "storage");
+        Objects.requireNonNull(buffers, "buffers");
         final ObjectMaterializer materializer = new ObjectMaterializer(storage.persistenceManager());
         for (final ByteBuffer buffer : buffers) {
             if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {

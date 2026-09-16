@@ -7,6 +7,7 @@ import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
 
 import javax.cache.configuration.MutableConfiguration;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -30,7 +31,7 @@ class ClusteredCacheRemoteUpdateSuppressionTest {
                     null,
                     new byte[16],
                     AeronClusteredCacheSenderSequence.SequenceLease.local(),
-                    new Object(),
+                    new ReentrantLock(),
                     () -> {
                     },
                     TimeUnit.MINUTES.toNanos(1L),

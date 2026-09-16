@@ -40,14 +40,9 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
                 Binary.getEntityTypeIdRawValue(entityStartAddress)
         );
         if (ptd == null) {
-            throw new StorageBinaryDataException(
-                    "Cannot materialize persisted entity with unknown type id %s".formatted(Binary.getEntityTypeIdRawValue(entityStartAddress)));
+            throw new StorageBinaryDataException("Cannot materialize persisted entity with unknown type id %s".formatted(Binary.getEntityTypeIdRawValue(entityStartAddress)));
         }
-        if (
-                PersistenceRoots.class.isAssignableFrom(ptd.type())
-                || PersistenceRootReference.class.isAssignableFrom(ptd.type())
-        ) {
-            // don't overwrite local roots
+        if (PersistenceRoots.class.isAssignableFrom(ptd.type()) || PersistenceRootReference.class.isAssignableFrom(ptd.type())) {// don't overwrite local roots
             return true;
         }
 
@@ -75,7 +70,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
     public void materialize() {
         try {
             // Batch-materializes all collected objects in the live graph
-            this.loader.collect(obj ->
+            this.loader.collect(_ ->
             {
                 // no-op
             }, this.oids);

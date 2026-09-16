@@ -25,10 +25,7 @@ public final class DistributedStorage {
     /// @param foundation  foundation to configure
     /// @param distributor destination for committed data
     /// @return the configured foundation
-    public static EmbeddedStorageFoundation<?> configureWriting(
-            final EmbeddedStorageFoundation<?> foundation,
-            final StorageBinaryDataDistributor distributor
-    ) {
+    public static EmbeddedStorageFoundation<?> configureWriting(final EmbeddedStorageFoundation<?> foundation, final StorageBinaryDataDistributor distributor) {
         final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
         connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(
                 distributor,
@@ -46,11 +43,9 @@ public final class DistributedStorage {
     public static EmbeddedStorageFoundation<?> configureWriting(
             final EmbeddedStorageFoundation<?> foundation,
             final StorageBinaryDataDistributor distributor,
-            final UnaryOperator<PersistenceTarget<Binary>> targetFactory
-    ) {
+            final UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
         final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
-        connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(
-                distributor, targetFactory));
+        connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(distributor, targetFactory));
         return foundation;
     }
 }

@@ -38,8 +38,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
     /// @param limits budgets bounding restore and manifest reads
     /// @return filesystem backup backend
     static FilesystemVolumeBackupBackend New(final Path backupVolumePath, final BackupArchiveLimits limits) {
-        return new Default(
-                notNull(backupVolumePath).toAbsolutePath().normalize(), notNull(limits));
+        return new Default(notNull(backupVolumePath).toAbsolutePath().normalize(), notNull(limits));
     }
 
     /// Implements archive export, restore, and cleanup.
@@ -87,11 +86,8 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
         }
 
         @Override
-        public void createBackup(
-                final StorageConnection connection,
-                final ReplicationCursor cursor,
-                final BackupMetadata backup
-        ) throws NodeLibraryException {
+        public void createBackup(final StorageConnection connection, final ReplicationCursor cursor, final BackupMetadata backup)
+                throws NodeLibraryException {
             final Path exportDirectory = this.createTemporaryDirectory(".backup-export-");
             Throwable primaryFailure = null;
             try {

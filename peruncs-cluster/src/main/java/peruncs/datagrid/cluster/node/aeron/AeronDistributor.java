@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.util.Objects;
@@ -22,7 +23,7 @@ final class AeronDistributor implements StorageBinaryDataDistributor {
     private final AtomicReference<String> dictionary = new AtomicReference<>();
 
     AeronDistributor(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer) {
-        this.writer = Objects.requireNonNull(writer, "writer");
+        this.writer = Objects.requireNonNull(writer, NodeLibraryPropertiesProvider.WRITER_ROLE);
         this.sequenceSynchronizer = Objects.requireNonNull(sequenceSynchronizer, "sequenceSynchronizer");
     }
 

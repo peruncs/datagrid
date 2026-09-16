@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.node.store;
 
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Records whether storage measurements reached the configured limit.
@@ -76,7 +77,7 @@ public final class StorageLimitGate {
     /// @param diskSpaceReader storage measurement source
     /// @return limit-check task for housekeeper scheduling
     public Runnable createScheduledWork(final StorageDiskSpaceReader diskSpaceReader) {
-        if (diskSpaceReader == null) throw new NullPointerException("diskSpaceReader");
+        Objects.requireNonNull(diskSpaceReader, "diskSpaceReader");
         return () ->
         {
             LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");

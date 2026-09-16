@@ -51,9 +51,10 @@ public record AeronAuthenticatedWatermark(
 
         /// Validates a watermark token, which is immutable after construction.
     public AeronAuthenticatedWatermark {
-        if (readerId == null || clusterId == null || storeGeneration == null || authentication == null) {
-            throw new NullPointerException("watermark identity and authentication are required");
-        }
+        Objects.requireNonNull(readerId, "readerId");
+        Objects.requireNonNull(clusterId, "clusterId");
+        Objects.requireNonNull(storeGeneration, "storeGeneration");
+        Objects.requireNonNull(authentication, "authentication");
         if (writerEpoch < 0 || recordingId < 0 || sequence < -1 || sequence == Long.MAX_VALUE || position < -1 ||
             !isAuthenticationHex(authentication)) {
             throw new IllegalArgumentException("invalid Aeron watermark");
@@ -168,7 +169,7 @@ public record AeronAuthenticatedWatermark(
     /// @param encoded serialized watermark bytes
     /// @return decoded watermark
     public static AeronAuthenticatedWatermark decode(final byte[] encoded) {
-        if (encoded == null) throw new NullPointerException("encoded");
+        Objects.requireNonNull(encoded, "encoded");
         if (encoded.length != ENCODED_LENGTH) {
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
         }
@@ -201,7 +202,7 @@ public record AeronAuthenticatedWatermark(
     /// @param length  serialized watermark length; must be [#ENCODED_LENGTH]
     /// @return decoded watermark
     public static AeronAuthenticatedWatermark decode(final DirectBuffer encoded, final int offset, final int length) {
-        if (encoded == null) throw new NullPointerException("encoded");
+        Objects.requireNonNull(encoded, "encoded");
         if (offset < 0 || length != ENCODED_LENGTH ||
             offset > encoded.capacity() - length) {
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
@@ -263,8 +264,9 @@ public record AeronAuthenticatedWatermark(
     private static byte[] canonical(
             final UUID readerId, final UUID clusterId, final UUID storeGeneration, final long writerEpoch,
             final long recordingId, final long sequence, final long position) {
-        if (readerId == null || clusterId == null || storeGeneration == null)
-            throw new NullPointerException("watermark identity");
+        Objects.requireNonNull(readerId, "readerId");
+        Objects.requireNonNull(clusterId, "clusterId");
+        Objects.requireNonNull(storeGeneration, "storeGeneration");
         final byte[] canonical = new byte[IDENTITY_LENGTH];
         putCanonical(canonical, readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
         return canonical;
@@ -286,8 +288,9 @@ public record AeronAuthenticatedWatermark(
 
     private static void validateFields(final UUID readerId, final UUID clusterId, final UUID storeGeneration,
                                        final long writerEpoch, final long recordingId, final long sequence, final long position) {
-        if (readerId == null || clusterId == null || storeGeneration == null)
-            throw new NullPointerException("watermark identity");
+        Objects.requireNonNull(readerId, "readerId");
+        Objects.requireNonNull(clusterId, "clusterId");
+        Objects.requireNonNull(storeGeneration, "storeGeneration");
         if (writerEpoch < 0 || recordingId < 0 || sequence < -1 || sequence == Long.MAX_VALUE || position < -1)
             throw new IllegalArgumentException("invalid Aeron watermark progress");
     }
@@ -459,7 +462,7 @@ public record AeronAuthenticatedWatermark(
             this.state.write(() ->
             {
                 this.ensureOpen();
-                if (readerId == null) throw new NullPointerException("readerId");
+                Objects.requireNonNull(readerId, "readerId");
                 if (watermark == null) {
                     this.latest.remove(readerId);
                     return;

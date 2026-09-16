@@ -4,6 +4,7 @@ import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -11,9 +12,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
 /// Shared polling and shutdown rules for the Aeron readers.
-final class AeronReaderLifecycle {
-    private AeronReaderLifecycle() {
-    }
+interface AeronReaderLifecycle {
 
         /// Runs the subscription duty cycle used by both readers. Keeping idle and
     /// stop-at-tail handling here prevents the test reader and the production
@@ -78,8 +77,7 @@ final class AeronReaderLifecycle {
             final AtomicBoolean active,
             final Thread thread,
             final CountDownLatch stopped,
-            final Runnable closeSubscription
-    ) {
+            final Runnable closeSubscription) {
         stopAndClose(active, thread, stopped, closeSubscription, TimeUnit.SECONDS.toNanos(5L));
     }
 
@@ -98,13 +96,11 @@ final class AeronReaderLifecycle {
             final Thread thread,
             final CountDownLatch stopped,
             final Runnable closeSubscription,
-            final long timeoutNanos
-    ) {
+            final long timeoutNanos) {
         if (timeoutNanos <= 0L) throw new IllegalArgumentException("timeoutNanos must be positive");
-        if (active == null || closeSubscription == null)
-            throw new NullPointerException("active and closeSubscription");
-        if (thread != null && stopped == null)
-            throw new NullPointerException("stopped latch is required for a polling thread");
+        Objects.requireNonNull(active, "active");
+        Objects.requireNonNull(closeSubscription, "closeSubscription");
+        if (thread != null) Objects.requireNonNull(stopped, "stopped latch is required for a polling thread");
         active.set(false);
         RuntimeException failure = null;
         if (thread != null) {

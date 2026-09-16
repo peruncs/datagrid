@@ -208,4 +208,44 @@ class AeronReaderLifecycleTest {
                 }, AeronReaderLifecycle.defaultIdleStrategy());
         assertEquals(0, polls.get());
     }
+
+        /// Verifies the polling loop paces with the supplied strategy, so the
+        /// reader's configured retry policy actually drives idle behavior.
+    @Test
+    void pollingLoopUsesTheSuppliedIdleStrategy() {
+        final AtomicBoolean active = new AtomicBoolean(true);
+        final AtomicInteger polls = new AtomicInteger();
+        final AtomicInteger idles = new AtomicInteger();
+        final org.agrona.concurrent.IdleStrategy counting = new org.agrona.concurrent.IdleStrategy() {
+            @Override
+            public void idle(final int workCount) {
+                idles.incrementAndGet();
+            }
+
+            @Override
+            public void idle() {
+                idles.incrementAndGet();
+            }
+
+            @Override
+            public void reset() {
+            }
+        };
+
+        AeronReaderLifecycle.runPollingLoop(
+                active,
+                () -> polls.get() >= 2,
+                () ->
+                {
+                    polls.incrementAndGet();
+                    return 0;
+                },
+                () -> false,
+                () -> false,
+                () -> {
+                },
+                counting);
+
+        assertTrue(idles.get() >= 1, "the supplied idle strategy must pace the polling loop");
+    }
 }

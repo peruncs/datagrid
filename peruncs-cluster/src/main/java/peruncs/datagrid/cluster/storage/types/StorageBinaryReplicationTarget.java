@@ -15,10 +15,7 @@ public interface StorageBinaryReplicationTarget extends PersistenceTarget<Binary
     /// @param delegate    local persistence target
     /// @param distributor destination for committed binaries
     /// @return distributing target
-    static StorageBinaryReplicationTarget New(
-            final PersistenceTarget<Binary> delegate,
-            final StorageBinaryDataDistributor distributor
-    ) {
+    static StorageBinaryReplicationTarget New(final PersistenceTarget<Binary> delegate, final StorageBinaryDataDistributor distributor) {
         return new StorageBinaryReplicationTarget.Default(
                 notNull(delegate),
                 notNull(distributor)
@@ -30,10 +27,7 @@ public interface StorageBinaryReplicationTarget extends PersistenceTarget<Binary
         private final PersistenceTarget<Binary> delegate;
         private final StorageBinaryDataDistributor distributor;
 
-        Default(
-                final PersistenceTarget<Binary> delegate,
-                final StorageBinaryDataDistributor distributor
-        ) {
+        Default(final PersistenceTarget<Binary> delegate, final StorageBinaryDataDistributor distributor) {
             super();
             this.delegate = delegate;
             this.distributor = distributor;

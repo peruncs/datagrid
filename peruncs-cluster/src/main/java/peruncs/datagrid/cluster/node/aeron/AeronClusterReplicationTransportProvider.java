@@ -27,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -44,8 +45,7 @@ import static java.lang.System.Logger.Level.WARNING;
 /// distributors do not close the runtime.
 public final class AeronClusterReplicationTransportProvider {
     /* Test-only, dynamically scoped seam used by the forked crash harness. */
-    private static final System.Logger LOGGER =
-            System.getLogger(AeronClusterReplicationTransportProvider.class.getName());
+    private static final System.Logger LOGGER = System.getLogger(AeronClusterReplicationTransportProvider.class.getName());
     private static final ScopedValue<BiConsumer<String, Long>> CRASH_HOOK = ScopedValue.newInstance();
     private static final ScopedValue<Long> CHECKPOINT_SEQUENCE = ScopedValue.newInstance();
     private static final ScopedValue<Boolean> DELIVERY_CALLBACK = ScopedValue.newInstance();
@@ -54,8 +54,8 @@ public final class AeronClusterReplicationTransportProvider {
     }
 
     static void runWithCrashHook(final BiConsumer<String, Long> hook, final Runnable action) {
-        if (hook == null) throw new NullPointerException("hook");
-        if (action == null) throw new NullPointerException("action");
+        Objects.requireNonNull(hook, "hook");
+        Objects.requireNonNull(action, "action");
         ScopedValue.where(CRASH_HOOK, hook).run(action);
     }
 
@@ -63,13 +63,13 @@ public final class AeronClusterReplicationTransportProvider {
             final BiConsumer<String, Long> hook,
             final ScopedValue.CallableOp<? extends T, X> operation
     ) throws X {
-        if (hook == null) throw new NullPointerException("hook");
-        if (operation == null) throw new NullPointerException("operation");
+        Objects.requireNonNull(hook, "hook");
+        Objects.requireNonNull(operation, "operation");
         return ScopedValue.where(CRASH_HOOK, hook).call(operation);
     }
 
     static Runnable inheritCurrentCrashHook(final Runnable action) {
-        if (action == null) throw new NullPointerException("action");
+        Objects.requireNonNull(action, "action");
         final BiConsumer<String, Long> hook = CRASH_HOOK.isBound() ? CRASH_HOOK.get() : null;
         return hook == null ? action : () -> ScopedValue.where(CRASH_HOOK, hook).run(action);
     }
@@ -258,7 +258,7 @@ public final class AeronClusterReplicationTransportProvider {
                 throw new IllegalStateException("Aeron transport supports one replication stream per provider");
             }
             this.distributor = new AeronDistributor(
-                    () -> "writer".equals(this.settings.role()),
+                    () -> NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()),
                     value ->
                     {
                         this.nextSequence.accumulateAndGet(value, Math::max);
@@ -273,7 +273,7 @@ public final class AeronClusterReplicationTransportProvider {
             synchronized (this) {
                 this.ensureOpen();
                 this.claimStream(streamName);
-                if (!"writer".equals(this.settings.role())) {
+                if (!NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
                     return UnaryOperator.identity();
                 }
             }
@@ -326,10 +326,10 @@ public final class AeronClusterReplicationTransportProvider {
              * the one-writer/N-reader topology and expose a partially initialized reader
              * through the writer's health path. Configure a separate reader/backup-reader
              * node when replay is required. */
-            if ("writer".equals(this.settings.role())) {
+            if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
                 return StorageBinaryDataClient.NoOp(startingCursor);
             }
-            if (packetAcceptor == null) throw new NullPointerException("packetAcceptor");
+            Objects.requireNonNull(packetAcceptor, "packetAcceptor");
             this.ensureRuntime();
             final long recordingId = this.settings.recordingId() >= 0
                     ? this.settings.recordingId() : this.discoverReaderRecordingId();
@@ -370,10 +370,7 @@ public final class AeronClusterReplicationTransportProvider {
                         this.aeron(),
                         archiveContext(),
                         recordingId,
-                        aeronCursor && cursorPosition >= 0
-                                ? cursorPosition
-                                : io.aeron.archive.client.PersistentSubscription.FROM_START,
-                        this.settings.liveChannel(),
+                        aeronCursor && cursorPosition >= 0 ? cursorPosition : io.aeron.archive.client.PersistentSubscription.FROM_START, this.settings.liveChannel(),
                         this.settings.streamId(),
                         this.settings.replayChannel(),
                         this.settings.streamId() + 1,
@@ -382,8 +379,7 @@ public final class AeronClusterReplicationTransportProvider {
                         this.settings.epoch(),
                         aeronCursor ? cursor.logicalSequence() : -1,
                         new ReceiverAdapter(this, packetAcceptor),
-                        () ->
-                        {
+                        () -> {
                             final StorageBinaryDataClientAeronArchive current = readerRef.get();
                             if (current != null && current == this.reader) {
                                 final CursorSnapshot snapshot = current.cursorSnapshot();
@@ -420,8 +416,7 @@ public final class AeronClusterReplicationTransportProvider {
              * transaction arrives. Otherwise a restarted writer cannot rebuild its
              * retention quorum until unrelated Store traffic happens. */
             if (aeronCursor && cursor.logicalSequence() >= 0) {
-                this.publishReaderWatermark(
-                        new CursorSnapshot(cursor.logicalSequence(), cursorPosition), recordingId);
+                this.publishReaderWatermark(new CursorSnapshot(cursor.logicalSequence(), cursorPosition), recordingId);
             }
             return new ClientAdapter(replacement, recordingId, this.settings.clusterId(),
                     this.settings.nodeId(), this.settings.storeGeneration(), this.settings.epoch());
@@ -437,8 +432,7 @@ public final class AeronClusterReplicationTransportProvider {
                     !aeron.storeGeneration().equals(this.settings.storeGeneration()) ||
                     aeron.epoch() != this.settings.epoch() || aeron.recordingId() != expectedRecordingId ||
                     aeron.sequence() != cursor.logicalSequence()) {
-                    throw new ReseedRequiredException(
-                            "Aeron cursor identity does not match the configured reader or writer");
+                    throw new ReseedRequiredException("Aeron cursor identity does not match the configured reader or writer");
                 }
                 return aeron.recordingPosition();
             } catch (final IllegalArgumentException failure) {
@@ -450,25 +444,22 @@ public final class AeronClusterReplicationTransportProvider {
             final io.aeron.ChannelUri live = io.aeron.ChannelUri.parse(this.settings.liveChannel());
             final String alias = live.get(io.aeron.CommonContext.ALIAS_PARAM_NAME);
             if (alias == null || alias.isBlank()) {
-                throw new IllegalStateException(
-                        "Aeron recording discovery requires alias= on ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL");
+                throw new IllegalStateException("Aeron recording discovery requires alias= on ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL");
             }
             final AtomicLong discovered = new AtomicLong(Aeron.NULL_VALUE);
             final int count = this.listRecordingsForUri("alias=%s".formatted(alias), this.settings.streamId(),
-                    (controlSessionId, correlationId, recordingId, startTimestamp,
-                     stopTimestamp, startPosition, stopPosition, initialTermId, segmentFileLength,
-                     termBufferLength, mtuLength, sessionId, streamId, strippedChannel, originalChannel,
-                     sourceIdentity) -> discovered.set(recordingId));
+                    (_, _, recordingId, _,
+                     _, _, _, _, _,
+                     _, _, _, _, _, _,
+                     _) -> discovered.set(recordingId));
             if (count != 1 || discovered.get() < 0) {
-                throw new IllegalStateException(
-                        "Aeron recording discovery requires exactly one alias=%s recording for stream %s; found %s".formatted(alias, this.settings.streamId(), count));
+                throw new IllegalStateException("Aeron recording discovery requires exactly one alias=%s recording for stream %s; found %s".formatted(alias, this.settings.streamId(), count));
             }
             return discovered.get();
         }
 
         private Path readerUncertaintyPath() {
-            return this.settings.checkpointPath().resolveSibling(
-                    "%s.reader-inflight".formatted(this.settings.checkpointPath().getFileName()));
+            return this.settings.checkpointPath().resolveSibling("%s.reader-inflight".formatted(this.settings.checkpointPath().getFileName()));
         }
 
         private void rejectUncertainReaderImport(final long recordingId) {
@@ -540,7 +531,7 @@ public final class AeronClusterReplicationTransportProvider {
             this.claimStream(streamName);
             if (this.positionProvider == null) {
                 this.positionProvider = new AeronPositionProvider(
-                        () -> "writer".equals(this.settings.role()),
+                        () -> NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()),
                         () -> this.writer != null && !this.writerRecoveryInProgress && !this.closed,
                         this::ensureWriter,
                         () -> this.writerBoundary,
@@ -644,7 +635,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         private void ensureWatermarkChannel() {
             if (this.watermarkChannel != null || this.retentionSecret == null) return;
-            if ("writer".equals(this.settings.role())) {
+            if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
                 if (!this.retentionSupported()) return;
                 if (this.retention == null) {
                     this.retention = this.newRetentionController(this.retentionSecret);
@@ -727,7 +718,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         private boolean retentionSupported() {
             return this.retentionSecret != null && !this.settings.retentionReaders().isEmpty() &&
-                   "writer".equals(this.settings.role()) && !this.settings.externalArchive();
+                   NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && !this.settings.externalArchive();
         }
 
         @Override
@@ -745,7 +736,7 @@ public final class AeronClusterReplicationTransportProvider {
                         () -> this.driverFailure.get() != null,
                         () -> this.archiveCapacity.available(this.settings.replication().maxTransactionBytes()),
                         this::writerReady,
-                        () -> "writer".equals(this.settings.role()),
+                        () -> NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()),
                         this::writerCheckpointState,
                         this.archiveCapacity::usableSpaceBytes,
                         () -> this.writerBoundary.position(),
@@ -757,7 +748,7 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         private boolean writerReady() {
-            return "writer".equals(this.settings.role()) && !this.writerRecoveryInProgress &&
+            return NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && !this.writerRecoveryInProgress &&
                    this.writerRecoveryState == null && this.writer != null && !this.writer.isFailed();
         }
 
@@ -769,7 +760,7 @@ public final class AeronClusterReplicationTransportProvider {
             if (this.driverFailure.get() != null) {
                 return ReplicationHealth.State.FAILED;
             }
-            if (!"writer".equals(this.settings.role())) {
+            if (!NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
                 return null;
             }
             /* Preserve a failed startup result even though the writer object was never
@@ -1095,7 +1086,7 @@ public final class AeronClusterReplicationTransportProvider {
                 throw new IllegalStateException("Aeron runtime has failed; create a new transport", this.driverFailure.get());
             }
             if (this.runtime != null) return;
-            if ("writer".equals(this.settings.role())) this.archiveCapacity.invalidate();
+            if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) this.archiveCapacity.invalidate();
             this.runtime = AeronRuntime.start(this.settings, this::recordDriverFailure,
                     () -> crashPoint("BEFORE_PUBLICATION_CONNECTED", -1L));
             try {
@@ -1148,7 +1139,7 @@ public final class AeronClusterReplicationTransportProvider {
              * worker first so it cannot enter ensureWriter/retention while writer close
              * is in progress. Reader-side channels remain open until the reader exits so
              * its final cursor publication is not turned into a spurious failure. */
-            if (this.reader == null && "writer".equals(this.settings.role()) && this.watermarkChannel != null) {
+            if (this.reader == null && NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && this.watermarkChannel != null) {
                 failure = this.closeWatermarkChannel();
             }
             if (this.watermarkChannel != null) {

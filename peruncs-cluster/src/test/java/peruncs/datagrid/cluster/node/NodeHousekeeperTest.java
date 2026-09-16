@@ -140,19 +140,15 @@ class NodeHousekeeperTest {
     @Test
     void firesPeriodicallyAndStopsOnClose() throws InterruptedException {
         final AtomicInteger runs = new AtomicInteger();
-        final NodeHousekeeper housekeeper = NodeHousekeeper.New();
-        housekeeper.schedule("counter", runs::incrementAndGet, Duration.ofMillis(50));
-        housekeeper.start();
-        try {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+            housekeeper.schedule("counter", runs::incrementAndGet, Duration.ofMillis(50));
+            housekeeper.start();
             awaitCondition(() -> runs.get() >= 2, 5_000L, "periodic task did not run");
-        } finally {
-            housekeeper.close();
         }
 
         final int stopped = runs.get();
         Thread.sleep(200L);
         assertEquals(stopped, runs.get());
-        housekeeper.close();
     }
 
         /// A failing task is logged while the remaining tasks keep running.

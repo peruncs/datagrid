@@ -60,8 +60,8 @@ public final class AeronReplicationEnvelope {
 
         /// Runs an encode or decode operation with caller-owned checksum state.
     public static <T> T withChecksumContext(final ChecksumContext context, final Supplier<T> operation) {
-        if (context == null) throw new NullPointerException("context");
-        if (operation == null) throw new NullPointerException("operation");
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(operation, "operation");
         return ScopedValue.where(CHECKSUM_CONTEXT, context).call(operation::get);
     }
 
@@ -146,8 +146,7 @@ public final class AeronReplicationEnvelope {
             final DirectBuffer payload,
             final int payloadOffset,
             final int chunkLength,
-            final int payloadCrc32c
-    ) {
+            final int payloadCrc32c) {
         final ChecksumContext context = checksumContext();
         return encodeWithPayloadCrcInternal(target, targetOffset, clusterId, epoch, sequence, kind, payloadLength,
                 chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength,
@@ -216,8 +215,9 @@ public final class AeronReplicationEnvelope {
             final int payloadOffset,
             final int chunkLength
     ) {
-        if (clusterId == null || kind == null || payload == null)
-            throw new NullPointerException("clusterId, kind, and payload are required");
+        Objects.requireNonNull(clusterId, "clusterId");
+        Objects.requireNonNull(kind, "kind");
+        Objects.requireNonNull(payload, "payload");
         if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
             payloadLength > MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
             chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
@@ -291,7 +291,7 @@ public final class AeronReplicationEnvelope {
             final int length,
             final EnvelopeView view
     ) {
-        if (view == null) throw new NullPointerException("view");
+        Objects.requireNonNull(view, "view");
         /* Invalidate a reused view before reading any new bytes. If parsing
          * fails halfway through, callers cannot accidentally observe the
          * previous frame through a stale view. */
@@ -549,9 +549,9 @@ public final class AeronReplicationEnvelope {
             byte[] payload
     ) {
         public Envelope {
-            if (clusterId == null || kind == null || payload == null) {
-                throw new NullPointerException("envelope identity, kind, and payload are required");
-            }
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(kind, "kind");
+            Objects.requireNonNull(payload, "payload");
             payload = payload.clone();
             if (payloadLength < 0 || payloadLength > MAX_MESSAGE_LENGTH ||
                 chunkIndex < 0 || chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||

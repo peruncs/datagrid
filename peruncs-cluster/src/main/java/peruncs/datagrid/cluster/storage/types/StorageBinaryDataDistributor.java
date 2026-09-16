@@ -26,6 +26,9 @@ public interface StorageBinaryDataDistributor extends Disposable {
 
         /// Creates a distributor that ignores all transport work.
     ///
+    /// Each call returns a new instance because the message index and
+    /// ignore flag are per-distributor lifecycle state.
+    ///
     /// @return neutral distributor
     static StorageBinaryDataDistributor NoOp() {
         return new StorageBinaryDataDistributor() {
@@ -115,6 +118,7 @@ public interface StorageBinaryDataDistributor extends Disposable {
     /// One staged slot is enough: cluster storage has one writer, so a queued
     /// restart snapshot and later incremental exports never need separate slots.
     final class Caching implements StorageBinaryDataDistributor {
+
         private final StorageBinaryDataDistributor delegate;
         /* The single staged dictionary plus whether it is an authoritative restart
          * snapshot. Both are held in one immutable value so the staged string and

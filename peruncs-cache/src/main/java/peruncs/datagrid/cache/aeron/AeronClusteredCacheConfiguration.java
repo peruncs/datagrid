@@ -8,26 +8,28 @@ import java.util.UUID;
 /// never parses property maps, files, or environment variables. The Hibernate
 /// adapter translates its setting map into this record once, at the framework
 /// boundary.
+///
+/// @param channel            Aeron channel shared by all participants; defaults to `aeron:ipc`,
+///                           which is single-host, so multi-host deployments must configure
+///                           a UDP channel with `control-mode=dynamic`
+/// @param streamId           Aeron stream id shared by all participants
+/// @param nodeId             optional node identity shared by every provider of one node;
+///                           when `null`, each provider uses a random identity
+/// @param directory          optional Aeron driver directory; `null` uses Aeron's default
+/// @param embeddedDriver     whether to launch a private embedded MediaDriver
+/// @param driverTimeoutMillis how long the Aeron client waits for a driver connection, in millis
+/// @param offerTimeoutMillis how long a sender waits for the publication to accept a frame
+///                           before failing the cache write, in millis; the same budget
+///                           bounds the wait for the shared per-node sequence lock
+/// @param maxPayloadBytes    largest accepted serialized payload, in bytes
 public record AeronClusteredCacheConfiguration(
-        /// Aeron channel shared by all participants. Defaults to `aeron:ipc`,
-        /// which is single-host; multi-host deployments must configure a UDP
-        /// channel with `control-mode=dynamic`.
         String channel,
-        /// Aeron stream id shared by all participants.
         int streamId,
-        /// Optional node identity shared by every provider of one node.
-        /// When `null`, each provider uses a random identity.
         UUID nodeId,
-        /// Optional Aeron driver directory; `null` uses Aeron's default.
         String directory,
-        /// Whether to launch a private embedded MediaDriver.
         boolean embeddedDriver,
-        /// How long the Aeron client waits for a driver connection, in millis.
         long driverTimeoutMillis,
-        /// How long a sender waits for the publication to accept a frame
-        /// before failing the cache write, in millis.
         long offerTimeoutMillis,
-        /// Largest accepted serialized payload, in bytes.
         int maxPayloadBytes
 ) {
         /// Default single-host channel.

@@ -11,6 +11,7 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -361,7 +362,7 @@ final class TransactionAssembler {
     }
 
     void failure(final RuntimeException exception) {
-        if (exception == null) throw new NullPointerException("exception");
+        Objects.requireNonNull(exception, "exception");
         synchronized (this.delivery) {
             synchronized (this) {
                 if (this.failure.compareAndSet(null, exception)) {

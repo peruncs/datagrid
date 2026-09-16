@@ -61,8 +61,7 @@ public record ReplicationCursor(
             final long logicalSequence,
             final byte[] providerPosition
     ) {
-        return new ReplicationCursor(transport, storeGeneration, logicalSequence,
-                providerPosition == null ? "" : HEX.formatHex(providerPosition));
+        return new ReplicationCursor(transport, storeGeneration, logicalSequence, providerPosition == null ? "" : HEX.formatHex(providerPosition));
     }
 
         /// Reports whether the text is even-length hexadecimal.

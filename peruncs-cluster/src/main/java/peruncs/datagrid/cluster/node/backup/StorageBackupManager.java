@@ -39,8 +39,7 @@ public interface StorageBackupManager {
             final StorageBackupBackend storageBackupBackend,
             final Supplier<ReplicationCursor> cursorSupplier,
             final StorageBinaryDataClient dataClient,
-            final ReplicationLogRetention retention
-    ) {
+            final ReplicationLogRetention retention) {
         return new Default(
                 notNull(storageConnection),
                 positive(maxBackupCount),
