@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.storage.internal;
+package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.functional.InstanceDispatcherLogic;
 import org.eclipse.serializer.persistence.binary.types.Binary;
@@ -6,8 +6,6 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.cluster.storage.types.StorageTypeDictionaryExporterDistributing;
 
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
@@ -19,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class DistributedStorageConfiguratorTest {
     @Test
     void preservesTargetAndDictionaryExporterContracts() {
-        final DistributedStorageConfigurator configurator = new DistributedStorageConfigurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
         final Object decorated = configurator.apply(new BothContracts());
 
         assertInstanceOf(PersistenceTarget.class, decorated);
@@ -40,7 +38,7 @@ class DistributedStorageConfiguratorTest {
             }
         };
         final List<PersistenceTarget<Binary>> decorated = new ArrayList<>();
-        final DistributedStorageConfigurator configurator = new DistributedStorageConfigurator(
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
                 new NoOpDistributor(),
                 delegate -> {
                     decorated.add(delegate);
@@ -57,7 +55,7 @@ class DistributedStorageConfiguratorTest {
         /// A `null` from the previous dispatcher passes through undecorated.
     @Test
     void nullFromPreviousPassesThrough() {
-        final DistributedStorageConfigurator configurator = new DistributedStorageConfigurator(
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
                 new NoOpDistributor(), delegate -> delegate, new InstanceDispatcherLogic() {
                     @Override
                     public <T> T apply(final T subject) {
@@ -71,7 +69,7 @@ class DistributedStorageConfiguratorTest {
         /// Plain subjects that implement neither SPI pass through untouched.
     @Test
     void plainObjectsPassThroughUnchanged() {
-        final DistributedStorageConfigurator configurator = new DistributedStorageConfigurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
         final Object subject = new Object();
 
         assertSame(subject, configurator.apply(subject));
@@ -81,7 +79,7 @@ class DistributedStorageConfiguratorTest {
     @Test
     void targetOnlySubjectUsesTargetFactory() {
         final List<PersistenceTarget<Binary>> seen = new ArrayList<>();
-        final DistributedStorageConfigurator configurator = new DistributedStorageConfigurator(
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
                 new NoOpDistributor(),
                 delegate -> {
                     seen.add(delegate);
@@ -96,7 +94,7 @@ class DistributedStorageConfiguratorTest {
         /// An exporter-only subject gains the distributing exporter contract.
     @Test
     void exporterOnlySubjectIsDecorated() {
-        final DistributedStorageConfigurator configurator = new DistributedStorageConfigurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
         final PersistenceTypeDictionaryExporter exporter = exporterProxy();
 
         assertInstanceOf(StorageTypeDictionaryExporterDistributing.class, configurator.apply(exporter));
@@ -106,7 +104,7 @@ class DistributedStorageConfiguratorTest {
     @Test
     void bothContractsForwardWritesToFactoryTarget() {
         final List<Binary> written = new ArrayList<>();
-        final DistributedStorageConfigurator configurator = new DistributedStorageConfigurator(
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
                 new NoOpDistributor(), delegate -> targetProxy(written));
 
         final PersistenceTarget<Binary> decorated = configurator.apply(new BothContracts());

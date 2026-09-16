@@ -40,6 +40,13 @@ import java.util.concurrent.atomic.LongAdder;
 /// re-synchronization: it never serves reads as healthy again until its
 /// caches are invalidated and a fresh stream is accepted.
 ///
+/// A volatile broadcast cannot detect a peer it has never heard from, so a
+/// fresh receiver with only self traffic would otherwise report healthy while
+/// partitioned from such a peer. Deployments that need verified reads
+/// configure how many distinct remote senders must prove liveness first; the
+/// receiver refuses reads until that quorum is observed, without failing
+/// closed, so a late peer still completes it.
+///
 /// A malformed or undecodable frame stops this receiver and is exposed
 /// through [#failure()]. A volatile broadcast cannot prove that a bad
 /// frame was harmless or reconstruct a missing invalidation; continuing would
@@ -90,6 +97,7 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
     private final ClusteredCacheMessageAcceptor messageAcceptor;
     private final int maxPayloadBytes;
     private final long freshnessTimeoutNanos;
+    private final int expectedRemoteSenders;
     private final AeronClusteredCacheCursorStore cursorStore;
     private final byte[] hmacSecret;
     private final byte[] previousHmacSecret;
@@ -114,6 +122,13 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
      * establishes a safe re-baseline boundary. */
     private volatile Set<AeronClusteredCacheMessageCodec.SenderId> rebaseSenders =
             ConcurrentHashMap.newKeySet();
+    /* Remote senders that proved liveness with a frame accepted in this
+     * lifecycle. Persisted cursors and rebase entries alone never count: only
+     * observed traffic proves the peer is reachable now. Cleared with the
+     * cursors on re-synchronization, so a recovered receiver rebuilds its
+     * quorum from post-recovery frames. */
+    private final Set<AeronClusteredCacheMessageCodec.SenderId> observedSenders =
+            ConcurrentHashMap.newKeySet();
     private final AtomicReference<RuntimeException> agentFailure = new AtomicReference<>();
     private volatile Subscription subscription;
     private volatile Thread agentThread;
@@ -127,6 +142,12 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
      * Reads must be refused until the wipe finishes and the baseline is recorded;
      * the wipe clears caches one at a time and would otherwise serve a torn view. */
     private volatile boolean joinInvalidationInProgress;
+    /* Test seam invoked on the re-synchronizing thread after the
+     * pre-invalidation drain and before the invalidation. A frame published
+     * from this hook must be consumed by the restarted polling thread, never
+     * discarded: it postdates the drain, so no later step may treat it as
+     * already-covered residue. */
+    Runnable resyncAfterDrainHook;
     /* When non-negative, a cache application started at this timestamp and has
      * not finished. The polling thread cannot watch the freshness deadline
      * while blocked inside the acceptor, so health checks consult this stamp
@@ -154,6 +175,7 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             final ClusteredCacheMessageAcceptor messageAcceptor,
             final int maxPayloadBytes,
             final long freshnessTimeoutNanos,
+            final int expectedRemoteSenders,
             final AeronClusteredCacheCursorStore cursorStore,
             final byte[] hmacSecret,
             final byte[] previousHmacSecret
@@ -187,8 +209,13 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             throw new IllegalArgumentException(
                     "freshnessTimeoutNanos must be positive: %s".formatted(freshnessTimeoutNanos));
         }
+        if (expectedRemoteSenders < 0) {
+            throw new IllegalArgumentException(
+                    "expectedRemoteSenders must not be negative: %s".formatted(expectedRemoteSenders));
+        }
         this.maxPayloadBytes = maxPayloadBytes;
         this.freshnessTimeoutNanos = freshnessTimeoutNanos;
+        this.expectedRemoteSenders = expectedRemoteSenders;
     }
 
         /// Starts the polling loop and its daemon thread.
@@ -246,6 +273,7 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             this.subscription = null;
             this.lastSequenceBySender.clear();
             this.lastSeenNanos.clear();
+            this.observedSenders.clear();
             this.applyStartNanos = -1L;
             try {
                 this.resources.closeSubscription();
@@ -299,6 +327,26 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             throw new IllegalStateException(
                     "Aeron clustered-cache receiver is still stopping; retry re-synchronization");
         }
+        /* Frames may have piled up in the subscription while no thread was
+         * polling. Drain them BEFORE the invalidation below: the wipe then
+         * covers every discarded frame, while anything published after the
+         * drain stays buffered and becomes the re-baselined live stream.
+         * Draining after the invalidation would discard peer updates the wipe
+         * never covered and let a later heartbeat become a false baseline.
+         * The drain is bounded; any residue is still safe, it can only cause
+         * a conservative gap failure. */
+        final Subscription draining = this.subscription;
+        if (draining != null) {
+            for (int round = 0; round < 1_000; round++) {
+                if (draining.poll(DISCARD, FRAGMENT_LIMIT) == 0) {
+                    break;
+                }
+            }
+        }
+        final Runnable afterDrain = this.resyncAfterDrainHook;
+        if (afterDrain != null) {
+            afterDrain.run();
+        }
         try {
             this.messageAcceptor.invalidateAll();
         } catch (final RuntimeException failure) {
@@ -309,6 +357,7 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         rebase.addAll(this.lastSequenceBySender.keySet());
         this.rebaseSenders = rebase;
         this.lastSequenceBySender.clear();
+        this.observedSenders.clear();
         /* Rebasing senders keep a freshness deadline from this call: each must
          * re-prove liveness with a post-invalidation frame, or the receiver
          * fails closed instead of silently dropping that sender. */
@@ -317,19 +366,9 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         for (final var sender : rebase) {
             this.lastSeenNanos.put(sender, rebaseStart);
         }
-        /* Frames may have piled up in the subscription while no thread was
-         * polling. The invalidation above already covered them, so they are
-         * discarded instead of becoming a false baseline: the next live frame
-         * from each known sender re-baselines. The drain is bounded; any
-         * residue is still safe, it can only cause a conservative gap failure. */
-        final Subscription draining = this.subscription;
-        if (draining != null) {
-            for (int round = 0; round < 1_000; round++) {
-                if (draining.poll(DISCARD, FRAGMENT_LIMIT) == 0) {
-                    break;
-                }
-            }
-        }
+        /* No second drain follows: consumption starts immediately below, so a
+         * frame published during the invalidation is consumed as the new
+         * baseline instead of being discarded as residue. */
         this.agentFailure.set(null);
         final long now = System.nanoTime();
         this.lastActivityNanos = now;
@@ -402,6 +441,18 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
                                 "Aeron clustered-cache sender %s is stale: silent for more than %s ms".formatted(seen.getKey(), this.freshnessTimeoutNanos / 1_000_000L)));
                 return false;
             }
+        }
+        /* A volatile broadcast cannot name a peer it has never heard from, so
+         * a fresh receiver with self traffic alone would otherwise report
+         * healthy while partitioned from a peer whose first frame never
+         * arrived. With a configured quorum, reads stay refused until enough
+         * distinct remote senders prove liveness with post-start frames. This
+         * deliberately does not fail closed: the missing peer may still
+         * arrive, and polling continues so its first frame completes the
+         * quorum instead of being ignored by a terminal state. */
+        if (this.expectedRemoteSenders > 0 &&
+            this.freshObservedSenders(now) < this.expectedRemoteSenders) {
+            return false;
         }
         return true;
     }
@@ -614,6 +665,7 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             if (this.rebaseSenders.remove(sender)) {
                 this.lastSequenceBySender.put(sender, sequence);
                 this.lastSeenNanos.put(sender, System.nanoTime());
+                this.observedSenders.add(sender);
                 this.cursorsDirty = true;
                 return true;
             }
@@ -652,12 +704,14 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
                 }
                 this.lastSequenceBySender.put(sender, sequence);
                 this.lastSeenNanos.put(sender, System.nanoTime());
+                this.observedSenders.add(sender);
                 this.cursorsDirty = true;
                 this.joinInvalidationInProgress = false;
                 return true;
             }
             this.lastSequenceBySender.put(sender, sequence);
             this.lastSeenNanos.put(sender, System.nanoTime());
+            this.observedSenders.add(sender);
             this.cursorsDirty = true;
             return true;
         }
@@ -670,8 +724,29 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         }
         this.lastSequenceBySender.put(sender, sequence);
         this.lastSeenNanos.put(sender, System.nanoTime());
+        this.observedSenders.add(sender);
         this.cursorsDirty = true;
         return true;
+    }
+
+        /// Counts quorum senders with post-start traffic inside the freshness window.
+    ///
+    /// Only observed senders count: persisted cursors and rebase entries prove
+    /// nothing about current reachability. A sender that proved liveness and
+    /// then went silent stops counting once its deadline passes, at which
+    /// point the per-sender staleness checks above fail the receiver closed.
+    ///
+    /// @param now current `System.nanoTime()` reading
+    /// @return number of observed senders heard from within the freshness window
+    private int freshObservedSenders(final long now) {
+        int fresh = 0;
+        for (final var observed : this.observedSenders) {
+            final Long lastSeen = this.lastSeenNanos.get(observed);
+            if (lastSeen != null && now - lastSeen < this.freshnessTimeoutNanos) {
+                fresh++;
+            }
+        }
+        return fresh;
     }
 
         /// Finds a previously-heard sender whose silence exceeds the freshness

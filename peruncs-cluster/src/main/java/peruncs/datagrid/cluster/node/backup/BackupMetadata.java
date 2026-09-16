@@ -93,7 +93,7 @@ public record BackupMetadata(
     ///
     /// @param digest CRC over the archived content
     /// @return copy with the digest set
-    public BackupMetadata withDigest(final long digest) {
+    BackupMetadata withDigest(final long digest) {
         return new BackupMetadata(
                 this.timestamp, this.manualSlot, this.clusterId, this.storeGeneration,
                 this.epoch, this.recordingId, this.nodeId, this.backupId, digest);
@@ -108,7 +108,7 @@ public record BackupMetadata(
     ///
     /// @param configured node identity to check against
     /// @return `true` when no known dimension contradicts
-    public boolean isCompatibleWith(final Identity configured) {
+    boolean isCompatibleWith(final Identity configured) {
         Objects.requireNonNull(configured, "configured");
         return (configured.clusterId() == null || configured.clusterId().equals(this.clusterId)) &&
                (configured.storeGeneration() == null || configured.storeGeneration().equals(this.storeGeneration)) &&

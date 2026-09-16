@@ -99,7 +99,7 @@
 					     unnamed module. The JPMS descriptor is guarded instead by
 					     ModuleDescriptorConsistencyTest, which parses the compiled
 					     module-info.class and checks its name, requirements, and exports
-					     against the tree and the OSGi manifest configuration. -->
+					     against the source tree. -->
 					<useModulePath>false</useModulePath>
 					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 				</configuration>

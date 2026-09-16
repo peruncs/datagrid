@@ -21,8 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// comment in `peruncs-cluster/pom.xml`): forked crash fixtures, dynamic
 /// test hooks, and non-modular test helpers assume an unnamed module. This
 /// test instead reads the compiled `module-info.class` and checks that its
-/// name, requirements, and exports still match the tree and the OSGi
-/// manifest configuration in the root `pom.xml`.
+/// name, requirements, and exports still match the source tree.
 class ModuleDescriptorConsistencyTest {
     private static Path classesDirectory() {
         try {
@@ -84,26 +83,5 @@ class ModuleDescriptorConsistencyTest {
                 "requires must match the published upstream module name: " + required);
         assertFalse(required.contains("org.eclipse.store.gigamap.jvector"),
                 "upstream has not published the corrected spelling yet: " + required);
-    }
-
-        /// The OSGi `Export-Package` list covers every JPMS export.
-    ///
-    /// The root `pom.xml` configures the bundle manifest with an explicit
-    /// export list that must match the module descriptor (no wildcards, no
-    /// dynamic imports); a package exported to JPMS but missing from the
-    /// manifest is invisible to OSGi consumers.
-    @Test
-    void osgiExportsCoverJpmsExports() throws Exception {
-        final Path rootPom = classesDirectory().resolve("../../../pom.xml").normalize();
-        assertTrue(Files.isRegularFile(rootPom), "root pom must sit three levels above " + classesDirectory());
-        final String pom = Files.readString(rootPom);
-        final int start = pom.indexOf("<Export-Package>");
-        final int end = pom.indexOf("</Export-Package>");
-        assertTrue(start >= 0 && end > start, "root pom must configure an explicit Export-Package list");
-        final String exports = pom.substring(start, end);
-        for (final ModuleDescriptor.Exports exported : descriptor().exports()) {
-            assertTrue(exports.contains(exported.source()),
-                    "OSGi Export-Package is missing the JPMS export " + exported.source());
-        }
     }
 }

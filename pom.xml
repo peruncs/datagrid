@@ -108,10 +108,6 @@
                 <artifactId>maven-jar-plugin</artifactId>
             </plugin>
             <plugin>
-                <groupId>org.apache.felix</groupId>
-                <artifactId>maven-bundle-plugin</artifactId>
-            </plugin>
-            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
             </plugin>
@@ -137,50 +133,6 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-dependency-plugin</artifactId>
                     <version>3.11.0</version>
-                </plugin>
-                <plugin>
-                    <groupId>org.apache.felix</groupId>
-                    <artifactId>maven-bundle-plugin</artifactId>
-                    <version>6.1.2</version>
-                    <extensions>true</extensions>
-                    <executions>
-                        <execution>
-                            <id>bundle-manifest</id>
-                            <phase>process-classes</phase>
-                            <goals>
-                                <goal>manifest</goal>
-                            </goals>
-                        </execution>
-                    </executions>
-                    <configuration>
-                        <instructions>
-                            <!-- Explicit OSGi exports matching the JPMS module descriptors:
-                                 peruncs-cluster/src/main/java/module-info.java plus
-                                 peruncs-cache/src/main/java/module-info.java. No wildcard
-                                 exports and no dynamic imports: consumers resolve every
-                                 dependency from the manifest. The plugin defaults
-                                 DynamicImport-Package to *, so the header is stripped
-                                 explicitly; omitting the element would restore the default. -->
-                            <_removeheaders>DynamicImport-Package</_removeheaders>
-                            <Export-Package>
-                                peruncs.datagrid.cache.types,
-                                peruncs.datagrid.cache.aeron,
-                                peruncs.datagrid.cluster.node.exceptions,
-                                peruncs.datagrid.cluster.node.backup,
-                                peruncs.datagrid.cluster.node.replication,
-                                peruncs.datagrid.cluster.node,
-                                peruncs.datagrid.cluster.node.store,
-                                peruncs.datagrid.cluster.node.aeron,
-                                peruncs.datagrid.cluster.storage.types,
-                                peruncs.datagrid.cluster.storage.aeron.config,
-                                peruncs.datagrid.cluster.storage.aeron.checkpoint,
-                                peruncs.datagrid.cluster.storage.aeron.reader,
-                                peruncs.datagrid.cluster.storage.aeron.writer,
-                                peruncs.datagrid.cluster.storage.index
-                            </Export-Package>
-                            <Import-Package>*</Import-Package>
-                        </instructions>
-                    </configuration>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>

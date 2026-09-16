@@ -372,8 +372,14 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
         if (this.stopOutcome.get() == StorageBinaryDataClient.StopOutcome.FAILED || this.failure() != null) {
             return;
         }
-        this.stopAtLatest = true;
+        /* The deadline precedes the flag: the polling thread tests the flag
+         * first and the deadline second, so publishing the flag first would
+         * let one iteration observe a live stop request against the reset
+         * (already-expired) deadline and time out instantly. A reader that
+         * observes the flag also observes this write: both sit in one
+         * synchronized block ahead of the volatile flag publication. */
         this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
+        this.stopAtLatest = true;
         if (this.active.get()) this.updateOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
     }
 

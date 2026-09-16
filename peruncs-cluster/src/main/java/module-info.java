@@ -10,8 +10,8 @@
 /// MCP, or UI boundary belongs to the embedding application.
 /// Store binary movement lives in
 /// `...cluster.storage.types`, carried by
-/// `...cluster.storage.aeron.*`, with the embedded Lucene/JVector
-/// index policy in `...cluster.storage.index`. The exported packages
+/// `...cluster.storage.aeron.*`, which also carries the embedded
+/// Lucene/JVector index policy. The exported packages
 /// contain the public contracts and errors used at those boundaries.
 /// Aeron is the only transport.
 ///
@@ -140,5 +140,4 @@ module peruncs.datagrid.cluster
     exports peruncs.datagrid.cluster.storage.aeron.checkpoint;
     exports peruncs.datagrid.cluster.storage.aeron.reader;
     exports peruncs.datagrid.cluster.storage.aeron.writer;
-    exports peruncs.datagrid.cluster.storage.index;
 }

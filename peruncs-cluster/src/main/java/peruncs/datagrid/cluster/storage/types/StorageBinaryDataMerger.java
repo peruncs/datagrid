@@ -9,7 +9,6 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDescription;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;

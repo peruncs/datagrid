@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.storage.index;
+package peruncs.datagrid.cluster.storage.types;
 
 import org.apache.lucene.document.Document;
 import org.eclipse.store.gigamap.jvector.*;
@@ -15,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -342,6 +343,56 @@ class ClusterStoreIndexesTest {
     }
 
     @Test
+    void largeOrdinaryGraphPassesValidation() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerMap(root.articles);
+        root.catalog = new ArrayList<>();
+        for (int index = 0; index < 5_000; index++) {
+            root.catalog.add(new CatalogEntry("title-" + index, index));
+        }
+
+        /* 5,000 realistic entities far exceed the object bound, but none can
+         * reach index metadata: `java.time` fields are provably index-free,
+         * so the prune must skip the entries and their date values without
+         * failing — roughly 10,000 objects under the old rule. */
+        assertDoesNotThrow(() -> ClusterStoreIndexes.validateGraph(root));
+        assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(root.articles));
+    }
+
+    @Test
+    void externalIndexHiddenInLargeGraphIsStillRejected() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        root.articles.index().register(LuceneIndex.Category(LuceneContext.New(
+                this.storagePath.resolve("hidden-external-lucene"), new ArticlePopulator())));
+        root.catalog = new ArrayList<>();
+        for (int index = 0; index < 5_000; index++) {
+            root.catalog.add(new CatalogEntry("title-" + index, index));
+        }
+
+        /* Pruning ordinary entities must not hide the directly registered
+         * external index among them. */
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+    }
+
+    @Test
+    void writerEntryAcceptsLargeOrdinaryGraph() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerLucene(root.articles, new ArticlePopulator());
+        root.catalog = new ArrayList<>();
+        for (int index = 0; index < 5_000; index++) {
+            root.catalog.add(new CatalogEntry("title-" + index, index));
+        }
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            storage.storeRoot();
+            assertDoesNotThrow(() -> ClusterStoreIndexes.validateForPublication(storage.createConnection()),
+                    "the writer entry must not walk the application's data set per transaction");
+        }
+    }
+
+    @Test
     void writerEntryAcceptsEmbeddedIndexes() {
         final Root root = new Root();
         root.articles = GigaMap.New();
@@ -422,6 +473,19 @@ class ClusterStoreIndexesTest {
 
     private static final class Root {
         GigaMap<Article> articles;
+        List<CatalogEntry> catalog;
+    }
+
+    private static final class CatalogEntry {
+        String title;
+        long ordinal;
+        LocalDate created;
+
+        CatalogEntry(final String title, final long ordinal) {
+            this.title = title;
+            this.ordinal = ordinal;
+            this.created = LocalDate.of(2026, 1, 1).plusDays(ordinal);
+        }
     }
 
     private static final class ArticlePopulator extends DocumentPopulator<Article> {

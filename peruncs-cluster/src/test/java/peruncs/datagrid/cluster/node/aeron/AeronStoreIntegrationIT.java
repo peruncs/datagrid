@@ -17,7 +17,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.*;
-import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 import peruncs.datagrid.cluster.storage.types.*;
 
 import java.net.ServerSocket;
@@ -32,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Exercises the Aeron target with a real four-channel Embedded Store across a restart.
 class AeronStoreIntegrationIT {
-    private static ReplicationCursor latest(final ClusterReplicationTransport transport) {
+    static ReplicationCursor latest(final ClusterReplicationTransport transport) {
         final ReplicationPositionProvider positionProvider = transport.positionProvider("store");
         positionProvider.init();
         return positionProvider.latest();
@@ -44,7 +43,7 @@ class AeronStoreIntegrationIT {
         return positionProvider.latestSequence();
     }
 
-    private static void configureIndexes(final GigaMap<IndexedArticle> articles) {
+    static void configureIndexes(final GigaMap<IndexedArticle> articles) {
         ClusterStoreIndexes.registerLucene(articles, new IndexedArticlePopulator());
         final VectorIndices<IndexedArticle> vectors = articles.index().register(VectorIndices.Category());
         ClusterStoreIndexes.addVector(vectors, "articles", VectorIndexConfiguration.builder()
@@ -56,7 +55,7 @@ class AeronStoreIntegrationIT {
         return articles.index().get(LuceneIndex.class);
     }
 
-    private static EmbeddedStorageManager startIndex(
+    static EmbeddedStorageManager startIndex(
             final Path path,
             final IndexRoot root,
             final StorageBinaryDataDistributor distributor,
@@ -66,7 +65,7 @@ class AeronStoreIntegrationIT {
         return foundation.start(root);
     }
 
-    private static EmbeddedStorageManager startExistingIndex(
+    static EmbeddedStorageManager startExistingIndex(
             final Path path,
             final StorageBinaryDataDistributor distributor,
             final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
@@ -176,7 +175,7 @@ class AeronStoreIntegrationIT {
         assertFalse(found.get(), "reader Store graph retained deleted %s".formatted(title));
     }
 
-    private static void assertIndexState(
+    static void assertIndexState(
             final IndexRoot imported, final String title, final String body, final float[] vector) {
         assertNotNull(imported.articles, "reader Store root lost its indexed GigaMap");
         final LuceneIndex<IndexedArticle> text = luceneIndex(imported.articles);
@@ -850,7 +849,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
-    private static final class ReaderNode implements AutoCloseable {
+    static final class ReaderNode implements AutoCloseable {
         private final ClusterReplicationTransport transport;
         private final StoredReplicationCursorManager cursorManager;
         private final EmbeddedStorageManager storage;

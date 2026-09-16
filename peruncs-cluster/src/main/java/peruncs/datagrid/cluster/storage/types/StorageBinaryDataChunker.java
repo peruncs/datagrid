@@ -94,7 +94,7 @@ final class StorageBinaryDataChunker {
     /// cannot mask the original validation failure.
     ///
     /// @param data binary whose extraction failed, or `null`
-    public static void releaseDirect(final Binary data) {
+    static void releaseDirect(final Binary data) {
         if (data == null) return;
         try {
             data.iterateChannelChunks(channel ->
@@ -134,7 +134,7 @@ final class StorageBinaryDataChunker {
     ///
     /// @param data source Store binary
     /// @return import-ready duplicate views
-    public static ByteBuffer[] importArray(final Binary data) {
+    static ByteBuffer[] importArray(final Binary data) {
         Objects.requireNonNull(data, "data");
         final ByteBuffer[] source = bufferArray(data);
         final ByteBuffer[] result = new ByteBuffer[source.length];

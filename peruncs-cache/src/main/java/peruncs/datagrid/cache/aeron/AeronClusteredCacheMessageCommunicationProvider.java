@@ -84,6 +84,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     private ClusteredCacheMessageAcceptor receiverAcceptor;
     private int receiverMaxPayloadBytes;
     private long receiverFreshnessTimeoutNanos;
+    private int receiverExpectedRemoteSenders;
     private byte[] receiverHmacSecret;
     private byte[] receiverPreviousHmacSecret;
     private boolean receiverProductionMode;
@@ -291,6 +292,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         final byte[] senderId = this.ensureSenderId(configuration);
         final int maxPayloadBytes = configuration.maxPayloadBytes();
         final long freshnessTimeoutNanos = configuration.freshnessTimeoutNanos();
+        final int expectedRemoteSenders = configuration.expectedRemoteSenders();
         final byte[] hmacSecret = configuration.hmacSecret();
         final byte[] previousHmacSecret = configuration.previousHmacSecret();
         final boolean productionMode = configuration.productionMode();
@@ -303,6 +305,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             }
             if (this.receiverAcceptor != messageAcceptor || this.receiverMaxPayloadBytes != maxPayloadBytes ||
                 this.receiverFreshnessTimeoutNanos != freshnessTimeoutNanos ||
+                this.receiverExpectedRemoteSenders != expectedRemoteSenders ||
                 !Arrays.equals(this.receiverHmacSecret, hmacSecret) ||
                 !Arrays.equals(this.receiverPreviousHmacSecret, previousHmacSecret) ||
                 this.receiverProductionMode != productionMode ||
@@ -325,6 +328,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
                     messageAcceptor,
                     maxPayloadBytes,
                     freshnessTimeoutNanos,
+                    expectedRemoteSenders,
                     cursorStore,
                     hmacSecret,
                     previousHmacSecret);
@@ -335,6 +339,7 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         this.receiverAcceptor = messageAcceptor;
         this.receiverMaxPayloadBytes = maxPayloadBytes;
         this.receiverFreshnessTimeoutNanos = freshnessTimeoutNanos;
+        this.receiverExpectedRemoteSenders = expectedRemoteSenders;
         this.receiverHmacSecret = hmacSecret;
         this.receiverPreviousHmacSecret = previousHmacSecret;
         this.receiverProductionMode = productionMode;

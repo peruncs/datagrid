@@ -19,7 +19,7 @@ import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
+import peruncs.datagrid.cluster.storage.types.ClusterStoreIndexes;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.lang.reflect.Proxy;

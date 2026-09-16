@@ -113,7 +113,7 @@ public record AeronAuthenticatedWatermark(
     /// @param position        Archive position acknowledged by the reader
     /// @param secret          HMAC secret
     /// @return serialized signed watermark
-    public static byte[] signEncoded(
+    static byte[] signEncoded(
             final UUID readerId,
             final UUID clusterId,
             final UUID storeGeneration,

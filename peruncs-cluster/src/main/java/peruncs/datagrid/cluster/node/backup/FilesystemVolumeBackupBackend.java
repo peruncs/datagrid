@@ -9,11 +9,15 @@ import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.*;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -27,21 +31,26 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
     /// @param backupVolumePath backup volume path
     /// @return filesystem backup backend
     static FilesystemVolumeBackupBackend New(final Path backupVolumePath) {
-        return New(backupVolumePath, BackupArchiveLimits.defaults());
-    }
-
-    /// Creates a filesystem backup backend with explicit restore limits.
-    ///
-    /// @param backupVolumePath backup volume path
-    /// @param limits budgets bounding restore and manifest reads
-    /// @return filesystem backup backend
-    static FilesystemVolumeBackupBackend New(final Path backupVolumePath, final BackupArchiveLimits limits) {
-        return new Default(notNull(backupVolumePath).toAbsolutePath().normalize(), notNull(limits));
+        /* The limits overload is deliberately absent: BackupArchiveLimits is
+         * package-private, so a public overload naming it would promise an
+         * entry point no external caller can use. */
+        return new Default(notNull(backupVolumePath).toAbsolutePath().normalize(),
+                BackupArchiveLimits.defaults());
     }
 
     /// Implements archive export, restore, and cleanup.
     final class Default implements FilesystemVolumeBackupBackend {
         private static final System.Logger LOGGER = System.getLogger(FilesystemVolumeBackupBackend.class.getName());
+        /* One advisory lock file per volume serializes archive publication.
+         * The existence check, the completeness/identity comparison, and the
+         * atomic rename below must hold while no other publisher publishes:
+         * without the lock a second publisher can create the destination
+         * between the check and the move, or delete a just-published archive
+         * while replacing a partial file, silently overwriting one backup
+         * with another. The in-JVM mutex covers threads of this process; the
+         * file lock covers separate processes sharing the volume. */
+        private static final String PUBLISH_LOCK_FILE_NAME = ".publish.lock";
+        private static final ConcurrentHashMap<Path, Object> PUBLISH_MUTEXES = new ConcurrentHashMap<>();
 
         private final Path backupVolumePath;
         private final Path userUploadedStorageArchivePath;
@@ -230,11 +239,39 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                 final byte[] manifestBytes,
                 final long digest
         ) {
+            /* Serialize with every other publisher on this volume before
+             * touching the destination: the check, the comparison, and the
+             * rename below are one atomic publication step only while the
+             * volume lock is held. */
+            final Object mutex = PUBLISH_MUTEXES.computeIfAbsent(this.backupVolumePath, ignored -> new Object());
+            synchronized (mutex) {
+                this.ensureVolumeDirectory();
+                final Path lockFile = this.backupVolumePath.resolve(PUBLISH_LOCK_FILE_NAME);
+                try (FileChannel lockChannel = FileChannel.open(lockFile,
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                     FileLock ignored = lockChannel.lock()) {
+                    this.publishArchiveLocked(temporaryArchive, destination, manifestBytes, digest);
+                } catch (final OverlappingFileLockException overlapped) {
+                    throw new NodeLibraryException(
+                            "Backup volume publication lock is already held at %s".formatted(lockFile), overlapped);
+                } catch (final IOException failure) {
+                    throw new NodeLibraryException(
+                            "Failed to lock backup volume for publication at %s".formatted(lockFile), failure);
+                }
+            }
+        }
+
+        private void publishArchiveLocked(
+                final Path temporaryArchive,
+                final Path destination,
+                final byte[] manifestBytes,
+                final long digest
+        ) {
             try {
                 /* An atomic rename replaces an existing destination on Unix
                  * instead of failing, so the collision must be detected with
                  * an existence check first; the move-time catch only covers
-                 * the residual race with another publisher. */
+                 * a publisher that bypassed the volume lock. */
                 if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
                     this.resolveSameNamePublication(temporaryArchive, destination, manifestBytes, digest);
                 } else {

@@ -67,6 +67,8 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     private static final String KEY_HEARTBEAT_INTERVAL_MILLIS = AERON_PREFIX + "heartbeat-interval-millis";
         /// Key setting the receiver silence tolerance in millis.
     private static final String KEY_FRESHNESS_TIMEOUT_MILLIS = AERON_PREFIX + "freshness-timeout-millis";
+        /// Key setting how many distinct remote senders must prove liveness before reads are verified.
+    private static final String KEY_EXPECTED_REMOTE_SENDERS = AERON_PREFIX + "expected-remote-senders";
         /// Key setting the directory holding the persisted per-sender cursors.
     private static final String KEY_CURSOR_DIRECTORY = AERON_PREFIX + "cursor-directory";
         /// Key setting the base64 HMAC secret authenticating every cache frame.
@@ -144,6 +146,8 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
                         AeronClusteredCacheConfiguration.DEFAULT_HEARTBEAT_INTERVAL_MILLIS, 1L),
                 longProperty(properties, KEY_FRESHNESS_TIMEOUT_MILLIS,
                         AeronClusteredCacheConfiguration.DEFAULT_FRESHNESS_TIMEOUT_MILLIS, 1L),
+                intProperty(properties, KEY_EXPECTED_REMOTE_SENDERS,
+                        AeronClusteredCacheConfiguration.DEFAULT_EXPECTED_REMOTE_SENDERS, 0),
                 stringProperty(properties, KEY_CURSOR_DIRECTORY, null),
                 hmacSecret(properties),
                 booleanProperty(properties, KEY_PRODUCTION_MODE, false),

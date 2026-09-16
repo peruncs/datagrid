@@ -38,7 +38,7 @@ import java.util.concurrent.TimeUnit;
 /// The lease directory must be shared by all writers of one cluster. Sharing
 /// only the Archive is not enough: separate Archives cannot see each other's
 /// lease without the shared volume.
-public final class WriterFencingLease implements AutoCloseable {
+final class WriterFencingLease implements AutoCloseable {
     private static final int MAGIC = 0x4447574c; // DGWL
     private static final short VERSION = 2;
     private static final int ENCODED_BYTES = Integer.BYTES + Short.BYTES + Long.BYTES + Long.BYTES * 2

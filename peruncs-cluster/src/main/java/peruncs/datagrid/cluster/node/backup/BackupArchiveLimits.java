@@ -6,11 +6,8 @@ package peruncs.datagrid.cluster.node.backup;
 /// when all are known and falls back to the absolute ceiling otherwise, so
 /// legitimate large stores restore while decompression bombs still fail fast.
 ///
-/// Public because it is a parameter of the [FilesystemVolumeBackupBackend]
-/// factory that embedding applications call.
-///
 /// @param maxExtractedBytes absolute extraction ceiling in bytes
-public record BackupArchiveLimits(long maxExtractedBytes) {
+record BackupArchiveLimits(long maxExtractedBytes) {
     /// Creates default limits with a generous absolute ceiling.
     ///
     /// @return default limits

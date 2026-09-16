@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.storage.index;
+package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.memory.XMemory;
@@ -22,9 +22,20 @@ import java.lang.ref.ReferenceQueue;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
-/// Registers Store indexes that are safe to replicate with Data Grid.
+/// Keeps clustered text and vector search inside the Store object graph and
+/// registers the index types that are safe to replicate with Data Grid.
+///
+/// A replicated Store transaction is the only source of truth. An index
+/// directory outside that transaction can advance independently, so it cannot
+/// be made correct by copying or naming the directory. Registration therefore
+/// offers exactly the two supported paths — embedded Lucene and in-graph
+/// JVector — and validation rejects everything else. Lucene uses an embedded
+/// GraphDirectory with manual commit at the `GigaMap.store()` boundary;
+/// JVector uses its persisted vector store, and its transient search graph is
+/// rebuilt locally by each reader.
 ///
 /// The class is intentionally small. It does not copy, mirror, or repair
 /// files. It makes the transaction boundary explicit: Lucene uses an embedded
@@ -36,14 +47,23 @@ import java.util.concurrent.atomic.AtomicReference;
 /// Direct registrations bypass [#registerLucene] and [#registerVector], so
 /// enforcement also scans reachable index metadata ([validateGraph],
 /// [validateStorageRoots], [validateForPublication]). The scan never descends
-/// into GigaMap entity payloads, but it must be complete for the metadata it
-/// does inspect. It therefore has a hard object bound and fails closed whenever
-/// an upstream layout prevents proving that every index group was checked. The
-/// field reads use Store's own offset-based memory accessor, so no runtime
-/// `--add-opens` flag is required. JDK references cannot be persisted by Store;
-/// validation inspects direct index referents but prunes other runtime referents
-/// to avoid scanning Store's bookkeeping graph. Other opaque JDK holders with
-/// state fail closed.
+/// into GigaMap entity payloads, and it never expands objects whose class
+/// cannot reach index metadata: a per-class relevance analysis (cached, and
+/// conservative — anything unprovable stays relevant) prunes ordinary entity
+/// graphs, so a root holding thousands of plain objects validates without
+/// touching the object bound. The bound therefore counts only index-relevant
+/// objects and still fails closed whenever an upstream layout prevents proving
+/// that every index group was checked. The field reads use Store's own
+/// offset-based memory accessor, so no runtime `--add-opens` flag is
+/// required. JDK references cannot be persisted by Store; validation inspects
+/// direct index referents but prunes other runtime referents to avoid scanning
+/// Store's bookkeeping graph. Other opaque JDK holders with state fail closed.
+///
+/// Every map that passes through registration or validation is also tracked
+/// in an explicit weak registry ([registerMap]). The writer entry point
+/// validates tracked maps directly and uses the pruned walk only to discover
+/// and check untracked metadata, so a steady-state write never pays for the
+/// application's data set.
 public final class ClusterStoreIndexes {
     private static final String EXTERNAL_LUCENE_MESSAGE = "Cluster replication supports only embedded Lucene indexes; external directories are not supported";
     private static final String EXTERNAL_VECTOR_MESSAGE = "Cluster replication supports only in-graph JVector indexes; external index directories are not supported";
@@ -54,8 +74,28 @@ public final class ClusterStoreIndexes {
     private static final LockedExecutor REGISTRATION = LockedExecutor.New();
 
         /* Bounds one graph validation so the reader hook never pays for the data
-         * set: only index metadata is visited, and the scan stops here. */
+         * set: only index-relevant objects are visited (ordinary entity graphs
+         * are pruned by class before they are enqueued), and the scan stops
+         * here. */
     private static final int MAX_VALIDATED_OBJECTS = 4096;
+
+        /* Explicit registry of GigaMap instances known to the cluster index
+         * boundary: maps registered through this class, maps that passed
+         * validation, and maps applications register directly. The registry
+         * is process-wide and the index policy is cluster-wide, so one
+         * writer entry validates every tracked map; only proven maps are
+         * ever added. Weak keys keep tracking from retaining application
+         * state; all access synchronizes on the set itself. */
+    private static final Set<GigaMap<?>> TRACKED_MAPS =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
+        /* Per-class index-relevance cache backing the traversal prune. A class
+         * is relevant when its instances could reach index metadata; anything
+         * unprovable (interfaces, abstract types, `Object` fields, JDK state,
+         * reflection failures) stays relevant so the walk fails closed rather
+         * than skipping unknown state. Deterministic per class, so concurrent
+         * duplicate analyses are harmless. */
+    private static final ConcurrentHashMap<Class<?>, Boolean> INDEX_RELEVANT = new ConcurrentHashMap<>();
 
         /* Worker-local validation scratch: the seen set and the traversal queue
          * are reused across scans instead of allocating an IdentityHashMap and
@@ -126,6 +166,10 @@ public final class ClusterStoreIndexes {
                 }
                 throw new IllegalStateException("failed to register clustered Lucene index");
             }
+            /* Track only proven maps: a failed registration must never enter
+             * the registry, or every later writer entry would re-fail on it;
+             * the root walk still covers untracked maps. */
+            TRACKED_MAPS.add(map);
             return registered;
         } catch (final RuntimeException raced) {
             /* A foreign registration slipped in between the check and the
@@ -194,7 +238,10 @@ public final class ClusterStoreIndexes {
             if (indices == null) {
                 indices = checkedMap.index().register(VectorIndices.Category());
             }
-            return addVectorLocked(indices, checkedName, configuration, checkedVectorizer);
+            final VectorIndex<E> added = addVectorLocked(indices, checkedName, configuration, checkedVectorizer);
+            /* Track only proven maps: see [#registerLuceneLocked]. */
+            TRACKED_MAPS.add(checkedMap);
+            return added;
         });
     }
 
@@ -246,15 +293,30 @@ public final class ClusterStoreIndexes {
         validateVectorIndicesGroup(indices);
     }
 
-        /// Validates every index attached to one map, Lucene and vector alike.
+    /// Tracks a map with the cluster index boundary without registering an index.
+    ///
+    /// The writer entry point ([validateForPublication]) validates tracked
+    /// maps directly and walks Store roots only for untracked metadata, so
+    /// registering the application's maps keeps every distributed write
+    /// cheap. Maps registered through [#registerLucene] and [#registerVector]
+    /// are tracked automatically; use this for maps that carry no cluster
+    /// index, or whose indexes were attached before this class was adopted.
+    /// Tracking never validates: it only names the map for later checks.
+    ///
+    /// @param map map to track
+    public static void registerMap(final GigaMap<?> map) {
+        TRACKED_MAPS.add(Objects.requireNonNull(map, "map"));
+    }
+
+    /// Validates every index attached to one map; validated maps join the tracking set.
     ///
     /// Every registered index group is enumerated: embedded Lucene and
     /// in-graph vector groups are validated, the core bitmap group is
     /// accepted as in-graph by construction, and any other group fails with
     /// [IllegalArgumentException] — an unknown category may keep state the
     /// replication cannot carry, so it fails closed instead of being assumed
-/// safe. If group enumeration cannot be proved under JPMS, validation throws
-/// [IllegalStateException] rather than assuming unknown state is safe.
+    /// safe. If group enumeration cannot be proved under JPMS, validation throws
+    /// [IllegalStateException] rather than assuming unknown state is safe.
     ///
     /// @param map map to validate
     /// @throws IllegalArgumentException if any attached index uses external
@@ -282,6 +344,10 @@ public final class ClusterStoreIndexes {
         } finally {
             scratch.groups.clear();
         }
+        /* Track only proven maps: a map that fails validation must never
+         * enter the registry, or every later writer entry would re-fail on
+         * another store's rejected map. */
+        TRACKED_MAPS.add(checked);
     }
 
         /// Snapshots every index group registered on a map into `collected`.
@@ -347,8 +413,16 @@ public final class ClusterStoreIndexes {
     /// @param root Store root to validate
     /// @throws IllegalArgumentException if an external Lucene directory reference or a
     ///                                  non-persisted vector index is reachable from the root
-    /// @throws IllegalStateException    if the graph cannot be inspected completely
+    /// @throws IllegalStateException    if a large index-relevant graph cannot be inspected completely
     public static void validateGraph(final Object root) {
+        validateGraphInternal(root, null);
+    }
+
+        /// Validates one root, skipping maps the caller already checked.
+    ///
+    /// @param root              Store root to validate
+    /// @param alreadyValidated  maps to skip, or `null` to check every map
+    private static void validateGraphInternal(final Object root, final Set<GigaMap<?>> alreadyValidated) {
         if (root == null) return;
         final ValidationScratch scratch = SCRATCH.get();
         scratch.seen.clear();
@@ -360,14 +434,18 @@ public final class ClusterStoreIndexes {
             while (!scratch.queue.isEmpty()) {
                 if (++visited > MAX_VALIDATED_OBJECTS) {
                     throw new IllegalStateException(
-                            "index validation exceeded %s objects; refusing an unprovable replication boundary"
+                            "index validation exceeded %s index-relevant objects; refusing an unprovable replication boundary"
                                     .formatted(MAX_VALIDATED_OBJECTS));
                 }
                 final Object current = scratch.queue.poll();
                 if (current instanceof GigaMap<?> map) {
                     /* Index metadata only: descending into entity payload would make
-                     * every reader batch pay for the whole data set. */
-                    validateMap(map);
+                     * every reader batch pay for the whole data set. Objects
+                     * whose class cannot reach index metadata were pruned
+                     * before enqueueing, so only relevant objects count above. */
+                    if (alreadyValidated == null || !alreadyValidated.contains(map)) {
+                        validateMap(map);
+                    }
                 } else if (current instanceof LuceneIndex<?> lucene) {
                     validateLuceneIndex(lucene);
                 } else if (current instanceof LuceneContext<?> context) {
@@ -413,14 +491,28 @@ public final class ClusterStoreIndexes {
     /// Call this at writer startup and from the writer commit path, so an index
     /// registered directly — bypassing [#registerLucene] and [#registerVector] —
     /// fails the writer before the diverging transaction is published instead of
-    /// failing every reader after the fact. Shares the reader hook's bounded,
-    /// fail-closed scan and its limits (see the class javadoc).
+    /// failing every reader after the fact. Tracked maps (see [registerMap])
+    /// are validated directly from the registry; the bounded, fail-closed walk
+    /// then covers only untracked metadata, so a steady-state write never pays
+    /// for the application's data set (see the class javadoc).
     ///
     /// @param storage storage connection owning the writer graph
     /// @throws IllegalArgumentException if any root violates the index policy
     /// @throws IllegalStateException    if a root cannot be inspected completely
     public static void validateForPublication(final StorageConnection storage) {
-        validateStorageRoots(storage);
+        Objects.requireNonNull(storage, "storage");
+        final Set<GigaMap<?>> validated = Collections.newSetFromMap(new IdentityHashMap<>());
+        synchronized (TRACKED_MAPS) {
+            validated.addAll(TRACKED_MAPS);
+        }
+        for (final GigaMap<?> tracked : validated) {
+            validateMap(tracked);
+        }
+        storage.persistenceManager()
+                .viewRoots()
+                .iterateEntries((identifier, value) -> {
+                    if (value != null) validateGraphInternal(value, validated);
+                });
     }
 
     private static void validateVectorIndicesGroup(final VectorIndices<?> group) {
@@ -551,16 +643,114 @@ public final class ClusterStoreIndexes {
     private static void offer(final Object value, final ArrayDeque<Object> queue,
                               final IdentityHashMap<Object, Boolean> seen) {
         if (value == null || isLeaf(value)) return;
+        /* Prune objects whose class cannot reach index metadata before they
+         * are enqueued: a root holding thousands of plain entities validates
+         * without touching the object bound. Anything unprovable stays
+         * relevant, so the prune can only skip provably index-free graphs. */
+        if (!isIndexRelevant(value.getClass())) return;
         if (seen.putIfAbsent(value, Boolean.TRUE) == null) queue.add(value);
     }
 
+        /// Reports whether instances of a class could reach index metadata.
+    ///
+    /// Results are cached per class; the analysis is deterministic, so
+    /// concurrent duplicate analyses are harmless. Metadata types themselves
+    /// are relevant; leaf values are not (they never reach this gate, but the
+    /// explicit branch keeps the analysis total). Interfaces, abstract types,
+    /// `Object`, JDK state, and reflection failures are all relevant: the walk
+    /// must inspect — or fail closed on — state it cannot prove index-free.
+    ///
+    /// @param type class to classify
+    /// @return `true` when its instances must be traversed
+    private static boolean isIndexRelevant(final Class<?> type) {
+        final Boolean cached = INDEX_RELEVANT.get(type);
+        if (cached != null) return cached;
+        final boolean relevant = analyzeIndexRelevant(type, new HashSet<>());
+        INDEX_RELEVANT.putIfAbsent(type, relevant);
+        return relevant;
+    }
+
+    private static boolean isIndexMetadataType(final Class<?> type) {
+        return GigaMap.class.isAssignableFrom(type)
+                || GigaIndices.class.isAssignableFrom(type)
+                || IndexGroup.class.isAssignableFrom(type)
+                || LuceneIndex.class.isAssignableFrom(type)
+                || LuceneContext.class.isAssignableFrom(type)
+                || VectorIndices.class.isAssignableFrom(type)
+                || VectorIndex.class.isAssignableFrom(type)
+                || VectorIndexConfiguration.class.isAssignableFrom(type);
+    }
+
+    private static boolean analyzeIndexRelevant(final Class<?> type, final HashSet<Class<?>> inProgress) {
+        if (type.isPrimitive() || isLeafValue(type)) return false;
+        if (isIndexMetadataType(type)) return true;
+        if (type.isArray()) {
+            final Class<?> component = type.componentType();
+            return !component.isPrimitive() && analyzeIndexRelevant(component, inProgress);
+        }
+        if (type.isInterface() || Modifier.isAbstract(type.getModifiers())) return true;
+        if (type.getPackageName().startsWith("java.")) return true;
+        if (!inProgress.add(type)) return false;
+        try {
+            for (Class<?> cursor = type; cursor != null && cursor != Object.class; cursor = cursor.getSuperclass()) {
+                final Field[] fields;
+                try {
+                    fields = cursor.getDeclaredFields();
+                } catch (final RuntimeException denied) {
+                    return true;
+                }
+                for (final Field field : fields) {
+                    if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) continue;
+                    final Class<?> fieldType = field.getType();
+                    if (fieldType.isPrimitive() || isLeafValue(fieldType)) continue;
+                    if (isIndexMetadataType(fieldType)) return true;
+                    if (fieldType.isArray()) {
+                        final Class<?> component = fieldType.componentType();
+                        if (!component.isPrimitive() && analyzeIndexRelevant(component, inProgress)) return true;
+                        continue;
+                    }
+                    if (fieldType.isInterface() || Modifier.isAbstract(fieldType.getModifiers())
+                        || fieldType.getPackageName().startsWith("java.")
+                        || analyzeIndexRelevant(fieldType, inProgress)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } finally {
+            inProgress.remove(type);
+        }
+    }
+
+    private static boolean isLeafValue(final Class<?> type) {
+        final String pkg = type.getPackageName();
+        return type == String.class
+                || Number.class.isAssignableFrom(type)
+                || type == Boolean.class
+                || type == Character.class
+                || Enum.class.isAssignableFrom(type)
+                || type == Class.class
+                || type == UUID.class
+                /* Immutable `java.time` value types: their fields are
+                 * primitives, strings, or other immutable `java.time` types,
+                 * so they provably cannot reach index metadata. Without this,
+                 * a realistic entity graph with date/time fields would stay
+                 * relevant and could exhaust the validation bound. */
+                || pkg.equals("java.time")
+                || pkg.startsWith("java.time.");
+    }
+
     private static boolean isLeaf(final Object value) {
-        return value instanceof String
+        if (value instanceof String
                 || value instanceof Number
                 || value instanceof Boolean
                 || value instanceof Character
                 || value instanceof Enum<?>
                 || value instanceof Class<?>
-                || value instanceof UUID;
+                || value instanceof UUID) {
+            return true;
+        }
+        final String pkg = value.getClass().getPackageName();
+        return pkg.equals("java.time") || pkg.startsWith("java.time.");
     }
 }

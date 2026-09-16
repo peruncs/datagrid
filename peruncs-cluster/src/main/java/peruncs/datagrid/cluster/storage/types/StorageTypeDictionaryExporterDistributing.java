@@ -12,7 +12,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// It first updates the local delegate and then distributes the assembled
 /// dictionary. Receivers can therefore learn the type definitions before they
 /// materialize a later binary message.
-public interface StorageTypeDictionaryExporterDistributing extends PersistenceTypeDictionaryExporter {
+interface StorageTypeDictionaryExporterDistributing extends PersistenceTypeDictionaryExporter {
         /// Creates an exporter that publishes each local dictionary.
     ///
     /// @param delegate    local dictionary exporter

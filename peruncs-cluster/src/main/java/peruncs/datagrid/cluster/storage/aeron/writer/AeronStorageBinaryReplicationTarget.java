@@ -13,9 +13,16 @@ import static org.eclipse.serializer.util.X.notNull;
 
 /// Store target that couples local acceptance to Aeron replication.
 ///
-/// The selected durability mode decides which side is attempted first. A
+/// The selected durability mode decides which side is attempted first and is
+/// a distinct failure contract (see
+/// [peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode]). A
 /// failed terminal step records an uncertain state and stops further writes;
 /// this is safer than allowing the local Store and Archive to drift silently.
+/// In `ENQUEUE_THEN_ARCHIVE` mode a preparation failure after local
+/// acceptance leaves a durable local write with no Archive copy: the write
+/// call throws a reseed-required failure, the sequence stays consumed, and
+/// the node must be reseeded from a healthy peer or a backup — never resumed
+/// in place by clearing the fence.
 public final class AeronStorageBinaryReplicationTarget implements PersistenceTarget<Binary> {
     private final PersistenceTarget<Binary> delegate;
     private final AeronReplicationWriteCoordinator coordinator;
@@ -53,7 +60,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
         /// Creates a target with writer-side index enforcement.
     ///
     /// The validation hook typically calls
-    /// [peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes#validateForPublication]
+    /// [peruncs.datagrid.cluster.storage.types.ClusterStoreIndexes#validateForPublication]
     /// on the writer's connection; it runs at startup through
     /// [#validateWriterState()] and again before every distributed
     /// publication, so an index registered directly — bypassing the cluster
@@ -88,7 +95,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// built without a validation hook accepts silently.
     ///
     /// @throws RuntimeException if the writer graph violates the index policy
-    public void validateWriterState() {
+    void validateWriterState() {
         final Runnable validation = this.writerIndexValidation;
         if (validation != null) validation.run();
     }

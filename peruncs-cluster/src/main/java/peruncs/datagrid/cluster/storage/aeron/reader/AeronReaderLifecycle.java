@@ -31,7 +31,7 @@ final class AeronReaderLifecycle {
     /// @param timedOut      whether the stop budget has expired
     /// @param onTimeout     action run once on timeout
     /// @param idleStrategy  Agrona idle strategy built from the configured retry policy
-    public static void runPollingLoop(
+    static void runPollingLoop(
             final AtomicBoolean active,
             final BooleanSupplier stopPolling,
             final IntSupplier poller,
@@ -79,7 +79,7 @@ final class AeronReaderLifecycle {
     /// @param thread            reader polling thread, or `null`
     /// @param stopped           latch released by the polling thread on exit
     /// @param closeSubscription callback that closes the reader subscription
-    public static void stopAndClose(
+    static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,
             final CountDownLatch stopped,
@@ -97,7 +97,7 @@ final class AeronReaderLifecycle {
     /// @param stopped           latch released by the polling thread on exit
     /// @param closeSubscription callback that closes the reader subscription
     /// @param timeoutNanos      bounded wait budget in nanoseconds
-    public static void stopAndClose(
+    static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,
             final CountDownLatch stopped,

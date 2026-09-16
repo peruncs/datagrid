@@ -419,17 +419,41 @@ final class AeronClusteredCacheMessageCodec {
     private static int checksum(final DirectBuffer buffer, final int offset, final int length) {
         final CRC32C crc = CHECKSUM.get();
         crc.reset();
+        streamBytes(buffer, offset, length, crc::update);
+        return (int) crc.getValue();
+    }
+
+        /// Feeds one buffer range to a chunked sink without retaining a frame-sized copy.
+    ///
+    /// Checksums and tags share this loop; only the per-chunk sink differs.
+    ///
+    /// @param buffer   source buffer
+    /// @param offset   first byte to feed
+    /// @param length   bytes to feed
+    /// @param consumer per-chunk sink
+    private static void streamBytes(final DirectBuffer buffer, final int offset, final int length,
+                                    final ChunkConsumer consumer) {
         final byte[] chunk = STREAM_CHUNK.get();
         int remaining = length;
         int cursor = offset;
         while (remaining > 0) {
             final int part = Math.min(remaining, chunk.length);
             buffer.getBytes(cursor, chunk, 0, part);
-            crc.update(chunk, 0, part);
+            consumer.accept(chunk, 0, part);
             cursor += part;
             remaining -= part;
         }
-        return (int) crc.getValue();
+    }
+
+        /// Per-chunk sink for [#streamBytes].
+    @FunctionalInterface
+    private interface ChunkConsumer {
+            /// Accepts one chunk.
+        ///
+        /// @param chunk  scratch array holding the chunk
+        /// @param offset first chunk byte to consume
+        /// @param length chunk bytes to consume
+        void accept(byte[] chunk, int offset, int length);
     }
 
         /// Computes the HMAC-SHA256 tag of a buffer range into the target array.
@@ -443,16 +467,7 @@ final class AeronClusteredCacheMessageCodec {
         final SecretKeySpec key = cachedKey(secret);
         try {
             mac.init(key);
-            final byte[] chunk = STREAM_CHUNK.get();
-            int remaining = length;
-            int cursor = offset;
-            while (remaining > 0) {
-                final int part = Math.min(remaining, chunk.length);
-                buffer.getBytes(cursor, chunk, 0, part);
-                mac.update(chunk, 0, part);
-                cursor += part;
-                remaining -= part;
-            }
+            streamBytes(buffer, offset, length, mac::update);
             mac.doFinal(target, targetOffset);
         } catch (final GeneralSecurityException failure) {
             throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);

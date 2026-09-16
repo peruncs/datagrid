@@ -23,7 +23,6 @@ import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAero
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryReplicationTarget;
-import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 import peruncs.datagrid.cluster.storage.types.*;
 
 import java.io.IOException;

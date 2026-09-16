@@ -14,9 +14,15 @@ import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -216,7 +222,12 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(2, listed.size());
         assertNotEquals(listed.get(0).backupId(), listed.get(1).backupId());
         try (var files = Files.list(backupVolume)) {
-            assertEquals(2, files.filter(Files::isRegularFile).count(),
+            /* Count backup archives only: the volume also holds the
+             * publication lock sidecar serializing same-name publishers. */
+            assertEquals(2, files
+                    .map(path -> path.getFileName().toString())
+                    .filter(BackupArchive::isBackupFileName)
+                    .count(),
                     "concurrent publishers must not clobber one shared archive name");
         }
     }
@@ -239,6 +250,62 @@ class FilesystemVolumeBackupBackendTest {
                 () -> backend.createBackup(noOpStorageConnection(), moved, backup));
         assertEquals(cursor, backend.getCursorForBackup(backup),
                 "a conflicting publication must leave the durable archive untouched");
+    }
+
+    @Test
+    void concurrentSameNamePublicationsElectOneWinnerWithoutSilentOverwrite(@TempDir final Path backupVolume)
+            throws Exception {
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        /* Every publisher shares one backup id — hence one archive name — but
+         * carries different content: the replication position differs, so the
+         * manifest and the content digest differ too. */
+        final UUID sharedBackupId = UUID.randomUUID();
+        final int publishers = 8;
+        final List<ReplicationCursor> cursors = new ArrayList<>();
+        for (int index = 0; index < publishers; index++) {
+            cursors.add(aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 100L + index));
+        }
+
+        final CountDownLatch gate = new CountDownLatch(1);
+        final AtomicInteger published = new AtomicInteger();
+        final AtomicInteger conflicts = new AtomicInteger();
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final List<Future<?>> futures = new ArrayList<>();
+            for (final ReplicationCursor cursor : cursors) {
+                futures.add(executor.submit(() ->
+                {
+                    final BackupMetadata shared = new BackupMetadata(
+                            100L, false, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, NODE_ONE,
+                            sharedBackupId, BackupMetadata.UNKNOWN);
+                    gate.await(1, TimeUnit.MINUTES);
+                    try {
+                        backend.createBackup(noOpStorageConnection(), cursor, shared);
+                        published.incrementAndGet();
+                    } catch (final NodeLibraryException conflict) {
+                        conflicts.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            gate.countDown();
+            for (final Future<?> future : futures) future.get(1, TimeUnit.MINUTES);
+        }
+
+        /* Publication is serialized on the volume while the existing archive
+         * is compared: exactly one publisher wins and every loser fails
+         * instead of overwriting — or being overwritten by — the winner. */
+        assertEquals(1, published.get(), "exactly one same-name publication must win");
+        assertEquals(publishers - 1, conflicts.get(), "every loser must fail instead of overwriting");
+        assertEquals(1, backend.listBackups().size());
+        final ReplicationCursor stored = backend.getCursorForBackup(backend.getLastBackup(0));
+        assertTrue(cursors.contains(stored),
+                "the surviving archive must hold one publisher's content, not a mixture");
+        try (var files = Files.list(backupVolume)) {
+            assertEquals(1, files
+                    .map(path -> path.getFileName().toString())
+                    .filter(BackupArchive::isBackupFileName)
+                    .count(), "concurrent publishers must leave exactly one archive");
+        }
     }
 
     @Test

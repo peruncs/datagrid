@@ -850,6 +850,10 @@ record AeronSettings(
 
         /// Resolves the durability mode from the primary and legacy environment
     /// keys. Both keys set to different modes is a configuration conflict.
+    /// The modes are distinct failure contracts documented on
+    /// [peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode]:
+    /// `ENQUEUE_THEN_ARCHIVE` accepts a local write that readers can never
+    /// replay when preparation fails, and recovery then requires a reseed.
     private static ReplicationDurabilityMode durabilityMode(final NodeLibraryPropertiesProvider properties) {
         final String primary = value(properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE", null);
         final String legacy = value(properties, "ECLIPSE_DATAGRID_AERON_DURABILITY_MODE", null);

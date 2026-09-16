@@ -142,12 +142,14 @@ class ClusteredCacheRegionFactoryTest {
         final Map<String, Object> properties = new HashMap<>();
         properties.put("hibernate.cache.eclipsestore.clustered.aeron.heartbeat-interval-millis", "100");
         properties.put("hibernate.cache.eclipsestore.clustered.aeron.freshness-timeout-millis", "500");
+        properties.put("hibernate.cache.eclipsestore.clustered.aeron.expected-remote-senders", "2");
         properties.put("hibernate.cache.eclipsestore.clustered.aeron.cursor-directory", "/tmp/cursors");
 
         final var configuration = ClusteredCacheRegionFactory.clusteredCacheConfiguration(properties);
 
         assertEquals(100L, configuration.heartbeatIntervalMillis());
         assertEquals(500L, configuration.freshnessTimeoutMillis());
+        assertEquals(2, configuration.expectedRemoteSenders());
         assertEquals("/tmp/cursors", configuration.cursorDirectory());
     }
 
@@ -170,6 +172,8 @@ class ClusteredCacheRegionFactoryTest {
                 configuration.heartbeatIntervalMillis());
         assertEquals(AeronClusteredCacheConfiguration.DEFAULT_FRESHNESS_TIMEOUT_MILLIS,
                 configuration.freshnessTimeoutMillis());
+        assertEquals(AeronClusteredCacheConfiguration.DEFAULT_EXPECTED_REMOTE_SENDERS,
+                configuration.expectedRemoteSenders());
         assertNull(configuration.cursorDirectory());
     }
 

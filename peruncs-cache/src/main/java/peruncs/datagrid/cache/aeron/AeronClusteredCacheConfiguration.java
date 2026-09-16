@@ -29,6 +29,14 @@ import java.util.UUID;
 /// @param freshnessTimeoutMillis  how long a receiver tolerates total silence before marking
 ///                                itself stale, in millis; must exceed the heartbeat interval.
 ///                                A stale receiver fails closed and requires re-synchronization
+/// @param expectedRemoteSenders   how many distinct remote senders must prove liveness with a
+///                                post-start frame before the receiver reports healthy, `0`
+///                                disables the quorum. A volatile broadcast cannot name a
+///                                peer it has never heard from, so without a quorum a fresh
+///                                receiver serves cache reads while partitioned from a peer
+///                                whose first frame never arrived. Multi-node deployments
+///                                must set this to the number of remote peers (cluster
+///                                size minus one); single-node deployments keep `0`
 /// @param cursorDirectory         directory holding the persisted per-sender cursors; `null`
 ///                                selects a subdirectory of the JVM temporary directory.
 ///                                A blank value is normalized to `null`
@@ -59,6 +67,7 @@ public record AeronClusteredCacheConfiguration(
         int maxPayloadBytes,
         long heartbeatIntervalMillis,
         long freshnessTimeoutMillis,
+        int expectedRemoteSenders,
         String cursorDirectory,
         byte[] hmacSecret,
         boolean productionMode,
@@ -86,8 +95,34 @@ public record AeronClusteredCacheConfiguration(
             final boolean allowUnsignedFrames
     ) {
         this(channel, streamId, nodeId, directory, embeddedDriver, driverTimeoutMillis, offerTimeoutMillis,
-                maxPayloadBytes, heartbeatIntervalMillis, freshnessTimeoutMillis, cursorDirectory, hmacSecret,
+                maxPayloadBytes, heartbeatIntervalMillis, freshnessTimeoutMillis, 0, cursorDirectory, hmacSecret,
                 productionMode, allowUnsignedFrames, null);
+    }
+
+        /// Creates a configuration with no remote-sender quorum.
+    ///
+    /// Every argument behaves as in the canonical constructor; no remote
+    /// sender must prove liveness first.
+    public AeronClusteredCacheConfiguration(
+            final String channel,
+            final int streamId,
+            final UUID nodeId,
+            final String directory,
+            final boolean embeddedDriver,
+            final long driverTimeoutMillis,
+            final long offerTimeoutMillis,
+            final int maxPayloadBytes,
+            final long heartbeatIntervalMillis,
+            final long freshnessTimeoutMillis,
+            final String cursorDirectory,
+            final byte[] hmacSecret,
+            final boolean productionMode,
+            final boolean allowUnsignedFrames,
+            final byte[] previousHmacSecret
+    ) {
+        this(channel, streamId, nodeId, directory, embeddedDriver, driverTimeoutMillis, offerTimeoutMillis,
+                maxPayloadBytes, heartbeatIntervalMillis, freshnessTimeoutMillis, 0, cursorDirectory, hmacSecret,
+                productionMode, allowUnsignedFrames, previousHmacSecret);
     }
 
         /// Minimum HMAC secret length in bytes.
@@ -106,6 +141,8 @@ public record AeronClusteredCacheConfiguration(
     public static final long DEFAULT_HEARTBEAT_INTERVAL_MILLIS = 500L;
         /// Default receiver silence tolerance in millis.
     public static final long DEFAULT_FRESHNESS_TIMEOUT_MILLIS = 5_000L;
+        /// Default remote-sender quorum: disabled for single-node deployments.
+    public static final int DEFAULT_EXPECTED_REMOTE_SENDERS = 0;
         /// Default cursor directory; `null` selects a JVM-temporary subdirectory.
     public static final String DEFAULT_CURSOR_DIRECTORY = null;
         /// Absolute payload ceiling imposed by frame framing.
@@ -186,6 +223,10 @@ public record AeronClusteredCacheConfiguration(
             throw new IllegalArgumentException(
                     "freshnessTimeoutMillis is too large: %s".formatted(freshnessTimeoutMillis));
         }
+        if (expectedRemoteSenders < 0) {
+            throw new IllegalArgumentException(
+                    "expectedRemoteSenders must not be negative: %s".formatted(expectedRemoteSenders));
+        }
     }
 
         /// Returns the default single-host configuration.
@@ -195,8 +236,9 @@ public record AeronClusteredCacheConfiguration(
         return new AeronClusteredCacheConfiguration(
                 DEFAULT_CHANNEL, DEFAULT_STREAM_ID, null, null, false,
                 DEFAULT_DRIVER_TIMEOUT_MILLIS, DEFAULT_OFFER_TIMEOUT_MILLIS, DEFAULT_MAX_PAYLOAD_BYTES,
-                DEFAULT_HEARTBEAT_INTERVAL_MILLIS, DEFAULT_FRESHNESS_TIMEOUT_MILLIS, DEFAULT_CURSOR_DIRECTORY,
-                null, false, false);
+                DEFAULT_HEARTBEAT_INTERVAL_MILLIS, DEFAULT_FRESHNESS_TIMEOUT_MILLIS,
+                DEFAULT_EXPECTED_REMOTE_SENDERS, DEFAULT_CURSOR_DIRECTORY,
+                null, false, false, null);
     }
 
         /// Returns a copy of the HMAC secret, or `null` when frames are unsigned.

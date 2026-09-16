@@ -18,7 +18,6 @@ import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.*;
 import peruncs.datagrid.cluster.node.store.*;
-import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 import peruncs.datagrid.cluster.storage.types.*;
 
 import java.io.IOException;
