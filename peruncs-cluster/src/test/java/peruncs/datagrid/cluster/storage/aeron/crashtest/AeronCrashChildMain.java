@@ -14,7 +14,7 @@ public final class AeronCrashChildMain {
     private AeronCrashChildMain() {
     }
 
-    public static void main(final String[] arguments) throws Exception {
+    static void main(final String[] arguments) throws Exception {
         final Path base = Path.of(System.getProperty("dg.crash.base"));
         final Path control = base.resolve("control");
         final Path checkpoint = base.resolve("checkpoint.bin");

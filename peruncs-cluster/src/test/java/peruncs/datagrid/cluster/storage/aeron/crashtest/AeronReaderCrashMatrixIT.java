@@ -11,6 +11,7 @@ import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpo
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.datagrid.cluster.storage.aeron.writer.RawArchivePublisher;
+import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.io.IOException;
 import java.net.ServerSocket;

@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.node;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
@@ -12,12 +11,13 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/// This manager controls a storage node's distributor role.
+/// This manager controls a storage node with a fixed replication role.
 ///
-/// The role is fixed when the manager is created: a reader never exposes a
-/// promotion operation, so an unsupported transition is unrepresentable.
-/// Nodes whose transport supports promotion use
-/// [PromotableStorageNodeManager] instead.
+/// The role is fixed when the manager is created: a reader only applies
+/// replicated writes and never distributes, while a distributor owns the
+/// write path and always distributes. There is no reader-to-distributor
+/// transition; a node that must distribute is started in the distributor
+/// role, so an unsupported transition is unrepresentable.
 public interface StorageNodeManager extends ClusterNodeManager {
         /// The fixed replication role a storage node manager is created for.
     enum Role {
@@ -29,12 +29,15 @@ public interface StorageNodeManager extends ClusterNodeManager {
 
         /// Creates a storage node manager for a fixed replication role.
     ///
-    /// A [Role#READER] manager never distributes and offers no promotion
-    /// operation. Use [PromotableStorageNodeManager] for transports that
-    /// support the reader-to-distributor transition.
+    /// A [Role#READER] manager never distributes and offers no way to start
+    /// distributing; a [Role#DISTRIBUTOR] manager always distributes from startup.
+    /// The manager borrows every collaborator: the caller retains ownership of
+    /// all of them, including `storageTaskExecutor`, and [Base#close()] never
+    /// closes the executor, the disk-space reader, or any other collaborator
+    /// beyond the distributor, client, health check, and position provider.
     ///
     /// @param dataDistributor        binary distributor
-    /// @param storageTaskExecutor    storage task executor
+    /// @param storageTaskExecutor    storage task executor, owned by the caller
     /// @param dataClient             replication client
     /// @param healthCheck            health check
     /// @param storageDiskSpaceReader disk-space reader
@@ -85,13 +88,13 @@ public interface StorageNodeManager extends ClusterNodeManager {
     abstract class Base implements StorageNodeManager {
         private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
-        /// Binary distributor used after promotion.
+        /// Binary distributor used by the distributor role.
         protected final StorageBinaryDataDistributor dataDistributor;
         /// Executor for storage checks.
         protected final StorageTaskExecutor storageTaskExecutor;
-        /// Replication client drained before promotion.
+        /// Replication client drained by the reader role.
         protected final StorageBinaryDataClient dataClient;
-        /// Health check closed on promotion.
+        /// Health check for the reader role.
         protected final StorageNodeHealthCheck healthCheck;
         /// Disk-space reader for size reporting.
         protected final StorageDiskSpaceReader storageDiskSpaceReader;
@@ -154,9 +157,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
 
         /// Reports replication readiness for the current role.
         ///
-        /// Promotion closes the reader health check, so a distributor reports
-        /// its own failure state instead; consulting the closed reader check
-        /// would leave every probe failing with 503 after promotion.
+        /// A distributor reports its own failure state instead of consulting
+        /// the reader health check, which never observes the publication path.
         private boolean replicationReady() throws NodeLibraryException {
             return this.isDistributor() ? this.dataDistributor.failure() == null : this.healthCheck.isReady();
         }
@@ -187,14 +189,12 @@ public interface StorageNodeManager extends ClusterNodeManager {
         public long getLatestSequence() {
             try {
                 return this.positionProvider.latestSequence();
-            } catch (final ReplicationPositionUnavailableException unavailable) {
-                /* Reader roles cannot infer the writer boundary from an applied cursor.
-                 * Expose unknown as -1 to monitoring rather than turning a metrics scrape
-                 * into a node failure. */
-                LOGGER.log(System.Logger.Level.DEBUG, "Latest replication position is unavailable for this node role", unavailable);
+            } catch (final NodeLibraryException unavailable) {
+                /* Any provider failure — an unavailable boundary for this role or a
+                 * transport fault — exposes unknown as -1 to monitoring rather than
+                 * turning a metrics scrape into a node failure. */
+                LOGGER.log(System.Logger.Level.DEBUG, "Latest replication position is unavailable", unavailable);
                 return -1L;
-            } catch (final NodeLibraryException failure) {
-                throw new IllegalStateException("Failed to read latest replication position", failure);
             }
         }
 
@@ -244,64 +244,59 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return;
             }
             this.closed = true;
-            Throwable failure = null;
+            final CloseFailures failures = new CloseFailures();
             try {
                 this.dataDistributor.dispose();
             } catch (final RuntimeException | Error closeFailure) {
-                failure = closeFailure;
+                failures.add(closeFailure);
             }
-            /* Promotion may have released one reader resource and failed on the
-             * other, so each is guarded independently; an aggregate guard would
-             * re-dispose the resource that already closed. */
-            if (!this.readerClientReleased()) {
-                try {
-                    this.dataClient.dispose();
-                } catch (final RuntimeException | Error closeFailure) {
-                    if (failure == null) failure = closeFailure;
-                    else failure.addSuppressed(closeFailure);
-                }
+            try {
+                this.dataClient.dispose();
+            } catch (final RuntimeException | Error closeFailure) {
+                failures.add(closeFailure);
             }
-            if (!this.readerHealthReleased()) {
-                try {
-                    this.healthCheck.close();
-                } catch (final RuntimeException | Error closeFailure) {
-                    if (failure == null) failure = closeFailure;
-                    else failure.addSuppressed(closeFailure);
-                }
+            try {
+                this.healthCheck.close();
+            } catch (final RuntimeException | Error closeFailure) {
+                failures.add(closeFailure);
             }
             try {
                 this.positionProvider.close();
             } catch (final RuntimeException | Error closeFailure) {
-                if (failure == null) failure = closeFailure;
-                else failure.addSuppressed(closeFailure);
+                failures.add(closeFailure);
             }
-            if (failure != null) {
-                if (failure instanceof Error error) throw error;
-                throw new NodeLibraryException("failed to close storage node resources", failure);
-            }
+            failures.throwIfFailed();
         }
 
-        /// Reports whether promotion already released the reader data client.
-        ///
-        /// A promoted node disposes its reader client during the role transition;
-        /// closing it again would double-dispose. The base implementation never
-        /// promotes and always releases it here.
-        ///
-        /// @return `true` when [PromotableStorageNodeManager] promotion released the client
-        protected boolean readerClientReleased() {
-            return false;
-        }
+        /// Aggregates close failures while keeping an Error ahead of any
+        /// RuntimeException, so an Error is never buried under the first
+        /// RuntimeException as a suppressed cause.
+        private static final class CloseFailures {
+            private Error fatal;
+            private Throwable failure;
 
-        /// Reports whether promotion already released the reader health check.
-        ///
-        /// @return `true` when [PromotableStorageNodeManager] promotion released the health check
-        protected boolean readerHealthReleased() {
-            return false;
+            private void add(final Throwable closeFailure) {
+                if (closeFailure instanceof Error error) {
+                    if (this.fatal == null) this.fatal = error;
+                    else this.fatal.addSuppressed(error);
+                } else if (this.failure == null) this.failure = closeFailure;
+                else this.failure.addSuppressed(closeFailure);
+            }
+
+            private void throwIfFailed() {
+                if (this.fatal != null) {
+                    if (this.failure != null) this.fatal.addSuppressed(this.failure);
+                    throw this.fatal;
+                }
+                if (this.failure != null) {
+                    throw new NodeLibraryException("failed to close storage node resources", this.failure);
+                }
+            }
         }
     }
 
-        /// A storage node that only reads. It exposes no promotion operation:
-    /// activating distribution on it is a wiring error, not a runtime refusal.
+        /// A storage node that only reads. Its role is fixed at creation:
+    /// it applies replicated writes and never distributes.
     final class Reader extends Base {
         private Reader(
                 final StorageBinaryDataDistributor dataDistributor,

@@ -15,7 +15,7 @@ public final class AeronProviderDriverFailureChildMain {
     private AeronProviderDriverFailureChildMain() {
     }
 
-    public static void main(final String[] ignored) throws Exception {
+    static void main(final String[] ignored) throws Exception {
         final Path root = Path.of(System.getProperty("dg.driver.failure.root"));
         Files.createDirectories(root.resolve("control"));
         final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -59,6 +59,7 @@ public final class AeronProviderDriverFailureChildMain {
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
                     case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> root.resolve("archive").toString();
                     case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> root.resolve("checkpoint/writer").toString();
+                    case "ECLIPSE_DATAGRID_BACKUP_PATH" -> root.resolve("backups").toString();
                     case "ECLIPSE_DATAGRID_AERON_DRIVER_TIMEOUT_MILLIS" -> "250";
                     default -> null;
                 };

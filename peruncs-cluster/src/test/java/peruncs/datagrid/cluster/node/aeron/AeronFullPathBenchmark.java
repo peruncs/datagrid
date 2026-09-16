@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import peruncs.datagrid.cluster.node.replication.AfterDataMessageConsumedListener;
@@ -27,7 +28,7 @@ public final class AeronFullPathBenchmark {
     private AeronFullPathBenchmark() {
     }
 
-    public static void main(final String[] arguments) throws Exception {
+    static void main(final String[] arguments) throws Exception {
         int payload = 64 * 1024;
         int warmup = 20;
         int iterations = 100;
@@ -84,12 +85,11 @@ public final class AeronFullPathBenchmark {
                          readerRoot.resolve("cursor"))) {
                 final EmbeddedStorageFoundation<?> readerFoundation = AeronStoreIntegrationIT.foundation(readerPath);
                 final EmbeddedStorageManager reader = readerFoundation.start();
-                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+                final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(
                         readerFoundation.getConnectionFoundation(), reader.createConnection(),
-                        ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
-                final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(merger);
+                        ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
                 final AtomicLong resolved = new AtomicLong(baseline.logicalSequence());
-                final StorageBinaryDataClient client = readerTransport.client(acceptor, "store",
+                final StorageBinaryDataClient client = readerTransport.client(receiver, "store",
                         new AfterDataMessageConsumedListener() {
                             @Override
                             public void onApplied(final ReplicationCursor cursor) {
@@ -126,14 +126,16 @@ public final class AeronFullPathBenchmark {
                     Arrays.sort(latencies);
                     client.stopAtLatestMessage();
                     awaitStopped(client);
-                    acceptor.awaitApplied();
+                    receiver.awaitApplied();
                     return new Result(payloadBytes, iterations, elapsed,
                             latencies[iterations / 2], latencies[Math.min(iterations - 1, (int) Math.ceil(iterations * 0.99) - 1)],
                             allocated < 0 ? -1L : allocated / iterations,
                             poolBytes("direct") - directBefore, poolBytes("mapped") - mappedBefore);
                 } finally {
                     client.dispose();
-                    acceptor.dispose();
+                    if (receiver instanceof Disposable disposable) {
+                        disposable.dispose();
+                    }
                     reader.shutdown();
                     writer.shutdown();
                 }

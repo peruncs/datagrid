@@ -13,9 +13,7 @@ import java.nio.file.*;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -56,12 +54,12 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
         }
 
         @Override
-        public ReplicationCursor getCursorFromPreviousBackup(final int skip) throws NodeLibraryException {
-            LOGGER.log(System.Logger.Level.TRACE, "Getting backup metadata info of latest-%s".formatted(skip));
-            final var previousBackup = this.getLastBackup(skip);
-            if (previousBackup == null) return null;
+        public ReplicationCursor getCursorForBackup(final BackupMetadata backup) throws NodeLibraryException {
+            Objects.requireNonNull(backup, "backup");
+            return this.readBackupCursor(this.toArchivePath(backup));
+        }
 
-            final Path archive = this.toArchivePath(previousBackup);
+        private ReplicationCursor readBackupCursor(final Path archive) throws NodeLibraryException {
             try {
                 return ReplicationCursorStore.decode(
                         BackupArchive.readManifest(archive, this.limits.maxExtractedBytes()));
@@ -75,9 +73,35 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             return this.listBackupVolumeFiles().stream()
                     .filter(BackupArchive::isBackupFileName)
                     .filter(name -> Files.isRegularFile(this.backupVolumePath.resolve(name), LinkOption.NOFOLLOW_LINKS))
-                    .map(name -> BackupArchive.parseMetadata(name, this.backupVolumePath))
-                    .sorted(Comparator.comparingLong(BackupMetadata::timestamp))
+                    .map(this::parseListedBackup)
+                    .filter(Objects::nonNull)
+                    .sorted(Comparator.comparingLong(BackupMetadata::timestamp)
+                            .thenComparing(BackupMetadata::backupId))
                     .toList();
+        }
+
+                /// Parses one volume file, overlaying the archived identity when present.
+        ///
+        /// The file name carries the selection fields; the identity sidecar
+        /// additionally carries provenance and the content digest. Archives
+        /// without a sidecar predate generations and list with unknown
+        /// provenance, while a corrupt sidecar means an untrustworthy file
+        /// that is skipped instead of selected.
+        ///
+        /// @param name volume file name
+        /// @return listed backup, or `null` when its identity is corrupt
+        private BackupMetadata parseListedBackup(final String name) {
+            final Path archive = this.backupVolumePath.resolve(name);
+            final BackupMetadata parsed = BackupArchive.parseMetadata(name, this.backupVolumePath);
+            final BackupMetadata identity;
+            try {
+                identity = BackupArchive.readIdentity(archive);
+            } catch (final NodeLibraryException corrupt) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Skipping backup archive with an unreadable identity at %s".formatted(archive), corrupt);
+                return null;
+            }
+            return identity == null ? parsed : identity;
         }
 
         @Override
@@ -93,20 +117,30 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             try {
                 final var fs = Storage.DefaultFileSystem();
                 connection.issueFullBackup(fs.ensureDirectory(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY)));
+                final byte[] manifestBytes;
                 try {
                     Files.createDirectories(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY));
                     StorageFileOperations.forceDirectory(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY));
+                    manifestBytes = ReplicationCursorStore.encode(cursor);
                     AtomicFileStore.writeBytes(
-                            exportDirectory.resolve(StorageBackupBackend.MANIFEST_ENTRY), ReplicationCursorStore.encode(cursor));
+                            exportDirectory.resolve(StorageBackupBackend.MANIFEST_ENTRY), manifestBytes);
                     AtomicFileStore.write(exportDirectory.resolve(StorageBackupBackend.READY_ENTRY), channel -> {
                     });
                 } catch (final IOException failure) {
                     throw new NodeLibraryException("Failed to write backup replication manifest", failure);
                 }
 
-                final Path temporaryArchive = exportDirectory.resolve(BackupArchive.toArchiveFileName(backup));
+                /* The digest covers the manifest and the storage payload, so a
+                 * later publication under the same backup id is idempotent
+                 * only for identical content. The random backup id in the file
+                 * name keeps concurrent publishers from ever sharing a name. */
+                final BackupMetadata stamped =
+                        backup.withDigest(BackupArchive.contentDigestOfDirectory(exportDirectory));
+                BackupArchive.writeIdentity(
+                        exportDirectory.resolve(BackupArchive.BACKUP_IDENTITY_ENTRY), stamped);
+                final Path temporaryArchive = exportDirectory.resolve(BackupArchive.toArchiveFileName(stamped));
                 BackupArchive.compressStorage(exportDirectory, temporaryArchive);
-                this.publishArchive(temporaryArchive, this.toArchivePath(backup));
+                this.publishArchive(temporaryArchive, this.toArchivePath(backup), manifestBytes, stamped.digest());
             } catch (final RuntimeException | Error failure) {
                 primaryFailure = failure;
                 throw failure;
@@ -124,13 +158,6 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
         public void restoreBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
                 throws NodeLibraryException {
             this.restoreArchive(this.toArchivePath(backup), storageDestinationParentPath, true);
-        }
-
-        @Override
-        public void restoreLatestBackup(final Path targetRootPath) throws NodeLibraryException {
-            final var backup = this.getLastBackup(0);
-            if (backup == null) throw new NodeLibraryException("No backups are available to restore");
-            this.restoreBackup(targetRootPath, backup);
         }
 
         @Override
@@ -158,10 +185,11 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             final Path workingDirectory = this.createTemporaryDirectory(storageDestinationParentPath, ".backup-restore-");
             Throwable primaryFailure = null;
             try {
-                BackupArchive.extractArchive(
-                        workingDirectory.resolve("extracted"), archive, requireBackupMetadata, this.limits);
+                final Path extracted = workingDirectory.resolve("extracted");
+                BackupArchive.extractArchive(extracted, archive, requireBackupMetadata, this.limits);
+                this.verifyExtractedDigest(archive, extracted);
                 StorageFileOperations.installStorage(
-                        workingDirectory.resolve("extracted").resolve(StorageBackupBackend.STORAGE_ENTRY),
+                        extracted.resolve(StorageBackupBackend.STORAGE_ENTRY),
                         storageDestinationParentPath.resolve(StorageBackupBackend.STORAGE_ENTRY));
             } catch (final RuntimeException | Error failure) {
                 primaryFailure = failure;
@@ -171,36 +199,50 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             }
         }
 
+                /// Rejects an archive whose content no longer matches its identity digest.
+        ///
+        /// Archives without an identity sidecar predate generations and skip
+        /// verification; anything carrying a digest must still match it before
+        /// it may replace local storage.
+        ///
+        /// @param archive   source archive
+        /// @param extracted extraction root holding `manifest` and `storage`
+        /// @throws NodeLibraryException when the digest contradicts the content
+        private void verifyExtractedDigest(final Path archive, final Path extracted) throws NodeLibraryException {
+            final BackupMetadata identity = BackupArchive.readIdentity(archive);
+            if (identity == null || identity.digest() < 0L) {
+                return;
+            }
+            final long actual = BackupArchive.contentDigestOfDirectory(extracted);
+            if (actual != identity.digest()) {
+                throw new NodeLibraryException(
+                        "Backup archive content digest mismatch at %s; refusing to install".formatted(archive));
+            }
+        }
+
         private Path toArchivePath(final BackupMetadata backup) {
             return this.backupVolumePath.resolve(BackupArchive.toArchiveFileName(backup));
         }
 
-        private void publishArchive(final Path temporaryArchive, final Path destination) {
+        private void publishArchive(
+                final Path temporaryArchive,
+                final Path destination,
+                final byte[] manifestBytes,
+                final long digest
+        ) {
             try {
-                try {
-                    StorageFileOperations.moveFileAtomically(temporaryArchive, destination);
-                } catch (final FileAlreadyExistsException alreadyPublished) {
-                    /* A crash between publication and acknowledgement retries the same
-                     * backup identity. Publish is idempotent only when the existing
-                     * archive is complete; a same-name partial file must be
-                     * replaced instead of mistaken for a durable backup. */
-                    if (this.isCompleteArchive(destination)) {
-                        LOGGER.log(System.Logger.Level.DEBUG,
-                                "Backup archive is already published at %s".formatted(destination));
-                        /* The export workspace cleanup deletes this file; a best
-                         * effort delete here must not turn a durable backup into
-                         * a publication failure. */
-                        try {
-                            Files.deleteIfExists(temporaryArchive);
-                        } catch (final IOException cleanupFailure) {
-                            LOGGER.log(System.Logger.Level.WARNING,
-                                    "Failed to delete superseded backup workspace file %s".formatted(temporaryArchive),
-                                    cleanupFailure);
-                        }
-                        return;
+                /* An atomic rename replaces an existing destination on Unix
+                 * instead of failing, so the collision must be detected with
+                 * an existence check first; the move-time catch only covers
+                 * the residual race with another publisher. */
+                if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
+                    this.resolveSameNamePublication(temporaryArchive, destination, manifestBytes, digest);
+                } else {
+                    try {
+                        StorageFileOperations.moveFileAtomically(temporaryArchive, destination);
+                    } catch (final FileAlreadyExistsException raced) {
+                        this.resolveSameNamePublication(temporaryArchive, destination, manifestBytes, digest);
                     }
-                    StorageFileOperations.deleteRegularFile(destination);
-                    StorageFileOperations.moveFileAtomically(temporaryArchive, destination);
                 }
                 StorageFileOperations.forceDirectory(this.backupVolumePath);
             } catch (final AtomicMoveNotSupportedException unsupported) {
@@ -208,6 +250,85 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             } catch (final IOException failure) {
                 throw new NodeLibraryException("Failed to publish backup archive %s".formatted(destination), failure);
             }
+        }
+
+                /// Resolves a publication whose archive name is already taken.
+        ///
+        /// A crash between publication and acknowledgement retries the same
+        /// backup identity: the retry is idempotent only when the published
+        /// archive is complete and holds the identical manifest and content
+        /// digest. A same-name partial file is replaced instead of mistaken
+        /// for a durable backup, while the same backup id with different
+        /// content is a conflicting publication that fails instead of
+        /// overwriting — concurrent nodes must differ by backup id.
+        ///
+        /// @param temporaryArchive new publication in the export workspace
+        /// @param destination      occupied archive path
+        /// @param manifestBytes    manifest of the new publication
+        /// @param digest           content digest of the new publication
+        /// @throws NodeLibraryException on a conflicting publication
+        private void resolveSameNamePublication(
+                final Path temporaryArchive,
+                final Path destination,
+                final byte[] manifestBytes,
+                final long digest
+        ) throws NodeLibraryException {
+            try {
+                if (!this.isCompleteArchive(destination)) {
+                    StorageFileOperations.deleteRegularFile(destination);
+                    StorageFileOperations.moveFileAtomically(temporaryArchive, destination);
+                } else if (this.isIdenticalPublication(destination, manifestBytes, digest)) {
+                    LOGGER.log(System.Logger.Level.DEBUG,
+                            "Backup archive is already published at %s".formatted(destination));
+                    /* The export workspace cleanup deletes this file; a best
+                     * effort delete here must not turn a durable backup into
+                     * a publication failure. */
+                    try {
+                        Files.deleteIfExists(temporaryArchive);
+                    } catch (final IOException cleanupFailure) {
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Failed to delete superseded backup workspace file %s".formatted(temporaryArchive),
+                                cleanupFailure);
+                    }
+                } else {
+                    throw new NodeLibraryException(
+                            "Conflicting backup archive is already published at %s; refusing to overwrite"
+                                    .formatted(destination));
+                }
+            } catch (final AtomicMoveNotSupportedException unsupported) {
+                throw new NodeLibraryException("Atomic backup publication is not supported", unsupported);
+            } catch (final IOException failure) {
+                throw new NodeLibraryException("Failed to publish backup archive %s".formatted(destination), failure);
+            }
+        }
+
+                /// Reports whether the published archive holds the same backup.
+        ///
+        /// Both the immutable manifest and the content digest must match: the
+        /// manifest pins the replication position, the digest pins the Store
+        /// image. Anything else under the same backup id is a conflict.
+        ///
+        /// @param destination   published archive
+        /// @param manifestBytes manifest of the new publication
+        /// @param digest        content digest of the new publication
+        /// @return `true` for an idempotent retry of the same backup
+        private boolean isIdenticalPublication(
+                final Path destination,
+                final byte[] manifestBytes,
+                final long digest
+        ) throws NodeLibraryException {
+            final byte[] publishedManifest =
+                    BackupArchive.readManifest(destination, this.limits.maxExtractedBytes());
+            if (!Arrays.equals(publishedManifest, manifestBytes)) {
+                return false;
+            }
+            /* The archived bytes must digest to the new publication's digest;
+             * a stored digest that disagrees with either side means bit-rot. */
+            if (BackupArchive.contentDigestOfArchive(destination) != digest) {
+                return false;
+            }
+            final BackupMetadata identity = BackupArchive.readIdentity(destination);
+            return identity == null || identity.digest() < 0L || identity.digest() == digest;
         }
 
         private boolean isCompleteArchive(final Path destination) {

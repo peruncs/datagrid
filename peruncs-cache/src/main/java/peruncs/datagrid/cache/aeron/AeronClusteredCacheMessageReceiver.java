@@ -2,6 +2,7 @@ package peruncs.datagrid.cache.aeron;
 
 import io.aeron.FragmentAssembler;
 import io.aeron.Subscription;
+import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.BackoffIdleStrategy;
@@ -9,9 +10,11 @@ import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 import peruncs.datagrid.cache.types.TimestampsRegionUpdateMessage;
 
-import java.util.HashMap;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -29,26 +32,56 @@ import java.util.concurrent.atomic.LongAdder;
 /// against the identity shared by this node's sender and receiver; a matching
 /// frame is skipped without copying or decoding its payload.
 ///
+/// Publication acceptance only proves admission, not delivery, so this
+/// receiver never assumes it is healthy just because it is polling. Every
+/// validated frame — invalidation or heartbeat, remote or self — refreshes a
+/// freshness deadline; total silence past the deadline marks the receiver
+/// stale, records a terminal failure, and stops it. A stale receiver requires
+/// re-synchronization: it never serves reads as healthy again until its
+/// caches are invalidated and a fresh stream is accepted.
+///
 /// A malformed or undecodable frame stops this receiver and is exposed
 /// through [#failure()]. A volatile broadcast cannot prove that a bad
 /// frame was harmless or reconstruct a missing invalidation; continuing would
 /// make the local cache permanently stale. The same fail-closed rule applies
-/// when a valid message cannot be applied or a sender sequence gap is found.
+/// when a valid message cannot be applied, or when a sender sequence gap is
+/// found. On an empty receiver, a sender joining with a non-zero first sequence
+/// causes a full cache invalidation before that sequence becomes its baseline;
+/// once a sender is admitted, an unknown sender fails closed and requires an
+/// explicit re-synchronization. Every failure path invalidates the local caches
+/// before the receiver can ever be declared healthy again.
+///
+/// Startup always invalidates the local caches first, because a restart may
+/// have missed traffic while down. Persisted per-sender cursors additionally
+/// validate the first sequence after a restart: cursors are flushed to an
+/// atomic file periodically and on disposal, preloaded on startup, and the
+/// first live frame must continue the persisted cursor. On mismatch the
+/// receiver invalidates everything and fails closed.
 ///
 /// A receiver is single-use: after [#dispose()] it cannot be started again.
 /// Create a new receiver from the provider when a new lifecycle is needed.
+/// After a terminal failure short of disposal, [#resynchronize()] invalidates
+/// the caches, re-baselines the known senders, and restarts polling.
 ///
 /// Observability: [#isRunning()] is the programmatic health surface,
-/// and received/self-skipped/malformed counters are reported in the dispose
-/// debug log; polling failures are retained through [#failure()].
+/// and received/self-skipped/heartbeat/malformed/gap counters are reported in
+/// the dispose debug log; polling failures are retained through [#failure()].
 public final class AeronClusteredCacheMessageReceiver implements Disposable {
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusteredCacheMessageReceiver.class.getName());
     private static final int FRAGMENT_LIMIT = 10;
-    /* A volatile invalidation stream is trusted only up to a bounded number of
-     * sender identities.  Without a cap, an untrusted or misconfigured peer can
-     * force an unbounded HashMap allocation simply by changing its node id. */
-    private static final int MAX_TRACKED_SENDERS = 1_024;
+        /// How often dirty cursors are flushed to the cursor file, in nanoseconds.
+    private static final long CURSOR_FLUSH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1L);
+        /// Drops frames buffered while no polling thread ran; the resync invalidation covered them.
+    private static final FragmentHandler DISCARD =
+            (buffer, offset, length, header) -> {
+            };
+    /* A volatile invalidation stream tracks only a bounded number of sender
+     * identities. Without a cap, an untrusted or misconfigured peer can force
+     * an unbounded HashMap allocation simply by changing its node id. Past the
+     * cap the receiver fails closed: evicting continuity would allow a sender
+     * to advance unseen and return with a false baseline. */
+    static final int MAX_TRACKED_SENDERS = 1_024;
     private static final String ROLE_NAME = "eclipse-datagrid-cache-invalidation-aeron";
 
     private final AeronClusteredCacheResources resources;
@@ -56,49 +89,115 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
     private final Runnable releaseSequence;
     private final ClusteredCacheMessageAcceptor messageAcceptor;
     private final int maxPayloadBytes;
+    private final long freshnessTimeoutNanos;
+    private final AeronClusteredCacheCursorStore cursorStore;
+    private final byte[] hmacSecret;
+    private final byte[] previousHmacSecret;
     private final FragmentAssembler assembler = new FragmentAssembler(this::onFragment);
     private final BackoffIdleStrategy idleStrategy = new BackoffIdleStrategy();
     private final LongAdder received = new LongAdder();
     private final LongAdder selfSkipped = new LongAdder();
+    private final LongAdder heartbeats = new LongAdder();
     private final LongAdder malformed = new LongAdder();
     private final LongAdder gaps = new LongAdder();
-    /* Accessed only on the polling thread. */
-    private final Map<AeronClusteredCacheMessageCodec.SenderId, Long> lastSequenceBySender = new HashMap<>();
+    /* Mutated on the polling thread; iterated for cursor snapshots on disposal,
+     * so the map itself is concurrent while its logical owner is the poller. */
+    private final ConcurrentHashMap<AeronClusteredCacheMessageCodec.SenderId, Long> lastSequenceBySender =
+            new ConcurrentHashMap<>();
+    /* Last-seen timestamps used to fail closed when an admitted sender goes
+     * silent; updated wherever a sender cursor is accepted. */
+    private final ConcurrentHashMap<AeronClusteredCacheMessageCodec.SenderId, Long> lastSeenNanos =
+            new ConcurrentHashMap<>();
+    /* Senders whose next frame is accepted as a re-synchronization baseline.
+     * Replaced while no polling thread runs; the poller only removes entries.
+     * This set is never used for LRU eviction: only an explicit invalidation
+     * establishes a safe re-baseline boundary. */
+    private volatile Set<AeronClusteredCacheMessageCodec.SenderId> rebaseSenders =
+            ConcurrentHashMap.newKeySet();
     private final AtomicReference<RuntimeException> agentFailure = new AtomicReference<>();
     private volatile Subscription subscription;
     private volatile Thread agentThread;
     private volatile boolean disposed;
     private volatile boolean running;
     private volatile CountDownLatch stopped;
+    private volatile long lastActivityNanos;
+    private volatile long lastFlushNanos;
+    private volatile boolean cursorsDirty;
+    /* True while the polling thread applies the first-sender join invalidation.
+     * Reads must be refused until the wipe finishes and the baseline is recorded;
+     * the wipe clears caches one at a time and would otherwise serve a torn view. */
+    private volatile boolean joinInvalidationInProgress;
+    /* When non-negative, a cache application started at this timestamp and has
+     * not finished. The polling thread cannot watch the freshness deadline
+     * while blocked inside the acceptor, so health checks consult this stamp
+     * instead: an apply running longer than the freshness timeout is suspect. */
+    private volatile long applyStartNanos = -1L;
+        /// Test seam invoked on the re-synchronizing thread after the new polling
+    /// thread starts and before the post-transition health re-check.
+    Runnable resyncTransitionHook;
 
         /// Creates a receiver for one provider.
     ///
-    /// @param resources       shared Aeron resources for this node
-    /// @param senderId        sender identity used to ignore this node's frames
-    /// @param messageAcceptor target for accepted invalidations
-    /// @param maxPayloadBytes maximum accepted payload size
+    /// @param resources            shared Aeron resources for this node
+    /// @param senderId             sender identity used to ignore this node's frames
+    /// @param messageAcceptor      target for accepted invalidations
+    /// @param maxPayloadBytes      maximum accepted payload size
+    /// @param freshnessTimeoutNanos how long total silence is tolerated before staleness; also
+    ///                             bounds one cache application before it is treated as suspect
+    /// @param cursorStore          persisted per-sender cursors for restart validation
+    /// @param hmacSecret           HMAC secret authenticating every frame, or `null` for unsigned frames
+    /// @param previousHmacSecret retiring HMAC secret accepted during rotation overlap, or `null`
     AeronClusteredCacheMessageReceiver(
             final AeronClusteredCacheResources resources,
             final byte[] senderId,
             final Runnable releaseSequence,
             final ClusteredCacheMessageAcceptor messageAcceptor,
-            final int maxPayloadBytes
+            final int maxPayloadBytes,
+            final long freshnessTimeoutNanos,
+            final AeronClusteredCacheCursorStore cursorStore,
+            final byte[] hmacSecret,
+            final byte[] previousHmacSecret
     ) {
         this.resources = Objects.requireNonNull(resources, "resources");
         this.senderId = Objects.requireNonNull(senderId, "senderId").clone();
         this.releaseSequence = Objects.requireNonNull(releaseSequence, "releaseSequence");
         this.messageAcceptor = Objects.requireNonNull(messageAcceptor, "messageAcceptor");
+        this.cursorStore = Objects.requireNonNull(cursorStore, "cursorStore");
+        if (hmacSecret != null && hmacSecret.length < AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES) {
+            throw new IllegalArgumentException("HMAC secret must contain at least %s bytes".formatted(
+                    AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES));
+        }
+        if (previousHmacSecret != null &&
+            previousHmacSecret.length < AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES) {
+            throw new IllegalArgumentException("previous HMAC secret must contain at least %s bytes".formatted(
+                    AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES));
+        }
+        this.hmacSecret = hmacSecret == null ? null : hmacSecret.clone();
+        this.previousHmacSecret = previousHmacSecret == null ? null : previousHmacSecret.clone();
         if (senderId.length != Long.BYTES * 2) {
             throw new IllegalArgumentException("sender id must be exactly 16 bytes");
         }
-        if (maxPayloadBytes < 1 || maxPayloadBytes > Integer.MAX_VALUE -
-                AeronClusteredCacheMessageCodec.HEADER_LENGTH - AeronClusteredCacheMessageCodec.CRC_LENGTH) {
+        final int maxFramePayloadBytes = Integer.MAX_VALUE -
+                AeronClusteredCacheMessageCodec.HEADER_LENGTH - AeronClusteredCacheMessageCodec.CRC_LENGTH -
+                (hmacSecret == null ? 0 : AeronClusteredCacheMessageCodec.HMAC_LENGTH);
+        if (maxPayloadBytes < 1 || maxPayloadBytes > maxFramePayloadBytes) {
             throw new IllegalArgumentException("maxPayloadBytes is outside the supported frame size");
         }
+        if (freshnessTimeoutNanos < 1) {
+            throw new IllegalArgumentException(
+                    "freshnessTimeoutNanos must be positive: %s".formatted(freshnessTimeoutNanos));
+        }
         this.maxPayloadBytes = maxPayloadBytes;
+        this.freshnessTimeoutNanos = freshnessTimeoutNanos;
     }
 
         /// Starts the polling loop and its daemon thread.
+    ///
+    /// Startup invalidates the local caches before the receiver is declared
+    /// healthy: a restart may have missed traffic while down, and the first
+    /// live frame only proves continuity from that point on. Persisted
+    /// per-sender cursors are preloaded first so that first frame is validated
+    /// against what the previous lifecycle applied.
     ///
     /// A receiver starts exactly once; restarting or starting after disposal
     /// fails. A failed startup rolls everything back — the subscription is
@@ -115,7 +214,25 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             throw new IllegalStateException("Aeron clustered-cache receiver is already started");
         }
         try {
+            final Map<AeronClusteredCacheMessageCodec.SenderId, Long> persisted = this.cursorStore.load();
+            if (persisted.size() > MAX_TRACKED_SENDERS) {
+                throw new IllegalStateException(
+                        "Aeron clustered-cache cursor file exceeds the maximum sender identity count: %s"
+                                .formatted(MAX_TRACKED_SENDERS));
+            }
+            this.lastSequenceBySender.putAll(persisted);
+            this.messageAcceptor.invalidateAll();
             this.subscription = this.resources.subscription();
+            final long now = System.nanoTime();
+            /* Every persisted sender must prove liveness within one freshness
+             * interval. Without a deadline a sender that disappears while another
+             * keeps sending would leave the receiver healthy despite missing
+             * that sender's updates. */
+            for (final var sender : persisted.keySet()) {
+                this.lastSeenNanos.put(sender, now);
+            }
+            this.lastActivityNanos = now;
+            this.lastFlushNanos = now;
             this.stopped = new CountDownLatch(1);
             this.running = true;
             final Thread worker = Thread.ofVirtual().name(ROLE_NAME).unstarted(this::run);
@@ -127,6 +244,9 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             this.stopped = null;
             this.agentThread = null;
             this.subscription = null;
+            this.lastSequenceBySender.clear();
+            this.lastSeenNanos.clear();
+            this.applyStartNanos = -1L;
             try {
                 this.resources.closeSubscription();
             } catch (final RuntimeException closeFailure) {
@@ -144,15 +264,146 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         LOGGER.log(System.Logger.Level.DEBUG, "Started Aeron clustered-cache receiver");
     }
 
+        /// Re-synchronizes a failed receiver without disposing it.
+    ///
+    /// Invalidation runs before the receiver is declared healthy again, and
+    /// every sender known before the failure is re-baselined: its next frame
+    /// is trusted as the new cursor because the invalidation just covered the
+    /// gap. The first sender observed after this full invalidation may start at
+    /// any sequence; any later unknown sender fails closed again. The freshness
+    /// deadline restarts from this call. Recovery is observable
+    /// through [#isRunning()] turning true and [#failure()] clearing.
+    ///
+    /// When the previous polling thread is still stopping — for example while
+    /// blocked applying a message — this call fails and can be retried once
+    /// the thread has exited. A receiver that never started or was already
+    /// disposed cannot be re-synchronized.
+    ///
+    /// @throws IllegalStateException when disposed, never started, or still stopping
+    public synchronized void resynchronize() {
+        if (this.disposed) {
+            throw new IllegalStateException("Aeron clustered-cache receiver is disposed");
+        }
+        if (this.subscription == null) {
+            throw new IllegalStateException("Aeron clustered-cache receiver was never started");
+        }
+        /* Consult the full health check, not the raw flags: a receiver stuck
+         * inside an over-long cache application must re-synchronize instead of
+         * reporting healthy. A detected stall fails closed here and the
+         * re-synchronization proceeds below. */
+        if (this.isRunning()) {
+            return;
+        }
+        final Thread worker = this.agentThread;
+        if (worker != null && worker.isAlive()) {
+            throw new IllegalStateException(
+                    "Aeron clustered-cache receiver is still stopping; retry re-synchronization");
+        }
+        try {
+            this.messageAcceptor.invalidateAll();
+        } catch (final RuntimeException failure) {
+            this.agentFailure.compareAndSet(null, failure);
+            throw failure;
+        }
+        final Set<AeronClusteredCacheMessageCodec.SenderId> rebase = ConcurrentHashMap.newKeySet();
+        rebase.addAll(this.lastSequenceBySender.keySet());
+        this.rebaseSenders = rebase;
+        this.lastSequenceBySender.clear();
+        /* Rebasing senders keep a freshness deadline from this call: each must
+         * re-prove liveness with a post-invalidation frame, or the receiver
+         * fails closed instead of silently dropping that sender. */
+        final long rebaseStart = System.nanoTime();
+        this.lastSeenNanos.clear();
+        for (final var sender : rebase) {
+            this.lastSeenNanos.put(sender, rebaseStart);
+        }
+        /* Frames may have piled up in the subscription while no thread was
+         * polling. The invalidation above already covered them, so they are
+         * discarded instead of becoming a false baseline: the next live frame
+         * from each known sender re-baselines. The drain is bounded; any
+         * residue is still safe, it can only cause a conservative gap failure. */
+        final Subscription draining = this.subscription;
+        if (draining != null) {
+            for (int round = 0; round < 1_000; round++) {
+                if (draining.poll(DISCARD, FRAGMENT_LIMIT) == 0) {
+                    break;
+                }
+            }
+        }
+        this.agentFailure.set(null);
+        final long now = System.nanoTime();
+        this.lastActivityNanos = now;
+        this.lastFlushNanos = now;
+        this.applyStartNanos = -1L;
+        this.cursorsDirty = false;
+        this.stopped = new CountDownLatch(1);
+        this.running = true;
+        final Thread next = Thread.ofVirtual().name(ROLE_NAME).unstarted(this::run);
+        this.agentThread = next;
+        next.start();
+        final Runnable hook = this.resyncTransitionHook;
+        if (hook != null) {
+            hook.run();
+        }
+        /* Re-check under the monitor: a failure that landed anywhere in the
+         * transitions above — during the invalidation, the drain, or the
+         * thread start — must not leave this receiver reporting healthy. */
+        final RuntimeException raced = this.agentFailure.get();
+        if (raced != null) {
+            this.running = false;
+            throw new IllegalStateException(
+                    "Aeron clustered-cache receiver failed during re-synchronization", raced);
+        }
+        LOGGER.log(System.Logger.Level.DEBUG, "Re-synchronized Aeron clustered-cache receiver");
+    }
+
     /// Returns whether the receiver is currently consuming invalidations.
     ///
-    /// Reports `false` before [#start()] and after disposal, and also
-    /// after a terminal transport failure so a node serving stale timestamps
-    /// is observable.
+    /// Reports `false` before [#start()] and after disposal, and also after
+    /// any terminal failure — a transport failure, a sequence gap, or
+    /// staleness past the freshness deadline — so a node that may serve stale
+    /// timestamps is observable. A failed receiver stays unhealthy until
+    /// [#resynchronize()] completes; it never recovers on its own.
+    ///
+    /// The polling thread cannot watch the freshness deadline while it is
+    /// blocked applying a message, so this check also watches the acceptor:
+    /// an application running longer than the freshness timeout is treated as
+    /// suspect, fails the receiver closed, and reports unhealthy. This check
+    /// therefore has a fail-closed side effect on a stalled receiver.
     ///
     /// @return `true` while the receiver is running
     public boolean isRunning() {
-        return this.running && !this.disposed;
+        if (!this.running || this.disposed || this.agentFailure.get() != null) {
+            return false;
+        }
+        /* A join invalidation clears caches one at a time on the polling thread.
+         * Refuse reads until the wipe finishes and the baseline is recorded. */
+        if (this.joinInvalidationInProgress) {
+            return false;
+        }
+        final long now = System.nanoTime();
+        final long applyStart = this.applyStartNanos;
+        if (applyStart >= 0 && now - applyStart >= this.freshnessTimeoutNanos) {
+            this.failClosed(
+                    "Aeron clustered-cache receiver is suspect: a cache application did not complete within %s ms".formatted(this.freshnessTimeoutNanos / 1_000_000L),
+                    new IllegalStateException(
+                            "Aeron clustered-cache receiver is suspect: a cache application did not complete within %s ms".formatted(this.freshnessTimeoutNanos / 1_000_000L)));
+            return false;
+        }
+        /* Known senders — persisted across restart or rebasing after recovery —
+         * must prove liveness even when other traffic keeps the global deadline
+         * fresh. Check synchronously so region reads refuse without waiting for
+         * the next poll iteration to notice the silence. */
+        for (final var seen : this.lastSeenNanos.entrySet()) {
+            if (now - seen.getValue() >= this.freshnessTimeoutNanos) {
+                this.failClosed(
+                        "Aeron clustered-cache sender %s is stale: silent for more than %s ms".formatted(seen.getKey(), this.freshnessTimeoutNanos / 1_000_000L),
+                        new IllegalStateException(
+                                "Aeron clustered-cache sender %s is stale: silent for more than %s ms".formatted(seen.getKey(), this.freshnessTimeoutNanos / 1_000_000L)));
+                return false;
+            }
+        }
+        return true;
     }
 
     /// Returns the terminal failure that stopped this receiver, or `null`
@@ -169,18 +420,46 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
     }
 
         /// Runs one Agrona-idled subscription polling loop until disposal or failure.
+    /// Total silence past the freshness deadline fails the receiver closed:
+    /// polling alone never proves delivery, only traffic does.
     private void run() {
         try {
             while (this.running) {
                 final RuntimeException resourceFailure = this.resources.failure();
                 if (resourceFailure != null) {
-                    this.agentFailure.compareAndSet(null, new IllegalStateException(
-                            "Aeron clustered-cache receiver transport has failed", resourceFailure));
-                    this.running = false;
+                    this.failClosed("Aeron clustered-cache receiver transport has failed",
+                            new IllegalStateException(
+                                    "Aeron clustered-cache receiver transport has failed", resourceFailure));
                     break;
                 }
                 final Subscription current = this.subscription;
                 final int work = current == null ? 0 : current.poll(this.assembler, FRAGMENT_LIMIT);
+                final long now = System.nanoTime();
+                this.flushCursorsIfDue(now);
+                if (this.agentFailure.get() == null &&
+                    now - this.lastActivityNanos >= this.freshnessTimeoutNanos) {
+                    this.failClosed(
+                            "Aeron clustered-cache receiver is stale: no frame or heartbeat within %s ms".formatted(this.freshnessTimeoutNanos / 1_000_000L),
+                            new IllegalStateException(
+                                    "Aeron clustered-cache receiver is stale: no frame or heartbeat within %s ms".formatted(this.freshnessTimeoutNanos / 1_000_000L)));
+                    break;
+                }
+                /* Per-sender staleness: a sender heard earlier that has since
+                 * gone silent while other traffic keeps flowing is otherwise
+                 * undetectable — self frames would refresh the global
+                 * deadline forever, and no later frame from the lost peer can
+                 * reveal a gap that was never followed by traffic. Its
+                 * invalidations may have been lost, so continuing would serve
+                 * stale query results. */
+                final AeronClusteredCacheMessageCodec.SenderId silentSender =
+                        this.silentSender(now);
+                if (silentSender != null) {
+                    this.failClosed(
+                            "Aeron clustered-cache sender %s is stale: silent for more than %s ms".formatted(silentSender, this.freshnessTimeoutNanos / 1_000_000L),
+                            new IllegalStateException(
+                                    "Aeron clustered-cache sender %s is stale: silent for more than %s ms".formatted(silentSender, this.freshnessTimeoutNanos / 1_000_000L)));
+                    break;
+                }
                 this.idleStrategy.idle(work);
             }
         } catch (final Throwable failure) {
@@ -198,6 +477,7 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             if (currentStopped != null) {
                 currentStopped.countDown();
             }
+            AeronClusteredCacheMessageCodec.clearThreadLocalAuthenticationState();
         }
     }
 
@@ -208,6 +488,10 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
 
     long selfSkipped() {
         return this.selfSkipped.sum();
+    }
+
+    long heartbeats() {
+        return this.heartbeats.sum();
     }
 
     long gaps() {
@@ -222,16 +506,21 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             return;
         }
         /* One validation covers the header, the sender identity, the sequence,
-         * and the payload bounds; the CRC is computed once, not per accessor. */
+         * the payload bounds, the CRC, and the HMAC when a secret is
+         * configured. */
         final AeronClusteredCacheMessageCodec.ValidatedFrame frame;
         try {
             frame = AeronClusteredCacheMessageCodec.validate(
-                    buffer, offset, length, this.maxPayloadBytes, this.senderId);
+                    buffer, offset, length, this.maxPayloadBytes, this.senderId, this.hmacSecret,
+                    this.previousHmacSecret);
         } catch (final RuntimeException failure) {
             this.malformed.increment();
             this.failClosed("Malformed Aeron clustered-cache frame of %s bytes".formatted(length), failure);
             return;
         }
+        /* Any validated frame proves the subscription is live, including a
+         * self frame: it traversed the local publication and subscription. */
+        this.lastActivityNanos = System.nanoTime();
         if (frame.self()) {
             this.selfSkipped.increment();
             return;
@@ -239,37 +528,77 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
         if (!this.acceptSequence(frame.sender(), frame.sequence())) {
             return;
         }
-
-        final TimestampsRegionUpdateMessage message;
-        try {
-            final byte[] payload = AeronClusteredCacheMessageCodec.payloadOf(
-                    buffer, offset, frame.payloadLength());
-            message = AeronClusteredCachePayloadCodec.decode(payload);
-        } catch (final RuntimeException failure) {
-            this.malformed.increment();
-            this.failClosed("Undecodable Aeron clustered-cache invalidation", failure);
+        if (frame.heartbeat()) {
+            this.heartbeats.increment();
             return;
         }
+
+        /* The polling thread cannot watch the freshness deadline while it is
+         * blocked below, so stamp the apply start: health checks treat an
+         * over-long application as suspect even though this thread is stalled. */
+        this.applyStartNanos = System.nanoTime();
         try {
-            this.messageAcceptor.accept(message);
-            this.received.increment();
-        } catch (final RuntimeException failure) {
-            final RuntimeException terminal =
-                    new IllegalStateException("Failed to apply Aeron clustered-cache invalidation", failure);
-            this.failClosed("Aeron clustered-cache receiver failed", terminal);
+            final TimestampsRegionUpdateMessage message;
+            try {
+                /* Decoded straight from the receive buffer: the payload is never
+                 * copied into a throwaway byte[] first. */
+                message = AeronClusteredCachePayloadCodec.decode(
+                        buffer, AeronClusteredCacheMessageCodec.payloadOffset(offset), frame.payloadLength());
+            } catch (final RuntimeException failure) {
+                this.malformed.increment();
+                this.failClosed("Undecodable Aeron clustered-cache invalidation", failure);
+                return;
+            }
+            try {
+                this.messageAcceptor.accept(message);
+                this.received.increment();
+            } catch (final RuntimeException failure) {
+                final RuntimeException terminal =
+                        new IllegalStateException("Failed to apply Aeron clustered-cache invalidation", failure);
+                this.failClosed("Aeron clustered-cache receiver failed", terminal);
+            }
+        } finally {
+            /* Progress — applied or failed — proves liveness past this point,
+             * and clears the suspect-apply stamp for the next frame. */
+            this.applyStartNanos = -1L;
+            this.lastActivityNanos = System.nanoTime();
         }
     }
 
-        /// Stops delivery while retaining the first terminal cause for health checks.
-    private void failClosed(final String message, final RuntimeException failure) {
-        this.agentFailure.compareAndSet(null, failure);
+        /// Stops delivery while retaining the first terminal cause for health
+    /// checks, then invalidates the local caches so they can never be declared
+    /// healthy again without a fresh synchronization. Invalidation is
+    /// best-effort here: the terminal failure is already recorded, and an
+    /// invalidation error is suppressed into it rather than replacing it.
+    /// Package-visible so health checks and tests can fail a stalled receiver.
+    void failClosed(final String message, final RuntimeException failure) {
+        /* The first failure owns the terminal wipe; concurrent detections (the
+         * polling thread and an application thread inside isRunning()) must not
+         * wipe twice for one outage. The receiver stays unhealthy until an
+         * explicit resynchronization wipes again. */
+        if (!this.agentFailure.compareAndSet(null, failure)) {
+            this.running = false;
+            LOGGER.log(System.Logger.Level.ERROR, message, failure);
+            return;
+        }
         this.running = false;
+        try {
+            this.messageAcceptor.invalidateAll();
+        } catch (final RuntimeException invalidateFailure) {
+            failure.addSuppressed(invalidateFailure);
+            LOGGER.log(System.Logger.Level.WARNING, "Aeron clustered-cache invalidation during fail-closed failed",
+                    invalidateFailure);
+        }
         LOGGER.log(System.Logger.Level.ERROR, message, failure);
     }
 
         /// Tracks the per-sender sequence. A gap means this volatile broadcast lost
     /// an invalidation (or the sender identity was reused); the receiver therefore
     /// fails closed instead of continuing with a cache that cannot be reconciled.
+    /// The first sender admitted to an empty receiver may start at any
+    /// sequence; a non-zero first sequence triggers a full invalidation before
+    /// it becomes the baseline. Once one sender is tracked, a new sender is a
+    /// late join and fails closed until an explicit re-synchronization.
     private boolean acceptSequence(final AeronClusteredCacheMessageCodec.SenderId sender, final long sequence) {
         /* Defense in depth: the codec's validateHeader already rejects a
          * negative or exhausted sequence, so this guard only fires if that
@@ -281,13 +610,58 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             return false;
         }
         final Long previous = this.lastSequenceBySender.get(sender);
-        if (previous == null && this.lastSequenceBySender.size() >= MAX_TRACKED_SENDERS) {
-            final IllegalStateException overflow = new IllegalStateException(
-                    "Aeron clustered-cache receiver exceeded the maximum sender identity count: %s".formatted(MAX_TRACKED_SENDERS));
-            this.failClosed("Aeron clustered-cache receiver rejected an unbounded sender set", overflow);
-            return false;
+        if (previous == null) {
+            if (this.rebaseSenders.remove(sender)) {
+                this.lastSequenceBySender.put(sender, sequence);
+                this.lastSeenNanos.put(sender, System.nanoTime());
+                this.cursorsDirty = true;
+                return true;
+            }
+            if (this.lastSequenceBySender.size() >= MAX_TRACKED_SENDERS) {
+                final IllegalStateException overflow = new IllegalStateException(
+                        "Aeron clustered-cache receiver exceeded the maximum sender identity count: %s"
+                                .formatted(MAX_TRACKED_SENDERS));
+                this.failClosed("Aeron clustered-cache receiver rejected an unbounded sender set", overflow);
+                return false;
+            }
+            if (!this.lastSequenceBySender.isEmpty()) {
+                final IllegalStateException lateSender = new IllegalStateException(
+                        "Aeron clustered-cache receiver observed an unknown sender after the join boundary: %s"
+                                .formatted(sender));
+                this.failClosed(
+                        "Aeron clustered-cache receiver requires re-synchronization for a late sender",
+                        lateSender);
+                return false;
+            }
+            if (sequence != 0) {
+                /* A receiver may join after a sender has already emitted
+                 * frames. Invalidate before accepting that sender's first
+                 * observed sequence; the wipe covers every invalidation that
+                 * preceded the baseline, so no gap can leave stale cache data.
+                 * Health stays refused until the wipe and baseline complete. */
+                this.joinInvalidationInProgress = true;
+                try {
+                    this.messageAcceptor.invalidateAll();
+                } catch (final RuntimeException failure) {
+                    try {
+                        this.failClosed("Aeron clustered-cache receiver could not invalidate before joining a sender", failure);
+                    } finally {
+                        this.joinInvalidationInProgress = false;
+                    }
+                    return false;
+                }
+                this.lastSequenceBySender.put(sender, sequence);
+                this.lastSeenNanos.put(sender, System.nanoTime());
+                this.cursorsDirty = true;
+                this.joinInvalidationInProgress = false;
+                return true;
+            }
+            this.lastSequenceBySender.put(sender, sequence);
+            this.lastSeenNanos.put(sender, System.nanoTime());
+            this.cursorsDirty = true;
+            return true;
         }
-        if (previous != null && (previous == Long.MAX_VALUE || sequence != previous + 1)) {
+        if (previous == Long.MAX_VALUE || sequence != previous + 1) {
             final IllegalStateException gap = new IllegalStateException(
                     "Aeron clustered-cache invalidation sequence gap from sender %s: expected %s after %s, received %s".formatted(sender, (previous == Long.MAX_VALUE ? "overflow" : previous + 1), previous, sequence));
             this.gaps.increment();
@@ -295,7 +669,61 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             return false;
         }
         this.lastSequenceBySender.put(sender, sequence);
+        this.lastSeenNanos.put(sender, System.nanoTime());
+        this.cursorsDirty = true;
         return true;
+    }
+
+        /// Finds a previously-heard sender whose silence exceeds the freshness
+    /// deadline, or `null` when every tracked sender is fresh.
+    ///
+    /// A sender that never sent again after a re-baseline leaves no entry, so
+    /// only senders with observed traffic are held to the deadline.
+    ///
+    /// @param now current `System.nanoTime()` reading
+    /// @return the silent sender, or `null` when all tracked senders are fresh
+    private AeronClusteredCacheMessageCodec.SenderId silentSender(final long now) {
+        for (final var seen : this.lastSeenNanos.entrySet()) {
+            if (now - seen.getValue() >= this.freshnessTimeoutNanos) {
+                return seen.getKey();
+            }
+        }
+        return null;
+    }
+
+        /// Returns a stable copy of every tracked sender cursor.
+    ///
+    /// Sender continuity is never evicted for space: dropping a cursor would
+    /// let that sender advance while unseen and later return with an
+    /// unverifiable baseline. The receiver rejects a sender set beyond the
+    /// hard bound instead, so this snapshot remains complete.
+    private Map<AeronClusteredCacheMessageCodec.SenderId, Long> cursorsSnapshot() {
+        return new ConcurrentHashMap<>(this.lastSequenceBySender);
+    }
+
+        /// Flushes dirty cursors at most once per flush interval. Failures only
+    /// delay durability: the next interval retries, and disposal flushes again.
+    private void flushCursorsIfDue(final long now) {
+        if (!this.cursorsDirty || now - this.lastFlushNanos < CURSOR_FLUSH_INTERVAL_NANOS) {
+            return;
+        }
+        try {
+            this.cursorStore.store(this.cursorsSnapshot());
+            this.lastFlushNanos = now;
+            this.cursorsDirty = false;
+        } catch (final RuntimeException failure) {
+            LOGGER.log(System.Logger.Level.WARNING, "Aeron clustered-cache cursor flush failed; retrying", failure);
+        }
+    }
+
+        /// Persists the cursors one last time without failing disposal.
+    private void flushCursorsAtDispose() {
+        try {
+            this.cursorStore.store(this.cursorsSnapshot());
+        } catch (final RuntimeException failure) {
+            LOGGER.log(System.Logger.Level.WARNING, "Aeron clustered-cache cursor flush on disposal failed",
+                    failure);
+        }
     }
 
         /// Stops the polling loop and releases the subscription. The wait is bounded;
@@ -315,6 +743,10 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             worker = this.agentThread;
             currentStopped = this.stopped;
         }
+        /* Persist what was applied so a restart validates its first sequence
+         * against this cursor instead of accepting anything. Best-effort: a
+         * failure only risks a conservative extra invalidation on restart. */
+        this.flushCursorsAtDispose();
         if (worker == null) {
             /* Never started: no subscription exists, but close through the resource
              * owner so a receiver-only provider does not retain an unbound lifecycle
@@ -332,6 +764,8 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
                 if (closeFailure == null) closeFailure = releaseFailure;
                 else if (closeFailure != releaseFailure) closeFailure.addSuppressed(releaseFailure);
             }
+            if (this.hmacSecret != null) Arrays.fill(this.hmacSecret, (byte) 0);
+            if (this.previousHmacSecret != null) Arrays.fill(this.previousHmacSecret, (byte) 0);
             if (closeFailure != null) {
                 throw closeFailure;
             }
@@ -366,6 +800,8 @@ public final class AeronClusteredCacheMessageReceiver implements Disposable {
             }
         }
         this.releaseSequence.run();
-        LOGGER.log(System.Logger.Level.DEBUG, "Disposed Aeron clustered-cache receiver: received=%s, selfSkipped=%s, malformed=%s, gaps=%s".formatted(this.received.sum(), this.selfSkipped.sum(), this.malformed.sum(), this.gaps.sum()));
+        if (this.hmacSecret != null) Arrays.fill(this.hmacSecret, (byte) 0);
+        if (this.previousHmacSecret != null) Arrays.fill(this.previousHmacSecret, (byte) 0);
+        LOGGER.log(System.Logger.Level.DEBUG, "Disposed Aeron clustered-cache receiver: received=%s, selfSkipped=%s, heartbeats=%s, malformed=%s, gaps=%s".formatted(this.received.sum(), this.selfSkipped.sum(), this.heartbeats.sum(), this.malformed.sum(), this.gaps.sum()));
     }
 }

@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import java.util.HexFormat;
+import java.util.Locale;
 import java.util.UUID;
 
 /// Durable Aeron replication position.
@@ -40,12 +41,12 @@ public record ReplicationCursor(
         /* Allocation-free validity scan. The per-message path builds cursors
          * from freshly encoded bytes whose hex is valid by construction; fully
          * decoding it here just to throw the bytes away would allocate on
-         * every applied message. Uppercase is accepted exactly as HexFormat
-         * parsing accepts it; producers still emit lowercase so identical
-         * positions compare equal as strings. */
+         * every applied message. Uppercase input is accepted but normalized
+         * to lowercase so identical positions always compare equal as strings. */
         if (!providerPosition.isEmpty() && !isHex(providerPosition)) {
             throw new IllegalArgumentException("providerPosition must be even-length hex");
         }
+        providerPosition = providerPosition.toLowerCase(Locale.ROOT);
     }
 
         /// Creates a cursor from raw provider position bytes.

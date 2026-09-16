@@ -63,12 +63,6 @@ public interface StorageBackupManager {
     /// @throws NodeLibraryException if backup creation fails
     void createStorageBackup(boolean useManualSlot) throws NodeLibraryException;
 
-        /// Restores the latest backup.
-    ///
-    /// @param targetRootPath destination root
-    /// @throws NodeLibraryException if restore fails
-    void restoreLatestBackup(Path targetRootPath) throws NodeLibraryException;
-
         /// Lists available backups.
     ///
     /// @return backup metadata
@@ -144,7 +138,6 @@ public interface StorageBackupManager {
 
                 final List<BackupMetadata> backups = this.listBackups();
                 final long timestamp = this.nextBackupTimestamp(backups, useManualSlot);
-                final var newBackup = new BackupMetadata(timestamp, useManualSlot);
                 final RuntimeException readerFailure = this.dataClient.failure();
                 if (readerFailure != null) {
                     throw new IllegalStateException("Cannot create backup after replication reader failure", readerFailure);
@@ -168,24 +161,44 @@ public interface StorageBackupManager {
                     }
                 }
 
+                /* The manifest cursor must describe the stopped boundary, not the
+                 * position observed before the stop resolved. Anything captured
+                 * earlier can lag the boundary the backup actually quiesced at.
+                 * The backup generation comes from that same cursor, so a node
+                 * on a shared volume only ever restores its own cluster, epoch,
+                 * and recording. The backup id is random, so concurrent
+                 * publishers never share an archive name. */
+                final ReplicationCursor cursor = this.cursorSupplier.get();
+                final var newBackup = BackupMetadata.New(timestamp, useManualSlot, cursor);
+                final var localIdentity = BackupMetadata.Identity.of(cursor);
+
                 Throwable operationFailure = null;
                 try {
-                    this.backend.createBackup(this.storageConnection, this.cursorSupplier.get(), newBackup);
+                    this.backend.createBackup(this.storageConnection, cursor, newBackup);
+
+                    /* The retention cursor is resolved before pruning while the
+                     * previous archive still exists to read it from. */
+                    final ReplicationCursor retentionCursor =
+                            useManualSlot ? null : this.retentionCursorExcluding(newBackup, localIdentity);
 
                     /* Prune only after the new backup is durable.  If upload fails, every
-                     * previously recoverable backup remains available for recovery. */
-                    if (!backups.isEmpty()) {
+                     * previously recoverable backup remains available for recovery.
+                     * Only backups compatible with this node count: pruning must
+                     * never delete another generation sharing the volume. */
+                    final List<BackupMetadata> compatible = backups.stream()
+                            .filter(backup -> backup.isCompatibleWith(localIdentity))
+                            .toList();
+                    if (!compatible.isEmpty()) {
                         if (useManualSlot) {
-                            backups.stream().filter(BackupMetadata::manualSlot).forEach(this::deleteBackup);
+                            compatible.stream().filter(BackupMetadata::manualSlot).forEach(this::deleteBackup);
                         } else {
                             // just in case there are multiple backups too many
-                            final int toDeleteCount = (int) backups.stream().filter(b -> !b.manualSlot()).count()
-                                                      - this.maxBackupCount + 1;
-                            LOGGER.log(System.Logger.Level.DEBUG, "Deleting %s oldest backup(s)".formatted(toDeleteCount));
-                            final List<BackupMetadata> nonManual = backups.stream()
+                            final List<BackupMetadata> nonManual = compatible.stream()
                                     .filter(b -> !b.manualSlot())
                                     .sorted(Comparator.comparingLong(BackupMetadata::timestamp))
                                     .toList();
+                            final int toDeleteCount = nonManual.size() - this.maxBackupCount + 1;
+                            LOGGER.log(System.Logger.Level.DEBUG, "Deleting %s oldest backup(s)".formatted(toDeleteCount));
                             for (int i = 0; i < Math.max(0, toDeleteCount) && i < nonManual.size(); i++) {
                                 this.deleteBackup(nonManual.get(i));
                             }
@@ -195,10 +208,9 @@ public interface StorageBackupManager {
                     if (!useManualSlot) {
                         // delete up to the previous backup to save on replication log storage
                         if (this.retention.isSupported()) {
-                            final var info = this.backend.getCursorFromPreviousBackup(1);
-                            if (info != null) {
+                            if (retentionCursor != null) {
                                 final ReplicationLogRetention.MaintenanceResult result =
-                                        this.deleteThroughWithReplayRetry(info);
+                                        this.deleteThroughWithReplayRetry(retentionCursor);
                                 switch (result.status()) {
                                     case DELETED -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention deleted Archive history through %s".formatted(result.position()));
                                     case NOTHING_TO_DELETE -> LOGGER.log(System.Logger.Level.DEBUG, "Replication retention found no complete Archive segment to delete");
@@ -243,15 +255,6 @@ public interface StorageBackupManager {
                 throw new NodeLibraryException("No unique timestamp is available for a new backup");
             }
             return timestamp;
-        }
-
-        @Override
-        public void restoreLatestBackup(final Path targetRootPath) {
-            final var backup = this.backend.getLastBackup(0);
-            if (backup == null) {
-                throw new NodeLibraryException("No backups are available to restore");
-            }
-            this.restoreBackup(targetRootPath, backup);
         }
 
         @Override
@@ -309,6 +312,31 @@ public interface StorageBackupManager {
                 }
                 XThreads.sleep(100);
             }
+        }
+
+                /// Resolves the retention cursor from the newest backup compatible
+        /// with this node, excluding the backup that was just created.
+        ///
+        /// Counting from the newest backup overall would hand retention a
+        /// cursor from an unrelated generation sharing the volume, deleting
+        /// log history this node's own restores still need.
+        ///
+        /// @param created        backup that was just published
+        /// @param localIdentity  this node's backup identity
+        /// @return cursor of the previous compatible backup, or `null` when none exists
+        private ReplicationCursor retentionCursorExcluding(
+                final BackupMetadata created,
+                final BackupMetadata.Identity localIdentity) {
+            final var previous = this.backend.listBackups().stream()
+                    .filter(backup -> !backup.backupId().equals(created.backupId()))
+                    .filter(backup -> backup.isCompatibleWith(localIdentity))
+                    .max(Comparator.comparingLong(BackupMetadata::timestamp)
+                            .thenComparing(BackupMetadata::backupId))
+                    .orElse(null);
+            if (previous == null) {
+                return null;
+            }
+            return this.backend.getCursorForBackup(previous);
         }
 
                 /// Retries a purge that is temporarily blocked by an active Archive replay.

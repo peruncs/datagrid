@@ -16,7 +16,7 @@ public final class AeronEnvelopeBenchmark {
     private AeronEnvelopeBenchmark() {
     }
 
-    public static void main(final String[] arguments) {
+    static void main(final String[] arguments) {
         int iterations = 2_000;
         int warmup = 100;
         int chunkSize = 16 * 1024;
@@ -99,7 +99,7 @@ public final class AeronEnvelopeBenchmark {
     ) {
         for (int chunkIndex = 0, offset = 0; chunkIndex < chunkCount; chunkIndex++) {
             final int length = Math.min(chunkSize, payloadLength - offset);
-            AeronReplicationEnvelope.encode(target, 0, clusterId, epoch, sequence,
+            AeronReplicationEnvelope.encode(target, 0, clusterId, epoch, 1L, sequence,
                     AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength, chunkIndex, chunkCount, offset, 0,
                     payload, offset, length);
             offset += length;

@@ -35,6 +35,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private static final int STATE_VERSION = 3;
 
     private final byte[] secret;
+    private final byte[] previousSecret;
     private final Set<UUID> configuredReaders;
     private final Runnable ensureWriter;
     private final RecordingPositions recordingPositions;
@@ -88,6 +89,29 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             final Path statePath,
             final long operationTimeoutMillis
     ) {
+        this(secret, readers, ensureWriter, recordingPositions, recordingId, writerBoundary, segmentPurger,
+                clusterId, storeGeneration, writerEpoch, termLength, segmentLength, watermarkDeliveryAvailable,
+                statePath, operationTimeoutMillis, null);
+    }
+
+    AeronArchiveRetention(
+            final byte[] secret,
+            final Set<UUID> readers,
+            final Runnable ensureWriter,
+            final RecordingPositions recordingPositions,
+            final LongSupplier recordingId,
+            final Supplier<AeronWriterBoundary> writerBoundary,
+            final LongUnaryOperator segmentPurger,
+            final UUID clusterId,
+            final UUID storeGeneration,
+            final long writerEpoch,
+            final IntSupplier termLength,
+            final IntSupplier segmentLength,
+            final BooleanSupplier watermarkDeliveryAvailable,
+            final Path statePath,
+            final long operationTimeoutMillis,
+            final byte[] previousSecret
+    ) {
         Objects.requireNonNull(secret, "secret");
         Objects.requireNonNull(readers, "readers");
         Objects.requireNonNull(ensureWriter, "ensureWriter");
@@ -101,8 +125,9 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         Objects.requireNonNull(segmentLength, "segmentLength");
         Objects.requireNonNull(watermarkDeliveryAvailable, "watermarkDeliveryAvailable");
         this.secret = secret.clone();
+        this.previousSecret = previousSecret == null ? null : previousSecret.clone();
         this.configuredReaders = Set.copyOf(readers);
-        this.quorum = new AeronAuthenticatedWatermark.Quorum(readers, this.secret);
+        this.quorum = new AeronAuthenticatedWatermark.Quorum(readers, this.secret, this.previousSecret);
         this.ensureWriter = ensureWriter;
         this.recordingPositions = recordingPositions;
         this.recordingId = recordingId;
@@ -345,7 +370,8 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                     "Aeron retention watermark delivery is not configured");
         }
         this.ensureStateRestored();
-        if (watermark == null || !this.quorum.acceptsReader(watermark.readerId()) || !watermark.verify(this.secret) ||
+        if (watermark == null || !this.quorum.acceptsReader(watermark.readerId()) ||
+            !watermark.verifyAny(this.secret, this.previousSecret) ||
             watermark.sequence() < 0 || watermark.position() < 0 ||
             !this.matchesWriter(watermark) ||
             (this.recordingId.getAsLong() >= 0 && watermark.recordingId() != this.recordingId.getAsLong())) {
@@ -422,6 +448,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
          * defensive copy for validation, so both copies must be erased explicitly. */
         this.quorum.clearSecret();
         Arrays.fill(this.secret, (byte) 0);
+        if (this.previousSecret != null) Arrays.fill(this.previousSecret, (byte) 0);
         this.secretErased = true;
     }
 
@@ -483,7 +510,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 final byte[] token = new byte[length];
                 buffer.get(token);
                 final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.decode(token);
-                if (!watermark.verify(this.secret) || !this.matchesWriter(watermark)) {
+                if (!watermark.verifyAny(this.secret, this.previousSecret) || !this.matchesWriter(watermark)) {
                     throw new SecurityException("retention state belongs to another Aeron writer");
                 }
                 if (watermark.sequence() < 0 || watermark.position() < 0)
@@ -520,7 +547,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
              * failure observable as partially restored state. The replacement is
              * published in one assignment, so retries always start from a clean view. */
             final AeronAuthenticatedWatermark.Quorum restored =
-                    new AeronAuthenticatedWatermark.Quorum(this.configuredReaders, this.secret);
+                    new AeronAuthenticatedWatermark.Quorum(this.configuredReaders, this.secret, this.previousSecret);
             try {
                 for (final UUID readerId : retiredReaders) {
                     if (!restored.retire(readerId))

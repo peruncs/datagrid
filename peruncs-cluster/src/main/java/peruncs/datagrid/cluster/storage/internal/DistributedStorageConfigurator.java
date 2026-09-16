@@ -4,9 +4,9 @@ package peruncs.datagrid.cluster.storage.internal;
 import org.eclipse.serializer.functional.InstanceDispatcherLogic;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryReplicationTarget;
 import peruncs.datagrid.cluster.storage.types.StorageTypeDictionaryExporterDistributing;
 
 import java.util.function.UnaryOperator;
@@ -22,10 +22,6 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
     private final StorageBinaryDataDistributor distributor;
     private final UnaryOperator<PersistenceTarget<Binary>> targetFactory;
     private final InstanceDispatcherLogic previous;
-
-    public DistributedStorageConfigurator(final StorageBinaryDataDistributor distributor) {
-        this(distributor, delegate -> StorageBinaryReplicationTarget.New(delegate, distributor), null);
-    }
 
     public DistributedStorageConfigurator(final StorageBinaryDataDistributor distributor, final UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
         this(distributor, targetFactory, null);
@@ -90,7 +86,7 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic {
         }
 
         @Override
-        public void exportTypeDictionary(final org.eclipse.serializer.persistence.types.PersistenceTypeDictionary typeDictionary) {
+        public void exportTypeDictionary(final PersistenceTypeDictionary typeDictionary) {
             this.dictionaryExporter.exportTypeDictionary(typeDictionary);
         }
     }

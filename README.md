@@ -9,9 +9,9 @@ is fully consistent locally, while the cluster model is eventual consistency.
 
 ## Modules
 
-| Module | Artifact | Contents |
-|---|---|---|
-| [`peruncs-cache`](peruncs-cache/README.md) | `peruncs-cache` | Clustered Hibernate second-level cache over Aeron |
+| Module                                         | Artifact          | Contents                                                          |
+|------------------------------------------------|-------------------|-------------------------------------------------------------------|
+| [`peruncs-cache`](peruncs-cache/README.md)     | `peruncs-cache`   | Clustered Hibernate second-level cache over Aeron                 |
 | [`peruncs-cluster`](peruncs-cluster/README.md) | `peruncs-cluster` | Node lifecycle, backup, Store replication, and indexes over Aeron |
 
 Each module keeps its own `README.md` and architecture decision records in

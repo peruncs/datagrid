@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;

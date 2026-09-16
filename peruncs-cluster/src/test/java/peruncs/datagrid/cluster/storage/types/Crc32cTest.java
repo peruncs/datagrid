@@ -2,6 +2,8 @@ package peruncs.datagrid.cluster.storage.types;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.zip.CRC32C;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -19,9 +21,38 @@ class Crc32cTest {
         assertEquals(Crc32c.compute(new byte[]{4, 5}), (int) second.getValue());
     }
 
+        /// The reuse overload resets a dirty accumulator instead of continuing it.
+    @Test
+    void reuseOverloadResetsADirtyAccumulator() {
+        final byte[] bytes = new byte[]{9, 8, 7, 6, 5};
+        final CRC32C dirty = Crc32c.accumulator();
+        dirty.update(new byte[]{1, 2, 3});
+
+        assertEquals(Crc32c.compute(bytes), Crc32c.compute(bytes, 0, bytes.length, dirty));
+        assertEquals(Crc32c.compute(bytes, 1, 3), Crc32c.compute(bytes, 1, 3, dirty));
+    }
+
+        /// The whole-array overload matches the explicit range overload.
+    @Test
+    void wholeArrayMatchesExplicitRange() {
+        final byte[] bytes = new byte[]{4, 5, 6};
+        assertEquals(Crc32c.compute(bytes, 0, bytes.length), Crc32c.compute(bytes));
+        assertEquals(Crc32c.compute(bytes, 1, 2, Crc32c.accumulator()), Crc32c.compute(bytes, 1, 2));
+    }
+
+        /// Out-of-range slices and a null reuse accumulator are rejected.
+    @Test
+    void rejectsInvalidRangeAndNullReuse() {
+        final byte[] bytes = new byte[]{1, 2, 3};
+        assertThrows(IllegalArgumentException.class, () -> Crc32c.compute(bytes, -1, 2));
+        assertThrows(IllegalArgumentException.class, () -> Crc32c.compute(bytes, 0, 4));
+        assertThrows(IllegalArgumentException.class, () -> Crc32c.compute(bytes, 2, 2));
+        assertThrows(NullPointerException.class, () -> Crc32c.compute(bytes, 0, 3, null));
+    }
+
         /// Null input is rejected consistently instead of failing while reading its length.
     @Test
     void rejectsNullInput() {
-        assertThrows(NullPointerException.class, () -> Crc32c.compute((byte[]) null));
+        assertThrows(NullPointerException.class, () -> Crc32c.compute(null));
     }
 }

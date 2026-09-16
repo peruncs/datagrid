@@ -37,7 +37,7 @@ public final class ReaderCrashChildMain {
     private ReaderCrashChildMain() {
     }
 
-    public static void main(final String[] args) throws Exception {
+    static void main(final String[] args) throws Exception {
         final Path base = Path.of(required("dg.reader.base")).toAbsolutePath().normalize();
         final Path control = base.resolve("control");
         Files.createDirectories(control);
@@ -261,7 +261,7 @@ public final class ReaderCrashChildMain {
                         AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                         CLUSTER_ID, java.util.UUID.nameUUIDFromBytes("reader-crash-node".getBytes(StandardCharsets.UTF_8)),
                         java.util.UUID.nameUUIDFromBytes("reader-crash-generation".getBytes(StandardCharsets.UTF_8)),
-                        this.recordingId, EPOCH, sequence, position, dataLength, dataChunkCount, crc32c));
+                        this.recordingId, EPOCH, 1L, sequence, position, dataLength, dataChunkCount, crc32c));
             } catch (final IOException failure) {
                 throw new IllegalStateException("cannot persist reader uncertainty marker", failure);
             }

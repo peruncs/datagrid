@@ -93,7 +93,13 @@
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
 					<!-- Keep test fixtures on the class path; production code is JPMS-compiled,
-					     while forked children intentionally receive the complete dependency class path. -->
+					     while forked children intentionally receive the complete dependency class path.
+					     No suite runs on the module path (useModulePath): forked crash fixtures,
+					     dynamic ScopedValue test hooks, and non-modular test helpers assume an
+					     unnamed module. The JPMS descriptor is guarded instead by
+					     ModuleDescriptorConsistencyTest, which parses the compiled
+					     module-info.class and checks its name, requirements, and exports
+					     against the tree and the OSGi manifest configuration. -->
 					<useModulePath>false</useModulePath>
 					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 				</configuration>
@@ -119,39 +125,11 @@
 		</plugins>
 	</build>
 
+	<!-- The unrelocated `shade` profile was removed: shading Aeron, Store,
+	     and Lucene without relocations or minimization would duplicate those
+	     classes onto every consumer classpath. Reintroduce shading only with
+	     full relocations plus minimizeJar behind a new profile. -->
 	<profiles>
-		<profile>
-			<id>shade</id>
-			<build>
-				<plugins>
-					<plugin>
-						<groupId>org.apache.maven.plugins</groupId>
-						<artifactId>maven-shade-plugin</artifactId>
-						<version>3.6.2</version>
-						<executions>
-							<execution>
-								<phase>package</phase>
-								<goals>
-									<goal>shade</goal>
-								</goals>
-							</execution>
-						</executions>
-						<configuration>
-							<filters>
-								<filter>
-									<artifact>*:*</artifact>
-									<excludes>
-										<exclude>META-INF/*.SF</exclude>
-										<exclude>META-INF/*.DSA</exclude>
-										<exclude>META-INF/*.RSA</exclude>
-									</excludes>
-								</filter>
-							</filters>
-						</configuration>
-					</plugin>
-				</plugins>
-			</build>
-		</profile>
 		<profile>
 			<id>crashmatrix</id>
 			<build>

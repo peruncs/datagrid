@@ -17,7 +17,7 @@ class AeronCrashRecoveryPolicyTest {
         /// Verifies archive ahead fails closed as reseed required.
     @Test
     void archiveAheadFailsClosedAsReseedRequired() {
-        final IllegalStateException failure = assertThrows(IllegalStateException.class,
+        final ReseedRequiredException failure = assertThrows(ReseedRequiredException.class,
                 () -> BOUNDARY.validateArchiveStop(101));
         assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
     }
@@ -25,7 +25,7 @@ class AeronCrashRecoveryPolicyTest {
         /// Verifies archive behind fails closed as reseed required.
     @Test
     void archiveBehindFailsClosedAsReseedRequired() {
-        final IllegalStateException failure = assertThrows(IllegalStateException.class,
+        final ReseedRequiredException failure = assertThrows(ReseedRequiredException.class,
                 () -> BOUNDARY.validateArchiveStop(99));
         assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
     }
@@ -33,7 +33,7 @@ class AeronCrashRecoveryPolicyTest {
         /// Verifies active recording cannot be extended from checkpoint.
     @Test
     void activeRecordingCannotBeExtendedFromCheckpoint() {
-        final IllegalStateException failure = assertThrows(IllegalStateException.class,
+        final ReseedRequiredException failure = assertThrows(ReseedRequiredException.class,
                 () -> BOUNDARY.validateArchiveStop(-1));
         assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"));
     }

@@ -2,6 +2,8 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.management.ManagementFactory;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /// Smoke tests the complete publisher staging benchmark without machine-specific limits.
@@ -16,8 +18,20 @@ class AeronPublisherBenchmarkTest {
         assertTrue(result.offeredBytesPerTransaction() > result.copiedBytesPerTransaction());
         assertTrue(result.nanosecondsPerTransaction() > 0);
         assertTrue(result.mebibytesPerSecond() > 0);
-        /* -1 is the documented value when the VM does not expose allocation counters. */
-        assertTrue(result.allocatedBytesPerTransaction() >= -1);
+        /* -1 is only valid when the VM hides allocation counters; on a
+         * supporting VM a negative value would mean the counter regressed, so
+         * assert the branch the runtime actually takes. */
+        if (threadAllocationSupported()) {
+            assertTrue(result.allocatedBytesPerTransaction() >= 0,
+                    "allocation counters are supported, so usage must be measured");
+        } else {
+            assertEquals(-1, result.allocatedBytesPerTransaction());
+        }
+    }
+
+    private static boolean threadAllocationSupported() {
+        return ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
+               && bean.isThreadAllocatedMemorySupported();
     }
 
     @Test

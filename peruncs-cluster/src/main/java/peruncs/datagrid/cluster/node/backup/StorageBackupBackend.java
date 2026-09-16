@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 import static org.eclipse.serializer.math.XMath.notNegative;
 
@@ -32,18 +33,35 @@ public interface StorageBackupBackend {
     /// @throws NodeLibraryException if listing fails
     List<BackupMetadata> listBackups() throws NodeLibraryException;
 
-        /// Restores the latest usable backup.
+        /// Reads the replication cursor stored with one selected backup.
     ///
-    /// @param targetRootPath destination root
-    /// @throws NodeLibraryException if restore fails
-    void restoreLatestBackup(Path targetRootPath) throws NodeLibraryException;
-
-        /// Reads the replication cursor from an earlier backup.
+    /// The cursor is read for a backup that was already selected for
+    /// compatibility, so restores never mix a cursor from an unrelated
+    /// generation with the installed image.
     ///
-    /// @param skip number of newest backups to skip; zero selects the newest
-    /// @return stored replication cursor, or `null` when there is no earlier backup
+    /// @param backup selected backup
+    /// @return stored replication cursor
     /// @throws NodeLibraryException if reading fails
-    ReplicationCursor getCursorFromPreviousBackup(int skip) throws NodeLibraryException;
+    ReplicationCursor getCursorForBackup(BackupMetadata backup) throws NodeLibraryException;
+
+        /// Selects the newest backup compatible with the given node identity.
+    ///
+    /// Backups from another cluster, store generation, epoch, or recording
+    /// are skipped, so a node on a shared volume never installs an unrelated
+    /// image. Ties on creation time break deterministically by backup id.
+    ///
+    /// @param configured node identity to check against
+    /// @return newest compatible backup, or `null` when there is none
+    /// @throws NodeLibraryException if listing fails
+    default BackupMetadata findLatestCompatibleBackup(final BackupMetadata.Identity configured)
+            throws NodeLibraryException {
+        Objects.requireNonNull(configured, "configured");
+        return this.listBackups().stream()
+                .filter(backup -> backup.isCompatibleWith(configured))
+                .max(Comparator.comparingLong(BackupMetadata::timestamp)
+                        .thenComparing(BackupMetadata::backupId))
+                .orElse(null);
+    }
 
         /// Reports whether at least one backup exists.
     ///

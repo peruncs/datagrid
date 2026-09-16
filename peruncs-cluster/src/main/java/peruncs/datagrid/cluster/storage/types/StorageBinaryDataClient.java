@@ -79,6 +79,8 @@ public interface StorageBinaryDataClient extends Disposable {
         /// Returns the latest lifecycle result. Implementations that can distinguish a
     /// resolved transaction boundary should override this method; the fallback
     /// treats a stopped client without a reported failure as a resolved boundary.
+    ///
+    /// @return current lifecycle outcome
     default StopOutcome stopOutcome() {
         if (this.failure() != null) return StopOutcome.FAILED;
         return this.isRunning() ? StopOutcome.RUNNING : StopOutcome.RESOLVED_BOUNDARY;
@@ -107,18 +109,31 @@ public interface StorageBinaryDataClient extends Disposable {
 
         /// Lifecycle outcomes for a replication reader.
     enum StopOutcome {
+        /// Client has not started.
         NOT_STARTED,
+        /// Client is actively reading.
         RUNNING,
+        /// Client is stopping at a boundary.
         STOPPING,
+        /// Client stopped at a resolved transaction boundary.
         RESOLVED_BOUNDARY,
+        /// Client did not reach a boundary before its deadline.
         TIMED_OUT,
+        /// Client stopped because of a terminal failure.
         FAILED,
+        /// Client stopped normally.
         STOPPED,
+        /// Client has been disposed.
         CLOSED
     }
 
         /// Immutable result of a stop-at-latest request.
+    ///
+    /// @param outcome lifecycle outcome
+    /// @param sequence last resolved logical sequence
+    /// @param position last resolved transport position, or `-1`
     record StopResult(StopOutcome outcome, long sequence, long position) {
+        /// Validates the lifecycle outcome.
         public StopResult {
             Objects.requireNonNull(outcome, "outcome");
         }

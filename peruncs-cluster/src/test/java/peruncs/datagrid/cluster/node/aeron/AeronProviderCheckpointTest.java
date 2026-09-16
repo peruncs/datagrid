@@ -62,6 +62,8 @@ class AeronProviderCheckpointTest {
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> directory.toString();
                     case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> archive.toString();
                     case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> checkpoint.toString();
+                    case "ECLIPSE_DATAGRID_BACKUP_PATH" -> directory.resolveSibling(
+                            "%s.backups".formatted(directory.getFileName())).toString();
                     case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> "aeron:udp?control=localhost:%s|control-mode=dynamic|fc=max".formatted(livePort);
                     case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
                     case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",

@@ -11,6 +11,7 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,11 +34,20 @@ final class TransactionAssembler {
     private final StorageBinaryDataReceiver receiver;
     private final Runnable transactionResolved;
     private final ReaderDeliveryListener deliveryListener;
+    private final byte[] authenticationSecret;
+    private final byte[] previousAuthenticationSecret;
     private final AtomicLong lastResolvedSequence = new AtomicLong();
     /* Materialisation can succeed before the durable cursor callback completes.
      * Keep that observation separate for health/lag reporting. */
     private final AtomicLong lastAppliedSequence = new AtomicLong();
     private final AtomicLong lastResolvedPosition = new AtomicLong();
+    /* Greatest writer fencing token accepted so far. A lower token proves the
+     * frame comes from a deposed writer that lost the lease race; it fails
+     * closed instead of interleaving stale history. Seeded from the durable
+     * cursor at startup so a restart never re-accepts superseded history.
+     * Raised only by fully accepted terminal frames (data-chunk tokens are
+     * adopted at commit time), never before validation. */
+    private volatile long lastAcceptedFencingToken;
     private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
     private final AeronReplicationEnvelope.EnvelopeView envelopeView =
             new AeronReplicationEnvelope.EnvelopeView();
@@ -130,6 +140,8 @@ final class TransactionAssembler {
         this.receiver = receiver;
         this.transactionResolved = transactionResolved;
         this.deliveryListener = deliveryListener;
+        this.authenticationSecret = configuration.authenticationSecret();
+        this.previousAuthenticationSecret = configuration.previousAuthenticationSecret();
         if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
             throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
         }
@@ -150,7 +162,8 @@ final class TransactionAssembler {
                 final boolean deliver;
                 synchronized (this) {
                     final AeronReplicationEnvelope.EnvelopeView envelope =
-                            AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
+                            AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView,
+                                    this.authenticationSecret, this.previousAuthenticationSecret);
                     if (this.failure.get() != null) return;
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
                 }
@@ -169,6 +182,18 @@ final class TransactionAssembler {
         if (!envelope.matches(this.clusterId) || this.epoch != envelope.epoch()) {
             throw new IllegalArgumentException("cluster or epoch mismatch");
         }
+        /* Reject stale tokens on every frame, but raise the floor only after a
+         * frame is fully accepted below. Raising it here would let a poison
+         * frame with a higher token but an invalid sequence or checksum lift
+         * the floor before validation fails; that poisoned floor would then
+         * persist through checkpointed cursors. Data chunks therefore adopt
+         * their token at commit time, when the whole transaction validates. */
+        final long token = envelope.fencingToken();
+        final long floor = this.lastAcceptedFencingToken;
+        if (token < floor) {
+            throw new IllegalStateException(
+                    "stale writer fencing token %s below accepted %s; the writer lost the lease race".formatted(token, floor));
+        }
         final long lastResolvedSequence = this.lastResolvedSequence.get();
         if (envelope.sequence() < lastResolvedSequence) {
             throw new IllegalStateException("replication sequence regressed: last resolved %s, received %s".formatted(lastResolvedSequence, envelope.sequence()));
@@ -186,7 +211,8 @@ final class TransactionAssembler {
                     throw new IllegalStateException("replayed data does not match the resolved transaction %s".formatted(lastResolvedSequence));
                 }
                 if (this.transaction == null) {
-                    this.transaction = new Transaction(envelope.sequence(), this.configuration.maxTransactionBytes(), true,
+                    this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
+                            this.configuration.maxTransactionBytes(), true,
                             this.dataCrc, this.crcScratch);
                 }
                 if (this.transaction.sequence != envelope.sequence() || !this.transaction.duplicate)
@@ -217,6 +243,7 @@ final class TransactionAssembler {
                 this.transaction.dispose();
                 this.transaction = null;
             }
+            this.adoptFencingToken(token);
             return false;
         }
         if (envelope.sequence() != this.nextExpectedSequence) {
@@ -239,6 +266,7 @@ final class TransactionAssembler {
                 this.transaction.dispose();
                 this.transaction = null;
             }
+            this.adoptFencingToken(token);
             this.nextExpectedSequence = envelope.sequence() + 1;
             this.delivery.prepare(null, null, null, envelope.sequence(), position, envelope.payloadLength(),
                     envelope.chunkCount(), 0, AeronReplicationEnvelope.Kind.ABORT);
@@ -249,7 +277,8 @@ final class TransactionAssembler {
             throw new IllegalArgumentException("non-data envelope on replication data stream: %s".formatted(envelope.kind()));
         }
         if (this.transaction == null) {
-            this.transaction = new Transaction(envelope.sequence(), this.configuration.maxTransactionBytes(), false,
+            this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
+                    this.configuration.maxTransactionBytes(), false,
                     this.dataCrc, this.crcScratch);
         }
         if (this.transaction.sequence != envelope.sequence()) {
@@ -262,6 +291,7 @@ final class TransactionAssembler {
     private void validateDuplicateCommit(final AeronReplicationEnvelope.EnvelopeView envelope) {
         final Transaction duplicate = this.transaction;
         if (duplicate.dataLength != envelope.payloadLength() ||
+            duplicate.fencingToken != envelope.fencingToken() ||
             duplicate.dataChunkCount != envelope.chunkCount() ||
             duplicate.dataNextChunk != duplicate.dataChunkCount ||
             duplicate.dataOffset != duplicate.dataLength ||
@@ -281,7 +311,8 @@ final class TransactionAssembler {
         if (this.transaction == null) {
             throw new IllegalStateException("commit without data chunks");
         }
-        if (this.transaction.dataLength != envelope.payloadLength() ||
+        if (this.transaction.fencingToken != envelope.fencingToken() ||
+            this.transaction.dataLength != envelope.payloadLength() ||
             this.transaction.dataChunkCount != envelope.chunkCount() ||
             this.transaction.dataNextChunk != this.transaction.dataChunkCount ||
             this.transaction.dataOffset != this.transaction.dataLength ||
@@ -307,6 +338,10 @@ final class TransactionAssembler {
                 throw new IllegalStateException("type dictionary is not valid UTF-8", failure);
             }
         }
+        /* The frame is fully accepted only now: every length, order, checksum,
+         * and dictionary-encoding claim validated. Adopt its fencing token here
+         * so a poison frame can never lift the floor that cursors persist. */
+        this.adoptFencingToken(envelope.fencingToken());
         final ByteBuffer direct = completed.dataStorage == null
                 ? EMPTY_BUFFER.duplicate()
                 : completed.dataStorage;
@@ -328,6 +363,16 @@ final class TransactionAssembler {
                 envelope.chunkCount(), envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
     }
 
+        /// Raises the stale-token floor after a frame is fully accepted.
+    ///
+    /// Data chunks never call this directly; their token is adopted by the
+    /// commit that validates the assembled transaction.
+    private void adoptFencingToken(final long token) {
+        if (token > this.lastAcceptedFencingToken) {
+            this.lastAcceptedFencingToken = token;
+        }
+    }
+
     long lastResolvedSequence() {
         return this.lastResolvedSequence.get();
     }
@@ -342,6 +387,21 @@ final class TransactionAssembler {
 
     long epoch() {
         return this.epoch;
+    }
+
+        /// Seeds the stale-token floor from the durable cursor before any frame is accepted.
+    ///
+    /// @param fencingToken greatest token the persisted cursor accepted, or `0` for a new reader
+    void startingFencingToken(final long fencingToken) {
+        if (fencingToken < 0) {
+            throw new IllegalArgumentException("starting fencing token must not be negative");
+        }
+        this.lastAcceptedFencingToken = fencingToken;
+    }
+
+        /// Returns the greatest writer fencing token accepted so far.
+    long fencingToken() {
+        return this.lastAcceptedFencingToken;
     }
 
     long lastResolvedPosition() {
@@ -385,11 +445,14 @@ final class TransactionAssembler {
                 }
             }
         }
+        if (this.authenticationSecret != null) Arrays.fill(this.authenticationSecret, (byte) 0);
+        if (this.previousAuthenticationSecret != null) Arrays.fill(this.previousAuthenticationSecret, (byte) 0);
     }
 
         /// Holds fragments and commit metadata for one transaction.
     static final class Transaction {
         private final long sequence;
+        private final long fencingToken;
         private final int maxBytes;
         private final boolean duplicate;
         private final CRC32C dataCrc;
@@ -407,9 +470,10 @@ final class TransactionAssembler {
         private int dictionaryLength;
         private int dataLength;
 
-        Transaction(final long sequence, final int maxBytes, final boolean duplicate,
+        Transaction(final long sequence, final long fencingToken, final int maxBytes, final boolean duplicate,
                     final CRC32C dataCrc, final byte[] crcScratch) {
             this.sequence = sequence;
+            this.fencingToken = fencingToken;
             this.maxBytes = maxBytes;
             this.duplicate = duplicate;
             this.dataCrc = dataCrc;
@@ -418,6 +482,9 @@ final class TransactionAssembler {
         }
 
         void add(final AeronReplicationEnvelope.EnvelopeView envelope) {
+            if (envelope.fencingToken() != this.fencingToken) {
+                throw new IllegalStateException("transaction mixes writer fencing tokens");
+            }
             final int payloadLength = envelope.payloadLength();
             final int wireLength = envelope.payloadLengthOnWire();
             if (payloadLength > this.maxBytes) throw new IllegalArgumentException("payload exceeds maxTransactionBytes");

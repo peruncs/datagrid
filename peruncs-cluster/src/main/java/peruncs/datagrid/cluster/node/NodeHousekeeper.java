@@ -114,12 +114,17 @@ final class NodeHousekeeper implements AutoCloseable {
     }
 
         /// Stops future runs and releases the threads. A running task is interrupted.
+    ///
+    /// Only the flag flips hold the monitor; the bounded join runs without
+    /// it so scheduling threads are never blocked behind shutdown.
     @Override
-    public synchronized void close() {
-        if (this.closed) {
-            return;
+    public void close() {
+        synchronized (this) {
+            if (this.closed) {
+                return;
+            }
+            this.closing = true;
         }
-        this.closing = true;
         LOGGER.log(System.Logger.Level.INFO, "Shutting down node housekeeper");
         this.scheduler.shutdownNow();
         try {

@@ -8,7 +8,10 @@ import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.TimeoutException;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.backup.BackupMetadata;
+import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.*;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
@@ -20,12 +23,15 @@ import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAero
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryReplicationTarget;
+import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 import peruncs.datagrid.cluster.storage.types.*;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
@@ -49,6 +55,8 @@ public final class AeronClusterReplicationTransportProvider {
     private static final ScopedValue<BiConsumer<String, Long>> CRASH_HOOK = ScopedValue.newInstance();
     private static final ScopedValue<Long> CHECKPOINT_SEQUENCE = ScopedValue.newInstance();
     private static final ScopedValue<Boolean> DELIVERY_CALLBACK = ScopedValue.newInstance();
+    /// Default heartbeat staleness bound for the writer fencing lease.
+    private static final long DEFAULT_LEASE_STALENESS_MILLIS = 30_000L;
         /// Creates a provider that reads Aeron settings when a transport is created.
     public AeronClusterReplicationTransportProvider() {
     }
@@ -96,15 +104,71 @@ public final class AeronClusterReplicationTransportProvider {
     /// @param properties node configuration
     /// @return Aeron replication transport
     public ClusterReplicationTransport create(final NodeLibraryPropertiesProvider properties) {
-        final Transport transport = new Transport(AeronSettings.fromEnvironment(properties));
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties);
+        final Path leaseDirectory = leaseDirectory(properties);
+        validateLeaseDirectory(settings, leaseDirectory);
+        final Transport transport = new Transport(settings, leaseDirectory,
+                properties.writerLeaseStalenessMillis());
         /* Probe metadata durability before any synchronized runtime startup path. */
         transport.verifyMetadataStorage();
         return transport;
     }
 
+        /// Rejects a lease directory the Aeron runtime recreates or overwrites.
+    ///
+    /// The MediaDriver recreates its directory on every start, so a lease
+    /// stored inside the driver, archive, or checkpoint tree is deleted on the
+    /// next startup and the writer would appear fenced. Failing at wiring time
+    /// is clearer than a lost lease on the first write.
+    ///
+    /// @param settings       resolved Aeron settings
+    /// @param leaseDirectory resolved lease directory, or `null` when unset
+    private static void validateLeaseDirectory(final AeronSettings settings, final Path leaseDirectory) {
+        if (leaseDirectory == null) {
+            return;
+        }
+        if (overlaps(leaseDirectory, settings.aeronDirectory()) ||
+            overlaps(leaseDirectory, settings.archiveDirectory()) ||
+            overlaps(leaseDirectory, settings.checkpointPath())) {
+            throw new IllegalArgumentException(
+                    "writer lease directory must not overlap the Aeron driver, archive, or checkpoint paths: lease=%s, driver=%s, archive=%s, checkpoint=%s".formatted(
+                            leaseDirectory, settings.aeronDirectory(), settings.archiveDirectory(), settings.checkpointPath()));
+        }
+    }
+
+    private static boolean overlaps(final Path left, final Path right) {
+        return left.startsWith(right) || right.startsWith(left);
+    }
+
+        /// Resolves the shared directory holding the writer fencing lease.
+    ///
+    /// The lease must live where every writer of one cluster/generation can
+    /// see it, so it shares the backup volume: the one filesystem this
+    /// topology already treats as shared across machines. A writer without a
+    /// configured shared directory cannot fence, so the directory is required
+    /// for the writer role and absent for readers.
+    ///
+    /// @param properties node configuration
+    /// @return lease directory, or `null` when no shared backup volume is configured
+    private static Path leaseDirectory(final NodeLibraryPropertiesProvider properties) {
+        final String configured = properties.replicationProperty(
+                NodeLibraryPropertiesProvider.Env.EnvKeys.BACKUP_PATH);
+        return configured == null || configured.isBlank()
+                ? null
+                : Paths.get(configured).toAbsolutePath().normalize();
+    }
+
         /// Owns the Aeron resources for one node and one transport lifecycle.
     private static final class Transport implements ClusterReplicationTransport {
         private final AeronSettings settings;
+        private final Path leaseDirectory;
+        /// Heartbeat staleness bound for the writer fencing lease.
+        private final long leaseStalenessMillis;
+        private volatile WriterFencingLease writerLease;
+        /* Fencing token captured when the lease is acquired. Writer checkpoints
+         * and the position supplier read this snapshot instead of performing a
+         * live lease lookup that would throw a bare exception when unleased. */
+        private volatile long writerFencingTokenSnapshot = -1L;
         private final AeronArchiveCapacity archiveCapacity;
         private final AtomicLong nextSequence = new AtomicLong();
         private final AtomicLong readerRecordingId = new AtomicLong(Aeron.NULL_VALUE);
@@ -120,6 +184,8 @@ public final class AeronClusterReplicationTransportProvider {
                 deferredWatermarks = new java.util.concurrent.ConcurrentHashMap<>();
                 /// One transport-owned copy; avoids cloning the configured HMAC key for every cursor.
         private byte[] retentionSecret;
+                /// Retiring key accepted during rotation overlap; `null` outside overlap.
+        private byte[] previousRetentionSecret;
         private volatile AeronRuntime runtime;
         private volatile AeronArchiveReplicationPublisher writer;
         private volatile AeronReplicationWriteCoordinator coordinator;
@@ -138,10 +204,17 @@ public final class AeronClusterReplicationTransportProvider {
         private volatile boolean closed;
         private volatile boolean closing;
 
-        private Transport(final AeronSettings settings) {
+        private Transport(final AeronSettings settings, final Path leaseDirectory, final Long leaseStalenessMillis) {
             this.settings = settings;
+            this.leaseDirectory = leaseDirectory;
+            /* Heartbeat staleness bound for the fencing lease: configurable so
+             * deployments with slow shared volumes can widen it, while the
+             * default keeps takeover within half a minute. */
+            this.leaseStalenessMillis = leaseStalenessMillis == null || leaseStalenessMillis <= 0L
+                    ? DEFAULT_LEASE_STALENESS_MILLIS : leaseStalenessMillis;
             this.archiveCapacity = new AeronArchiveCapacity(settings);
             this.retentionSecret = settings.retentionSecret();
+            this.previousRetentionSecret = settings.previousRetentionSecret();
             this.writerRecordingId.set(settings.recordingId());
         }
 
@@ -224,6 +297,13 @@ public final class AeronClusterReplicationTransportProvider {
             return "aeron";
         }
 
+        @Override
+        public BackupMetadata.Identity configuredBackupIdentity() {
+            return new BackupMetadata.Identity(
+                    this.settings.clusterId(), this.settings.storeGeneration(),
+                    this.settings.epoch(), this.settings.recordingId());
+        }
+
         /// Returns the distributor for the provider's single replication stream.
         ///
         /// The returned handle carries dictionaries and lifecycle control
@@ -258,7 +338,7 @@ public final class AeronClusterReplicationTransportProvider {
                 throw new IllegalStateException("Aeron transport supports one replication stream per provider");
             }
             this.distributor = new AeronDistributor(
-                    () -> NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()),
+                    () -> this.settings.role().isWriter(),
                     value ->
                     {
                         this.nextSequence.accumulateAndGet(value, Math::max);
@@ -269,12 +349,17 @@ public final class AeronClusterReplicationTransportProvider {
 
         @Override
         public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-                final String streamName, final StorageBinaryDataDistributor distributor) {
+                final String streamName, final StorageBinaryDataDistributor distributor,
+                final Supplier<StorageConnection> writerStorage) {
             synchronized (this) {
                 this.ensureOpen();
                 this.claimStream(streamName);
-                if (!NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
-                    return UnaryOperator.identity();
+                if (!this.settings.role().isWriter()) {
+                    /* Reader roles must reproduce the writer's history through
+                     * the replication import path, which bypasses this target.
+                     * Any locally originated write is rejected instead of
+                     * persisting an unreplicated divergence. */
+                    return RejectingPersistenceTarget::New;
                 }
             }
             final AeronReplicationWriteCoordinator coordinator = this.ensureCoordinator();
@@ -288,7 +373,19 @@ public final class AeronClusterReplicationTransportProvider {
                             cluster.messageIndex(sequence);
                         }
                     },
-                    () -> !(distributor instanceof StorageBinaryDataDistributor cluster) || !cluster.ignoreDistribution()
+                    () -> !(distributor instanceof StorageBinaryDataDistributor cluster) || !cluster.ignoreDistribution(),
+                    /* Writer-side index enforcement: before every distributed
+                     * write the reachable graph is scanned for external index
+                     * registrations. The storage connection does not exist
+                     * during wiring, so the supplier is resolved lazily and a
+                     * null connection (root creation) skips the scan. */
+                    () ->
+                    {
+                        final StorageConnection connection = writerStorage == null ? null : writerStorage.get();
+                        if (connection != null) {
+                            ClusterStoreIndexes.validateForPublication(connection);
+                        }
+                    }
             );
         }
 
@@ -305,7 +402,7 @@ public final class AeronClusterReplicationTransportProvider {
         /// re-advertises its watermark immediately so a restarted writer can
         /// rebuild its retention quorum without waiting for new traffic.
         ///
-        /// @param packetAcceptor destination for received packets
+        /// @param receiver destination for received binaries and dictionaries
         /// @param streamName logical stream name
         /// @param cursorListener callback after data is applied
         /// @param startingCursor durable starting cursor
@@ -313,7 +410,7 @@ public final class AeronClusterReplicationTransportProvider {
         /// @return binary data client
         @Override
         public synchronized StorageBinaryDataClient client(
-                final StorageBinaryDataPacketAcceptor packetAcceptor,
+                final StorageBinaryDataReceiver receiver,
                 final String streamName,
                 final AfterDataMessageConsumedListener cursorListener,
                 final ReplicationCursor startingCursor,
@@ -326,10 +423,10 @@ public final class AeronClusterReplicationTransportProvider {
              * the one-writer/N-reader topology and expose a partially initialized reader
              * through the writer's health path. Configure a separate reader/backup-reader
              * node when replay is required. */
-            if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
+            if (this.settings.role().isWriter()) {
                 return StorageBinaryDataClient.NoOp(startingCursor);
             }
-            Objects.requireNonNull(packetAcceptor, "packetAcceptor");
+            Objects.requireNonNull(receiver, "receiver");
             this.ensureRuntime();
             final long recordingId = this.settings.recordingId() >= 0
                     ? this.settings.recordingId() : this.discoverReaderRecordingId();
@@ -343,6 +440,15 @@ public final class AeronClusterReplicationTransportProvider {
             if (!aeronCursor && cursor.hasProviderPosition()) {
                 throw new IllegalArgumentException("an uninitialized cursor cannot carry Aeron provider state");
             }
+            if (!aeronCursor && cursor.logicalSequence() >= 0) {
+                /* Claims prior history without Aeron provider identity: neither
+                 * a new reader nor a resumable cursor. Fail closed instead of
+                 * silently restarting from scratch over existing Store files. */
+                throw reseedRequired(
+                        "non-Aeron cursor claims sequence %s without provider identity; manual reseed is required".formatted(
+                                cursor.logicalSequence()),
+                        null);
+            }
             if (aeronCursor && cursor.storeGeneration() != null &&
                 !this.settings.storeGeneration().equals(cursor.storeGeneration())) {
                 throw new IllegalArgumentException("cursor store generation does not match Aeron configuration");
@@ -351,10 +457,11 @@ public final class AeronClusterReplicationTransportProvider {
                 throw new IllegalArgumentException("resolved Aeron cursor must identify its Store generation");
             }
             final AtomicReference<StorageBinaryDataClientAeronArchive> readerRef = new AtomicReference<>();
-            final long cursorPosition = this.cursorPosition(cursor, recordingId);
-            if (aeronCursor && cursor.logicalSequence() >= 0 && cursorPosition < 0) {
-                throw new IllegalArgumentException("Aeron cursor has a sequence but no recording position");
-            }
+            /* Decode once and validate the token together with the recording
+             * identity, so the seed floor below can never come from a cursor
+             * whose identity checks failed. */
+            final AeronReplicationCursor validatedCursor = this.validatedAeronCursor(cursor, aeronCursor, recordingId);
+            final long cursorPosition = validatedCursor == null ? -1L : validatedCursor.recordingPosition();
             /* Validate the complete replacement before disturbing a healthy reader.
              * The reader recording id is also used by its uncertainty-marker callback,
              * so it must not change until the old polling thread has exited. */
@@ -378,7 +485,7 @@ public final class AeronClusterReplicationTransportProvider {
                         this.settings.clusterId(),
                         this.settings.epoch(),
                         aeronCursor ? cursor.logicalSequence() : -1,
-                        new ReceiverAdapter(this, packetAcceptor),
+                        new ReceiverAdapter(this, receiver),
                         () -> {
                             final StorageBinaryDataClientAeronArchive current = readerRef.get();
                             if (current != null && current == this.reader) {
@@ -392,7 +499,8 @@ public final class AeronClusterReplicationTransportProvider {
                                      * boundary to the writer's retention controller. */
                                     final byte[] position = new AeronReplicationCursor(
                                             this.settings.clusterId(), this.settings.nodeId(), this.settings.storeGeneration(),
-                                            this.settings.epoch(), recordingId, snapshot.position(), snapshot.sequence()).encode();
+                                            this.settings.epoch(), this.currentFencingToken(), recordingId,
+                                            snapshot.position(), snapshot.sequence()).encode();
                                     this.runInDeliveryCallback(() -> cursorListener.onApplied(ReplicationCursor.of(
                                             "aeron", this.settings.storeGeneration(), snapshot.sequence(), position)));
                                 }
@@ -410,6 +518,12 @@ public final class AeronClusterReplicationTransportProvider {
                 this.reader = null;
                 throw failure;
             }
+            /* Seed the stale-token floor from the validated cursor before the
+             * reader accepts any frame, so a restart never re-accepts history
+             * from a writer its persisted cursor already moved past. The token
+             * comes from the same validated cursor as the replay position
+             * above, never from a separately decoded copy. */
+            replacement.seedFencingToken(validatedCursor == null ? 0L : validatedCursor.fencingToken());
             this.reader = replacement;
             readerRef.set(replacement);
             /* Re-advertise the durable cursor when a reader restarts even if no new
@@ -422,22 +536,41 @@ public final class AeronClusterReplicationTransportProvider {
                     this.settings.nodeId(), this.settings.storeGeneration(), this.settings.epoch());
         }
 
-                /// Decodes and validates the sole supported self-describing Aeron cursor.
-        private long cursorPosition(final ReplicationCursor cursor, final long expectedRecordingId) {
-            final byte[] positionBytes = cursor.providerPositionBytes();
-            if (positionBytes.length == 0) return -1L;
-            try {
-                final AeronReplicationCursor aeron = AeronReplicationCursor.decode(positionBytes);
-                if (!aeron.clusterId().equals(this.settings.clusterId()) ||
-                    !aeron.storeGeneration().equals(this.settings.storeGeneration()) ||
-                    aeron.epoch() != this.settings.epoch() || aeron.recordingId() != expectedRecordingId ||
-                    aeron.sequence() != cursor.logicalSequence()) {
-                    throw new ReseedRequiredException("Aeron cursor identity does not match the configured reader or writer");
-                }
-                return aeron.recordingPosition();
-            } catch (final IllegalArgumentException failure) {
-                throw new ReseedRequiredException("invalid Aeron cursor", failure);
+                /// Decodes the durable cursor and validates its recording identity together
+        /// with its fencing token. A `null` result is the explicit new-reader
+        /// case (no provider position, sequence `-1`); anything else that is
+        /// absent or mismatched fails closed because the Store may already hold
+        /// history the cursor can no longer address.
+        ///
+        /// @param cursor              durable starting cursor
+        /// @param aeronCursor         whether the cursor belongs to this transport
+        /// @param expectedRecordingId recording the reader will replay
+        /// @return validated Aeron cursor, or `null` for a new reader
+        private AeronReplicationCursor validatedAeronCursor(
+                final ReplicationCursor cursor, final boolean aeronCursor, final long expectedRecordingId) {
+            if (!aeronCursor) {
+                return null;
             }
+            final byte[] positionBytes = cursor.providerPositionBytes();
+            if (positionBytes.length == 0) {
+                if (cursor.logicalSequence() >= 0) {
+                    throw reseedRequired("Aeron cursor has a sequence but no recording position", null);
+                }
+                return null;
+            }
+            final AeronReplicationCursor aeron;
+            try {
+                aeron = AeronReplicationCursor.decode(positionBytes);
+            } catch (final IllegalArgumentException failure) {
+                throw reseedRequired("invalid Aeron cursor", failure);
+            }
+            if (!aeron.clusterId().equals(this.settings.clusterId()) ||
+                !aeron.storeGeneration().equals(this.settings.storeGeneration()) ||
+                aeron.epoch() != this.settings.epoch() || aeron.recordingId() != expectedRecordingId ||
+                aeron.sequence() != cursor.logicalSequence()) {
+                throw reseedRequired("Aeron cursor identity does not match the configured reader or writer", null);
+            }
+            return aeron;
         }
 
         private long discoverReaderRecordingId() {
@@ -501,7 +634,8 @@ public final class AeronClusterReplicationTransportProvider {
                                     ReplicationDurabilityMode.ARCHIVE_FIRST,
                                     AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                                     settings.clusterId(), settings.nodeId(), settings.storeGeneration(), readerRecordingId.get(),
-                                    settings.epoch(), sequence, position, dataLength, dataChunkCount, crc32c);
+                                    settings.epoch(), Transport.this.currentFencingToken(), sequence, position,
+                                    dataLength, dataChunkCount, crc32c);
                             AeronReplicationCheckpointStore.write(path, checkpoint);
                         } catch (final IOException failure) {
                             throw reseedRequired("cannot persist uncertain reader import marker: %s".formatted(path), failure);
@@ -531,16 +665,46 @@ public final class AeronClusterReplicationTransportProvider {
             this.claimStream(streamName);
             if (this.positionProvider == null) {
                 this.positionProvider = new AeronPositionProvider(
-                        () -> NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()),
+                        () -> this.settings.role().isWriter(),
                         () -> this.writer != null && !this.writerRecoveryInProgress && !this.closed,
                         this::ensureWriter,
                         () -> this.writerBoundary,
                         this.settings::clusterId,
                         this.settings::nodeId,
                         this.settings::storeGeneration,
-                        this.settings::epoch);
+                        this.settings::epoch,
+                        this::positionWriterFencingToken);
             }
             return this.positionProvider;
+        }
+
+        /// Reports whether the held writer lease is still current.
+        ///
+        /// Write admission deliberately bypasses the lease freshness cache:
+        /// commit fencing must observe a takeover immediately, not after the
+        /// background-check interval expires.
+        private boolean writerFencingTokenValid() {
+            final WriterFencingLease lease = this.writerLease;
+            return lease != null && lease.isCurrentUncached();
+        }
+
+        private peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate writerLeaseGate() {
+            return new peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate() {
+                @Override
+                public boolean isValid() {
+                    return writerFencingTokenValid();
+                }
+
+                @Override
+                public long offerUnderOwnership(final java.util.function.LongSupplier offer) {
+                    final WriterFencingLease lease = writerLease;
+                    if (lease == null) {
+                        throw new IllegalStateException(
+                                "writer fencing lease lost before commit; restart required");
+                    }
+                    return lease.executeUnderOwnership(offer);
+                }
+            };
         }
 
         /// Returns the authenticated Archive retention controller.
@@ -576,7 +740,8 @@ public final class AeronClusterReplicationTransportProvider {
                 };
                 return this.retention;
             }
-            final AeronArchiveRetention created = this.newRetentionController(retentionSecret);
+            final AeronArchiveRetention created =
+                    this.newRetentionController(retentionSecret, this.previousRetentionSecret);
             /* Publish the controller before runtime startup because the writer-side
              * watermark setup consults this field.  If startup fails, however, do not
              * leave a closed/broken controller cached for the next retention() call. */
@@ -595,7 +760,8 @@ public final class AeronClusterReplicationTransportProvider {
             }
         }
 
-        private AeronArchiveRetention newRetentionController(final byte[] retentionSecret) {
+        private AeronArchiveRetention newRetentionController(
+                final byte[] retentionSecret, final byte[] previousRetentionSecret) {
             return new AeronArchiveRetention(retentionSecret, this.settings.retentionReaders(),
                     () ->
                     {
@@ -622,7 +788,8 @@ public final class AeronClusterReplicationTransportProvider {
                     () -> this.watermarkChannel != null && this.watermarkChannel.available(),
                     this.settings.checkpointPath().resolveSibling(
                             "%s.retention".formatted(this.settings.checkpointPath().getFileName())),
-                    AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
+                    AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS,
+                    previousRetentionSecret);
         }
 
         private void publishReaderWatermark(final CursorSnapshot snapshot, final long recordingId) {
@@ -635,10 +802,10 @@ public final class AeronClusterReplicationTransportProvider {
 
         private void ensureWatermarkChannel() {
             if (this.watermarkChannel != null || this.retentionSecret == null) return;
-            if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
+            if (this.settings.role().isWriter()) {
                 if (!this.retentionSupported()) return;
                 if (this.retention == null) {
-                    this.retention = this.newRetentionController(this.retentionSecret);
+                    this.retention = this.newRetentionController(this.retentionSecret, this.previousRetentionSecret);
                 }
                 final AeronArchiveRetention controller = (AeronArchiveRetention) this.retention;
                 this.watermarkChannel = AeronWatermarkChannel.writer(this.aeron(),
@@ -652,7 +819,7 @@ public final class AeronClusterReplicationTransportProvider {
                                  * configured reader instead of losing the only acknowledgement. */
                                 if (!this.writerReady()) {
                                     if (this.settings.retentionReaders().contains(watermark.readerId()) &&
-                                        watermark.verify(this.retentionSecret) &&
+                                        watermark.verifyAny(this.retentionSecret, this.previousRetentionSecret) &&
                                         watermark.clusterId().equals(this.settings.clusterId()) &&
                                         watermark.storeGeneration().equals(this.settings.storeGeneration()) &&
                                         watermark.writerEpoch() == this.settings.epoch()) {
@@ -718,7 +885,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         private boolean retentionSupported() {
             return this.retentionSecret != null && !this.settings.retentionReaders().isEmpty() &&
-                   NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && !this.settings.externalArchive();
+                   this.settings.role().isWriter() && !this.settings.externalArchive();
         }
 
         @Override
@@ -736,7 +903,7 @@ public final class AeronClusterReplicationTransportProvider {
                         () -> this.driverFailure.get() != null,
                         () -> this.archiveCapacity.available(this.settings.replication().maxTransactionBytes()),
                         this::writerReady,
-                        () -> NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()),
+                        () -> this.settings.role().isWriter(),
                         this::writerCheckpointState,
                         this.archiveCapacity::usableSpaceBytes,
                         () -> this.writerBoundary.position(),
@@ -748,7 +915,7 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         private boolean writerReady() {
-            return NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && !this.writerRecoveryInProgress &&
+            return this.settings.role().isWriter() && !this.writerRecoveryInProgress &&
                    this.writerRecoveryState == null && this.writer != null && !this.writer.isFailed();
         }
 
@@ -760,7 +927,7 @@ public final class AeronClusterReplicationTransportProvider {
             if (this.driverFailure.get() != null) {
                 return ReplicationHealth.State.FAILED;
             }
-            if (!NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) {
+            if (!this.settings.role().isWriter()) {
                 return null;
             }
             /* Preserve a failed startup result even though the writer object was never
@@ -795,6 +962,10 @@ public final class AeronClusterReplicationTransportProvider {
                 throw new IllegalStateException("Aeron writer cannot start while transport is closing");
             }
             if (this.writer != null) return this.writer;
+            /* Fence before any publication path exists: a second writer for
+             * the same cluster/generation fails here while the first writer's
+             * heartbeat is fresh, instead of publishing concurrently. */
+            this.ensureWriterLease();
             this.writerRecoveryInProgress = true;
             try {
                 this.ensureRuntime();
@@ -865,6 +1036,64 @@ public final class AeronClusterReplicationTransportProvider {
             }
         }
 
+                /// Acquires the writer fencing lease, failing when another writer holds it.
+        ///
+        /// The lease carries the monotonically increasing token every envelope,
+        /// checkpoint, and cursor publishes; readers reject stale tokens so a
+        /// deposed writer cannot interleave history. Acquisition happens before
+        /// the writer publication path exists, so a second writer for the same
+        /// cluster/generation fails here instead of publishing concurrently.
+        private void ensureWriterLease() {
+            if (this.writerLease == null) {
+                if (this.leaseDirectory == null) {
+                    throw new IllegalStateException(
+                            "a writer requires a shared lease directory (%s) so it can fence against another writer for the same cluster/generation".formatted(
+                                    NodeLibraryPropertiesProvider.Env.EnvKeys.BACKUP_PATH));
+                }
+                final Duration staleness = Duration.ofMillis(this.leaseStalenessMillis);
+                final WriterFencingLease acquired = WriterFencingLease.acquire(
+                        this.leaseDirectory, this.settings.clusterId(), this.settings.storeGeneration(),
+                        this.settings.nodeId(), staleness);
+                this.writerLease = acquired;
+                /* Capture the token once, while the lease is known held. Every
+                 * later checkpoint and cursor reuses this snapshot instead of a
+                 * live lookup that would fail once the lease is gone. */
+                this.writerFencingTokenSnapshot = acquired.fencingToken();
+            }
+        }
+
+                /// Returns the fencing token captured at lease acquisition.
+        ///
+        /// Write paths always run after [ensureWriterLease], so the snapshot is
+        /// set; a missing snapshot is a defensive fail-closed, never a live-path
+        /// lookup that could observe the lease disappearing mid-write.
+        private long heldWriterFencingToken() {
+            final long token = this.writerFencingTokenSnapshot;
+            if (token <= 0) {
+                throw new IllegalStateException("writer publishes without a fencing lease; a restart is required");
+            }
+            return token;
+        }
+
+                /// Returns the captured fencing token for the writer position supplier.
+        ///
+        /// The position path must report a typed unavailability instead of the
+        /// bare lease exception used on internal write paths.
+        private long positionWriterFencingToken() {
+            final long token = this.writerFencingTokenSnapshot;
+            if (token <= 0) {
+                throw new ReplicationPositionUnavailableException(
+                        "Aeron writer fencing lease is not held; no writer position can be established");
+            }
+            return token;
+        }
+
+                /// Returns the newest writer fencing token this reader has accepted.
+        private long currentFencingToken() {
+            final StorageBinaryDataClientAeronArchive current = this.reader;
+            return current == null ? 0L : current.fencingToken();
+        }
+
         private AeronReplicationWriteCoordinator ensureCoordinator() {
             final AeronReplicationWriteCoordinator coordinator;
             synchronized (this) {
@@ -886,9 +1115,19 @@ public final class AeronClusterReplicationTransportProvider {
                                     }
                                 }
                             };
-                    this.coordinator = this.ensureWriterLocked().newWriteCoordinator(
+                    final AeronArchiveReplicationPublisher writer = this.ensureWriterLocked();
+                    /* Claim the lease token before the coordinator admits its
+                     * first transaction, and suspend admission once the lease
+                     * is lost: a writer that lost a steal race must stop, not
+                     * keep publishing with a stale token readers will reject.
+                     * Lease validity is checked before Archive capacity so a
+                     * fenced writer fails with a distinct lease-lost error,
+                     * never a misleading capacity message. */
+                    writer.claimFencingToken(this.heldWriterFencingToken());
+                    this.coordinator = writer.newWriteCoordinator(
                             this.settings.replication().durabilityMode(), checkpointWriter,
-                            this.archiveCapacity::available);
+                            this.archiveCapacity::available,
+                            this.writerLeaseGate());
                 }
                 coordinator = this.coordinator;
             }
@@ -1077,7 +1316,8 @@ public final class AeronClusterReplicationTransportProvider {
                     AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
                     this.settings.replication().durabilityMode(),
                     state, this.settings.clusterId(), this.settings.nodeId(), this.settings.storeGeneration(),
-                    recordingId, this.settings.epoch(), sequence, position, dataLength, dataChunkCount, dataCrc32c);
+                    recordingId, this.settings.epoch(), this.heldWriterFencingToken(), sequence, position,
+                    dataLength, dataChunkCount, dataCrc32c);
         }
 
         private synchronized void ensureRuntime() {
@@ -1086,7 +1326,7 @@ public final class AeronClusterReplicationTransportProvider {
                 throw new IllegalStateException("Aeron runtime has failed; create a new transport", this.driverFailure.get());
             }
             if (this.runtime != null) return;
-            if (NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role())) this.archiveCapacity.invalidate();
+            if (this.settings.role().isWriter()) this.archiveCapacity.invalidate();
             this.runtime = AeronRuntime.start(this.settings, this::recordDriverFailure,
                     () -> crashPoint("BEFORE_PUBLICATION_CONNECTED", -1L));
             try {
@@ -1139,7 +1379,7 @@ public final class AeronClusterReplicationTransportProvider {
              * worker first so it cannot enter ensureWriter/retention while writer close
              * is in progress. Reader-side channels remain open until the reader exits so
              * its final cursor publication is not turned into a spurious failure. */
-            if (this.reader == null && NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && this.watermarkChannel != null) {
+            if (this.reader == null && this.settings.role().isWriter() && this.watermarkChannel != null) {
                 failure = this.closeWatermarkChannel();
             }
             if (this.watermarkChannel != null) {
@@ -1172,17 +1412,21 @@ public final class AeronClusterReplicationTransportProvider {
                 }
             }
             if (this.watermarkChannel == null && this.retention == null && this.runtime == null) {
-                this.clearRetentionSecrets();
+                this.clearSecrets();
             }
             return failure;
         }
 
-        private void clearRetentionSecrets() {
+        private void clearSecrets() {
             this.deferredWatermarks.clear();
             this.settings.clearRetentionSecret();
+            this.settings.clearReplicationSecrets();
             final byte[] secret = this.retentionSecret;
             this.retentionSecret = null;
             if (secret != null) Arrays.fill(secret, (byte) 0);
+            final byte[] previous = this.previousRetentionSecret;
+            this.previousRetentionSecret = null;
+            if (previous != null) Arrays.fill(previous, (byte) 0);
         }
 
         private Aeron aeron() {
@@ -1264,15 +1508,17 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         /// Shuts the transport down in dependency order: reader, write
-        /// coordinator, writer, watermark channel, retention, and finally the
-        /// shared Aeron runtime.
+        /// coordinator, writer, watermark channel, retention, the shared Aeron
+        /// runtime, and finally the writer fencing lease.
         ///
-        /// Each stage runs only after the previous one is fully gone, and a
-        /// stage that fails leaves the transport retryable instead of torn
-        /// down beneath live threads — closing the runtime early would turn a
-        /// retryable abort into a use-after-close. All failures are aggregated
-        /// and thrown together. Never call this from inside a reader delivery
-        /// callback.
+        /// The lease is released only after the publication path is fully
+        /// gone, so no successor can steal the token while this writer can
+        /// still offer. Each stage runs only after the previous one is fully
+        /// gone, and a stage that fails leaves the transport retryable instead
+        /// of torn down beneath live threads — closing the runtime early would
+        /// turn a retryable abort into a use-after-close. All failures are
+        /// aggregated and thrown together. Never call this from inside a reader
+        /// delivery callback.
         @Override
         public void close() {
             this.ensureNotDeliveryCallback();
@@ -1281,9 +1527,13 @@ public final class AeronClusterReplicationTransportProvider {
                 if (this.closing) {
                     throw new IllegalStateException("Aeron transport close is already in progress");
                 }
+                /* A lease held without any other resource means writer startup
+                 * failed after acquisition; it still shuts down on the full
+                 * path below, never leaking its file and heartbeat thread. */
                 if (this.reader == null && this.writer == null && this.coordinator == null &&
-                    this.runtime == null && this.retention == null && this.watermarkChannel == null) {
-                    this.clearRetentionSecrets();
+                    this.runtime == null && this.retention == null && this.watermarkChannel == null &&
+                    this.writerLease == null) {
+                    this.clearSecrets();
                     this.closed = true;
                     return;
                 }
@@ -1363,6 +1613,25 @@ public final class AeronClusterReplicationTransportProvider {
                     failure = appendCloseFailure(failure, runtimeFailure);
                 }
             }
+            /* Release the writer lease only after the writer, coordinator, and
+             * runtime are stopped: the publication path must stop offering
+             * before a successor can observe a released lease and steal the
+             * token, and a retryable close above keeps the lease so the retry
+             * still owns it. */
+            if (this.reader == null && this.writer == null && this.coordinator == null && this.runtime == null) {
+                final WriterFencingLease lease;
+                synchronized (this) {
+                    lease = this.writerLease;
+                    this.writerLease = null;
+                }
+                if (lease != null) {
+                    try {
+                        lease.close();
+                    } catch (final Throwable leaseFailure) {
+                        failure = appendCloseFailure(failure, leaseFailure);
+                    }
+                }
+            }
             if (failure != null) {
                 this.closing = false;
                 if (failure instanceof Error error) throw error;
@@ -1371,40 +1640,40 @@ public final class AeronClusterReplicationTransportProvider {
             synchronized (this) {
                 this.distributor = null;
                 this.distributorStream = null;
-                this.clearRetentionSecrets();
+                this.clearSecrets();
                 this.closed = true;
                 this.closing = false;
             }
         }
     }
 
-        /// Adapts complete Aeron data to the neutral packet acceptor.
-    private record ReceiverAdapter(Transport owner, StorageBinaryDataPacketAcceptor packetAcceptor)
+        /// Adapts complete Aeron data to the neutral binary receiver.
+    private record ReceiverAdapter(Transport owner, StorageBinaryDataReceiver receiver)
             implements StorageBinaryDataReceiver {
         public void receiveTypeDictionary(final String value) {
-            this.owner().runInDeliveryCallback(() -> this.packetAcceptor().acceptTypeDictionary(value));
+            this.owner().runInDeliveryCallback(() -> this.receiver().receiveTypeDictionary(value));
         }
 
         public void receiveData(final org.eclipse.serializer.persistence.binary.types.Binary value) {
             this.owner().runInDeliveryCallback(() -> {
-                this.packetAcceptor().acceptData(value);
-                this.packetAcceptor().awaitApplied();
+                this.receiver().receiveData(value);
+                this.receiver().awaitApplied();
             });
         }
 
         @Override
         public boolean receiveDataOwned(final org.eclipse.serializer.persistence.binary.types.Binary value) {
-            return this.owner().callInDeliveryCallback(() -> this.packetAcceptor().acceptDataOwned(value));
+            return this.owner().callInDeliveryCallback(() -> this.receiver().receiveDataOwned(value));
         }
 
         @Override
         public boolean canReceiveDataOwned() {
-            return this.packetAcceptor().canAcceptDataOwned();
+            return this.receiver().canReceiveDataOwned();
         }
 
         @Override
         public void awaitApplied() {
-            this.owner().runInDeliveryCallback(this.packetAcceptor()::awaitApplied);
+            this.owner().runInDeliveryCallback(this.receiver()::awaitApplied);
         }
     }
 
@@ -1428,7 +1697,8 @@ public final class AeronClusterReplicationTransportProvider {
             final CursorSnapshot snapshot = this.delegate().cursorSnapshot();
             return ReplicationCursor.of("aeron", this.storeGeneration(), snapshot.sequence(),
                     new AeronReplicationCursor(this.clusterId(), this.nodeId(), this.storeGeneration(),
-                            this.epoch(), this.recordingId(), snapshot.position(), snapshot.sequence()).encode());
+                            this.epoch(), this.delegate().fencingToken(), this.recordingId(), snapshot.position(),
+                            snapshot.sequence()).encode());
         }
 
         public boolean isRunning() {

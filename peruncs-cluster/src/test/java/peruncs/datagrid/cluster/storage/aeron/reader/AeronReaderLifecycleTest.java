@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.reader;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -159,7 +160,7 @@ class AeronReaderLifecycleTest {
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> false, () -> polls.incrementAndGet() == 1 ? 1 : 0,
                 () -> polls.get() >= 2, () -> false, () -> {
-                }, AeronReaderLifecycle.defaultIdleStrategy());
+                }, AeronRetryPolicy.Default().idleStrategy());
 
         assertFalse(active.get());
         assertEquals(2, polls.get());
@@ -173,7 +174,7 @@ class AeronReaderLifecycleTest {
 
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> false, () -> 0, () -> false, () -> true, () -> timedOut.set(true),
-                AeronReaderLifecycle.defaultIdleStrategy());
+                AeronRetryPolicy.Default().idleStrategy());
 
         assertFalse(active.get());
         assertTrue(timedOut.get());
@@ -191,7 +192,7 @@ class AeronReaderLifecycleTest {
                         active, () -> false, () -> 0, () -> false, () -> true, () -> {
                             throw expected;
                         },
-                        AeronReaderLifecycle.defaultIdleStrategy()));
+                        AeronRetryPolicy.Default().idleStrategy()));
 
         assertSame(expected, actual);
         assertFalse(active.get());
@@ -205,7 +206,7 @@ class AeronReaderLifecycleTest {
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> polls.get() == 0, polls::incrementAndGet,
                 () -> false, () -> false, () -> {
-                }, AeronReaderLifecycle.defaultIdleStrategy());
+                }, AeronRetryPolicy.Default().idleStrategy());
         assertEquals(0, polls.get());
     }
 

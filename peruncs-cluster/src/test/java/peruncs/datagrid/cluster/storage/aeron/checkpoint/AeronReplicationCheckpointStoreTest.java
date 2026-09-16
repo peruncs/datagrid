@@ -22,7 +22,7 @@ class AeronReplicationCheckpointStoreTest {
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
                 ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
-                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 7, 13, 4096, 12, 1, 99
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 7, 5, 13, 4096, 12, 1, 99
         );
     }
 
@@ -80,7 +80,7 @@ class AeronReplicationCheckpointStoreTest {
         final AeronReplicationCheckpoint second = new AeronReplicationCheckpoint(
                 first.recordType(), first.durabilityMode(), AeronReplicationCheckpoint.State.COMMITTED,
                 first.clusterId(), first.nodeId(), first.storeGeneration(), first.recordingId(),
-                first.writerEpoch(), first.transactionSequence() + 1, first.recordingPosition() + 10,
+                first.writerEpoch(), first.fencingToken(), first.transactionSequence() + 1, first.recordingPosition() + 10,
                 first.dataLength(), first.dataChunkCount(), 7);
         AeronReplicationCheckpointStore.write(path, second);
         assertEquals(second, AeronReplicationCheckpointStore.read(path));
@@ -102,22 +102,37 @@ class AeronReplicationCheckpointStoreTest {
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
                 ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.PREPARING,
-                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -2, 0, -1, -1, 0, 0, 0));
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -2, 0, 1, -1, -1, 0, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
                 ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
-                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 7, 1024, 1, 1, 0));
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 3, 7, 1024, 1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
                 ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
-                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -1, 0, 7, -1, 1, 1, 0));
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -1, 0, 2, 7, -1, 1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
                 ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
-                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, Long.MAX_VALUE, 1024, 1, 1, 0));
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 4, Long.MAX_VALUE, 1024, 1, 1, 0));
+    }
+
+        /// Verifies a resolved checkpoint never carries the token-0 new-reader sentinel.
+    @Test
+    void rejectsTokenZeroOnResolvedCheckpoints() {
+        assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
+                AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
+                AeronReplicationCheckpoint.State.COMMITTED,
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 0, 7, 1024, 1, 1, 0));
+        assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
+                AeronReplicationCheckpoint.RecordType.READER_CURSOR,
+                ReplicationDurabilityMode.ARCHIVE_FIRST,
+                AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 0, 7, 4096, 0, 0, 0));
     }
 
     @Test
@@ -149,7 +164,7 @@ class AeronReplicationCheckpointStoreTest {
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
                 ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
-                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 7, 4096, 0, 0, 0);
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 6, 7, 4096, 0, 0, 0);
         try {
             FileStoreCrashHooks.callWithHook((phase, ignored) -> phases.add(phase), () -> {
                 AeronReplicationCheckpointStore.write(path, readerCursor);

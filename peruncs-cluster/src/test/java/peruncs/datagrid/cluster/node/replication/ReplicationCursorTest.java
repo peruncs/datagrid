@@ -29,12 +29,13 @@ class ReplicationCursorTest {
         assertFalse(new ReplicationCursor("aeron", null, -1, "").hasProviderPosition());
     }
 
-        /// Verifies uppercase hex is accepted exactly as hex decoding accepts it.
+        /// Verifies uppercase hex is accepted but normalized to lowercase.
     @Test
-    void uppercaseHexIsAccepted() {
+    void uppercaseHexIsNormalizedToLowercase() {
         final ReplicationCursor cursor = new ReplicationCursor("aeron", null, -1, "AB12");
-        assertEquals("AB12", cursor.providerPosition());
+        assertEquals("ab12", cursor.providerPosition());
         assertArrayEquals(new byte[]{(byte) 0xAB, 0x12}, cursor.providerPositionBytes());
+        assertEquals(new ReplicationCursor("aeron", null, -1, "ab12"), cursor);
     }
 
         /// Verifies rejection of invalid sequence, transport, and position.

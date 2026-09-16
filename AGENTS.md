@@ -65,3 +65,53 @@ Here are the reference source code directories to borrow from:
 `$GITHUB_ROOT/eclipse-serializer`
 `$GITHUB_ROOT/bhf/aeron-cache`
 
+## Local JVM Performance Monitoring
+
+## 1. Local JVM CLI tools
+
+| Tool | Purpose |
+|---|---|
+| `jps -lvm` | Find running JVMs (PID + main class/args) |
+| `jstat -gcutil <pid> 1000` | GC stats, polled |
+| `jstack <pid>` / `jcmd <pid> Thread.print` | Thread dump (deadlocks, stuck threads) |
+| `jmap -heap` / `-histo` / `-dump` | Heap summary, class histogram, heap dump |
+| `jcmd <pid> help` | The modern all-in-one tool — flags, GC, threads, JFR control |
+| `jconsole <pid>` | GUI, live attach |
+
+Requires same user (or root) as the target JVM, and attach mechanism not disabled.
+
+## 2. JFR (Java Flight Recorder)
+
+Built into the JDK (11+, backported to 8u262+), low-overhead, best for deep profiling:
+```bash
+jcmd <pid> JFR.start name=rec duration=60s filename=recording.jfr
+jcmd <pid> JFR.dump name=rec filename=snapshot.jfr
+jcmd <pid> JFR.stop name=rec
+```
+Or launch with recording enabled: `-XX:StartFlightRecording=disk=true,maxsize=250M,maxage=1d,filename=continuous.jfr` — safe to leave running continuously in production (~1% overhead).
+
+Analyze with `jfr summary`/`jfr print` (CLI) or **JDK Mission Control (JMC)** for flamegraphs, allocation/lock analysis.
+
+## 3. How an AI agent interprets `.jfr` files
+
+`.jfr` is **binary and can be huge** — an agent must convert and aggregate before it ever hits the LLM context:
+- `jfr summary` → event type/counts overview (cheap first pass)
+- `jfr print --json --events <type>` → structured, filterable dump
+- `jdk.jfr.consumer.RecordingFile` (Java API) → programmatic iteration for custom aggregation (hot methods, GC pauses, allocation histograms)
+- JMC's core libraries (headless) → run the same "automated analysis" rules JMC's GUI uses, get pre-digested findings
+- `jfrconv`/async-profiler → collapsed stacks / flamegraphs — the most LLM-friendly text format for "what's slow" questions
+
+**Key principle**: write code to count/aggregate/diff, and only pass the LLM a compact summary (top-N tables, time-bucketed stats) — never raw millions-of-events dumps.
+
+## 4. How an AI agent interprets `jcmd` output
+
+`jcmd` output is **already plain text**, so no binary decoding — but formats are inconsistent per subcommand, so an agent needs per-command parsing:
+- `VM.flags`, `VM.system_properties` → trivial key/value parsing, small enough to pass to LLM directly
+- `GC.heap_info` → small, safe to pass through; parse numbers if tracking trends over time
+- `Thread.print` → hardest one: split per-thread, aggregate by state + top stack frame instead of dumping all threads; **hardcode a check for `Found one Java-level deadlock`** rather than relying on the LLM to spot it
+- `GC.class_histogram` → clean tabular data; for leak-hunting, diff two histograms over time in code, not via LLM reasoning over two big tables
+
+**Key principle** (same as JFR): let code do exact counting/diffing/pattern matching for high-volume or safety-critical signals (deadlocks, thresholds); hand the LLM only the compact result.
+
+## Overall takeaway
+For both `.jfr` and `jcmd`, the pattern is identical: **deterministic code does extraction/aggregation/pattern-matching; the LLM reasons over a small, structured summary** — never raw dumps. JFR needs this because of binary format + volume; `jcmd` needs it mainly for high-volume text outputs (`Thread.print`, `GC.class_histogram`) and for signals worth catching reliably (deadlocks) rather than probabilistically.

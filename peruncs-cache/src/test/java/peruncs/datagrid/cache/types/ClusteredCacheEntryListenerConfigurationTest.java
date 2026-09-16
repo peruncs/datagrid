@@ -16,7 +16,8 @@ import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.publish;
 class ClusteredCacheEntryListenerConfigurationTest {
     private static AeronClusteredCacheConfiguration configuration() {
         return new AeronClusteredCacheConfiguration(
-                "aeron:ipc", 2001, null, null, true, 10_000L, 10_000L, 1 << 20);
+                "aeron:ipc", 2001, null, null, true, 10_000L, 10_000L, 1 << 20,
+                500L, 5_000L, null, null, false, false);
     }
 
     @Test

@@ -516,4 +516,25 @@ class AeronReplicationPublisherTest {
             assertFalse(publisher.isFailed(), "a successful commit must not fail the publisher");
         }
     }
+
+        /// Verifies a second claim with a different token fails the publisher closed.
+    @Test
+    void secondClaimWithDifferentTokenFailsClosed() {
+        final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+        try (final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) -> length,
+                configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            publisher.claimFencingToken(7L);
+            assertEquals(7L, publisher.fencingToken());
+            publisher.claimFencingToken(7L);
+            final var failure = assertThrows(IllegalStateException.class,
+                    () -> publisher.claimFencingToken(9L));
+            assertTrue(failure.getMessage().contains("lease was lost"),
+                    "re-claim must name the lost lease, was: %s".formatted(failure.getMessage()));
+            assertTrue(publisher.isFailed(), "a publisher that outlived its lease must fail closed");
+            assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
+                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
+            assertThrows(IllegalArgumentException.class, () -> publisher.claimFencingToken(0L));
+        }
+    }
 }

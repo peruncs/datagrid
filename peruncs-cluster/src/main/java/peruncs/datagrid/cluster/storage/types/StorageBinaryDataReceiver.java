@@ -13,6 +13,8 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 /// every direct buffer in the supplied binary.
 public interface StorageBinaryDataReceiver {
         /// Returns a terminal receiver failure, or `null` while healthy.
+    ///
+    /// @return terminal failure, or `null`
     default RuntimeException failure() {
         return null;
     }

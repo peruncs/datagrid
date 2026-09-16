@@ -5,13 +5,13 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.nio.file.Path;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Queue;
+import java.util.*;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -26,8 +26,47 @@ class StorageBackupManagerTest {
             final FakeRetention retention,
             final int maxBackupCount
     ) {
+        return manager(backend, client, retention, maxBackupCount, () -> CURSOR);
+    }
+
+    private static StorageBackupManager manager(
+            final FakeBackend backend,
+            final FakeClient client,
+            final FakeRetention retention,
+            final int maxBackupCount,
+            final Supplier<ReplicationCursor> cursor
+    ) {
         return StorageBackupManager.New(
-                storageConnection(), maxBackupCount, backend, () -> CURSOR, client, retention);
+                storageConnection(), maxBackupCount, backend, cursor, client, retention);
+    }
+
+    private static BackupMetadata backup(final long timestamp, final boolean manualSlot) {
+        return new BackupMetadata(timestamp, manualSlot, null, null,
+                BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
+    }
+
+    private static ReplicationCursor aeronCursor(
+            final UUID clusterId,
+            final UUID generation,
+            final long epoch,
+            final long recordingId,
+            final long sequence
+    ) {
+        return ReplicationCursor.of("aeron", generation, sequence,
+                new AeronReplicationCursor(
+                        clusterId, UUID.randomUUID(), generation, epoch, 1L, recordingId, 0L, sequence).encode());
+    }
+
+    private static BackupMetadata generationBackup(
+            final long timestamp,
+            final boolean manualSlot,
+            final UUID clusterId,
+            final UUID generation,
+            final long epoch,
+            final long recordingId
+    ) {
+        return new BackupMetadata(timestamp, manualSlot, clusterId, generation,
+                epoch, recordingId, null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
     }
 
     /// A typed stub keeps this orchestration test independent of Store implementation details.
@@ -41,9 +80,9 @@ class StorageBackupManagerTest {
         client.running = true;
         final FakeBackend backend = new FakeBackend();
         backend.backups.addAll(List.of(
-                new BackupMetadata(1L, false),
-                new BackupMetadata(2L, false),
-                new BackupMetadata(3L, false)));
+                backup(1L, false),
+                backup(2L, false),
+                backup(3L, false)));
         backend.previousCursor = CURSOR;
         final FakeRetention retention = new FakeRetention();
         retention.results.add(new ReplicationLogRetention.MaintenanceResult(
@@ -64,7 +103,7 @@ class StorageBackupManagerTest {
     @Test
     void retriesDeferredRetentionWithoutRepeatingTheBackup() {
         final FakeBackend backend = new FakeBackend();
-        backend.backups.add(new BackupMetadata(1L, false));
+        backend.backups.add(backup(1L, false));
         backend.previousCursor = CURSOR;
         final FakeRetention retention = new FakeRetention();
         retention.results.addAll(List.of(
@@ -134,8 +173,8 @@ class StorageBackupManagerTest {
     void manualBackupDeletesOnlyThePreviousManualSlotAndSkipsRetention() {
         final FakeBackend backend = new FakeBackend();
         backend.backups.addAll(List.of(
-                new BackupMetadata(1L, false),
-                new BackupMetadata(2L, true)));
+                backup(1L, false),
+                backup(2L, true)));
         final FakeRetention retention = new FakeRetention();
 
         final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 1);
@@ -144,6 +183,89 @@ class StorageBackupManagerTest {
 
         assertEquals(List.of(2L), backend.deleted.stream().map(BackupMetadata::timestamp).toList());
         assertEquals(0, retention.calls);
+    }
+
+    @Test
+    void pruningSparesForeignGenerations() {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final ReplicationCursor local = aeronCursor(cluster, generation, 5L, 42L, 7L);
+        final FakeClient client = new FakeClient();
+        final FakeBackend backend = new FakeBackend();
+        /* The foreign backup is the oldest, so unfiltered pruning would delete
+         * it first; compatible pruning must leave it alone. */
+        backend.backups.addAll(List.of(
+                generationBackup(0L, false, UUID.randomUUID(), UUID.randomUUID(), 9L, 77L),
+                generationBackup(1L, false, cluster, generation, 5L, 42L),
+                generationBackup(2L, false, cluster, generation, 5L, 42L)));
+        backend.previousCursor = local;
+        final FakeRetention retention = new FakeRetention();
+
+        manager(backend, client, retention, 2, () -> local).createStorageBackup(false);
+
+        assertEquals(List.of(1L), backend.deleted.stream().map(BackupMetadata::timestamp).toList());
+        assertTrue(backend.backups.stream().anyMatch(b -> b.timestamp() == 0L),
+                "a foreign generation sharing the volume must never be pruned");
+    }
+
+    @Test
+    void manualPruningSparesForeignManualSlots() {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final ReplicationCursor local = aeronCursor(cluster, generation, 5L, 42L, 7L);
+        final FakeBackend backend = new FakeBackend();
+        backend.backups.addAll(List.of(
+                generationBackup(5L, true, UUID.randomUUID(), UUID.randomUUID(), 9L, 77L),
+                generationBackup(6L, true, cluster, generation, 5L, 42L),
+                generationBackup(7L, false, cluster, generation, 5L, 42L)));
+
+        manager(backend, new FakeClient(), new FakeRetention(), 1, () -> local).createStorageBackup(true);
+
+        assertEquals(List.of(6L), backend.deleted.stream().map(BackupMetadata::timestamp).toList());
+        assertTrue(backend.backups.stream().anyMatch(b -> b.timestamp() == 5L),
+                "a foreign manual backup must never be pruned");
+    }
+
+    @Test
+    void retentionUsesTheNewestCompatibleCursor() {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final ReplicationCursor local = aeronCursor(cluster, generation, 5L, 42L, 7L);
+        final ReplicationCursor compatibleCursor = aeronCursor(cluster, generation, 5L, 42L, 6L);
+        final ReplicationCursor foreignCursor = aeronCursor(UUID.randomUUID(), UUID.randomUUID(), 9L, 77L, 11L);
+        final FakeBackend backend = new FakeBackend();
+        final BackupMetadata compatible = generationBackup(1L, false, cluster, generation, 5L, 42L);
+        final BackupMetadata foreign = generationBackup(9L, false, UUID.randomUUID(), UUID.randomUUID(), 9L, 77L);
+        backend.backups.addAll(List.of(compatible, foreign));
+        /* The legacy newest-overall path would resolve the foreign cursor. */
+        backend.previousCursor = foreignCursor;
+        backend.cursorForBackup = candidate ->
+                candidate.backupId().equals(compatible.backupId()) ? compatibleCursor : foreignCursor;
+        final FakeRetention retention = new FakeRetention();
+
+        manager(backend, new FakeClient(), retention, 10, () -> local).createStorageBackup(false);
+
+        /* The retention cursor must come from the compatibility-selected
+         * backup, never from the newest backup overall: exactly one
+         * getCursorForBackup call for the compatible candidate. */
+        assertEquals(1, backend.previousCalls, "retention reads the cursor of its selected backup exactly once");
+        assertEquals(List.of(compatibleCursor), retention.cursors);
+    }
+
+    @Test
+    void manifestCursorIsCapturedAfterTheStopBoundary() {
+        final ReplicationCursor before = new ReplicationCursor("test", null, 7L, "010203");
+        final ReplicationCursor stopped = new ReplicationCursor("test", null, 99L, "040506");
+        final FakeClient client = new FakeClient();
+        client.running = true;
+        final FakeBackend backend = new FakeBackend();
+        final FakeRetention retention = new FakeRetention();
+
+        manager(backend, client, retention, 1, () -> client.stopCalls == 0 ? before : stopped)
+                .createStorageBackup(false);
+
+        assertEquals(List.of(stopped), backend.createdCursors,
+                "the stored manifest must describe the stopped boundary, not the pre-stop position");
     }
 
     private static final class FakeClient implements StorageBinaryDataClient {
@@ -202,8 +324,11 @@ class StorageBackupManagerTest {
     private static final class FakeBackend implements StorageBackupBackend {
         private final List<BackupMetadata> backups = new ArrayList<>();
         private final List<BackupMetadata> created = new ArrayList<>();
+        private final List<ReplicationCursor> createdCursors = new ArrayList<>();
         private final List<BackupMetadata> deleted = new ArrayList<>();
         private ReplicationCursor previousCursor;
+        private Function<BackupMetadata, ReplicationCursor> cursorForBackup;
+        private int previousCalls;
         private RuntimeException createFailure;
 
         @Override
@@ -212,8 +337,9 @@ class StorageBackupManagerTest {
         }
 
         @Override
-        public ReplicationCursor getCursorFromPreviousBackup(final int skip) {
-            return this.previousCursor;
+        public ReplicationCursor getCursorForBackup(final BackupMetadata backup) {
+            this.previousCalls++;
+            return this.cursorForBackup == null ? this.previousCursor : this.cursorForBackup.apply(backup);
         }
 
         @Override
@@ -230,11 +356,8 @@ class StorageBackupManagerTest {
         ) {
             if (this.createFailure != null) throw this.createFailure;
             this.created.add(backup);
+            this.createdCursors.add(cursor);
             this.backups.add(backup);
-        }
-
-        @Override
-        public void restoreLatestBackup(final Path destination) {
         }
 
         @Override

@@ -4,13 +4,16 @@ import java.util.Objects;
 import java.util.zip.CRC32C;
 
 /// Shared CRC32C implementation for replication wire and checkpoint data.
-public interface Crc32c {
+public final class Crc32c {
+    private Crc32c() {
+    }
+
     /// Returns a fresh resettable CRC32C accumulator.
     ///
     /// The caller owns the returned accumulator and may use it without locking.
     ///
     /// @return reset CRC32C accumulator
-    static CRC32C accumulator() {
+    public static CRC32C accumulator() {
         return new CRC32C();
     }
 
@@ -20,7 +23,7 @@ public interface Crc32c {
     /// @param offset first byte to include
     /// @param length number of bytes to include
     /// @return CRC32C value
-    static int compute(final byte[] bytes, final int offset, final int length) {
+    public static int compute(final byte[] bytes, final int offset, final int length) {
         return compute(bytes, offset, length, accumulator());
     }
 
@@ -34,7 +37,7 @@ public interface Crc32c {
     /// @param length number of bytes to include
     /// @param reuse  caller-owned accumulator
     /// @return CRC32C value
-    static int compute(final byte[] bytes, final int offset, final int length, final CRC32C reuse) {
+    public static int compute(final byte[] bytes, final int offset, final int length, final CRC32C reuse) {
         Objects.requireNonNull(bytes, "bytes");
         if (offset < 0 || length < 0 || offset > bytes.length - length) {
             throw new IllegalArgumentException("invalid CRC32C range");
@@ -49,7 +52,7 @@ public interface Crc32c {
     ///
     /// @param bytes source bytes
     /// @return CRC32C value
-    static int compute(final byte[] bytes) {
+    public static int compute(final byte[] bytes) {
         Objects.requireNonNull(bytes, "bytes");
         return compute(bytes, 0, bytes.length);
     }

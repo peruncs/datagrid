@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 
@@ -30,6 +31,12 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private final ReplicationDurabilityMode durabilityMode;
     private final AeronArchiveReplicationPublisher.CheckpointWriter listener;
     private final LongPredicate writeAdmission;
+    /* Lease validity is checked before Archive capacity on every admission, so
+     * a fenced writer fails with a distinct lease-lost error instead of a
+     * misleading capacity-exhaustion message. Terminal-marker offers run
+     * through the same gate under interprocess ownership (see WriterLeaseGate)
+     * so a steal racing back pressure cannot slip a stale marker into Aeron. */
+    private final WriterLeaseGate leaseGate;
     /* The single lock for all coordinator state below. It is reentrant: write
      * admission holds it across a whole Store transaction while the state
      * transitions nest inside. It is released only across the slow Archive
@@ -82,15 +89,33 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                                      final ReplicationDurabilityMode durabilityMode,
                                      final AeronArchiveReplicationPublisher.CheckpointWriter listener,
                                      final LongPredicate writeAdmission) {
+        this(publisher, durabilityMode, listener, writeAdmission, () -> true);
+    }
+
+    AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
+                                      final ReplicationDurabilityMode durabilityMode,
+                                      final AeronArchiveReplicationPublisher.CheckpointWriter listener,
+                                      final LongPredicate writeAdmission,
+                                      final BooleanSupplier leaseValid) {
+        this(publisher, durabilityMode, listener, writeAdmission, WriterLeaseGate.of(leaseValid));
+    }
+
+    AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
+                                      final ReplicationDurabilityMode durabilityMode,
+                                      final AeronArchiveReplicationPublisher.CheckpointWriter listener,
+                                      final LongPredicate writeAdmission,
+                                      final WriterLeaseGate leaseGate) {
         Objects.requireNonNull(publisher, "publisher");
         Objects.requireNonNull(durabilityMode, "durabilityMode");
         Objects.requireNonNull(listener, "listener");
         Objects.requireNonNull(writeAdmission, "writeAdmission");
+        Objects.requireNonNull(leaseGate, "leaseGate");
         this.publisher = publisher;
         this.durabilityMode = durabilityMode;
         this.listener = listener;
         this.writeAdmission = writeAdmission;
-        this.publisher.claimCoordinator(this);
+        this.leaseGate = leaseGate;
+        this.publisher.claimCoordinator(this, leaseGate);
         this.writerEpoch = publisher.epoch();
         this.initialSequence = publisher.nextSequence();
     }
@@ -450,6 +475,11 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     private void ensureWriteAdmitted(final int dataLength) {
+        if (!this.leaseGate.isValid()) {
+            this.publisher.failLeaseLost();
+            throw new IllegalStateException(
+                    "writer fencing lease lost, restart required; this writer is fenced");
+        }
         final long dictionaryLength = this.pendingDictionary == null ? 0L : this.pendingDictionary.length;
         final long requiredBytes = Math.addExact(dataLength, dictionaryLength);
         if (requiredBytes > this.publisher.maxTransactionBytes()) {
@@ -602,19 +632,43 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         } finally {
             this.writeLock.unlock();
         }
-        /* publisher.commit() offers the marker outside its state monitor and
-         * waits for the Archive acknowledgement afterwards. Do not hold the
-         * write lock during that potentially slow wait; commitInProgress keeps
-         * other writers out until the terminal state below is recorded. */
+        /* The marker offer runs under interprocess lease ownership while the
+         * Archive acknowledgement wait runs outside it: the offer retries under
+         * back pressure long enough for a successor to steal the lease, and a
+         * marker offered after that steal can never be retracted. Do not hold
+         * the write lock during either slow wait; commitInProgress keeps other
+         * writers out until the terminal state below is recorded. */
+        final long commitPosition;
         try {
-            final long position = this.publisher.commit(prepared);
+            if (!this.leaseGate.isValid()) {
+                this.publisher.failLeaseLost();
+                throw new IllegalStateException("writer fencing lease lost before commit; restart required");
+            }
+            CrashHook.invoke("BEFORE_COMMIT_GATE", prepared.sequence());
+            try {
+                commitPosition = this.leaseGate.offerUnderOwnership(
+                        () -> this.publisher.offerCommitMarker(prepared));
+            } catch (final IllegalStateException fenced) {
+                this.publisher.failLeaseLost();
+                throw new IllegalStateException(
+                        "writer fencing lease lost before commit; restart required", fenced);
+            }
+            final long position = this.publisher.awaitCommitPosition(prepared, commitPosition);
             this.writeLock.lock();
             try {
-                this.commitMarkerPublished = true;
+                if (!this.leaseGate.isValid()) {
+                    this.publisher.failLeaseLost();
+                    throw new IllegalStateException("writer fencing lease lost during commit; transaction is uncertain");
+                }
                 try {
                     CrashHook.invoke("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", prepared.sequence());
                     this.notifyState(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
                             prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), position);
+                    /* Only a successful checkpoint callback proves that the
+                     * durable COMMITTED record is visible. If the callback
+                     * throws after a partial write, the outer failure path
+                     * records COMMITTING_UNCERTAIN instead of guessing. */
+                    this.commitMarkerPublished = true;
                 } catch (final RuntimeException | Error failure) {
                     this.publisher.failClosed();
                     throw failure;

@@ -18,6 +18,7 @@ import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongPredicate;
 
 /// Publishes the replication stream and waits for the Archive to record it.
@@ -721,11 +722,68 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                 writeAdmission);
     }
 
+        /// Creates a coordinator that refuses admission once the writer lease is lost.
+    ///
+    /// Lease validity is checked before Archive capacity, so a fenced writer
+    /// fails with a distinct lease-lost error instead of a misleading
+    /// capacity-exhaustion message, and the publisher is failed closed.
+    ///
+    /// @param durabilityMode ordering between local acceptance and Archive
+    /// @param writer         receiver for checkpoint transitions
+    /// @param writeAdmission predicate receiving payload plus dictionary bytes before local acceptance
+    /// @param leaseValid     supplier reporting whether the writer lease is still current
+    /// @return a coordinator backed by this publisher
+    public AeronReplicationWriteCoordinator newWriteCoordinator(
+            final ReplicationDurabilityMode durabilityMode,
+            final CheckpointWriter writer,
+            final LongPredicate writeAdmission,
+            final BooleanSupplier leaseValid) {
+        Objects.requireNonNull(writer, "writer");
+        Objects.requireNonNull(leaseValid, "leaseValid");
+        return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer,
+                writeAdmission, WriterLeaseGate.of(leaseValid));
+    }
+
+        /// Creates a coordinator whose terminal markers run under lease ownership.
+    ///
+    /// @param durabilityMode ordering between local acceptance and Archive
+    /// @param writer         receiver for checkpoint transitions
+    /// @param writeAdmission predicate receiving payload plus dictionary bytes before local acceptance
+    /// @param leaseGate      gate serializing marker offers with lease takeovers
+    /// @return a coordinator backed by this publisher
+    public AeronReplicationWriteCoordinator newWriteCoordinator(
+            final ReplicationDurabilityMode durabilityMode,
+            final CheckpointWriter writer,
+            final LongPredicate writeAdmission,
+            final WriterLeaseGate leaseGate) {
+        Objects.requireNonNull(writer, "writer");
+        Objects.requireNonNull(leaseGate, "leaseGate");
+        return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer,
+                writeAdmission, leaseGate);
+    }
+
         /// Aligns the next transaction with a sequence recovered from the Store.
     ///
     /// @param nextSequence next sequence that may be published
     public void synchronizeNextSequence(final long nextSequence) {
         this.publisher.synchronizeNextSequence(nextSequence);
+    }
+
+        /// Claims the fencing token acquired with the writer lease.
+    ///
+    /// Every envelope offered afterwards carries this token; readers reject
+    /// frames from a deposed writer whose token is lower.
+    ///
+    /// @param fencingToken positive lease token
+    public void claimFencingToken(final long fencingToken) {
+        this.publisher.claimFencingToken(fencingToken);
+    }
+
+        /// Returns the fencing token carried by offered envelopes.
+    ///
+    /// @return current fencing token
+    public long fencingToken() {
+        return this.publisher.fencingToken();
     }
 
         /// Stops the recording, aborts any pending transaction, and closes the publication.

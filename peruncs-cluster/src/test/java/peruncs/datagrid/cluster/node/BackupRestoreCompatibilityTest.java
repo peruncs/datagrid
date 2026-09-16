@@ -1,0 +1,237 @@
+package peruncs.datagrid.cluster.node;
+
+import org.eclipse.store.storage.types.StorageConnection;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.node.backup.BackupMetadata;
+import peruncs.datagrid.cluster.node.backup.FilesystemVolumeBackupBackend;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.reflect.Proxy;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/// Verifies generation-filtered restores: on a shared backup volume a node
+/// selects the newest backup of its own cluster, generation, epoch, and
+/// recording, and an incompatible newest backup never deletes or overwrites
+/// valid local storage.
+class BackupRestoreCompatibilityTest {
+    private static final UUID CLUSTER_ONE = UUID.randomUUID();
+    private static final UUID GENERATION_ONE = UUID.randomUUID();
+    private static final UUID NODE_ONE = UUID.randomUUID();
+    private static final UUID CLUSTER_TWO = UUID.randomUUID();
+    private static final UUID GENERATION_TWO = UUID.randomUUID();
+
+    private static ReplicationCursor cursor(
+            final UUID clusterId,
+            final UUID nodeId,
+            final UUID generation,
+            final long epoch,
+            final long recordingId,
+            final long sequence
+    ) {
+        return ReplicationCursor.of("aeron", generation, sequence,
+                new AeronReplicationCursor(
+                        clusterId, nodeId, generation, epoch, 1L, recordingId, 0L, sequence).encode());
+    }
+
+    private static StorageConnection noOpStorageConnection() {
+        return (StorageConnection) Proxy.newProxyInstance(
+                StorageConnection.class.getClassLoader(),
+                new Class<?>[]{StorageConnection.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("issueFullBackup")) {
+                        return null;
+                    }
+                    final Class<?> result = method.getReturnType();
+                    if (result == boolean.class) return false;
+                    if (result == int.class) return 0;
+                    if (result == long.class) return 0L;
+                    return null;
+                });
+    }
+
+    private static void publishBackup(
+            final Path volume,
+            final ReplicationCursor backupCursor,
+            final long timestamp
+    ) {
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(volume);
+        backend.createBackup(
+                noOpStorageConnection(), backupCursor, BackupMetadata.New(timestamp, false, backupCursor));
+    }
+
+    private static void writeOffset(final Path storageParent, final ReplicationCursor offset) {
+        try {
+            Files.createDirectories(storageParent);
+            ReplicationCursorStore.write(storageParent.resolve("offset"), offset);
+        } catch (final IOException failure) {
+            throw new UncheckedIOException(failure);
+        }
+    }
+
+    private static ReplicationCursor readOffset(final Path storageParent) {
+        try {
+            return ReplicationCursorStore.read(storageParent.resolve("offset"));
+        } catch (final IOException failure) {
+            throw new UncheckedIOException(failure);
+        }
+    }
+
+    private static ReaderSeedBootstrapTest.TestProperties properties(
+            final Path storagePath, final Path backupPath, final String role) {
+        return new ReaderSeedBootstrapTest.TestProperties(storagePath, backupPath, role);
+    }
+
+    @Test
+    void incompatibleNewestKeepsValidLocalStorage(@TempDir final Path root) {
+        final Path home = root.resolve("node-home");
+        final Path volume = root.resolve("shared-volume");
+        final ReplicationCursor local = cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 9L);
+
+        try (final ClusterFoundation node = ClusterFoundation.New()
+                .setNodeLibraryPropertiesProvider(properties(
+                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            @SuppressWarnings("unchecked")
+            final ArrayList<String> writerRoot = (ArrayList<String>) node.startStorageManager().root().get();
+            writerRoot.add("local-value");
+            node.startStorageManager().store(writerRoot);
+        }
+        assertTrue(Files.isDirectory(home.resolve("storage")), "node must have created its Store directory");
+
+        /* The node ran generation one and is ahead of its older backup; an
+         * unrelated newer generation shares the volume. */
+        writeOffset(home, local);
+        publishBackup(volume, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 5L), 100L);
+        publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
+
+        try (final ClusterFoundation restarted = ClusterFoundation.New()
+                .setNodeLibraryPropertiesProvider(properties(
+                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            @SuppressWarnings("unchecked")
+            final ArrayList<String> restartedRoot =
+                    (ArrayList<String>) restarted.startStorageManager().root().get();
+            assertTrue(restartedRoot.contains("local-value"),
+                    "valid local storage must survive an incompatible newest backup, was: %s".formatted(restartedRoot));
+        }
+
+        assertEquals(local, readOffset(home),
+                "the local replication boundary must not move to the unrelated generation");
+        assertEquals(2, FilesystemVolumeBackupBackend.New(volume).listBackups().size(),
+                "the unrelated backup must be left alone on the volume");
+    }
+
+    @Test
+    void mixedGenerationsRestoreTheCompatibleBackup(@TempDir final Path root) {
+        final Path home = root.resolve("node-home");
+        final Path volume = root.resolve("shared-volume");
+        final ReplicationCursor generationOne = cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+
+        /* No local Store image, but a durable boundary from generation one;
+         * the volume's newest backup belongs to generation two. */
+        writeOffset(home, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 3L));
+        publishBackup(volume, generationOne, 100L);
+        publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
+
+        try (final ClusterFoundation node = ClusterFoundation.New()
+                .setNodeLibraryPropertiesProvider(properties(
+                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            assertNotNull(node.startStorageManager().root(),
+                    "the node must start from the compatible backup");
+        }
+
+        assertEquals(generationOne, readOffset(home),
+                "the restored boundary must come from the compatible backup, not the newest one");
+        assertEquals(2, FilesystemVolumeBackupBackend.New(volume).listBackups().size());
+    }
+
+    @Test
+    void freshNodeWithOnlyIncompatibleBackupsRefusesToInstall(@TempDir final Path root) {
+        final Path home = root.resolve("node-home");
+        final Path volume = root.resolve("shared-volume");
+
+        writeOffset(home, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 3L));
+        publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
+
+        try (final ClusterFoundation node = ClusterFoundation.New()
+                .setNodeLibraryPropertiesProvider(properties(
+                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            final NodeLibraryException failure =
+                    assertThrows(NodeLibraryException.class, node::startStorageManager);
+            assertTrue(failure.getMessage().contains("compatible"),
+                    "refusal must name the compatibility cause, was: %s".formatted(failure.getMessage()));
+        }
+
+        assertFalse(Files.exists(home.resolve("storage")),
+                "no unrelated image may be installed when nothing compatible exists");
+    }
+
+    @Test
+    void readerKeepsSeededStorageWhenNewestIsIncompatible(@TempDir final Path root) throws Exception {
+        final Path writerHome = root.resolve("writer-home");
+        final Path readerHome = root.resolve("reader-home");
+        final Path volume = root.resolve("shared-volume");
+        final ReplicationCursor local = cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 9L);
+
+        try (final ClusterFoundation writer = ClusterFoundation.New()
+                .setNodeLibraryPropertiesProvider(properties(
+                        writerHome, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            @SuppressWarnings("unchecked")
+            final ArrayList<String> writerRoot = (ArrayList<String>) writer.startStorageManager().root().get();
+            writerRoot.add("seeded-value");
+            writer.startStorageManager().store(writerRoot);
+        }
+
+        copyStorage(writerHome.resolve("storage"), readerHome.resolve("storage"));
+        writeOffset(readerHome, local);
+        publishBackup(volume, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 5L), 100L);
+        publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
+
+        try (final ClusterFoundation reader = ClusterFoundation.New()
+                .setNodeLibraryPropertiesProvider(properties(
+                        readerHome, volume, NodeLibraryPropertiesProvider.READER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            @SuppressWarnings("unchecked")
+            final ArrayList<String> readerRoot = reader.startStorageManager()
+                    .readRoot(stored -> new ArrayList<>((ArrayList<String>) stored));
+            assertTrue(readerRoot.contains("seeded-value"),
+                    "seeded reader storage must survive an incompatible newest backup, was: %s".formatted(readerRoot));
+        }
+
+        assertEquals(local, readOffset(readerHome));
+    }
+
+    private static void copyStorage(final Path source, final Path target) throws IOException {
+        try (var paths = Files.walk(source)) {
+            for (final var iterator = paths.iterator(); iterator.hasNext(); ) {
+                final Path from = iterator.next();
+                final Path to = target.resolve(source.relativize(from).toString());
+                if (Files.isDirectory(from)) {
+                    Files.createDirectories(to);
+                } else {
+                    Files.copy(from, to);
+                }
+            }
+        }
+    }
+}

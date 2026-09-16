@@ -62,6 +62,19 @@ public interface NodeLibraryPropertiesProvider {
         return false;
     }
 
+        /// Returns the single normalized role every decision point uses.
+    ///
+    /// This reconciles the legacy [NodeLibraryPropertiesProvider#isBackupNode]
+    /// flag with the `ECLIPSE_DATAGRID_REPLICATION_ROLE` value and rejects a
+    /// conflicting combination, so startup, guards, and transport setup can
+    /// never disagree about the role.
+    ///
+    /// @return effective role
+    /// @throws IllegalArgumentException for an unknown value or a legacy/new conflict
+    default NodeRole nodeRole() {
+        return NodeRole.of(this);
+    }
+
         /// Reports whether this node restores backups.
     ///
     /// @return `true` for a backup node
@@ -134,11 +147,26 @@ public interface NodeLibraryPropertiesProvider {
     /// @return apply timeout, or `null` for the built-in default
     Long dataMergerApplyTimeoutMs();
 
+        /// Writer fencing lease heartbeat staleness bound in millis, `null` for the default.
+    ///
+    /// @return staleness bound in millis, or `null` when unset
+    Long writerLeaseStalenessMillis();
+
         /// Reads node properties from environment variables.
     class Env implements NodeLibraryPropertiesProvider {
-                /// Creates an environment-backed provider.
+                /// Creates an environment-backed provider reading the process environment.
         public Env() {
+            this(null);
         }
+
+                /// Creates a provider reading a fixed environment, for tests.
+        ///
+        /// @param environment variable source, or `null` for the process environment
+        Env(final Map<String, String> environment) {
+            this.environment = environment == null ? null : Map.copyOf(environment);
+        }
+
+        private final Map<String, String> environment;
 
         @Override
         public String replicationStreamName() {
@@ -246,6 +274,11 @@ public interface NodeLibraryPropertiesProvider {
             return this.envLong(EnvKeys.DATA_MERGER_APPLY_TIMEOUT);
         }
 
+        @Override
+        public Long writerLeaseStalenessMillis() {
+            return this.envLong(EnvKeys.WRITER_LEASE_STALENESS_MILLIS);
+        }
+
         private Integer envInteger(final String envKey) {
             final String env = this.envString(envKey);
             if (env == null || env.isBlank()) return null;
@@ -267,11 +300,17 @@ public interface NodeLibraryPropertiesProvider {
         }
 
         private boolean envBoolean(final String envKey) {
-            return Boolean.parseBoolean(this.envString(envKey));
+            final String env = this.envString(envKey);
+            if (env == null || env.isBlank()) return false;
+            if ("true".equalsIgnoreCase(env.trim())) return true;
+            if ("false".equalsIgnoreCase(env.trim())) return false;
+            throw new IllegalArgumentException("Invalid %s value: %s".formatted(envKey, env));
         }
 
         private String envString(final String envKey) {
-            return resolve(System.getenv(), envKey);
+            return this.environment == null
+                    ? resolve(System.getenv(), envKey)
+                    : resolve(this.environment, envKey);
         }
 
         /// Resolves one variable against an explicit environment, falling back
@@ -359,6 +398,8 @@ public interface NodeLibraryPropertiesProvider {
             public static final String DATA_MERGER_LIMIT = "ECLIPSE_DATAGRID_DATA_MERGER_LIMIT";
                         /// Merger materialization timeout environment variable.
             public static final String DATA_MERGER_APPLY_TIMEOUT = "ECLIPSE_DATAGRID_DATA_MERGER_APPLY_TIMEOUT";
+                        /// Writer lease staleness environment variable.
+            public static final String WRITER_LEASE_STALENESS_MILLIS = "ECLIPSE_DATAGRID_AERON_LEASE_STALENESS_MILLIS";
 
             private EnvKeys() {
             }

@@ -1,8 +1,7 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.HttpResponseException;
-import peruncs.datagrid.cluster.node.http.ClusterRestRequestController;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
@@ -14,9 +13,11 @@ import java.lang.reflect.Proxy;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Verifies the reader/promotable role split is structural, not a runtime flag.
+/// Verifies the fixed reader/distributor role split: the role is chosen at
+/// creation and never changes, so an unsupported transition is
+/// unrepresentable.
 class StorageNodeManagerRolesTest {
-        /// A fixed-role reader never distributes and exposes no promotion type.
+        /// A fixed-role reader never distributes.
     @Test
     void readerNeverDistributes() {
         final StorageNodeManager manager = StorageNodeManager.New(
@@ -25,7 +26,7 @@ class StorageNodeManagerRolesTest {
                 stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron", StorageNodeManager.Role.READER);
 
         assertFalse(manager.isDistributor());
-        assertFalse(manager instanceof PromotableStorageNodeManager);
+        assertEquals("aeron", manager.getReplicationTransport());
     }
 
         /// A fixed writer reports itself as the distributor and derives its
@@ -43,49 +44,44 @@ class StorageNodeManagerRolesTest {
         assertTrue(manager.isHealthy(), "a distributor must not depend on a reader health check");
     }
 
-        /// Aeron roles are fixed at transport creation, so the promotable
-    /// factory refuses aeron wiring instead of failing at promotion time.
+        /// The reader reports its current sequence from the replication client.
     @Test
-    void promotableFactoryRefusesAeron() {
-        assertThrows(IllegalArgumentException.class, () -> PromotableStorageNodeManager.New(
+    void readerReportsClientSequence() {
+        final StorageBinaryDataClient client = stub(StorageBinaryDataClient.class);
+        final StorageNodeManager manager = StorageNodeManager.New(
                 stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
-                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron"));
-    }
-
-        /// Finishing without starting fails even before the reader is consulted.
-    @Test
-    void promotableFinishWithoutStartFails() {
-        final PromotableStorageNodeManager manager = PromotableStorageNodeManager.New(
-                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
-                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "neutral");
+                client, stub(StorageNodeHealthCheck.class),
+                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "none",
+                StorageNodeManager.Role.READER);
 
         assertFalse(manager.isDistributor());
-        assertThrows(HttpResponseException.class, manager::finishDistributionSwitch);
+        assertEquals(0L, manager.getCurrentSequence());
     }
 
-        /// Promotion endpoints on a fixed-role reader report not-a-distributor.
+        /// The distributor flag reflects the fixed role.
     @Test
-    void controllerRejectsPromotionOnFixedReader() {
-        final StorageNodeManager manager = StorageNodeManager.New(
+    void distributorFlagReflectsFixedRole() {
+        final StorageNodeManager reader = StorageNodeManager.New(
                 stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
                 stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
                 stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron", StorageNodeManager.Role.READER);
-        final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager);
+        final StorageNodeManager writer = StorageNodeManager.New(
+                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
+                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
+                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron",
+                StorageNodeManager.Role.DISTRIBUTOR);
 
-        final HttpResponseException start = assertThrows(
-                HttpResponseException.class, controller::postActivateDistributorStart);
-        final HttpResponseException finish = assertThrows(
-                HttpResponseException.class, controller::postActivateDistributorFinish);
-        assertEquals(400, start.statusCode());
-        assertEquals(400, finish.statusCode());
+        assertFalse(reader.isDistributor());
+        assertTrue(writer.isDistributor());
     }
 
     @SuppressWarnings("unchecked")
     private static <T> T stub(final Class<T> type) {
         return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
                 (proxy, method, args) -> {
+                    if (method.getName().equals("cursor")) {
+                        return new ReplicationCursor("test", null, 0L, "");
+                    }
                     final Class<?> result = method.getReturnType();
                     if (result == boolean.class) return false;
                     if (result == int.class) return 0;

@@ -1,6 +1,5 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
@@ -31,12 +30,14 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
     private final Supplier<UUID> nodeId;
     private final Supplier<UUID> storeGeneration;
     private final LongSupplier epoch;
+    private final LongSupplier fencingToken;
 
     AeronPositionProvider(final BooleanSupplier writer, final BooleanSupplier initialized,
                           final Runnable ensureWriter,
                           final Supplier<AeronWriterBoundary> writerBoundary, final Supplier<UUID> clusterId,
-                          final Supplier<UUID> nodeId, final Supplier<UUID> storeGeneration, final LongSupplier epoch) {
-        this.writer = Objects.requireNonNull(writer, NodeLibraryPropertiesProvider.WRITER_ROLE);
+                          final Supplier<UUID> nodeId, final Supplier<UUID> storeGeneration, final LongSupplier epoch,
+                          final LongSupplier fencingToken) {
+        this.writer = Objects.requireNonNull(writer, "writer");
         this.initialized = Objects.requireNonNull(initialized, "initialized");
         this.ensureWriter = Objects.requireNonNull(ensureWriter, "ensureWriter");
         this.writerBoundary = Objects.requireNonNull(writerBoundary, "writerBoundary");
@@ -44,6 +45,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.storeGeneration = Objects.requireNonNull(storeGeneration, "storeGeneration");
         this.epoch = Objects.requireNonNull(epoch, "epoch");
+        this.fencingToken = Objects.requireNonNull(fencingToken, "fencingToken");
     }
 
     @Override
@@ -58,12 +60,26 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
         }
         if (!this.initialized.getAsBoolean())
             throw new ReplicationPositionUnavailableException("Aeron writer position is unavailable until the position provider is initialized");
+        final long fencingToken;
+        try {
+            fencingToken = this.fencingToken.getAsLong();
+        } catch (final ReplicationPositionUnavailableException unavailable) {
+            throw unavailable;
+        } catch (final RuntimeException failure) {
+            throw new ReplicationPositionUnavailableException(
+                    "Aeron writer fencing lease is not held; no writer position can be established");
+        }
+        if (fencingToken <= 0) {
+            throw new ReplicationPositionUnavailableException(
+                    "Aeron writer fencing lease is not held; no writer position can be established");
+        }
         final AeronWriterBoundary boundary = this.writerBoundary.get();
         final UUID generation = this.storeGeneration.get();
         final byte[] encoded = boundary.recordingId() < 0 || boundary.position() < 0
                 ? new byte[0]
                 : new AeronReplicationCursor(this.clusterId.get(), this.nodeId.get(), generation,
-                this.epoch.getAsLong(), boundary.recordingId(), boundary.position(), boundary.sequence()).encode();
+                this.epoch.getAsLong(), fencingToken, boundary.recordingId(), boundary.position(),
+                boundary.sequence()).encode();
         return ReplicationCursor.of("aeron", generation, boundary.sequence(), encoded);
     }
 

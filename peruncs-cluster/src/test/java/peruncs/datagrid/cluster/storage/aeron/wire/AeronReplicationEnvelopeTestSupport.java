@@ -13,6 +13,7 @@ public final class AeronReplicationEnvelopeTestSupport {
     public static byte[] encode(
             final UUID clusterId,
             final long epoch,
+            final long fencingToken,
             final long sequence,
             final AeronReplicationEnvelope.Kind kind,
             final int payloadLength,
@@ -31,7 +32,7 @@ public final class AeronReplicationEnvelopeTestSupport {
                 new AeronReplicationEnvelope.ChecksumContext(),
                 () -> {
                     AeronReplicationEnvelope.encode(
-                            new UnsafeBuffer(encoded), 0, clusterId, epoch, sequence, kind,
+                            new UnsafeBuffer(encoded), 0, clusterId, epoch, fencingToken, sequence, kind,
                             payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
                             new UnsafeBuffer(payload), 0, payload.length);
                     return encoded;

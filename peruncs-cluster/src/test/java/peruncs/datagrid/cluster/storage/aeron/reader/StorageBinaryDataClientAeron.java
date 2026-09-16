@@ -5,6 +5,7 @@ import io.aeron.Subscription;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.util.UUID;
@@ -63,7 +64,7 @@ public final class StorageBinaryDataClientAeron implements Disposable {
                     () -> false,
                     () -> {
                     },
-                    AeronReaderLifecycle.defaultIdleStrategy()
+                    AeronRetryPolicy.Default().idleStrategy()
             );
         } catch (final RuntimeException e) {
             this.assembler.failure(e);
@@ -82,7 +83,7 @@ public final class StorageBinaryDataClientAeron implements Disposable {
     public AeronReplicationCursor cursor(final UUID nodeId, final UUID storeGeneration, final long recordingId) {
         final CursorSnapshot snapshot = this.assembler.cursorSnapshot();
         return new AeronReplicationCursor(
-                this.assembler.clusterId(), nodeId, storeGeneration, this.assembler.epoch(), recordingId,
+                this.assembler.clusterId(), nodeId, storeGeneration, this.assembler.epoch(), 1L, recordingId,
                 snapshot.position(), snapshot.sequence());
     }
 

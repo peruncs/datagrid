@@ -161,6 +161,36 @@ class AeronAuthenticatedWatermarkTest {
         assertTrue(aggregate.verify(SECRET));
     }
 
+        /// Rotation overlap accepts watermarks signed with the retiring key while the
+    /// aggregate is already signed with the primary.
+    @Test
+    void rotationOverlapAcceptsTheRetiringKey() {
+        final byte[] previous = "test-only-previous-secret!".getBytes(StandardCharsets.UTF_8);
+        final byte[] primary = "test-only-primary-secret!!".getBytes(StandardCharsets.UTF_8);
+        final AeronAuthenticatedWatermark oldToken = AeronAuthenticatedWatermark.sign(
+                READER_ONE, CLUSTER, GENERATION, 3, 17, 1, 100, previous);
+        final AeronAuthenticatedWatermark newToken = AeronAuthenticatedWatermark.sign(
+                READER_TWO, CLUSTER, GENERATION, 3, 17, 2, 200, primary);
+        final AeronAuthenticatedWatermark foreignToken = AeronAuthenticatedWatermark.sign(
+                READER_ONE, CLUSTER, GENERATION, 3, 17, 3, 300, SECRET);
+        assertTrue(oldToken.verifyAny(primary, previous));
+        assertTrue(newToken.verifyAny(primary, previous));
+        assertFalse(foreignToken.verifyAny(primary, previous));
+        assertFalse(oldToken.verifyAny(primary, null));
+        try (final AeronAuthenticatedWatermark.Quorum quorum =
+                new AeronAuthenticatedWatermark.Quorum(java.util.Set.of(READER_ONE, READER_TWO), primary, previous)) {
+            quorum.accept(oldToken);
+            quorum.accept(newToken);
+            final AeronAuthenticatedWatermark aggregate = quorum.aggregate();
+            assertEquals(1, aggregate.sequence());
+            assertTrue(aggregate.verify(primary));
+            assertFalse(aggregate.verify(previous));
+        }
+        final AeronAuthenticatedWatermark aggregate = AeronAuthenticatedWatermark.aggregate(
+                java.util.List.of(oldToken, newToken), primary, previous);
+        assertTrue(aggregate.verify(primary));
+    }
+
     @Test
     void validatorRejectsRestoringAnIdentityMismatchedToken() {
         try (final AeronAuthenticatedWatermark.Validator validator =

@@ -14,7 +14,7 @@ public final class AeronDriverFailureChildMain {
     private AeronDriverFailureChildMain() {
     }
 
-    public static void main(final String[] ignored) throws Exception {
+    static void main(final String[] ignored) throws Exception {
         final Path root = Path.of(System.getProperty("dg.driver.failure.root"));
         final Path control = root.resolve("control");
         final Path aeronDirectory = root.resolve("aeron");

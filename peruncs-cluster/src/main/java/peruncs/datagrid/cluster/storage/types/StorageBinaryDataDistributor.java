@@ -14,12 +14,18 @@ import java.util.concurrent.atomic.AtomicReference;
 /// message and is used by the Aeron provider.
 public interface StorageBinaryDataDistributor extends Disposable {
         /// Publishes one complete Store binary.
+    ///
+    /// @param data complete binary to publish
     void distributeData(Binary data);
 
         /// Publishes a type dictionary needed by later Store data.
+    ///
+    /// @param typeDictionaryData assembled type dictionary
     void distributeTypeDictionary(String typeDictionaryData);
 
         /// Returns and clears a dictionary staged for the next binary transaction.
+    ///
+    /// @return staged dictionary, or `null` when none is pending
     default String consumeTypeDictionary() {
         return null;
     }

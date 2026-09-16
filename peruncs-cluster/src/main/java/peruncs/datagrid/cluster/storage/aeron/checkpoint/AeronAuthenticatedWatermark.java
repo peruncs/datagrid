@@ -241,11 +241,26 @@ public record AeronAuthenticatedWatermark(
     /// @return a signed watermark at the least advanced boundary
     public static AeronAuthenticatedWatermark aggregate(
             final Collection<AeronAuthenticatedWatermark> watermarks, final byte[] secret) {
+        return aggregate(watermarks, secret, null);
+    }
+
+        /// Creates an authenticated aggregate at the least advanced boundary, accepting
+    /// the retiring key during rotation overlap. Member watermarks verify
+    /// against either key; the aggregate itself is always signed with the
+    /// primary key.
+    ///
+    /// @param watermarks     authenticated reader watermarks from one writer
+    /// @param primarySecret  current HMAC secret
+    /// @param previousSecret retiring HMAC secret, or `null`
+    /// @return a signed watermark at the least advanced boundary
+    public static AeronAuthenticatedWatermark aggregate(
+            final Collection<AeronAuthenticatedWatermark> watermarks,
+            final byte[] primarySecret, final byte[] previousSecret) {
         if (watermarks == null || watermarks.isEmpty()) throw new IllegalArgumentException("watermarks are empty");
         final Set<UUID> readers = new HashSet<>();
         AeronAuthenticatedWatermark least = null;
         for (final AeronAuthenticatedWatermark watermark : watermarks) {
-            if (watermark == null || !watermark.verify(secret))
+            if (watermark == null || !watermark.verifyAny(primarySecret, previousSecret))
                 throw new SecurityException("invalid Aeron watermark authentication");
             if (!readers.add(watermark.readerId()))
                 throw new IllegalArgumentException("duplicate Aeron watermark reader identity");
@@ -258,7 +273,7 @@ public record AeronAuthenticatedWatermark(
             }
         }
         return sign(UUID_ZERO, least.clusterId(), least.storeGeneration(), least.writerEpoch(),
-                least.recordingId(), least.sequence(), least.position(), secret);
+                least.recordingId(), least.sequence(), least.position(), primarySecret);
     }
 
     private static byte[] canonical(
@@ -395,6 +410,19 @@ public record AeronAuthenticatedWatermark(
         });
     }
 
+        /// Verifies against the primary key, falling back to the retiring key.
+    ///
+    /// Rotation overlap accepts watermarks the readers signed before the
+    /// rotation while the quorum aggregate is already signed with the
+    /// primary. A `null` previous key verifies against the primary only.
+    ///
+    /// @param primarySecret  current HMAC secret
+    /// @param previousSecret retiring HMAC secret, or `null`
+    /// @return `true` when the token was signed with either secret
+    public boolean verifyAny(final byte[] primarySecret, final byte[] previousSecret) {
+        return this.verify(primarySecret) || (previousSecret != null && this.verify(previousSecret));
+    }
+
         /// Encodes the signed token for a cursor or a control message.
     ///
     /// @return serialized watermark bytes
@@ -412,6 +440,7 @@ public record AeronAuthenticatedWatermark(
     public static final class Validator implements AutoCloseable {
         private final LockedExecutor state = LockedExecutor.New();
         private final byte[] secret;
+        private final byte[] previousSecret;
         private final Map<UUID, AeronAuthenticatedWatermark> latest = new HashMap<>();
         private boolean erased;
 
@@ -419,9 +448,20 @@ public record AeronAuthenticatedWatermark(
         ///
         /// @param secret HMAC secret
         public Validator(final byte[] secret) {
+            this(secret, null);
+        }
+
+                /// Creates a validator accepting the retiring key during rotation overlap.
+        ///
+        /// @param secret         current HMAC secret
+        /// @param previousSecret retiring HMAC secret, or `null`
+        public Validator(final byte[] secret, final byte[] previousSecret) {
             if (secret == null || secret.length < 16)
                 throw new IllegalArgumentException("watermark secret must contain at least 16 bytes");
+            if (previousSecret != null && previousSecret.length < 16)
+                throw new IllegalArgumentException("watermark previous secret must contain at least 16 bytes");
             this.secret = secret.clone();
+            this.previousSecret = previousSecret == null ? null : previousSecret.clone();
         }
 
                 /// Accepts a verified, monotonically advancing reader watermark.
@@ -431,7 +471,7 @@ public record AeronAuthenticatedWatermark(
             this.state.write(() ->
             {
                 this.ensureOpen();
-                if (watermark == null || !watermark.verify(this.secret))
+                if (watermark == null || !watermark.verifyAny(this.secret, this.previousSecret))
                     throw new SecurityException("invalid Aeron watermark authentication");
                 final AeronAuthenticatedWatermark previous = this.latest.get(watermark.readerId());
                 if (previous != null && (!sameWriterIdentity(previous, watermark) ||
@@ -467,7 +507,7 @@ public record AeronAuthenticatedWatermark(
                     this.latest.remove(readerId);
                     return;
                 }
-                if (!readerId.equals(watermark.readerId()) || !watermark.verify(this.secret))
+                if (!readerId.equals(watermark.readerId()) || !watermark.verifyAny(this.secret, this.previousSecret))
                     throw new SecurityException("cannot restore an unauthenticated Aeron watermark");
                 this.latest.put(readerId, watermark);
             });
@@ -525,6 +565,7 @@ public record AeronAuthenticatedWatermark(
             {
                 if (!this.erased) {
                     Arrays.fill(this.secret, (byte) 0);
+                    if (this.previousSecret != null) Arrays.fill(this.previousSecret, (byte) 0);
                     this.erased = true;
                 }
             });
@@ -554,6 +595,15 @@ public record AeronAuthenticatedWatermark(
         /// @param expectedReaders reader identities that must acknowledge
         /// @param secret          HMAC secret
         public Quorum(final Collection<UUID> expectedReaders, final byte[] secret) {
+            this(expectedReaders, secret, null);
+        }
+
+                /// Creates a quorum accepting the retiring key during rotation overlap.
+        ///
+        /// @param expectedReaders reader identities that must acknowledge
+        /// @param secret          current HMAC secret
+        /// @param previousSecret  retiring HMAC secret, or `null`
+        public Quorum(final Collection<UUID> expectedReaders, final byte[] secret, final byte[] previousSecret) {
             if (expectedReaders == null || expectedReaders.isEmpty())
                 throw new IllegalArgumentException("at least one Aeron reader is required");
             final HashSet<UUID> readers = new HashSet<>(expectedReaders);
@@ -561,7 +611,7 @@ public record AeronAuthenticatedWatermark(
                 throw new IllegalArgumentException("invalid Aeron reader identity");
             this.expectedReaders = readers;
             this.activeReaders = new HashSet<>(readers);
-            this.validator = new Validator(secret);
+            this.validator = new Validator(secret, previousSecret);
         }
 
                 /// Accepts one authenticated acknowledgement from a configured reader.

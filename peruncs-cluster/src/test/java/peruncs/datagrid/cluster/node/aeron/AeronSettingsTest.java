@@ -1,5 +1,9 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+import io.aeron.archive.codecs.MessageHeaderDecoder;
+import io.aeron.archive.codecs.ReplayRequestDecoder;
+import io.aeron.archive.codecs.StartRecordingRequestDecoder;
+import io.aeron.archive.codecs.TruncateRecordingRequestDecoder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
@@ -8,10 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
-import java.util.Base64;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -22,6 +23,14 @@ class AeronSettingsTest {
     }
 
     private static NodeLibraryPropertiesProvider properties(final Map<String, String> overrides, final boolean production) {
+        return properties(overrides, production, "writer");
+    }
+
+    private static NodeLibraryPropertiesProvider properties(
+            final Map<String, String> overrides,
+            final boolean production,
+            final String role
+    ) {
         final Path root = Path.of(System.getProperty("java.io.tmpdir"), "aeron-settings-%s".formatted(UUID.randomUUID()));
         final UUID cluster = UUID.randomUUID();
         final UUID node = UUID.randomUUID();
@@ -34,7 +43,7 @@ class AeronSettingsTest {
 
             @Override
             public String replicationRole() {
-                return "writer";
+                return role;
             }
 
             @Override
@@ -102,6 +111,19 @@ class AeronSettingsTest {
         )));
 
         assertArrayEquals(secret, settings.retentionSecret());
+    }
+
+    @Test
+    void readsReplicationSecretFromOwnerOnlyFile(@TempDir final Path temporaryDirectory) throws Exception {
+        final byte[] secret = "sixteen-byte-key".getBytes(StandardCharsets.US_ASCII);
+        final Path file = temporaryDirectory.resolve("replication.secret");
+        Files.writeString(file, Base64.getEncoder().encodeToString(secret), StandardCharsets.US_ASCII);
+        Files.setPosixFilePermissions(file, Set.of(PosixFilePermission.OWNER_READ));
+
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_FILE", file.toString())));
+
+        assertArrayEquals(secret, settings.replication().authenticationSecret());
     }
 
     @Test
@@ -175,5 +197,342 @@ class AeronSettingsTest {
     @Test
     void rejectsLoopbackEndpointsInProduction() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(), true)));
+    }
+
+    @Test
+    void aeronAuthIsDisabledByDefault() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
+        assertFalse(settings.authEnabled());
+        assertNull(settings.authPrincipal());
+        assertNull(settings.authCredentials());
+        assertNull(settings.authenticatorSupplier());
+        assertNull(settings.authorisationServiceSupplier());
+        assertNull(settings.credentialsSupplier());
+    }
+
+    @Test
+    void aeronAuthEnabledParsesPrincipalAndCredentials() {
+        final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(credentials)
+        )));
+        assertTrue(settings.authEnabled());
+        assertEquals("datagrid-node", settings.authPrincipal());
+        assertArrayEquals(credentials, settings.authCredentials());
+        final var authenticatorSupplier = settings.authenticatorSupplier();
+        assertNotNull(authenticatorSupplier);
+        assertNotNull(authenticatorSupplier.get());
+        final var authorisationServiceSupplier = settings.authorisationServiceSupplier();
+        assertNotNull(authorisationServiceSupplier);
+        assertNotNull(authorisationServiceSupplier.get());
+        final var credentialsSupplier = settings.credentialsSupplier();
+        assertNotNull(credentialsSupplier);
+        assertArrayEquals(credentials, credentialsSupplier.encodedCredentials());
+        assertArrayEquals(credentials, credentialsSupplier.onChallenge(new byte[0]));
+    }
+
+    @Test
+    void aeronAuthAuthorisesAnAuthenticatedPrincipal() {
+        final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
+        final byte[] readerCredentials = "datagrid-reader-secret".getBytes(StandardCharsets.US_ASCII);
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(credentials),
+                "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL", "datagrid-reader",
+                "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS", Base64.getEncoder().encodeToString(readerCredentials)
+        )));
+        final var authorisationServiceSupplier = settings.authorisationServiceSupplier();
+        assertNotNull(authorisationServiceSupplier);
+        assertTrue(authorisationServiceSupplier.get()
+                .isAuthorised(MessageHeaderDecoder.SCHEMA_ID, StartRecordingRequestDecoder.TEMPLATE_ID, null,
+                        "datagrid-node".getBytes(StandardCharsets.US_ASCII)));
+        assertFalse(authorisationServiceSupplier.get()
+                .isAuthorised(MessageHeaderDecoder.SCHEMA_ID, StartRecordingRequestDecoder.TEMPLATE_ID, null,
+                        "unexpected-principal".getBytes(StandardCharsets.US_ASCII)));
+        assertTrue(authorisationServiceSupplier.get()
+                .isAuthorised(MessageHeaderDecoder.SCHEMA_ID, ReplayRequestDecoder.TEMPLATE_ID, null,
+                        "datagrid-reader".getBytes(StandardCharsets.US_ASCII)));
+        assertFalse(authorisationServiceSupplier.get()
+                .isAuthorised(MessageHeaderDecoder.SCHEMA_ID, TruncateRecordingRequestDecoder.TEMPLATE_ID, null,
+                        "datagrid-reader".getBytes(StandardCharsets.US_ASCII)));
+    }
+
+    @Test
+    void readerPrincipalCannotMutateArchive() {
+        final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-reader",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(credentials)
+        ), false, "reader"));
+        final var service = settings.authorisationServiceSupplier().get();
+        final byte[] principal = "datagrid-reader".getBytes(StandardCharsets.US_ASCII);
+        assertTrue(service.isAuthorised(MessageHeaderDecoder.SCHEMA_ID, ReplayRequestDecoder.TEMPLATE_ID, null, principal));
+        assertFalse(service.isAuthorised(MessageHeaderDecoder.SCHEMA_ID,
+                TruncateRecordingRequestDecoder.TEMPLATE_ID, null, principal));
+    }
+
+    @Test
+    void aeronAuthRejectsNonPrintablePrincipal() {
+        final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "node\n",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
+                Base64.getEncoder().encodeToString(credentials)
+        ))));
+    }
+
+    @Test
+    void aeronAuthReadsCredentialsFromOwnerOnlyFile(@TempDir final Path temporaryDirectory) throws Exception {
+        final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
+        final Path file = temporaryDirectory.resolve("aeron-auth.credentials");
+        Files.writeString(file, Base64.getEncoder().encodeToString(credentials), StandardCharsets.US_ASCII);
+        Files.setPosixFilePermissions(file, Set.of(PosixFilePermission.OWNER_READ));
+
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS_FILE", file.toString()
+        )));
+
+        assertTrue(settings.authEnabled());
+        assertArrayEquals(credentials, settings.authCredentials());
+        final var credentialsSupplier = settings.credentialsSupplier();
+        assertNotNull(credentialsSupplier);
+        assertArrayEquals(credentials, credentialsSupplier.encodedCredentials());
+    }
+
+    @Test
+    void aeronAuthRequiresPrincipalWhenEnabled() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
+                Base64.getEncoder().encodeToString("datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII))
+        ))));
+    }
+
+    @Test
+    void aeronAuthRequiresCredentialsWhenEnabled() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node"
+        ))));
+    }
+
+    @Test
+    void aeronAuthRejectsCredentialsWithoutEnabled() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
+                Base64.getEncoder().encodeToString("datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII))
+        ))));
+    }
+
+    @Test
+    void aeronAuthRejectsBothCredentialsAndCredentialsFile(@TempDir final Path temporaryDirectory) throws Exception {
+        final Path file = temporaryDirectory.resolve("aeron-auth.credentials");
+        Files.writeString(file, Base64.getEncoder().encodeToString("datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII)),
+                StandardCharsets.US_ASCII);
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
+                Base64.getEncoder().encodeToString("datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII)),
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS_FILE", file.toString()
+        ))));
+    }
+
+    @Test
+    void aeronAuthRejectsShortCredentials() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(new byte[4])
+        ))));
+    }
+
+    @Test
+    void aeronAuthRejectsNonBooleanEnabled() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "yes",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
+                Base64.getEncoder().encodeToString("datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII))
+        ))));
+    }
+
+        /// Production mode rejects unauthenticated operation without an explicit acknowledgement.
+    @Test
+    void prodModeRejectsDisabledAuthWithoutAcknowledgement() {
+        final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> AeronSettings.fromEnvironment(prodProperties(Map.of())));
+        assertTrue(failure.getMessage().contains("ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE"));
+    }
+
+        /// The insecure acknowledgement explicitly opts a production node out of auth.
+    @Test
+    void prodModeAcceptsAcknowledgedInsecureAuth() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true",
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", "true")));
+
+        assertFalse(settings.authEnabled());
+        assertNull(settings.authenticatorSupplier());
+    }
+
+        /// The acknowledgement is strictly `true`/`false`, like every other boolean setting.
+    @Test
+    void prodModeRejectsNonBooleanAcknowledgement() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(prodProperties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "yes"))));
+    }
+
+        /// Enabled auth in production mode needs no acknowledgement.
+    @Test
+    void prodModeWithEnabledAuthNeedsNoAcknowledgement() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
+                Base64.getEncoder().encodeToString("datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII)),
+                "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL", "datagrid-reader",
+                "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS",
+                Base64.getEncoder().encodeToString("datagrid-reader-secret".getBytes(StandardCharsets.US_ASCII)),
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET",
+                Base64.getEncoder().encodeToString("datagrid-replication-key".getBytes(StandardCharsets.US_ASCII)))));
+
+        assertTrue(settings.authEnabled());
+        assertEquals("datagrid-node", settings.authPrincipal());
+    }
+
+        /// The default profile is authenticated operation.
+    @Test
+    void defaultNetworkProfileIsAuthenticated() {
+        assertEquals(AeronSettings.NetworkProfile.AUTHENTICATED,
+                AeronSettings.fromEnvironment(properties(Map.of())).networkProfile());
+        assertEquals(AeronSettings.NetworkProfile.AUTHENTICATED,
+                AeronSettings.fromEnvironment(prodProperties(Map.of(
+                        "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true",
+                        "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", "true"))).networkProfile());
+    }
+
+        /// An unknown profile fails closed instead of silently degrading.
+    @Test
+    void unknownNetworkProfileIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "vpn"))));
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(prodProperties(Map.of(
+                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "vpn",
+                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true",
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", "true"))));
+    }
+
+        /// The trusted-network profile waives the replication gate only: Archive
+    /// control authentication always needs its own acknowledgement, even on a
+    /// trusted network.
+    @Test
+    void trustedNetworkProfileWaivesOnlyTheReplicationGate() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(prodProperties(Map.of(
+                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "trusted-network"))));
+        final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
+                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "trusted-network",
+                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true")));
+
+        assertEquals(AeronSettings.NetworkProfile.TRUSTED_NETWORK, settings.networkProfile());
+        assertFalse(settings.authEnabled());
+    }
+
+        /// The profile spelling is case-insensitive and tolerates surrounding whitespace.
+    @Test
+    void trustedNetworkProfileSpellingIsLenient() {
+        assertEquals(AeronSettings.NetworkProfile.TRUSTED_NETWORK,
+                AeronSettings.fromEnvironment(prodProperties(Map.of(
+                        "ECLIPSE_DATAGRID_NETWORK_PROFILE", " Trusted-Network ",
+                        "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true"))).networkProfile());
+    }
+
+        /// A previous key rides alongside its primary and is exposed for rotation overlap.
+    @Test
+    void previousSecretsAreAcceptedAndExposed() {
+        final String primary = Base64.getEncoder().encodeToString(
+                "datagrid-replication-key".getBytes(StandardCharsets.US_ASCII));
+        final String previous = Base64.getEncoder().encodeToString(
+                "datagrid-previous-key!".getBytes(StandardCharsets.US_ASCII));
+        final UUID reader = UUID.randomUUID();
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET", primary,
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", previous,
+                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET", primary,
+                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS", previous,
+                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", reader.toString())));
+
+        assertArrayEquals(Base64.getDecoder().decode(previous),
+                settings.replication().previousAuthenticationSecret());
+        assertArrayEquals(Base64.getDecoder().decode(previous), settings.previousRetentionSecret());
+    }
+
+        /// A previous key without its primary, equal to its primary, or from both
+    /// sources at once is rejected.
+    @Test
+    void previousSecretsRequireADistinctPrimary() {
+        final String primary = Base64.getEncoder().encodeToString(
+                "datagrid-replication-key".getBytes(StandardCharsets.US_ASCII));
+        final String previous = Base64.getEncoder().encodeToString(
+                "datagrid-previous-key!".getBytes(StandardCharsets.US_ASCII));
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", previous))));
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET", primary,
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", primary))));
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET", primary,
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", previous,
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS_FILE", "/nonexistent-secret"))));
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS", previous,
+                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", UUID.randomUUID().toString()))));
+    }
+
+        /// Closing the transport erases the configuration copies of both
+    /// replication keys; readers keep their own clones until disposal.
+    @Test
+    void transportCloseErasesReplicationSecrets() {
+        final byte[] primary = "datagrid-replication-key".getBytes(StandardCharsets.US_ASCII);
+        final byte[] previous = "datagrid-previous-key!".getBytes(StandardCharsets.US_ASCII);
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET",
+                Base64.getEncoder().encodeToString(primary),
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS",
+                Base64.getEncoder().encodeToString(previous))));
+
+        assertArrayEquals(primary, settings.replication().authenticationSecret());
+        settings.clearReplicationSecrets();
+
+        assertArrayEquals(new byte[primary.length], settings.replication().authenticationSecret());
+        assertArrayEquals(new byte[previous.length], settings.replication().previousAuthenticationSecret());
+    }
+
+        /// Production-shaped settings with routable endpoints and home-directory paths.
+    private static NodeLibraryPropertiesProvider prodProperties(final Map<String, String> overrides) {
+        final HashMap<String, String> merged = new HashMap<>(overrides);
+        final Path root = Path.of(System.getProperty("user.home"),
+                "datagrid-auth-test-%s".formatted(UUID.randomUUID()));
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_DIRECTORY", root.resolve("driver").toString());
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY", root.resolve("archive").toString());
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH",
+                root.resolve("checkpoint/writer.checkpoint").toString());
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+                "aeron:udp?control=192.168.7.1:40123|control-mode=dynamic|fc=max");
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
+                "aeron:udp?endpoint=192.168.7.1:0|control=192.168.7.1:40123|control-mode=dynamic");
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL", "aeron:udp?endpoint=192.168.7.1:0");
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL", "aeron:udp?endpoint=192.168.7.1:40125");
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL", "aeron:udp?endpoint=192.168.7.1:40124");
+        merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL", "aeron:udp?endpoint=192.168.7.1:0");
+        return properties(merged, true);
     }
 }

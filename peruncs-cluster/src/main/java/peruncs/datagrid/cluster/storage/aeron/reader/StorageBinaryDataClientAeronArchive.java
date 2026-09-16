@@ -8,6 +8,7 @@ import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
@@ -36,6 +37,9 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
     private volatile Thread thread;
     private volatile CountDownLatch stopped = new CountDownLatch(0);
     private volatile boolean disposed;
+    /* Seeding closes on the first start: the stale-token floor must be fixed
+     * before any frame is accepted, and a late seed would silently lower it. */
+    private volatile boolean seedingClosed;
     /* A disposal request is permanent even when its bounded wait times out.  Keep
      * it separate from disposed so callers can retry disposal without starting a
      * second poller against the same subscription and assembler. */
@@ -251,6 +255,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
 
         /// Starts replay and live polling; repeated calls have no effect.
     public synchronized void start() {
+        this.seedingClosed = true;
         if (this.disposed || this.disposeRequested) {
             throw new IllegalStateException("Aeron Archive reader is disposed or stopping for disposal");
         }
@@ -311,6 +316,7 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
             throw e;
         } finally {
             this.finishRun(lifecycleStopped);
+            AeronReplicationEnvelope.clearThreadLocalAuthenticationState();
         }
     }
 
@@ -433,10 +439,34 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
                 nodeId,
                 storeGeneration,
                 this.assembler.epoch(),
+                this.assembler.fencingToken(),
                 recordingId,
                 snapshot.position(),
                 snapshot.sequence()
         );
+    }
+
+        /// Seeds the assembler's stale-token floor from the durable cursor.
+    ///
+    /// Call before [#start()] only. The floor must be fixed before the reader
+    /// accepts any frame, so a restart never re-accepts history from a writer
+    /// its cursor already moved past; seeding after start would silently move
+    /// the floor under live validation and is rejected.
+    ///
+    /// @param fencingToken greatest token the persisted cursor accepted, or `0` for a new reader
+    /// @throws IllegalStateException when the reader is already started
+    public synchronized void seedFencingToken(final long fencingToken) {
+        if (this.seedingClosed) {
+            throw new IllegalStateException("Aeron Archive reader fencing seed is only accepted before start()");
+        }
+        this.assembler.startingFencingToken(fencingToken);
+    }
+
+        /// Returns the greatest writer fencing token accepted so far.
+    ///
+    /// @return greatest accepted fencing token
+    public long fencingToken() {
+        return this.assembler.fencingToken();
     }
 
         /// Returns the terminal polling failure, or `null` while healthy.
@@ -447,11 +477,15 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
     }
 
         /// Returns the stop boundary outcome and never infers success from a dead thread.
+    ///
+    /// @return current stop outcome
     public StorageBinaryDataClient.StopOutcome stopOutcome() {
         return this.stopOutcome.get();
     }
 
         /// Returns the terminal stop state and the last resolved sequence/position.
+    ///
+    /// @return current stop result
     public StorageBinaryDataClient.StopResult stopResult() {
         final CursorSnapshot cursor = this.assembler.cursorSnapshot();
         return new StorageBinaryDataClient.StopResult(this.stopOutcome.get(), cursor.sequence(), cursor.position());

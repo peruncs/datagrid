@@ -8,9 +8,13 @@ import java.nio.ByteBuffer;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Copies incoming Store binary buffers into owned native memory and imports them.
+///
+/// Every slot of a returned array is distinctly owned native memory — including
+/// empty slots, which each get their own fresh empty direct buffer instead of
+/// sharing one static instance. The caller must therefore release every slot
+/// exactly once through [#release(ByteBuffer[])] (or the ranged overload);
+/// slots are never shared, duplicated, or retained anywhere else.
 final class StorageBinaryDataImporter {
-    private static final ByteBuffer EMPTY_DIRECT_BUFFER = ByteBuffer.allocateDirect(0);
-
     private StorageBinaryDataImporter() {
     }
 
@@ -56,7 +60,11 @@ final class StorageBinaryDataImporter {
                 }
                 final int sourceLength = source.remaining();
                 if (sourceLength == 0) {
-                    ownedBuffers[i] = EMPTY_DIRECT_BUFFER.duplicate();
+                    /* A fresh empty per slot: each slot stays independently
+                     * owned so the unconditional release below frees exactly
+                     * what this slot owns — never a shared static buffer, and
+                     * never a duplicate that would double-free one address. */
+                    ownedBuffers[i] = ByteBuffer.allocateDirect(0);
                     continue;
                 }
                 final ByteBuffer owned = XMemory.allocateDirectNative(sourceLength);
@@ -100,12 +108,34 @@ final class StorageBinaryDataImporter {
 
         /// Releases native buffers returned by [#importOwned(StorageConnection, ByteBuffer\[\])].
     ///
+    /// Every non-null slot is deallocated unconditionally — including empty
+    /// buffers, which are independently owned since the shared static empty
+    /// was removed. Slots must be distinctly owned: passing two views of one
+    /// native address would free it twice.
+    ///
     /// @param buffers buffers to release
     public static void release(final ByteBuffer[] buffers) {
         if (buffers == null) return;
+        release(buffers, buffers.length);
+    }
+
+        /// Releases the first `length` slots of a scratch array.
+    ///
+    /// Scratch arrays are usually larger than the batch they hold; only the
+    /// populated prefix is owned. Slots past `length` are untouched and keep
+    /// whatever value (normally `null`) the caller left there.
+    ///
+    /// @param buffers scratch array holding owned buffers in its prefix
+    /// @param length  number of populated prefix slots
+    public static void release(final ByteBuffer[] buffers, final int length) {
+        if (buffers == null) return;
+        if (length < 0 || length > buffers.length) {
+            throw new IllegalArgumentException("release length out of range: %s".formatted(length));
+        }
         RuntimeException failure = null;
-        for (final ByteBuffer buffer : buffers) {
-            if (buffer != null && buffer.capacity() > 0) {
+        for (int index = 0; index < length; index++) {
+            final ByteBuffer buffer = buffers[index];
+            if (buffer != null) {
                 try {
                     XMemory.deallocateDirectByteBuffer(buffer);
                 } catch (final RuntimeException cleanupFailure) {

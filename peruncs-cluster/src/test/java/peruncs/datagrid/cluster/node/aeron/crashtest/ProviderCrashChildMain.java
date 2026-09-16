@@ -49,7 +49,7 @@ public final class ProviderCrashChildMain {
     private ProviderCrashChildMain() {
     }
 
-    public static void main(final String[] arguments) throws Exception {
+    static void main(final String[] arguments) throws Exception {
         final String baseProperty = System.getProperty("dg.crash.base");
         if (baseProperty == null || baseProperty.isBlank()) throw new IllegalArgumentException("missing -Ddg.crash.base");
         final Path base = Path.of(baseProperty).toAbsolutePath().normalize();
@@ -610,6 +610,11 @@ public final class ProviderCrashChildMain {
         }
 
         @Override
+        public Long writerLeaseStalenessMillis() {
+            return null;
+        }
+
+        @Override
         public Long dataMergerApplyTimeoutMs() {
             return null;
         }
@@ -624,6 +629,7 @@ public final class ProviderCrashChildMain {
                         this.externalArchive ? "writer-aeron" : "aeron").toString();
                 case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> this.base.resolve("archive").toString();
                 case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> this.base.resolve("checkpoint/writer.checkpoint").toString();
+                case "ECLIPSE_DATAGRID_BACKUP_PATH" -> this.base.resolve("backups").toString();
                 case "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL" -> writerLiveChannel();
                 case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(Integer.getInteger("dg.crash.controlPort", 40124));
                 case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",

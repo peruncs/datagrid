@@ -1,0 +1,195 @@
+package peruncs.datagrid.cluster.node.backup;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+
+import java.nio.file.Path;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/// Verifies backup generation identity: derivation from cursors,
+/// compatibility filtering, and the archive file-name round trip.
+class BackupMetadataTest {
+    private static final UUID CLUSTER = UUID.randomUUID();
+    private static final UUID GENERATION = UUID.randomUUID();
+    private static final UUID NODE = UUID.randomUUID();
+
+    private static ReplicationCursor aeronCursor(final long sequence) {
+        return ReplicationCursor.of("aeron", GENERATION, sequence,
+                new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 42L, 0L, sequence).encode());
+    }
+
+    @Test
+    void derivesGenerationFromAnAeronCursor() {
+        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+
+        assertEquals(100L, backup.timestamp());
+        assertFalse(backup.manualSlot());
+        assertEquals(CLUSTER, backup.clusterId());
+        assertEquals(GENERATION, backup.storeGeneration());
+        assertEquals(5L, backup.epoch());
+        assertEquals(42L, backup.recordingId());
+        assertEquals(NODE, backup.nodeId());
+        assertNotNull(backup.backupId());
+        assertEquals(BackupMetadata.UNKNOWN, backup.digest());
+    }
+
+    @Test
+    void leavesIdentityUnknownWithoutACursor() {
+        final BackupMetadata missing = BackupMetadata.New(100L, true, null);
+        assertTrue(missing.manualSlot());
+        assertNull(missing.clusterId());
+        assertNull(missing.storeGeneration());
+        assertEquals(BackupMetadata.UNKNOWN, missing.epoch());
+        assertEquals(BackupMetadata.UNKNOWN, missing.recordingId());
+        assertNull(missing.nodeId());
+        assertNotNull(missing.backupId());
+
+        final BackupMetadata plain =
+                BackupMetadata.New(100L, false, new ReplicationCursor("none", null, -1L, ""));
+        assertNull(plain.clusterId());
+        assertNull(plain.storeGeneration());
+
+        /* A corrupt Aeron provider position cannot identify the Store image;
+         * publishing it would create a backup that a configured reader could
+         * mistake for a compatible generation. */
+        assertThrows(IllegalArgumentException.class, () -> BackupMetadata.New(
+                100L, false, new ReplicationCursor("aeron", GENERATION, 7L, "deadbeef")));
+    }
+
+    @Test
+    void everyPublicationGetsADistinctBackupId() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+
+        assertNotEquals(BackupMetadata.New(100L, false, cursor).backupId(),
+                BackupMetadata.New(100L, false, cursor).backupId());
+    }
+
+    @Test
+    void compatibilityRejectsOnlyKnownContradictions() {
+        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+
+        assertTrue(backup.isCompatibleWith(BackupMetadata.Identity.unknown()),
+                "unknown node identity must accept every backup");
+        assertTrue(backup.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, GENERATION, 5L, 42L)));
+        assertFalse(backup.isCompatibleWith(new BackupMetadata.Identity(UUID.randomUUID(), GENERATION, 5L, 42L)));
+        assertFalse(backup.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, UUID.randomUUID(), 5L, 42L)));
+        assertFalse(backup.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, GENERATION, 6L, 42L)));
+        assertFalse(backup.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, GENERATION, 5L, 43L)));
+
+        final BackupMetadata unknown = BackupMetadata.New(100L, false, null);
+        assertFalse(unknown.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, GENERATION, 5L, 42L)),
+                "a configured replicated node must reject an unidentifiable backup");
+        assertTrue(unknown.isCompatibleWith(BackupMetadata.Identity.unknown()),
+                "an unreplicated node has no identity constraint");
+    }
+
+    @Test
+    void identityMergesProviderAndLocalViews() {
+        final BackupMetadata.Identity provider =
+                new BackupMetadata.Identity(CLUSTER, null, BackupMetadata.UNKNOWN, 42L);
+        final BackupMetadata.Identity local = BackupMetadata.Identity.of(aeronCursor(7L));
+
+        final BackupMetadata.Identity merged = provider.fillUnknowns(local);
+        assertEquals(CLUSTER, merged.clusterId());
+        assertEquals(GENERATION, merged.storeGeneration());
+        assertEquals(5L, merged.epoch());
+        assertEquals(42L, merged.recordingId());
+    }
+
+    @Test
+    void fileNameRoundTripsTheSelectionFields(@TempDir final Path volume) {
+        final BackupMetadata backup = BackupMetadata.New(1700000000000L, true, aeronCursor(7L));
+        final String name = BackupArchive.toArchiveFileName(backup);
+
+        assertTrue(BackupArchive.isBackupFileName(name));
+        final BackupMetadata parsed = BackupArchive.parseMetadata(name, volume);
+        assertEquals(backup.timestamp(), parsed.timestamp());
+        assertEquals(backup.manualSlot(), parsed.manualSlot());
+        assertEquals(backup.clusterId(), parsed.clusterId());
+        assertEquals(backup.storeGeneration(), parsed.storeGeneration());
+        assertEquals(backup.epoch(), parsed.epoch());
+        assertEquals(backup.recordingId(), parsed.recordingId());
+        assertEquals(backup.backupId(), parsed.backupId());
+    }
+
+    @Test
+    void consistentMetadataAndCursorPass() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        BackupMetadata.requireConsistentWithCursor(backup, cursor);
+    }
+
+    @Test
+    void rejectsClusterMismatchBetweenMetadataAndCursor() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
+                new AeronReplicationCursor(UUID.randomUUID(), NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
+        assertThrows(IllegalArgumentException.class,
+                () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
+    }
+
+    @Test
+    void rejectsGenerationMismatchBetweenMetadataAndCursor() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final UUID otherGeneration = UUID.randomUUID();
+        final ReplicationCursor foreign = ReplicationCursor.of("aeron", otherGeneration, 7L,
+                new AeronReplicationCursor(CLUSTER, NODE, otherGeneration, 5L, 7L, 42L, 0L, 7L).encode());
+        assertThrows(IllegalArgumentException.class,
+                () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
+    }
+
+    @Test
+    void rejectsRecordingMismatchWhenRecordingUnconfigured() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
+                new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 43L, 0L, 7L).encode());
+        assertThrows(IllegalArgumentException.class,
+                () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
+    }
+
+    @Test
+    void rejectsEpochMismatchBetweenMetadataAndCursor() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
+                new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 6L, 7L, 42L, 0L, 7L).encode());
+        assertThrows(IllegalArgumentException.class,
+                () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
+    }
+
+    @Test
+    void rejectsOuterSequenceMismatchWithEncodedPosition() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final ReplicationCursor drifted = ReplicationCursor.of("aeron", GENERATION, 8L,
+                new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
+        assertThrows(IllegalArgumentException.class,
+                () -> BackupMetadata.requireConsistentWithCursor(backup, drifted));
+    }
+
+    @Test
+    void rejectsUndecodableAeronCursor() {
+        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+        final ReplicationCursor corrupt =
+                new ReplicationCursor("aeron", GENERATION, 7L, "deadbeef");
+        assertThrows(IllegalArgumentException.class,
+                () -> BackupMetadata.requireConsistentWithCursor(backup, corrupt));
+    }
+
+    @Test
+    void fileNameRejectsLegacyAndMalformedNames(@TempDir final Path volume) {
+        assertFalse(BackupArchive.isBackupFileName("1700000000000.zip"));
+        assertFalse(BackupArchive.isBackupFileName("1700000000000.manual.zip"));
+        assertFalse(BackupArchive.isBackupFileName("123.evil.zip"));
+        assertFalse(BackupArchive.isBackupFileName(null));
+        assertThrows(peruncs.datagrid.cluster.node.exceptions.NodeLibraryException.class,
+                () -> BackupArchive.parseMetadata("1700000000000.zip", volume));
+    }
+}

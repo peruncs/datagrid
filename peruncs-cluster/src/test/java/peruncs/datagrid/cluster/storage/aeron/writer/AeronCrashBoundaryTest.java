@@ -121,10 +121,11 @@ class AeronCrashBoundaryTest {
                 }
             }, () -> assertThrows(CrashBarrier.SimulatedCrash.class, () -> coordinator.distributeData(
                     ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{5})))));
-            /* The Archive terminal is known durable, so converting the checkpoint to
-             * COMMITTING_UNCERTAIN would be misleading. The surviving PREPARING fence
-             * deliberately forces restart validation to report RESEED_REQUIRED. */
-            assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING), states);
+            /* The Archive terminal may be durable but the checkpoint callback did not
+             * complete. COMMITTING_UNCERTAIN is the only truthful restart fence: the
+             * next writer must validate the recording before reusing the sequence. */
+            assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
+                    AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
         } finally {
             coordinator.dispose();
         }

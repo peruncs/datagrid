@@ -61,6 +61,7 @@ public interface AeronReplicationCheckpointStore {
         putUuid(encoded, checkpoint.nodeId());
         putUuid(encoded, checkpoint.storeGeneration());
         encoded.putLong(checkpoint.recordingId()).putLong(checkpoint.writerEpoch())
+                .putLong(checkpoint.fencingToken())
                 .putLong(checkpoint.transactionSequence()).putLong(checkpoint.recordingPosition())
                 .putInt(checkpoint.dataLength()).putInt(checkpoint.dataChunkCount())
                 .putInt(checkpoint.resolutionCrc32c());
@@ -95,7 +96,7 @@ public interface AeronReplicationCheckpointStore {
             }
             return new AeronReplicationCheckpoint(recordType, mode, state,
                     readUuid(buffer), readUuid(buffer), readUuid(buffer),
-                    buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),
+                    buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),
                     buffer.getInt(), buffer.getInt(), buffer.getInt());
         } catch (final RuntimeException e) {
             throw new IOException("invalid Aeron checkpoint fields", e);

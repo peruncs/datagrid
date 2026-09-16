@@ -14,7 +14,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// A backup stops the reader at a safe message boundary, creates the backup,
 /// and then resumes reading. Callers must not close the storage while either
 /// operation is active.
-public interface BackupNodeManager extends ClusterNodeManager {
+public interface BackupNodeManager extends ClusterNodeManager, BackupNodeControl {
         /// Creates a backup manager for the supplied collaborators.
     ///
     /// @param storageBackupTaskExecutor backup task executor
@@ -72,6 +72,7 @@ public interface BackupNodeManager extends ClusterNodeManager {
         private final StorageController storageController;
         private final StorageDiskSpaceReader storageDiskSpaceReader;
         private final String replicationTransport;
+        private volatile boolean closed;
 
         private Default(
                 final StorageBackupTaskExecutor storageBackupTaskExecutor,
@@ -131,9 +132,14 @@ public interface BackupNodeManager extends ClusterNodeManager {
 
         @Override
         public boolean isHealthy() {
+            /* A stopped reader is not healthy: without it the node silently
+             * stops replicating. An intentional stop while a backup holds the
+             * single-flight lock is the one exemption, so every backup cycle
+             * does not flap the health endpoint. */
             return this.isStorageAvailable()
                     && this.dataClient.failure() == null
-                    && this.tasks.backupFailure() == null;
+                    && this.tasks.backupFailure() == null
+                    && (this.dataClient.isRunning() || this.tasks.isRunningBackup());
         }
 
         @Override
@@ -160,7 +166,12 @@ public interface BackupNodeManager extends ClusterNodeManager {
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
+            /* A borrowed manager may be closed concurrently with the foundation. */
+            if (this.closed) {
+                return;
+            }
+            this.closed = true;
             LOGGER.log(INFO, "Closing BackupNodeManager.");
             Throwable failure = null;
             try {

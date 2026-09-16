@@ -20,6 +20,10 @@ import java.util.UUID;
 /// @param storeGeneration     Store image identity
 /// @param recordingId         Aeron Archive recording identity
 /// @param writerEpoch         writer fencing epoch
+/// @param fencingToken        writer fencing token; always positive here. Every persisted
+///                            checkpoint represents a transaction, so `0` is never valid on
+///                            disk: it exists only as the explicit in-memory new-reader
+///                            sentinel (an unresolved cursor with sequence `-1`).
 /// @param transactionSequence last transaction sequence represented
 /// @param recordingPosition   recorded Archive position at the transition. It is
 ///                            always the position returned after the configured recording wait;
@@ -38,6 +42,7 @@ public record AeronReplicationCheckpoint(
         UUID storeGeneration,
         long recordingId,
         long writerEpoch,
+        long fencingToken,
         long transactionSequence,
         long recordingPosition,
         int dataLength,
@@ -45,17 +50,24 @@ public record AeronReplicationCheckpoint(
         int resolutionCrc32c
 ) {
     static final int MAGIC = 0x44474350; // DGCP
-    static final short VERSION = 1;
-    static final int ENCODED_BYTES = 108;
+    static final short VERSION = 2;
+    static final int ENCODED_BYTES = 116;
 
         /// Validates the restart record and keeps its state machine closed over the
     /// writer and reader recovery domains.
     public AeronReplicationCheckpoint {
         if (recordType == null || durabilityMode == null || state == null || clusterId == null ||
             nodeId == null || storeGeneration == null || recordingId < -1 || writerEpoch < 0 ||
-            transactionSequence < -1 || transactionSequence == Long.MAX_VALUE || recordingPosition < -1 ||
-            dataLength < 0 || dataChunkCount < 0) {
+            fencingToken < 0 || transactionSequence < -1 || transactionSequence == Long.MAX_VALUE ||
+            recordingPosition < -1 || dataLength < 0 || dataChunkCount < 0) {
             throw new IllegalArgumentException("invalid Aeron replication checkpoint");
+        }
+        /* A fencing token of 0 is only the explicit new-reader sentinel for an
+         * unresolved cursor (sequence -1). Every persisted checkpoint
+         * represents a transaction, so writer checkpoints and any record with
+         * a resolved sequence must carry a positive token. */
+        if (fencingToken <= 0 && (recordType == RecordType.WRITER_CHECKPOINT || transactionSequence >= 0)) {
+            throw new IllegalArgumentException("Aeron replication checkpoint carries no writer fencing token");
         }
         /* Keep the persisted state machine closed over its domain.  Without these
          * checks a corrupt-but-checksummed record could be accepted and interpreted

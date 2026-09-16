@@ -16,7 +16,7 @@ public final class AeronEndToEndBenchmark {
     private AeronEndToEndBenchmark() {
     }
 
-    public static void main(final String[] arguments) {
+    static void main(final String[] arguments) {
         int payload = 1_048_576;
         int chunk = 16 * 1024;
         int warmup = 100;
@@ -73,13 +73,13 @@ public final class AeronEndToEndBenchmark {
             final int crc = AeronReplicationEnvelope.crc32c(source, 0, length);
             for (int index = 0, offset = 0; offset < length; index++) {
                 final int size = Math.min(chunkSize, length - offset);
-                final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1,
+                final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1, 1L,
                         sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, length, index, count, offset, 0,
                         source, offset, size);
                 assembler.onFragment(frame, 0, encoded, null);
                 offset += size;
             }
-            final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1, sequence,
+            final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1, 1L, sequence,
                     AeronReplicationEnvelope.Kind.COMMIT, length, 0, count, 0, crc, empty, 0, 0);
             assembler.onFragment(frame, 0, encoded, null);
             return null;

@@ -8,6 +8,8 @@ package peruncs.datagrid.cluster.node.backup;
 ///
 /// Public because it is a parameter of the [FilesystemVolumeBackupBackend]
 /// factory that embedding applications call.
+///
+/// @param maxExtractedBytes absolute extraction ceiling in bytes
 public record BackupArchiveLimits(long maxExtractedBytes) {
     /// Creates default limits with a generous absolute ceiling.
     ///

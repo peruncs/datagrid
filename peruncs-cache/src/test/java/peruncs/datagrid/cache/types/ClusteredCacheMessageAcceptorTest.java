@@ -61,13 +61,196 @@ class ClusteredCacheMessageAcceptorTest {
     }
 
     @Test
-    void unknownCacheIsIgnored() {
-        final StubCache cache = new StubCache("cache");
-        final ClusteredCacheMessageAcceptor acceptor = acceptor(cache);
+    void unknownCacheIsBufferedInsteadOfIgnored() {
+        final StubCacheManager manager = new StubCacheManager();
+        manager.caches.put("cache", new StubCache("cache"));
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
 
         acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 42L));
 
-        assertNull(cache.entries.get("table"));
+        assertEquals(1, acceptor.pendingUnopenedCount(),
+                "an update for an unopened cache must be buffered, never silently dropped");
+    }
+
+    @Test
+    void updateObservedBeforeInvalidateIsNotBufferedIntoNewGeneration() throws Exception {
+        final StubCacheManager manager = new StubCacheManager();
+        manager.caches.put("cache", new StubCache("cache"));
+        final CountDownLatch lookupComplete = new CountDownLatch(1);
+        final CountDownLatch continueLookup = new CountDownLatch(1);
+        manager.blockNextLookup(lookupComplete, continueLookup);
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
+
+        final Thread update = Thread.ofVirtual().start(() ->
+                acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 42L)));
+        assertTrue(lookupComplete.await(5, TimeUnit.SECONDS));
+        acceptor.invalidateAll();
+        continueLookup.countDown();
+        update.join(TimeUnit.SECONDS.toMillis(5L));
+
+        manager.caches.put("other", new StubCache("other"));
+        acceptor.replayPending();
+        assertEquals(0, acceptor.pendingUnopenedCount());
+        assertTrue(manager.caches.get("other").entries.isEmpty(),
+                "an update observed before invalidation must not be replayed as post-gap traffic");
+    }
+
+    @Test
+    void bufferedUpdateIsAppliedOnceTheCacheOpens() {
+        final StubCacheManager manager = new StubCacheManager();
+        manager.caches.put("cache", new StubCache("cache"));
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
+
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 42L));
+        manager.caches.put("other", new StubCache("other"));
+        acceptor.replayPending();
+
+        assertEquals(42L, manager.caches.get("other").entries.get("table"));
+        assertEquals(0, acceptor.pendingUnopenedCount());
+    }
+
+    @Test
+    void bufferedUpdateKeepsOnlyTheNewestTimestamp() {
+        final StubCacheManager manager = new StubCacheManager();
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
+
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 10L));
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 42L));
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 7L));
+        assertEquals(1, acceptor.pendingUnopenedCount());
+
+        manager.caches.put("other", new StubCache("other"));
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 20L));
+
+        /* The buffered newest timestamp wins over both the older buffered
+         * values and the newer arrival, because the acceptor keeps the max. */
+        assertEquals(42L, manager.caches.get("other").entries.get("table"));
+        assertEquals(0, acceptor.pendingUnopenedCount());
+    }
+
+    @Test
+    void invalidateAllClearsCachesAndBufferedUpdates() {
+        final StubCacheManager manager = new StubCacheManager();
+        final StubCache cache = new StubCache("cache");
+        cache.entries.put("table", 1L);
+        manager.caches.put("cache", cache);
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 42L));
+        assertEquals(1, acceptor.pendingUnopenedCount());
+
+        acceptor.invalidateAll();
+
+        assertTrue(cache.entries.isEmpty(), "invalidation must drop every locally cached timestamp");
+        assertEquals(0, acceptor.pendingUnopenedCount(),
+                "invalidation must drop buffered updates that predate the gap");
+    }
+
+    @Test
+    void invalidateAllWithoutManagerIsANoOp() {
+        new ClusteredCacheMessageAcceptor(null).invalidateAll();
+    }
+
+    @Test
+    void replayAfterInvalidateDropsTheBufferedUpdate() {
+        final StubCacheManager manager = new StubCacheManager();
+        manager.caches.put("cache", new StubCache("cache"));
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
+
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 42L));
+        assertEquals(1, acceptor.pendingUnopenedCount());
+        acceptor.invalidateAll();
+        assertEquals(0, acceptor.pendingUnopenedCount());
+
+        manager.caches.put("other", new StubCache("other"));
+        acceptor.replayPending();
+
+        assertNull(manager.caches.get("other").entries.get("table"),
+                "a replay racing an invalidation must never re-insert the pre-gap update");
+        assertEquals(0, acceptor.pendingUnopenedCount());
+    }
+
+    @Test
+    void invalidateBumpsTheGeneration() {
+        final ClusteredCacheMessageAcceptor acceptor =
+                new ClusteredCacheMessageAcceptor(new StubCacheManager());
+
+        assertEquals(0L, acceptor.generation());
+        acceptor.invalidateAll();
+        assertEquals(1L, acceptor.generation());
+        acceptor.invalidateAll();
+        assertEquals(2L, acceptor.generation());
+    }
+
+    @Test
+    void postInvalidateUpdateStillReplays() {
+        final StubCacheManager manager = new StubCacheManager();
+        manager.caches.put("cache", new StubCache("cache"));
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
+
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 10L));
+        acceptor.invalidateAll();
+        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", 42L));
+        assertEquals(1, acceptor.pendingUnopenedCount());
+
+        manager.caches.put("other", new StubCache("other"));
+        acceptor.replayPending();
+
+        assertEquals(42L, manager.caches.get("other").entries.get("table"),
+                "an update buffered after the invalidation is live traffic and must replay");
+    }
+
+    @Test
+    void concurrentReplayAndInvalidateNeverResurrects() throws Exception {
+        final StubCacheManager manager = new StubCacheManager();
+        manager.caches.put("cache", new StubCache("cache"));
+        final ClusteredCacheMessageAcceptor acceptor = new ClusteredCacheMessageAcceptor(manager);
+        final CountDownLatch start = new CountDownLatch(1);
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        final List<Thread> threads = new ArrayList<>();
+        for (int writer = 0; writer < 4; writer++) {
+            final long base = writer * 1_000_000L;
+            threads.add(Thread.ofVirtual().unstarted(() ->
+            {
+                try {
+                    start.await();
+                    for (long timestamp = 1; timestamp <= 200; timestamp++) {
+                        acceptor.accept(new TimestampsRegionUpdateMessage("other", "table", base + timestamp));
+                    }
+                } catch (final Throwable error) {
+                    failure.compareAndSet(null, error);
+                }
+            }));
+        }
+        for (int racer = 0; racer < 2; racer++) {
+            threads.add(Thread.ofVirtual().unstarted(() ->
+            {
+                try {
+                    start.await();
+                    for (int round = 0; round < 50; round++) {
+                        acceptor.invalidateAll();
+                        acceptor.replayPending();
+                    }
+                } catch (final Throwable error) {
+                    failure.compareAndSet(null, error);
+                }
+            }));
+        }
+        threads.forEach(Thread::start);
+        start.countDown();
+        for (final Thread thread : threads) {
+            thread.join(TimeUnit.SECONDS.toMillis(10L));
+            assertFalse(thread.isAlive(), "replay versus invalidation must not deadlock");
+        }
+        assertNull(failure.get(), "concurrent replay and invalidation must complete");
+
+        /* Quiesce: everything buffered or in flight predates this invalidation,
+         * so opening the cache afterwards must observe nothing. */
+        acceptor.invalidateAll();
+        manager.caches.put("other", new StubCache("other"));
+        acceptor.replayPending();
+        assertTrue(manager.caches.get("other").entries.isEmpty(),
+                "no pre-gap update may survive a racing replay");
+        assertEquals(0, acceptor.pendingUnopenedCount());
     }
 
     @Test
@@ -174,10 +357,28 @@ class ClusteredCacheMessageAcceptorTest {
         /// Cache manager stub that only answers [#getCache(String)].
     private static final class StubCacheManager implements org.eclipse.store.cache.types.CacheManager {
         private final Map<String, StubCache> caches = new HashMap<>();
+        private CountDownLatch blockedLookupComplete;
+        private CountDownLatch blockedLookupContinue;
+
+        void blockNextLookup(final CountDownLatch complete, final CountDownLatch continueLookup) {
+            this.blockedLookupComplete = complete;
+            this.blockedLookupContinue = continueLookup;
+        }
 
         @Override
         @SuppressWarnings("unchecked")
         public <K, V> org.eclipse.store.cache.types.Cache<K, V> getCache(final String cacheName) {
+            final CountDownLatch complete = this.blockedLookupComplete;
+            if (complete != null) {
+                this.blockedLookupComplete = null;
+                complete.countDown();
+                try {
+                    this.blockedLookupContinue.await(5, TimeUnit.SECONDS);
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted while coordinating cache lookup", interrupted);
+                }
+            }
             return (org.eclipse.store.cache.types.Cache<K, V>) this.caches.get(cacheName);
         }
 
@@ -223,7 +424,7 @@ class ClusteredCacheMessageAcceptorTest {
 
         @Override
         public Iterable<String> getCacheNames() {
-            throw new UnsupportedOperationException();
+            return new ArrayList<>(this.caches.keySet());
         }
 
         @Override
@@ -343,12 +544,12 @@ class ClusteredCacheMessageAcceptorTest {
 
         @Override
         public void removeAll() {
-            throw new UnsupportedOperationException();
+            this.entries.clear();
         }
 
         @Override
         public void clear() {
-            throw new UnsupportedOperationException();
+            this.entries.clear();
         }
 
         @Override

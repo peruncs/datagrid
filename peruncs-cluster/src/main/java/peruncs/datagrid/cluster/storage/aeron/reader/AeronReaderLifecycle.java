@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.reader;
 
-import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
+import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.Objects;
@@ -12,7 +12,13 @@ import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
 /// Shared polling and shutdown rules for the Aeron readers.
-interface AeronReaderLifecycle {
+///
+/// Idle pacing always comes from the configured [AeronRetryPolicy#idleStrategy()];
+/// there is no hard-coded default here, so tests and production readers share
+/// the same pacing contract.
+final class AeronReaderLifecycle {
+    private AeronReaderLifecycle() {
+    }
 
         /// Runs the subscription duty cycle used by both readers. Keeping idle and
     /// stop-at-tail handling here prevents the test reader and the production
@@ -25,7 +31,7 @@ interface AeronReaderLifecycle {
     /// @param timedOut      whether the stop budget has expired
     /// @param onTimeout     action run once on timeout
     /// @param idleStrategy  Agrona idle strategy built from the configured retry policy
-    static void runPollingLoop(
+    public static void runPollingLoop(
             final AtomicBoolean active,
             final BooleanSupplier stopPolling,
             final IntSupplier poller,
@@ -73,7 +79,7 @@ interface AeronReaderLifecycle {
     /// @param thread            reader polling thread, or `null`
     /// @param stopped           latch released by the polling thread on exit
     /// @param closeSubscription callback that closes the reader subscription
-    static void stopAndClose(
+    public static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,
             final CountDownLatch stopped,
@@ -91,7 +97,7 @@ interface AeronReaderLifecycle {
     /// @param stopped           latch released by the polling thread on exit
     /// @param closeSubscription callback that closes the reader subscription
     /// @param timeoutNanos      bounded wait budget in nanoseconds
-    static void stopAndClose(
+    public static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,
             final CountDownLatch stopped,
@@ -148,10 +154,5 @@ interface AeronReaderLifecycle {
         if (failure != null) {
             throw failure;
         }
-    }
-
-    /// Builds the default reader idle strategy.
-    static IdleStrategy defaultIdleStrategy() {
-        return new BackoffIdleStrategy();
     }
 }

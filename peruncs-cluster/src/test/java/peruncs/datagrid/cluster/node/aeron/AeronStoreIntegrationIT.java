@@ -3,6 +3,7 @@ package peruncs.datagrid.cluster.node.aeron;
 import org.apache.lucene.document.Document;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.gigamap.jvector.*;
 import org.eclipse.store.gigamap.lucene.DocumentPopulator;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
@@ -99,11 +100,10 @@ class AeronStoreIntegrationIT {
              StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(cursorPath)) {
             final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
             final EmbeddedStorageManager reader = readerFoundation.start();
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+            final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(
                     readerFoundation.getConnectionFoundation(), reader.createConnection(),
-                    ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
-            final StorageBinaryDataPacketAcceptor acceptor = StorageBinaryDataPacketAcceptor.New(merger);
-            final StorageBinaryDataClient client = transport.client(acceptor, "store", new AfterDataMessageConsumedListener() {
+                    ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
+            final StorageBinaryDataClient client = transport.client(receiver, "store", new AfterDataMessageConsumedListener() {
                         @Override
                         public void onApplied(final ReplicationCursor cursor) {
                             cursorManager.set(cursor);
@@ -125,7 +125,7 @@ class AeronStoreIntegrationIT {
                 if (client.failure() != null) throw client.failure();
                 assertEquals(target.logicalSequence(), client.cursor().logicalSequence(),
                         "%s did not reach the writer boundary".formatted(role));
-                acceptor.awaitApplied();
+                receiver.awaitApplied();
                 client.stopAtLatestMessage();
                 final long stopDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
                 while (client.isRunning() && System.nanoTime() < stopDeadline) {
@@ -135,7 +135,9 @@ class AeronStoreIntegrationIT {
                         client.stopOutcome(), "%s did not stop at a resolved transaction boundary".formatted(role));
             } finally {
                 client.dispose();
-                acceptor.dispose();
+                if (receiver instanceof Disposable disposable) {
+                    disposable.dispose();
+                }
                 reader.shutdown();
             }
             assertEquals(target.logicalSequence(), cursorManager.get().logicalSequence(),
@@ -307,6 +309,7 @@ class AeronStoreIntegrationIT {
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
                     case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> root.resolve("archive").toString();
                     case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> root.resolve("checkpoint/writer.checkpoint").toString();
+                    case "ECLIPSE_DATAGRID_BACKUP_PATH" -> root.resolve("backups").toString();
                     case "ECLIPSE_DATAGRID_AERON_RECORDING_ID" -> Long.toString(recordingId);
                     case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH",
                          "ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH" -> "65536";
@@ -851,7 +854,7 @@ class AeronStoreIntegrationIT {
         private final ClusterReplicationTransport transport;
         private final StoredReplicationCursorManager cursorManager;
         private final EmbeddedStorageManager storage;
-        private final StorageBinaryDataPacketAcceptor acceptor;
+        private final StorageBinaryDataReceiver receiver;
         private final StorageBinaryDataClient client;
         private boolean closed;
 
@@ -873,11 +876,10 @@ class AeronStoreIntegrationIT {
                 this.cursorManager = StoredReplicationCursorManager.NewAtomic(nodeRoot.resolve("cursor"));
                 final EmbeddedStorageFoundation<?> foundation = foundation(storePath);
                 this.storage = foundation.start();
-                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+                this.receiver = StorageBinaryDataMerger.New(
                         foundation.getConnectionFoundation(), this.storage.createConnection(),
-                        ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
-                this.acceptor = StorageBinaryDataPacketAcceptor.New(merger);
-                this.client = this.transport.client(this.acceptor, "store", new AfterDataMessageConsumedListener() {
+                        ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
+                this.client = this.transport.client(this.receiver, "store", new AfterDataMessageConsumedListener() {
                     @Override
                     public void onApplied(final ReplicationCursor cursor) {
                         ReaderNode.this.cursorManager.set(cursor);
@@ -944,7 +946,7 @@ class AeronStoreIntegrationIT {
             if (this.client.failure() != null) throw this.client.failure();
             assertEquals(target.logicalSequence(), this.client.cursor().logicalSequence(),
                     "reader did not resolve the writer transaction");
-            this.acceptor.awaitApplied();
+            this.receiver.awaitApplied();
         }
 
         void assertHealthy() {
@@ -982,6 +984,12 @@ class AeronStoreIntegrationIT {
             return this.cursorManager.get();
         }
 
+        private void disposeReceiver() {
+            if (this.receiver instanceof Disposable disposable) {
+                disposable.dispose();
+            }
+        }
+
         @Override
         public void close() {
             if (this.closed) return;
@@ -993,7 +1001,7 @@ class AeronStoreIntegrationIT {
                 failure = closeFailure;
             }
             try {
-                this.acceptor.dispose();
+                this.disposeReceiver();
             } catch (final RuntimeException closeFailure) {
                 failure = append(failure, closeFailure);
             }

@@ -4,9 +4,13 @@ import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
 import peruncs.datagrid.cache.types.ClusteredCacheMessageAcceptor;
 
-import java.util.Locale;
-import java.util.Objects;
-import java.util.UUID;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.*;
 import java.util.concurrent.locks.ReentrantLock;
 
 /// This provider builds the Aeron sender and receiver for clustered cache
@@ -32,8 +36,11 @@ import java.util.concurrent.locks.ReentrantLock;
 /// Multi-host deployments must configure a UDP channel with
 /// `control-mode=dynamic` (Aeron MDC), which the provider validates;
 /// plain unicast UDP and loopback UDP would silently drop cross-node traffic or
-/// never leave the host. The channel is assumed to be on an isolated network;
-/// it carries no authentication.
+/// never leave the host. Frames carry only a CRC32C unless an HMAC secret is
+/// configured, in which case every frame is signed and unsigned frames are
+/// rejected; without a secret the channel must sit on an isolated network.
+/// Production mode additionally requires the secret (or an explicit
+/// unsigned-frames acknowledgement) and rejects loopback channels outright.
 ///
 /// Self-suppression compares the 16-byte sender identity in each frame
 /// against the identity shared by this provider's sender and receiver. The
@@ -46,7 +53,12 @@ import java.util.concurrent.locks.ReentrantLock;
 /// The sender waits at most the configured offer timeout (default 5 s) for the
 /// publication to accept a frame and fails the local cache operation on timeout.
 /// The offer timeout bounds the publication handshake; the driver timeout
-/// bounds the Aeron client's connection to the MediaDriver separately.
+/// bounds the Aeron client's connection to the MediaDriver separately. An idle
+/// sender heartbeats at the configured heartbeat interval so receivers can
+/// detect silence; a receiver that hears nothing for the configured freshness
+/// timeout marks itself stale and requires re-synchronization. Per-sender
+/// cursors persist in the configured cursor directory so a restart validates
+/// its first sequence instead of accepting anything.
 public class AeronClusteredCacheMessageCommunicationProvider {
     private static final System.Logger LOGGER =
             System.getLogger(AeronClusteredCacheMessageCommunicationProvider.class.getName());
@@ -65,9 +77,17 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     private AeronClusteredCacheMessageSender sender;
     private long senderOfferTimeoutNanos;
     private int senderMaxPayloadBytes;
+    private byte[] senderHmacSecret;
+    private boolean senderProductionMode;
+    private boolean senderAllowUnsignedFrames;
     private AeronClusteredCacheMessageReceiver receiver;
     private ClusteredCacheMessageAcceptor receiverAcceptor;
     private int receiverMaxPayloadBytes;
+    private long receiverFreshnessTimeoutNanos;
+    private byte[] receiverHmacSecret;
+    private byte[] receiverPreviousHmacSecret;
+    private boolean receiverProductionMode;
+    private boolean receiverAllowUnsignedFrames;
     private boolean senderSequenceReleased;
     private boolean receiverSequenceReleased;
 
@@ -93,7 +113,10 @@ public class AeronClusteredCacheMessageCommunicationProvider {
     /// frames, wildcard endpoints are rejected because the channel is expected to
     /// sit on an isolated, controlled network, and loopback UDP is rejected
     /// unless an embedded driver is used, because it would never leave the host.
-    private static void validateChannel(final String channel, final boolean embeddedDriver) {
+    /// In production mode loopback is rejected even with an embedded driver:
+    /// a loopback channel can never carry cross-node invalidations.
+    private static void validateChannel(final String channel, final boolean embeddedDriver,
+                                        final boolean productionMode) {
         final ChannelUri uri;
         try {
             uri = ChannelUri.parse(channel);
@@ -114,9 +137,10 @@ public class AeronClusteredCacheMessageCommunicationProvider {
                 throw new IllegalArgumentException(
                         "Channel must not bind a wildcard endpoint: %s".formatted(channel));
             }
-            if (!embeddedDriver && (isLoopbackHost(endpointHost) || isLoopbackHost(controlHost))) {
+            if ((!embeddedDriver || productionMode) &&
+                (isLoopbackHost(endpointHost) || isLoopbackHost(controlHost))) {
                 throw new IllegalArgumentException(
-                        "Channel must not use a loopback endpoint outside an embedded driver: %s".formatted(channel));
+                        "Channel must not use a loopback endpoint outside an embedded driver, never in production mode: %s".formatted(channel));
             }
         }
     }
@@ -176,6 +200,9 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         final byte[] senderId = this.ensureSenderId(configuration);
         final long offerTimeoutNanos = configuration.offerTimeoutNanos();
         final int maxPayloadBytes = configuration.maxPayloadBytes();
+        final byte[] hmacSecret = configuration.hmacSecret();
+        final boolean productionMode = configuration.productionMode();
+        final boolean allowUnsignedFrames = configuration.allowUnsignedFrames();
         /* Validate the transport binding even on a repeat call: a second call
          * with a different channel or stream must be rejected, not silently
          * bound to the resources created by the first call. */
@@ -185,9 +212,12 @@ public class AeronClusteredCacheMessageCommunicationProvider {
                 throw new IllegalStateException(
                         "The Aeron clustered-cache sender is single-use and has been disposed; create a new provider");
             }
-            if (this.senderOfferTimeoutNanos != offerTimeoutNanos || this.senderMaxPayloadBytes != maxPayloadBytes) {
+            if (this.senderOfferTimeoutNanos != offerTimeoutNanos || this.senderMaxPayloadBytes != maxPayloadBytes ||
+                !Arrays.equals(this.senderHmacSecret, hmacSecret) ||
+                this.senderProductionMode != productionMode ||
+                this.senderAllowUnsignedFrames != allowUnsignedFrames) {
                 throw new IllegalArgumentException(
-                        "The Aeron clustered-cache provider already owns a sender with different limits");
+                        "The Aeron clustered-cache provider already owns a sender with different configuration");
             }
             return this.sender;
         }
@@ -208,7 +238,9 @@ public class AeronClusteredCacheMessageCommunicationProvider {
                     this.sequenceLock,
                     this::senderClosed,
                     offerTimeoutNanos,
-                    maxPayloadBytes);
+                    configuration.heartbeatIntervalNanos(),
+                    maxPayloadBytes,
+                    hmacSecret);
         } catch (final RuntimeException | Error failure) {
             /* A provider owns no usable handle yet. Do not leave a sequence lease or
              * lazily-created resources stranded when a future sender constructor gains
@@ -219,6 +251,9 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         }
         this.senderOfferTimeoutNanos = offerTimeoutNanos;
         this.senderMaxPayloadBytes = maxPayloadBytes;
+        this.senderHmacSecret = hmacSecret;
+        this.senderProductionMode = productionMode;
+        this.senderAllowUnsignedFrames = allowUnsignedFrames;
         this.sender = created;
         return this.sender;
     }
@@ -226,9 +261,12 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         /// Creates the receiver that passes remote messages to the acceptor.
     ///
     /// The receiver fails closed on malformed or undeserializable frames, on a
-    /// valid message that cannot be applied, and on a sender sequence gap. A
-    /// volatile invalidation stream cannot prove that a bad frame was harmless or
-    /// repair a missed message, so continuing would expose stale cache entries.
+    /// valid message that cannot be applied, on a sender sequence gap, and on
+    /// silence past the freshness deadline. A volatile invalidation stream
+    /// cannot prove that a bad frame was harmless or repair a missed message,
+    /// so continuing would expose stale cache entries. Startup invalidates the
+    /// local caches before the receiver is declared healthy, and persisted
+    /// per-sender cursors validate the first sequence after a restart.
     ///
     /// One provider owns at most one receiver, mirroring the sender rules:
     /// a repeat call with the same transport configuration, acceptor, and
@@ -252,13 +290,23 @@ public class AeronClusteredCacheMessageCommunicationProvider {
          * cannot leave closed resources behind for a retry. */
         final byte[] senderId = this.ensureSenderId(configuration);
         final int maxPayloadBytes = configuration.maxPayloadBytes();
+        final long freshnessTimeoutNanos = configuration.freshnessTimeoutNanos();
+        final byte[] hmacSecret = configuration.hmacSecret();
+        final byte[] previousHmacSecret = configuration.previousHmacSecret();
+        final boolean productionMode = configuration.productionMode();
+        final boolean allowUnsignedFrames = configuration.allowUnsignedFrames();
         final AeronClusteredCacheResources resources = this.ensureResources(configuration);
         if (this.receiver != null) {
             if (this.receiver.isDisposed()) {
                 throw new IllegalStateException(
                         "The Aeron clustered-cache receiver is single-use and has been disposed; create a new provider");
             }
-            if (this.receiverAcceptor != messageAcceptor || this.receiverMaxPayloadBytes != maxPayloadBytes) {
+            if (this.receiverAcceptor != messageAcceptor || this.receiverMaxPayloadBytes != maxPayloadBytes ||
+                this.receiverFreshnessTimeoutNanos != freshnessTimeoutNanos ||
+                !Arrays.equals(this.receiverHmacSecret, hmacSecret) ||
+                !Arrays.equals(this.receiverPreviousHmacSecret, previousHmacSecret) ||
+                this.receiverProductionMode != productionMode ||
+                this.receiverAllowUnsignedFrames != allowUnsignedFrames) {
                 throw new IllegalArgumentException(
                         "The Aeron clustered-cache provider already owns a receiver with different configuration");
             }
@@ -266,20 +314,83 @@ public class AeronClusteredCacheMessageCommunicationProvider {
         }
         final AeronClusteredCacheMessageReceiver created;
         try {
+            final AeronClusteredCacheCursorStore cursorStore =
+                    new AeronClusteredCacheCursorStore(
+                            cursorDirectory(configuration), cursorNamespace(configuration));
+            cursorStore.ensureWritable();
             created = new AeronClusteredCacheMessageReceiver(
                     resources,
                     senderId,
                     this::receiverClosed,
                     messageAcceptor,
-                    maxPayloadBytes);
+                    maxPayloadBytes,
+                    freshnessTimeoutNanos,
+                    cursorStore,
+                    hmacSecret,
+                    previousHmacSecret);
         } catch (final RuntimeException | Error failure) {
             this.closeUnboundResources(failure);
             throw failure;
         }
         this.receiverAcceptor = messageAcceptor;
         this.receiverMaxPayloadBytes = maxPayloadBytes;
+        this.receiverFreshnessTimeoutNanos = freshnessTimeoutNanos;
+        this.receiverHmacSecret = hmacSecret;
+        this.receiverPreviousHmacSecret = previousHmacSecret;
+        this.receiverProductionMode = productionMode;
+        this.receiverAllowUnsignedFrames = allowUnsignedFrames;
         this.receiver = created;
         return this.receiver;
+    }
+
+        /// Host discriminator keeping cursor state apart across hosts sharing a
+    /// temporary directory, resolved once per JVM.
+    private static final String LOCAL_HOST = resolveLocalHost();
+
+    private static String resolveLocalHost() {
+        try {
+            final String host = InetAddress.getLocalHost().getHostName();
+            if (host != null && !host.isBlank()) {
+                return host.trim().replaceAll("[^A-Za-z0-9]", "_");
+            }
+        } catch (final IOException | RuntimeException ignored) {
+            /* Name resolution is best-effort here; the fallback still
+             * discriminates the configured node id below. */
+        }
+        return "unknown_host";
+    }
+
+        /// Returns the directory holding this subscription's cursor file: the
+    /// configured one, or a JVM-temporary subdirectory discriminated by host
+    /// when none is configured, so hosts sharing one temporary filesystem do
+    /// not share cursor files.
+    static Path cursorDirectory(final AeronClusteredCacheConfiguration configuration) {
+        final String configured = configuration.cursorDirectory();
+        if (configured != null) {
+            return Path.of(configured);
+        }
+        return Path.of(System.getProperty("java.io.tmpdir"), "peruncs-datagrid-cache-cursors-" + LOCAL_HOST);
+    }
+
+        /// Returns the stable per-subscription cursor namespace for one channel,
+    /// stream, and node identity. The channel is hashed, never truncated: two
+    /// channels sharing a long prefix — or two hosts behind one channel text —
+    /// must never share a cursor file. The node identity, or the host name when
+    /// no node id is configured, discriminates providers that would otherwise
+    /// collide.
+    static String cursorNamespace(final AeronClusteredCacheConfiguration configuration) {
+        final MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (final NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("SHA-256 is unavailable", failure);
+        }
+        final String channelHash = HexFormat.of().formatHex(
+                digest.digest(configuration.channel().getBytes(StandardCharsets.UTF_8)));
+        final String identity = configuration.nodeId() == null
+                ? "host_" + LOCAL_HOST
+                : "node_" + configuration.nodeId();
+        return channelHash + "_" + configuration.streamId() + "_" + identity;
     }
 
     private void ensureProviderOpen() {
@@ -337,12 +448,22 @@ public class AeronClusteredCacheMessageCommunicationProvider {
 
     private synchronized void senderClosed() {
         this.senderSequenceReleased = true;
+        wipe(this.senderHmacSecret);
+        this.senderHmacSecret = null;
         this.releaseSequenceIfUnused();
     }
 
     private synchronized void receiverClosed() {
         this.receiverSequenceReleased = true;
+        wipe(this.receiverHmacSecret);
+        this.receiverHmacSecret = null;
+        wipe(this.receiverPreviousHmacSecret);
+        this.receiverPreviousHmacSecret = null;
         this.releaseSequenceIfUnused();
+    }
+
+    private static void wipe(final byte[] secret) {
+        if (secret != null) Arrays.fill(secret, (byte) 0);
     }
 
     private void releaseSequenceIfUnused() {
@@ -378,7 +499,12 @@ public class AeronClusteredCacheMessageCommunicationProvider {
             if (embeddedDriver && directory == null) {
                 LOGGER.log(System.Logger.Level.WARNING, "No directory configured with embedded driver enabled; the embedded MediaDriver will use a generated private directory.");
             }
-            validateChannel(channel, embeddedDriver);
+            validateChannel(channel, embeddedDriver, configuration.productionMode());
+            if (!configuration.authenticated() && !configuration.allowUnsignedFrames()) {
+                LOGGER.log(System.Logger.Level.WARNING, "No HMAC secret configured; cache frames carry only a CRC32C, which detects corruption but never forgery. Configure hmac-secret, or acknowledge the risk with allow-unsigned-frames.");
+            } else if (!configuration.authenticated()) {
+                LOGGER.log(System.Logger.Level.WARNING, "Unsigned cache frames were explicitly acknowledged; any peer that can publish on the channel can poison or deny the cache.");
+            }
             this.resources = new AeronClusteredCacheResources(
                     directory, channel, streamId, driverTimeoutMillis, embeddedDriver);
             LOGGER.log(System.Logger.Level.DEBUG, "Bound Aeron clustered-cache resources to channel=%s, streamId=%s".formatted(channel, streamId));

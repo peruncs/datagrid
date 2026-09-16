@@ -5,6 +5,8 @@ import org.eclipse.serializer.persistence.binary.types.BinaryPersistence;
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundation;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceManager;
+import org.eclipse.serializer.persistence.types.PersistenceRootsView;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryAssembler;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.Storage;
@@ -65,11 +67,33 @@ class StorageBinaryDataMergerTest {
         return null;
     }
 
+        /// A connection whose root scan always passes: the post-batch index
+    /// validation runs for every batch (even when a test handler skips the
+    /// materializer), so these cases need viewRoots to resolve instead of
+    /// returning `null`.
+    private static StorageConnection tolerantConnection() {
+        final PersistenceRootsView emptyView = (PersistenceRootsView) Proxy.newProxyInstance(
+                PersistenceRootsView.class.getClassLoader(),
+                new Class<?>[]{PersistenceRootsView.class},
+                (proxy, method, args) -> method.getName().equals("iterateEntries") ? args[0]
+                        : defaultValue(method.getReturnType()));
+        final PersistenceManager<?> managers = (PersistenceManager<?>) Proxy.newProxyInstance(
+                PersistenceManager.class.getClassLoader(),
+                new Class<?>[]{PersistenceManager.class},
+                (proxy, method, args) -> method.getName().equals("viewRoots") ? emptyView
+                        : defaultValue(method.getReturnType()));
+        return (StorageConnection) Proxy.newProxyInstance(
+                StorageConnection.class.getClassLoader(),
+                new Class<?>[]{StorageConnection.class},
+                (proxy, method, args) -> method.getName().equals("persistenceManager") ? managers
+                        : defaultValue(method.getReturnType()));
+    }
+
         /// A disposed merger refuses both data and dictionary updates.
     @Test
     void disposedMergerRejectsDataAndDictionary() {
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
-                foundation(), connection(), ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, 60_000L);
+                foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L);
 
         merger.dispose();
 
@@ -83,6 +107,10 @@ class StorageBinaryDataMergerTest {
     void applyTimeoutLatchesTerminalFailure() throws Exception {
         final CountDownLatch handlerEntered = new CountDownLatch(1);
         final CountDownLatch releaseHandler = new CountDownLatch(1);
+        /* The handler deliberately does not run the updater: this case exercises
+         * the merger's wait/retry budget, not the Store materializer. The
+         * post-batch validation still runs afterwards, hence the tolerant
+         * connection. */
         final ObjectGraphUpdateHandler blockingHandler = updater ->
         {
             handlerEntered.countDown();
@@ -91,20 +119,49 @@ class StorageBinaryDataMergerTest {
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }
-            updater.run();
         };
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
-                foundation(), connection(), blockingHandler, 0L, 1L, 50L);
+                foundation(), tolerantConnection(), blockingHandler, 0L, 1L, 50L);
         try {
             assertThrows(IllegalStateException.class, () -> merger.receiveData(binary(2)),
                     "a materialization timeout must fail the delivery call");
             assertTrue(handlerEntered.await(10, TimeUnit.SECONDS), "the worker never entered the handler");
             assertNotNull(merger.failure(), "the timeout must latch a terminal merger failure");
+            assertTrue(merger.failure().getMessage().contains("Timed out"),
+                    "a timeout must say timed out: " + merger.failure().getMessage());
+            assertFalse(merger.failure().getMessage().contains("or failed"),
+                    "a timeout must not be mislabeled as a genuine failure: " + merger.failure().getMessage());
             assertThrows(IllegalStateException.class, merger::awaitApplied);
             assertThrows(IllegalStateException.class, () -> merger.receiveData(binary(1)));
             assertThrows(IllegalStateException.class, () -> merger.receiveTypeDictionary("{}"));
         } finally {
             releaseHandler.countDown();
+            merger.dispose();
+        }
+    }
+
+        /// A genuine materialization failure says failed, never timed out.
+    @Test
+    void genuineFailureSaysFailedNotTimedOut() throws Exception {
+        final IllegalStateException boom = new IllegalStateException("boom");
+        final ObjectGraphUpdateHandler failingHandler = updater ->
+        {
+            throw boom;
+        };
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+                foundation(), tolerantConnection(), failingHandler, 0L, 1_000_000L, 60_000L);
+        try {
+            merger.receiveDataOwned(binary(1));
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
+            while (merger.failure() == null && System.nanoTime() < deadline) {
+                Thread.sleep(50L);
+            }
+            assertNotNull(merger.failure(), "a throwing handler must latch a terminal merger failure");
+            assertTrue(merger.failure().getMessage().contains("failed"),
+                    "a genuine failure must say failed: " + merger.failure().getMessage());
+            assertFalse(merger.failure().getMessage().contains("Timed out"),
+                    "a genuine failure must not be mislabeled as a timeout: " + merger.failure().getMessage());
+        } finally {
             merger.dispose();
         }
     }
@@ -118,7 +175,9 @@ class StorageBinaryDataMergerTest {
         final java.util.concurrent.atomic.AtomicReference<Throwable> deliveryFailure =
                 new java.util.concurrent.atomic.AtomicReference<>();
         /* The handler deliberately does not run the updater: this case exercises
-         * the merger's wait/retry budget, not the Store materializer. */
+         * the merger's wait/retry budget, not the Store materializer. The
+         * post-batch validation still runs afterwards, hence the tolerant
+         * connection. */
         final ObjectGraphUpdateHandler slowHandler = updater ->
         {
             handlerEntered.countDown();
@@ -129,7 +188,7 @@ class StorageBinaryDataMergerTest {
             }
         };
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
-                foundation(), connection(), slowHandler, 0L, 1L, 200L);
+                foundation(), tolerantConnection(), slowHandler, 0L, 1L, 200L);
         try {
             final Thread delivering = Thread.ofVirtual().start(() ->
             {
@@ -162,7 +221,7 @@ class StorageBinaryDataMergerTest {
     void disposeRacingAcceptFailsCleanly() throws Exception {
         for (int iteration = 0; iteration < 8; iteration++) {
             final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
-                    foundation(), connection(), ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, 60_000L);
+                    foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L);
             final AtomicReference<Throwable> unexpected = new AtomicReference<>();
             final CountDownLatch start = new CountDownLatch(1);
             final Thread disposing = Thread.ofVirtual().start(() ->
@@ -195,7 +254,7 @@ class StorageBinaryDataMergerTest {
     @Test
     void receiveDataOwnedOnDisposedMergerFailsCleanly() {
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
-                foundation(), connection(), ObjectGraphUpdateHandler.Synchronized(), 0L, 1L, 60_000L);
+                foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L);
 
         merger.dispose();
 
@@ -213,7 +272,7 @@ class StorageBinaryDataMergerTest {
     void dictionaryMergeAndDataImportAreMutuallyExclusive(@TempDir final Path root) throws Exception {
         final EmbeddedStorageManager storage = startStorage(root);
         try {
-            final PersistenceManager persistenceManager = storage.createConnection().persistenceManager();
+            final PersistenceManager<Binary> persistenceManager = storage.createConnection().persistenceManager();
             final CountDownLatch dictionaryEntered = new CountDownLatch(1);
             final CountDownLatch releaseDictionary = new CountDownLatch(1);
             final AtomicBoolean dictionaryInProgress = new AtomicBoolean();
@@ -238,7 +297,7 @@ class StorageBinaryDataMergerTest {
                         }
                     });
             final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
-                    foundationWithDictionaryLoader(), connection, ObjectGraphUpdateHandler.Synchronized(),
+                    foundationWithDictionaryLoader(), connection, ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()),
                     0L, 1L, 60_000L);
             final AtomicReference<Throwable> dictionaryFailure = new AtomicReference<>();
             final AtomicReference<Throwable> dataFailure = new AtomicReference<>();
@@ -284,6 +343,118 @@ class StorageBinaryDataMergerTest {
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         }
+    }
+
+        /// The dictionary merge must run through the update handler, not just
+    /// the materialization lock: the lock alone cannot exclude application
+    /// reads that joined the coordinator's read side.
+    @Test
+    void dictionaryMergeRunsThroughTheUpdateHandler(
+            @TempDir final Path writerRoot, @TempDir final Path readerRoot) {
+        /* Both stores share the root class so no per-store type id collides.
+         * The field is declared as Object: the reader's null never registers
+         * the runtime type, while the writer's stored Extra does — so only
+         * the writer dictionary knows it. */
+        final String dictionary;
+        final Root writerInstance = new Root();
+        writerInstance.extra = new Extra();
+        try (EmbeddedStorageManager writer = EmbeddedStorage.start(writerInstance, writerRoot)) {
+            writer.storeRoot();
+            dictionary = PersistenceTypeDictionaryAssembler.New().assemble(writer.typeDictionary());
+        }
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        final AtomicBoolean handlerUsed = new AtomicBoolean();
+        final ObjectGraphUpdateHandler recording = updater ->
+        {
+            handlerUsed.set(true);
+            coordinator.write(updater);
+        };
+        try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+                    foundationWithDictionaryLoader(), reader.createConnection(), recording,
+                    0L, 1L, 60_000L, coordinator);
+            try {
+                merger.receiveTypeDictionary(dictionary);
+                assertTrue(handlerUsed.get(),
+                        "registering unknown writer types must run through the update handler");
+                assertNull(merger.failure(), "the dictionary merge must not fail the merger");
+            } finally {
+                merger.dispose();
+            }
+        }
+    }
+
+        /// A dictionary merge in progress excludes application reads: the
+    /// registration runs on the coordinator's write side.
+    @Test
+    void dictionaryMergeExcludesApplicationReads(
+            @TempDir final Path writerRoot, @TempDir final Path readerRoot) throws Exception {
+        final String dictionary;
+        final Root writerInstance = new Root();
+        writerInstance.extra = new Extra();
+        try (EmbeddedStorageManager writer = EmbeddedStorage.start(writerInstance, writerRoot)) {
+            writer.storeRoot();
+            dictionary = PersistenceTypeDictionaryAssembler.New().assemble(writer.typeDictionary());
+        }
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        final CountDownLatch handlerEntered = new CountDownLatch(1);
+        final ObjectGraphUpdateHandler recording = updater ->
+        {
+            handlerEntered.countDown();
+            coordinator.write(updater);
+        };
+        try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+                    foundationWithDictionaryLoader(), reader.createConnection(), recording,
+                    0L, 1L, 60_000L, coordinator);
+            try {
+                final CountDownLatch readHeld = new CountDownLatch(1);
+                final CountDownLatch releaseRead = new CountDownLatch(1);
+                final Thread holder = Thread.ofVirtual().start(() -> coordinator.read(() ->
+                {
+                    readHeld.countDown();
+                    await(releaseRead);
+                }));
+                assertTrue(readHeld.await(10, TimeUnit.SECONDS), "the application read never started");
+
+                final AtomicBoolean mergeDone = new AtomicBoolean();
+                final AtomicReference<Throwable> mergeFailure = new AtomicReference<>();
+                final Thread merging = Thread.ofVirtual().start(() ->
+                {
+                    try {
+                        merger.receiveTypeDictionary(dictionary);
+                        mergeDone.set(true);
+                    } catch (final Throwable failure) {
+                        mergeFailure.set(failure);
+                    }
+                });
+                /* The read-phase plan shares the read side and proceeds; the
+                 * registration must then block on the write side. */
+                assertTrue(handlerEntered.await(10, TimeUnit.SECONDS),
+                        "the merge never reached the update handler");
+                Thread.sleep(300L);
+                assertFalse(mergeDone.get(),
+                        "the dictionary merge entered the write side while an application read was held");
+                assertNull(mergeFailure.get(), "the blocked merge failed: " + mergeFailure.get());
+
+                releaseRead.countDown();
+                merging.join(TimeUnit.SECONDS.toMillis(10));
+                holder.join(TimeUnit.SECONDS.toMillis(10));
+                assertTrue(mergeDone.get(), "the merge never finished after the read released");
+                assertNull(mergeFailure.get(), "the merge failed: " + mergeFailure.get());
+                assertNull(merger.failure(), "the merge must not fail the merger");
+            } finally {
+                merger.dispose();
+            }
+        }
+    }
+
+    public static final class Extra {
+        public String value = "writer-only";
+    }
+
+    public static final class Root {
+        public Object extra;
     }
 
         /// A bare foundation lacks the dictionary loader and storer that its

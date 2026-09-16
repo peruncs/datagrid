@@ -31,7 +31,9 @@ class AeronClusteredCacheMessageSenderTest {
                     () -> {
                     },
                     PUBLISH_TIMEOUT_NANOS,
-                    1024);
+                    TimeUnit.MINUTES.toNanos(1L),
+                    1024,
+                    null);
 
             final CountDownLatch lockHeld = new CountDownLatch(1);
             final CountDownLatch releaseLock = new CountDownLatch(1);
@@ -87,7 +89,9 @@ class AeronClusteredCacheMessageSenderTest {
                     () -> {
                     },
                     TimeUnit.SECONDS.toNanos(10L),
-                    1024);
+                    TimeUnit.MINUTES.toNanos(1L),
+                    1024,
+                    null);
 
             final CountDownLatch lockHeld = new CountDownLatch(1);
             final CountDownLatch releaseLock = new CountDownLatch(1);

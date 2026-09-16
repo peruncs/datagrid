@@ -12,14 +12,16 @@ import java.util.function.LongSupplier;
 ///
 /// The clock-taking overloads exist for deterministic tests: production loops
 /// pass [System#nanoTime] (directly or through the single-clock methods).
-public interface ReplicationRetry {
+public final class ReplicationRetry {
+    private ReplicationRetry() {
+    }
 
     /// Returns a deadline measured by [System#nanoTime()].
     ///
     /// @param timeoutNanos positive retry budget
     /// @return saturated monotonic deadline
     /// @throws IllegalArgumentException when the budget is not positive
-    static long deadlineNanos(final long timeoutNanos) {
+    public static long deadlineNanos(final long timeoutNanos) {
         return deadlineNanos(timeoutNanos, System::nanoTime);
     }
 
@@ -29,7 +31,7 @@ public interface ReplicationRetry {
     /// @param clock        monotonic nanosecond source
     /// @return saturated monotonic deadline
     /// @throws IllegalArgumentException when the budget is not positive
-    static long deadlineNanos(final long timeoutNanos, final LongSupplier clock) {
+    public static long deadlineNanos(final long timeoutNanos, final LongSupplier clock) {
         if (timeoutNanos <= 0L) throw new IllegalArgumentException("timeoutNanos must be positive");
         if (timeoutNanos == Long.MAX_VALUE) return Long.MAX_VALUE;
         try {
@@ -43,7 +45,7 @@ public interface ReplicationRetry {
     ///
     /// @param deadlineNanos saturated deadline returned by this class
     /// @return remaining nanoseconds, or zero after expiry
-    static long remainingNanos(final long deadlineNanos) {
+    public static long remainingNanos(final long deadlineNanos) {
         return remainingNanos(deadlineNanos, System::nanoTime);
     }
 
@@ -52,7 +54,7 @@ public interface ReplicationRetry {
     /// @param deadlineNanos saturated deadline returned by this class
     /// @param clock         monotonic nanosecond source
     /// @return remaining nanoseconds, or zero after expiry
-    static long remainingNanos(final long deadlineNanos, final LongSupplier clock) {
+    public static long remainingNanos(final long deadlineNanos, final LongSupplier clock) {
         if (deadlineNanos == Long.MAX_VALUE) return Long.MAX_VALUE;
         final long now = clock.getAsLong();
         try {
@@ -70,7 +72,7 @@ public interface ReplicationRetry {
     ///
     /// @param deadlineNanos saturated deadline returned by this class
     /// @return `true` when no retry time remains
-    static boolean expired(final long deadlineNanos) {
+    public static boolean expired(final long deadlineNanos) {
         return expired(deadlineNanos, System::nanoTime);
     }
 
@@ -79,7 +81,7 @@ public interface ReplicationRetry {
     /// @param deadlineNanos saturated deadline returned by this class
     /// @param clock         monotonic nanosecond source
     /// @return `true` when no retry time remains
-    static boolean expired(final long deadlineNanos, final LongSupplier clock) {
+    public static boolean expired(final long deadlineNanos, final LongSupplier clock) {
         return remainingNanos(deadlineNanos, clock) == 0L;
     }
 
@@ -94,7 +96,7 @@ public interface ReplicationRetry {
     /// @param baseNanos delay for the first attempt, must be positive
     /// @param capNanos  maximum delay, must be positive
     /// @return backoff delay in nanoseconds
-    static long fullJitterDelayNanos(final long attempt, final long baseNanos, final long capNanos) {
+    public static long fullJitterDelayNanos(final long attempt, final long baseNanos, final long capNanos) {
         if (attempt < 1L) throw new IllegalArgumentException("attempt must be positive");
         if (baseNanos <= 0L) throw new IllegalArgumentException("baseNanos must be positive");
         if (capNanos <= 0L) throw new IllegalArgumentException("capNanos must be positive");

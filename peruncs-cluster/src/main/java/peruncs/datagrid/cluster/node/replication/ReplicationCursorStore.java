@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.eclipse.serializer.io.XIO;
+import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
@@ -51,12 +52,14 @@ public final class ReplicationCursorStore {
                 AtomicFileStore.PHASE_CURSOR);
     }
 
-        /// Reads and validates a persisted cursor, rejecting truncation and bit-rot.
+        /// Reads and validates a persisted cursor, rejecting symbolic-link paths,
+    /// truncation, and bit-rot.
     ///
     /// @param path cursor path
     /// @return stored cursor
     /// @throws IOException if the cursor is missing or invalid
     public static ReplicationCursor read(final Path path) throws IOException {
+        StorageFileOperations.ensureNoSymbolicLinks(path);
         try (SeekableByteChannel channel = Files.newByteChannel(path, Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
             final long size = channel.size();
             if (size < 0L || size > MAX_CURSOR_BYTES) {
@@ -64,7 +67,9 @@ public final class ReplicationCursorStore {
             }
             final ByteBuffer bytes = ByteBuffer.allocate((int) size);
             while (bytes.hasRemaining()) {
-                if (channel.read(bytes) < 0) throw new IOException("truncated replication cursor");
+                /* A zero-byte read makes no progress: treat it like a truncation
+                 * instead of spinning forever on a stalled channel. */
+                if (channel.read(bytes) <= 0) throw new IOException("truncated replication cursor");
             }
             return decode(bytes.array());
         }

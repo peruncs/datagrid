@@ -44,6 +44,12 @@
 		<module>peruncs-cluster</module>
 	</modules>
 
+    <!-- Eclipse Store/Serializer snapshots track upstream daily builds. The snapshot
+         metadata is re-resolved at most once per day (updatePolicy=daily, the Maven
+         default) instead of on every build (always), so two consecutive builds
+         resolve the same artifacts and stay reproducible within a day. The
+         `release` profile pins these to releases and bans snapshots via
+         requireReleaseDeps once upstream publishes them. -->
     <repositories>
         <repository>
             <id>maven-snapshots</id>
@@ -53,13 +59,29 @@
             </releases>
             <snapshots>
                 <enabled>true</enabled>
-                <updatePolicy>always</updatePolicy>
+                <updatePolicy>daily</updatePolicy>
             </snapshots>
         </repository>
     </repositories>
 
     <dependencyManagement>
         <dependencies>
+            <!-- Converges the slf4j-api split (2.0.17 via Store/Serializer, 2.0.16 via
+                 jvector): one managed version for the whole tree, enforced by the
+                 dependencyConvergence rule below. -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>2.0.17</version>
+            </dependency>
+            <!-- Converges the agrona split (2.6.0 via Aeron, 1.20.0 via jvector).
+                 The resolved tree already runs jvector against 2.6.0 today
+                 (nearest-wins); the pin only makes that choice explicit. -->
+            <dependency>
+                <groupId>org.agrona</groupId>
+                <artifactId>agrona</artifactId>
+                <version>2.6.0</version>
+            </dependency>
             <dependency>
                 <groupId>org.junit.jupiter</groupId>
                 <artifactId>junit-jupiter-engine</artifactId>
@@ -132,9 +154,31 @@
                     </executions>
                     <configuration>
                         <instructions>
-                            <Export-Package>peruncs.datagrid*;-split-package:=merge-first</Export-Package>
+                            <!-- Explicit OSGi exports matching the JPMS module descriptors:
+                                 peruncs-cluster/src/main/java/module-info.java plus
+                                 peruncs-cache/src/main/java/module-info.java. No wildcard
+                                 exports and no dynamic imports: consumers resolve every
+                                 dependency from the manifest. The plugin defaults
+                                 DynamicImport-Package to *, so the header is stripped
+                                 explicitly; omitting the element would restore the default. -->
+                            <_removeheaders>DynamicImport-Package</_removeheaders>
+                            <Export-Package>
+                                peruncs.datagrid.cache.types,
+                                peruncs.datagrid.cache.aeron,
+                                peruncs.datagrid.cluster.node.exceptions,
+                                peruncs.datagrid.cluster.node.backup,
+                                peruncs.datagrid.cluster.node.replication,
+                                peruncs.datagrid.cluster.node,
+                                peruncs.datagrid.cluster.node.store,
+                                peruncs.datagrid.cluster.node.aeron,
+                                peruncs.datagrid.cluster.storage.types,
+                                peruncs.datagrid.cluster.storage.aeron.config,
+                                peruncs.datagrid.cluster.storage.aeron.checkpoint,
+                                peruncs.datagrid.cluster.storage.aeron.reader,
+                                peruncs.datagrid.cluster.storage.aeron.writer,
+                                peruncs.datagrid.cluster.storage.index
+                            </Export-Package>
                             <Import-Package>*</Import-Package>
-                            <DynamicImport-Package>*</DynamicImport-Package>
                         </instructions>
                     </configuration>
                 </plugin>
@@ -257,6 +301,23 @@
                                 <fail>true</fail>
                             </configuration>
                         </execution>
+                        <execution>
+                            <id>enforce-convergence</id>
+                            <goals>
+                                <goal>enforce</goal>
+                            </goals>
+                            <configuration>
+                                <rules>
+                                    <!-- Every dependency must resolve to one version in each
+                                         module. A divergence fails the build until the tree
+                                         is converged with dependencyManagement pins or
+                                         exclusions, so upgrades cannot silently mix two
+                                         Serializer/Store/Aeron/Lucene revisions. -->
+                                    <dependencyConvergence/>
+                                </rules>
+                                <fail>true</fail>
+                            </configuration>
+                        </execution>
                     </executions>
                 </plugin>
                 <plugin>
@@ -339,6 +400,46 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- Release gate: resolves the Eclipse Store/Serializer daily snapshots
+             to pinned releases and fails closed on any remaining snapshot
+             dependency. Pin the versions below to the upstream releases once
+             they are published; until then this profile intentionally fails
+             dependency resolution. The default build keeps the SNAPSHOT
+             versions and works offline from the local repository. -->
+        <profile>
+            <id>release</id>
+            <properties>
+                <eclipse-store.version>5.0.0</eclipse-store.version>
+                <eclipse-serializer.version>5.0.0</eclipse-serializer.version>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-enforcer-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>enforce-no-snapshots</id>
+                                <goals>
+                                    <goal>enforce</goal>
+                                </goals>
+                                <configuration>
+                                    <rules>
+                                        <requireReleaseDeps>
+                                            <message>No snapshots are allowed in a release build.</message>
+                                            <!-- The reactor itself is versioned separately;
+                                                 this rule guards upstream dependencies. -->
+                                            <failWhenParentIsSnapshot>false</failWhenParentIsSnapshot>
+                                        </requireReleaseDeps>
+                                    </rules>
+                                    <fail>true</fail>
+                                </configuration>
+                            </execution>
+                        </executions>
                     </plugin>
                 </plugins>
             </build>

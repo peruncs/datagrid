@@ -18,7 +18,7 @@ public final class ArchiveProcessMain {
     private ArchiveProcessMain() {
     }
 
-    public static void main(final String[] args) throws Exception {
+    static void main(final String[] args) throws Exception {
         final Path base = Path.of(required("dg.archive.base")).toAbsolutePath().normalize();
         final Path control = base.resolve("control");
         Files.createDirectories(control);

@@ -22,14 +22,47 @@ class StorageBinaryDataImporterTest {
     Path storagePath;
 
     @Test
-    void releaseToleratesNullsEmptiesAndDuplicates() {
+    void releaseFreesEverySlotUnconditionally() {
+        /* Empty slots are independently owned since the shared static empty
+         * was removed, so the release frees them exactly like any other slot —
+         * including zero-capacity buffers, which the old capacity guard used
+         * to skip. Slots must be distinctly owned: two views of one native
+         * address would free it twice. */
         final ByteBuffer owned = XMemory.allocateDirectNative(64);
-        final ByteBuffer empty = ByteBuffer.allocateDirect(0);
+        final ByteBuffer firstEmpty = ByteBuffer.allocateDirect(0);
+        final ByteBuffer secondEmpty = ByteBuffer.allocateDirect(0);
 
         assertDoesNotThrow(() -> StorageBinaryDataImporter.release(null));
         assertDoesNotThrow(() -> StorageBinaryDataImporter.release(new ByteBuffer[0]));
         assertDoesNotThrow(() -> StorageBinaryDataImporter.release(
-                new ByteBuffer[]{null, empty, empty.duplicate(), owned}));
+                new ByteBuffer[]{null, firstEmpty, secondEmpty, owned}));
+        assertDoesNotThrow(() -> StorageBinaryDataImporter.release(new ByteBuffer[]{null}, 1));
+        assertThrows(IllegalArgumentException.class,
+                () -> StorageBinaryDataImporter.release(new ByteBuffer[]{owned}, 2));
+    }
+
+    @Test
+    void emptySourcesGetFreshEmptiesPerSlot() {
+        /* Each empty source must produce its own independently owned empty —
+         * never two duplicates of one shared static buffer. */
+        try (EmbeddedStorageManager manager = EmbeddedStorage.start(new Root(), this.storagePath)) {
+            final StorageConnection connection = manager.createConnection();
+
+            final ByteBuffer[] owned = StorageBinaryDataImporter.importOwned(
+                    connection, new ByteBuffer[]{ByteBuffer.allocate(0), ByteBuffer.allocate(0)});
+            try {
+                assertEquals(2, owned.length);
+                assertNotNull(owned[0]);
+                assertNotNull(owned[1]);
+                assertNotSame(owned[0], owned[1],
+                        "empty slots must be independently owned, not duplicates of one shared buffer");
+                assertEquals(0, owned[0].capacity());
+                assertEquals(0, owned[1].capacity());
+            } finally {
+                /* Unconditional release frees both empties without throwing. */
+                assertDoesNotThrow(() -> StorageBinaryDataImporter.release(owned));
+            }
+        }
     }
 
     @Test

@@ -13,6 +13,7 @@ import javax.cache.event.CacheEntryCreatedListener;
 import javax.cache.event.CacheEntryEvent;
 import javax.cache.event.CacheEntryListenerException;
 import javax.cache.event.CacheEntryUpdatedListener;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -31,11 +32,19 @@ import java.util.concurrent.locks.ReentrantLock;
 /// exhausted publication fails immediately, and a timeout fails with
 /// [CacheEntryListenerException]. Nothing is silently dropped.
 ///
-/// Observability: published and offer-retry counters are package-private
-/// test seams; the public surface is the dispose debug log. The sequence is
-/// shared per node identity when `node-id` is configured, and per
-/// provider otherwise, so receivers never see false gaps when several providers
-/// share one node id.
+/// An idle sender publishes a payload-less heartbeat on its own daemon thread
+/// at the configured interval. Heartbeats consume the same per-sender
+/// sequence as invalidations, so a receiver can tell a quiet sender from a
+/// lost one and mark itself stale when no frame of any kind arrives. A
+/// heartbeat never blocks, never fails the local operation, and never
+/// touches the offer-retry counters: when the sequence lock is contested or
+/// the publication is not connected, that beat is simply skipped.
+///
+/// Observability: published, heartbeat, and offer-retry counters are
+/// package-private test seams; the public surface is the dispose debug log.
+/// The sequence is shared per node identity when `node-id` is configured, and
+/// per provider otherwise, so receivers never see false gaps when several
+/// providers share one node id.
 public final class AeronClusteredCacheMessageSender
         implements CacheEntryCreatedListener<Object, Object>, CacheEntryUpdatedListener<Object, Object>, Disposable {
     private static final System.Logger LOGGER =
@@ -53,12 +62,17 @@ public final class AeronClusteredCacheMessageSender
     private final ReentrantLock sequenceLock;
     private final Runnable releaseSequence;
     private final long publishTimeoutNanos;
+    private final long heartbeatIntervalNanos;
     private final int maxPayloadBytes;
+    private final byte[] hmacSecret;
     /* Every publication is serialized by sequenceLock, so one stateful idle
      * strategy and one reusable native buffer are sufficient. */
     private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
     private final LongAdder published = new LongAdder();
+    private final LongAdder heartbeats = new LongAdder();
     private final LongAdder offerRetries = new LongAdder();
+    private volatile Thread heartbeatThread;
+    private volatile boolean heartbeatStopped;
     private final Object lifecycleMonitor = new Object();
     private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
     /* Lock order is deliberately one-way: a publish admission takes
@@ -85,7 +99,9 @@ public final class AeronClusteredCacheMessageSender
             final ReentrantLock sequenceLock,
             final Runnable releaseSequence,
             final long publishTimeoutNanos,
-            final int maxPayloadBytes
+            final long heartbeatIntervalNanos,
+            final int maxPayloadBytes,
+            final byte[] hmacSecret
     ) {
         this.resources = resources;
         this.senderId = Objects.requireNonNull(senderId, "senderId").clone();
@@ -96,16 +112,35 @@ public final class AeronClusteredCacheMessageSender
         this.sequenceLock = sequenceLock;
         this.releaseSequence = releaseSequence;
         this.publishTimeoutNanos = publishTimeoutNanos;
+        if (heartbeatIntervalNanos < 1) {
+            throw new IllegalArgumentException(
+                    "heartbeatIntervalNanos must be positive: %s".formatted(heartbeatIntervalNanos));
+        }
+        this.heartbeatIntervalNanos = heartbeatIntervalNanos;
         this.maxPayloadBytes = maxPayloadBytes;
+        if (hmacSecret != null && hmacSecret.length < AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES) {
+            throw new IllegalArgumentException("HMAC secret must contain at least %s bytes".formatted(
+                    AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES));
+        }
+        this.hmacSecret = hmacSecret == null ? null : hmacSecret.clone();
+        final int maxFramePayloadBytes = Integer.MAX_VALUE -
+                AeronClusteredCacheMessageCodec.HEADER_LENGTH - AeronClusteredCacheMessageCodec.CRC_LENGTH -
+                (hmacSecret == null ? 0 : AeronClusteredCacheMessageCodec.HMAC_LENGTH);
+        if (maxPayloadBytes < 1 || maxPayloadBytes > maxFramePayloadBytes) {
+            throw new IllegalArgumentException("maxPayloadBytes is outside the supported frame size");
+        }
     }
 
         /// Creates the sender that turns timestamp cache events into cluster messages.
+    /// The heartbeat thread starts with the sender and stops on disposal.
     ///
-    /// @param resources           shared Aeron resources for this node
-    /// @param senderId            sender identity used so the node ignores its own frames
-    /// @param sequence            sequence source shared by every sender of this identity
-    /// @param publishTimeoutNanos maximum time to wait for the publication to accept a frame
-    /// @param maxPayloadBytes     maximum accepted payload size
+    /// @param resources             shared Aeron resources for this node
+    /// @param senderId              sender identity used so the node ignores its own frames
+    /// @param sequence              sequence source shared by every sender of this identity
+    /// @param publishTimeoutNanos   maximum time to wait for the publication to accept a frame
+    /// @param heartbeatIntervalNanos how often an idle sender publishes a heartbeat
+    /// @param maxPayloadBytes       maximum accepted payload size
+    /// @param hmacSecret            HMAC secret signing every frame, or `null` for unsigned frames
     /// @return timestamp-cache sender
     static AeronClusteredCacheMessageSender New(
             final AeronClusteredCacheResources resources,
@@ -114,10 +149,101 @@ public final class AeronClusteredCacheMessageSender
             final ReentrantLock sequenceLock,
             final Runnable releaseSequence,
             final long publishTimeoutNanos,
-            final int maxPayloadBytes
+            final long heartbeatIntervalNanos,
+            final int maxPayloadBytes,
+            final byte[] hmacSecret
     ) {
-        return new AeronClusteredCacheMessageSender(resources, senderId, sequence, sequenceLock, releaseSequence,
-                publishTimeoutNanos, maxPayloadBytes);
+        final AeronClusteredCacheMessageSender sender = new AeronClusteredCacheMessageSender(resources, senderId,
+                sequence, sequenceLock, releaseSequence, publishTimeoutNanos, heartbeatIntervalNanos,
+                maxPayloadBytes, hmacSecret);
+        sender.startHeartbeats();
+        return sender;
+    }
+
+        /// Starts the daemon heartbeat thread. Best-effort by design: a missed
+    /// beat only delays a receiver's freshness signal, it never fails anything.
+    private void startHeartbeats() {
+        final Thread worker = Thread.ofVirtual()
+                .name("eclipse-datagrid-cache-heartbeat")
+                .unstarted(this::heartbeatLoop);
+        this.heartbeatThread = worker;
+        worker.start();
+    }
+
+        /// Publishes one heartbeat per interval until disposal.
+    private void heartbeatLoop() {
+        while (!this.heartbeatStopped && !this.disposed) {
+            try {
+                TimeUnit.NANOSECONDS.sleep(this.heartbeatIntervalNanos);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            if (this.heartbeatStopped || this.disposed) {
+                break;
+            }
+            try {
+                this.trySendHeartbeat();
+            } catch (final RuntimeException failure) {
+                /* Heartbeats are best-effort liveness signals. A failure here
+                 * must never kill the heartbeat thread or the sender; the
+                 * publish path reports transport failures on its own. */
+                LOGGER.log(System.Logger.Level.DEBUG, "Aeron clustered-cache heartbeat skipped", failure);
+            }
+        }
+    }
+
+        /// Offers one heartbeat without waiting. The sequence is consumed only
+    /// when the publication accepts the frame, so a skipped beat leaves no gap.
+    private void trySendHeartbeat() {
+        final AeronClusteredCacheResources resources = this.resources;
+        if (resources == null || resources.failure() != null) {
+            return;
+        }
+        if (!this.sequenceLock.tryLock()) {
+            return;
+        }
+        try {
+            /* Disposal stops the heartbeat thread first, but a beat already
+             * past the sleep may still be queued behind a publish; never let
+             * it connect a transport the disposal just released. */
+            if (this.heartbeatStopped || this.disposed) {
+                return;
+            }
+            final ConcurrentPublication publication;
+            try {
+                publication = this.ensurePublication();
+            } catch (final RuntimeException unavailable) {
+                return;
+            }
+            final long heartbeatSequence = this.sequence.current();
+            if (heartbeatSequence == Long.MAX_VALUE) {
+                return;
+            }
+            final UnsafeBuffer buffer = this.scratchFor(0, this.hmacSecret != null);
+            final int length = AeronClusteredCacheMessageCodec.encodeHeartbeat(
+                    buffer, this.senderId, heartbeatSequence, this.hmacSecret);
+            if (publication.offer(buffer, 0, length) > 0) {
+                this.sequence.advance();
+                this.heartbeats.increment();
+            }
+        } finally {
+            this.sequenceLock.unlock();
+        }
+    }
+
+        /// Stops the heartbeat thread without failing disposal when it lingers.
+    private void stopHeartbeats() {
+        this.heartbeatStopped = true;
+        final Thread worker = this.heartbeatThread;
+        if (worker != null && worker != Thread.currentThread()) {
+            worker.interrupt();
+            try {
+                worker.join(TimeUnit.SECONDS.toMillis(2L));
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
         /// Returns the publish deadline, saturating at [Long#MAX_VALUE] so an
@@ -146,13 +272,13 @@ public final class AeronClusteredCacheMessageSender
     private void handleEvents(final Iterable<CacheEntryEvent<?, ?>> events)
             throws CacheEntryListenerException {
         for (final CacheEntryEvent<?, ?> event : events) {
-            final byte[] payload;
+            final TimestampsRegionUpdateMessage message;
             try {
-                payload = AeronClusteredCachePayloadCodec.encode(TimestampsRegionUpdateMessage.fromEvent(event));
+                message = TimestampsRegionUpdateMessage.fromEvent(event);
             } catch (final RuntimeException failure) {
                 throw new CacheEntryListenerException("Failed to serialize clustered-cache message", failure);
             }
-            this.publish(payload);
+            this.publish(message);
         }
     }
 
@@ -170,8 +296,14 @@ public final class AeronClusteredCacheMessageSender
         this.handleEvents(events);
     }
 
-    private void publish(final byte[] payload) {
-        if (payload == null || payload.length > this.maxPayloadBytes) {
+    private void publish(final TimestampsRegionUpdateMessage message) {
+        final int payloadLength;
+        try {
+            payloadLength = AeronClusteredCachePayloadCodec.encodedLength(Objects.requireNonNull(message, "message"));
+        } catch (final RuntimeException failure) {
+            throw new CacheEntryListenerException("Failed to serialize clustered-cache message", failure);
+        }
+        if (payloadLength > this.maxPayloadBytes) {
             throw new CacheEntryListenerException(
                     "Aeron clustered-cache payload exceeds the configured limit of %s".formatted(this.maxPayloadBytes));
         }
@@ -206,16 +338,21 @@ public final class AeronClusteredCacheMessageSender
                         "Aeron clustered-cache publish did not acquire the shared sequence within %s ms".formatted(this.publishTimeoutNanos / 1_000_000L));
             }
             try {
-                buffer = this.scratchFor(payload.length);
-                /* Do not consume a sequence until the publication has accepted the
-                 * frame. A timed-out offer is not visible to receivers. */
+                buffer = this.scratchFor(payloadLength, this.hmacSecret != null);
+                /* The payload is serialized straight into the scratch frame;
+                 * no per-message payload array is allocated. Do not consume a
+                 * sequence until the publication has accepted the frame.
+                 * A timed-out offer is not visible to receivers. */
+                AeronClusteredCachePayloadCodec.encodeInto(
+                        message, buffer, AeronClusteredCacheMessageCodec.payloadOffset(0));
                 final ConcurrentPublication publication = this.ensurePublication();
                 final long sequence = this.sequence.current();
                 if (sequence == Long.MAX_VALUE) {
                     throw new CacheEntryListenerException("Aeron clustered-cache sender sequence exhausted");
                 }
-                final int length = AeronClusteredCacheMessageCodec.encode(
-                        buffer, this.senderId, sequence, payload);
+                final int length = AeronClusteredCacheMessageCodec.encodeFrame(
+                        buffer, this.senderId, sequence,
+                        AeronClusteredCacheMessageCodec.TYPE_INVALIDATION, payloadLength, this.hmacSecret);
                 this.offer(publication, buffer, length, deadline);
                 this.sequence.advance();
             } finally {
@@ -258,9 +395,10 @@ public final class AeronClusteredCacheMessageSender
 
         /// Returns the sender-owned off-heap buffer that fits the given payload,
     /// growing (and releasing the previous) buffer when needed.
-    private UnsafeBuffer scratchFor(final int payloadLength) {
+    private UnsafeBuffer scratchFor(final int payloadLength, final boolean signed) {
         final int required = AeronClusteredCacheMessageCodec.HEADER_LENGTH +
-                AeronClusteredCacheMessageCodec.CRC_LENGTH + payloadLength;
+                AeronClusteredCacheMessageCodec.CRC_LENGTH +
+                (signed ? AeronClusteredCacheMessageCodec.HMAC_LENGTH : 0) + payloadLength;
         UnsafeBuffer buffer = this.scratch;
         if (buffer == null || buffer.capacity() < required) {
             this.releaseScratch();
@@ -374,6 +512,9 @@ public final class AeronClusteredCacheMessageSender
     /// scratch buffer and the shared sequence lease. Disposal is idempotent.
     @Override
     public void dispose() {
+        /* Stop the heartbeat first so no new sequence is consumed while the
+         * in-flight publishes drain. */
+        this.stopHeartbeats();
         boolean quiescent = false;
         boolean completed = false;
         try {
@@ -404,19 +545,32 @@ public final class AeronClusteredCacheMessageSender
             }
         } finally {
             if (quiescent) this.releaseScratch();
-            if (completed) this.releaseSequence.run();
+            if (completed) {
+                /* The sender is single-use; once the publication is closed no
+                 * operation can legitimately need the HMAC key again. Wipe the
+                 * owned copy so a long-lived provider does not retain credentials
+                 * after its transport has been disposed. */
+                if (this.hmacSecret != null) Arrays.fill(this.hmacSecret, (byte) 0);
+                AeronClusteredCacheMessageCodec.clearThreadLocalAuthenticationState();
+                this.releaseSequence.run();
+            }
             if (!completed) {
                 synchronized (this.lifecycleMonitor) {
                     this.closing = false;
                 }
             }
         }
-        LOGGER.log(System.Logger.Level.DEBUG, "Disposed Aeron clustered-cache sender: published=%s, offerRetries=%s".formatted(this.published.sum(), this.offerRetries.sum()));
+        LOGGER.log(System.Logger.Level.DEBUG, "Disposed Aeron clustered-cache sender: published=%s, heartbeats=%s, offerRetries=%s".formatted(this.published.sum(), this.heartbeats.sum(), this.offerRetries.sum()));
     }
 
         /// Package-private test seam for the published counter.
     long published() {
         return this.published.sum();
+    }
+
+        /// Package-private test seam for the heartbeat counter.
+    long heartbeats() {
+        return this.heartbeats.sum();
     }
 
         /// Package-private test seam for the offer-retry counter.

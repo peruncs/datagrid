@@ -38,6 +38,17 @@ For a reader, set `ECLIPSE_DATAGRID_AERON_RECORDING_ID` to the writer's
 recording. Reader identity/checkpoint persistence is supplied by the
 node deployment; this provider does not invent an identity from the
 network address.
+
+A reader owns no authoritative Store image: replication ships deltas that
+reference object ids the writer created, so a reader started against an empty
+directory cannot reproduce pre-existing state and fails with
+`ReseedRequiredException` instead of inventing a root. Before a reader (or a
+backup node without a user upload) starts, seed it with a matching Store
+directory plus its durable replication cursor — either restore a compatible
+backup on the shared volume or copy the writer's Store directory and offset
+file while the writer is stopped. The writer is the only role that may
+manufacture a fresh root; the backup node may do so only for a user-uploaded
+Store it then publishes as the starter backup.
 One provider instance owns one configured replication stream; use separate
 provider instances/channels for multiple streams.
 The development live-channel default is a dynamic MDC loopback channel
@@ -57,14 +68,21 @@ recorded-position, and stop waits are independently configurable with
 `ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS`, and
 `ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS`; reader shutdown uses
 `ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
+Replication frames can be authenticated with the shared base64 key in
+`ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET` or an owner-only file named by
+`ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_FILE` (at least 16 decoded bytes).
+Production nodes require this key unless
+`ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE=true` explicitly accepts
+unsigned frames. Every writer and reader must use the same key; a mismatch
+fails closed before Store data is applied.
 Archive runtime tuning is controlled by
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL`,
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH`,
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD`, and
 `ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS`. The provider maps the
 configured threading mode to matching MediaDriver and Archive threading.
-`CHUNK_SIZE + 64` must fit Aeron's publication maximum (`term-length / 8`,
-capped at 16 MiB). Store bytes are sent directly inside the fixed replication
+`CHUNK_SIZE + 76` must fit Aeron's publication maximum (`term-length / 8`,
+capped at 16 MiB); authenticated frames add a 32-byte tag. Store bytes are sent directly inside the fixed replication
 envelope; no SBE or second serialization pass is required.
 
 Writer checkpoint persistence is enabled in the provider. Authenticated,
@@ -99,65 +117,144 @@ restart with the same recording and checkpoint. Do not delete active recording
 segments or manually advance a reader cursor; if the Archive cannot be
 restored, initialize a new epoch and reseed every reader.
 
-Aeron Archive control and replay channels have no application authentication in
-this provider. Production deployments must isolate those endpoints with private
-interfaces, firewall rules, and Kubernetes NetworkPolicies/security groups.
-Cluster UUIDs and CRCs validate data identity and integrity only; they are not
-credentials. Do not enable ACK-driven deletion on an untrusted network.
+Aeron Archive control and replay channels support control-session authentication when
+`ECLIPSE_DATAGRID_AERON_AUTH_ENABLED=true`. Configure the principal and
+credentials with `ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL` and either
+`ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS` or its file variant. Reader roles are
+limited to discovery, position queries, and replay; writer roles additionally
+receive recording and retention-maintenance actions. Production deployments
+must still isolate those endpoints with private interfaces, firewall rules,
+and Kubernetes NetworkPolicies/security groups. Cluster UUIDs and CRCs validate
+data identity and integrity only; they are not credentials. Do not enable
+ACK-driven deletion on an untrusted network.
 
-Fixed-writer/no-consensus operation is intentional. Writer fencing and manual
-promotion remain deployment responsibilities.
+When Archive authentication is enabled on a writer, configure a separate
+reader identity with `ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL` and either
+`ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS` or its file variant. Use that
+reader identity on every reader node; sharing the writer identity would grant
+the writer's recording permissions.
+
+## Network trust and key rotation
+
+Each control proves something different; none of them replaces the network
+boundary:
+
+- The writer fencing lease and fencing token are correctness, not security:
+  they keep exactly one writer's history linear.
+- CRC32C detects accidental corruption, never forgery.
+- The replication, retention, and cache HMACs authenticate "a holder of the
+  cluster secret", not a unique node. Any host with the secret can publish
+  valid-looking frames, and a staging cluster on the same network must use a
+  different secret or its frames cross-talk.
+- Aeron Archive authentication gates control-plane commands (recording,
+  retention, replay). It is defense in depth behind firewall rules and
+  NetworkPolicies, which remain the primary boundary and the only per-node
+  identity below full PKI.
+
+`ECLIPSE_DATAGRID_NETWORK_PROFILE=trusted-network` is the explicit
+acknowledgement for VPN-contained deployments: it waives the production
+requirement for replication frame HMAC and logs the waiver at startup.
+Archive control authentication is a separate protection domain and always
+needs its own acknowledgement (`ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE`);
+the profile never touches it. The profile never disables fencing, CRC32C, or
+retention-watermark authentication either, and no value is ever inferred — an
+unknown profile refuses startup.
+
+Rotate a frame or watermark key without a flag-day restart: configure the new
+key as the primary secret (`ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET`,
+`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET`, or the cache `hmac-secret`) and
+the old key as its `*_PREVIOUS` counterpart on every node. Verification tries
+the primary first and falls back to the previous, while signing always uses
+the primary, so old-signed and new-signed frames verify throughout the roll.
+
+Do not drop `*_PREVIOUS` as soon as every node runs the new primary. Frames
+carry no key identity, and a reader keeps a durable cursor: any reader that
+restarts onto — or replays — pre-rotation Archive history still needs the old
+key to verify it. Retain the previous key until every reader cursor has
+advanced past the rotation point and the Archive segments holding old-signed
+frames are purged or have aged out, and only then drop it. When that is hard
+to establish, reseed the lagging readers from a post-rotation image instead.
+The same applies to the cache: retain the previous key until every receiver
+has drained past the rotation, bounded in practice by the freshness timeout
+plus a restart cycle, or bounce the receivers. Archive control credentials
+have no overlap mechanism: rotate those with a coordinated restart.
+
+Key lifetime is bounded honestly: the transport erases its settings-held
+replication, retention, and Archive credential copies on close, and frame
+readers erase their working clones on disposal. Copies owned elsewhere — a
+configuration object shared beyond the transport — live until cleared or
+collected; the cache configuration in particular has no clear hook and lives
+with its region.
+
+Fixed-writer/no-consensus operation is intentional. The strict one-writer
+invariant is enforced by a renewable writer lease in the shared backup volume:
+a writer acquires `writer-lease-<cluster>-<generation>.lease` in
+`ECLIPSE_DATAGRID_BACKUP_PATH`, renews its heartbeat, and publishes the lease's
+monotonically increasing fencing token with every envelope, checkpoint, and
+cursor. A different writer for the same cluster/generation fails acquisition while
+the first heartbeat is fresh, and readers reject a lower token so a deposed
+writer cannot interleave history. The same writer (the same stable node id)
+restarting after a clean stop or a crash mints the next token immediately;
+a live clone with a copied node id is deposed instead, when its next renewal
+fails the holder check. A writer therefore requires a shared
+`ECLIPSE_DATAGRID_BACKUP_PATH`; manual promotion and automated failover remain
+deployment responsibilities, and the lease directory must not sit inside the
+Aeron driver, archive, or checkpoint tree.
 
 ## Filesystem backups
 
 Backups use the filesystem named by `ECLIPSE_DATAGRID_BACKUP_PATH` (default
-`backups`). This can be a network-mounted volume. Each generated backup is a
-single compressed archive named `<timestamp>.zip` or
-`<timestamp>.manual.zip`; the archive contains `storage/`, `manifest`, and
-`ready`. The complete archive is atomically moved into the volume, so readers
-never select an in-progress export. Operator-provided storage is kept as
-`user-uploaded-storage.zip` and is restored through its separate API.
+`backups`). This can be a network-mounted volume, and it also holds the writer
+fencing lease. Each generated backup is a single compressed archive named
+`<timestamp>.zip` or `<timestamp>.manual.zip`; the archive contains `storage/`,
+`manifest`, and `ready`. The complete archive is atomically moved into the
+volume, so readers never select an in-progress export. Operator-provided
+storage is kept as `user-uploaded-storage.zip` and is restored through its
+separate API.
 
 Archive extraction rejects traversal, symbolic-link paths, duplicate entries,
 oversized content, missing storage, and incomplete generated metadata. The
-REST backup endpoints trigger and read these local-volume operations; no
+backup operations below trigger and read these local-volume operations; no
 backup HTTP transport or hosted backup target is configured by the node.
 
-The node ships no HTTP server. The embedding application mounts the routes
-below under `/eclipse-datagrid` on its own stack and delegates each to
-`ClusterRestRequestController`; the path constants live in
-`peruncs.datagrid.cluster.node.http.StorageNodeRestPaths`. The controller
-returns typed values (`ReplicationMetrics`, byte counts, booleans) and never
-renders JSON or Prometheus text itself.
+## Programmatic control boundary
 
-| Path | Methods | Purpose |
-|---|---|---|
-| `/distributor` | GET | Whether this node is the distributor |
-| `/activate-distributor/start` | POST | Start the distributor role transition |
-| `/activate-distributor/finish` | POST | Finish the distributor role transition |
-| `/health` | GET | Liveness probe |
-| `/health/ready` | GET | Readiness probe |
-| `/storage-bytes` | GET | Current storage size in bytes |
-| `/replication-metrics` | GET | Raw replication observability values |
-| `/backup` | GET, POST | Whether a backup runs / start a backup |
-| `/updates` | GET, POST | Whether replication is paused / pause it |
-| `/resume-updates` | POST | Resume replication |
-| `/gc` | GET, POST | Whether storage checks run / start them |
+The node ships no HTTP server and no HTTP types. The embedding application
+owns the entire boundary — HTTP/OpenAPI routes, MCP tools, a web UI,
+Prometheus rendering, authentication, and authorization — and drives the node
+through the control views borrowed from `ClusterFoundation`:
 
-The `POST` routes (`/backup`, `/gc`, `/updates`, `/resume-updates`,
-`/activate-distributor/*`) are privileged and carry no authentication of their
-own: the embedding application MUST authenticate and authorize them before
-delegating to the controller. Only `/health`, `/health/ready`, and the
-read-only metrics are safe to expose to an unauthenticated probe endpoint.
+- `storageNodeManager()` on a storage node returns a `StorageNodeControl`:
+  role (`isDistributor`), liveness (`isHealthy`), readiness (`isReady`),
+  storage size (`readStorageSizeBytes`), and raw replication observability
+  (`replicationMetrics()` — transport, replay/live state, current/latest
+  sequence, lag, readiness, health, including Archive or replay failures).
+  The embedder renders these typed values as JSON or Prometheus text itself.
+- `backupNodeManager()` on a backup node returns a `BackupNodeControl`:
+  backup triggers (`createStorageBackup`, `isBackupRunning`) and reader
+  pause/resume (`stopReadingAtLatestMessage`, `resumeReading`, `isReading`).
 
-The Prometheus-compatible `/replication-metrics` reports `transport="aeron"`,
-replay/live state, current/latest sequence, lag, readiness, and health,
-including Archive or replay failures.
+The views carry no `close()`: the foundation owns both managers and closes
+them exactly once, and both closes are idempotent, so a stray borrower call
+stays harmless. The role is validated before anything starts, so probing the
+wrong role never starts Store, Aeron, recovery, or background threads. Roles
+are fixed at startup — a writer serves the distributor, a reader or
+backup-reader serves the reader, and there is deliberately no
+reader-to-distributor promotion: a role change is a restart with a new role,
+never a runtime transition.
+The mutating operations (backups, storage checks, pausing and resuming
+replication) carry no authentication of their own: the embedding application
+MUST authenticate and authorize them before delegating. Only the health,
+readiness, and read-only metric reads are safe to expose to an
+unauthenticated probe endpoint. Map `BackupBusyException` to a conflict
+response, unhealthy/not-ready to a retryable unavailable response, and any
+other failure to an internal error.
 
 ## Store binary transport
 
 The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque and
-adds a 68-byte versioned envelope for cluster identity, sequence, chunking,
+adds a 76-byte version-3 envelope for cluster identity, fencing token,
+sequence, chunking,
 CRC32C, and commit/abort markers. A writer should use
 `AeronStorageBinaryReplicationTarget` with an
 `AeronReplicationWriteCoordinator` so the ordering is:
@@ -174,13 +271,14 @@ deployments that persist the Aeron-specific identity and replay boundary.
 The envelope is deliberately not an SBE-generated second payload format:
 Eclipse Serializer's `Binary` bytes remain the authoritative Store payload,
 while the fixed header supplies only framing and validation. Chunk size must
-remain below `min(termLength / 8, 16 MiB) - 64`; Aeron fragments each envelope
-as needed for the selected MTU.
+remain below `min(termLength / 8, 16 MiB) - 76`; authenticated frames reserve
+an additional 32-byte tag. Aeron fragments each envelope as needed for the
+selected MTU.
 
-CRC32C detects corruption but does not authenticate a sender. Bind UDP and
-Archive-control channels to private interfaces and restrict them with firewall
-or network-policy rules; do not enable ACK-driven retention on an untrusted
-network.
+CRC32C detects accidental corruption; when no replication HMAC key is
+configured, it does not authenticate a sender. Bind UDP and Archive-control
+channels to private interfaces and restrict them with firewall or network-policy
+rules; do not enable ACK-driven retention on an untrusted network.
 
 Run the transport and UDP/Archive integration tests with:
 

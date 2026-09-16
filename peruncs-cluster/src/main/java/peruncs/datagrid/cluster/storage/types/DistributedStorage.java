@@ -22,19 +22,10 @@ public final class DistributedStorage {
 
         /// Adds distributed writing to an embedded storage foundation.
     ///
-    /// @param foundation  foundation to configure
-    /// @param distributor destination for committed data
-    /// @return the configured foundation
-    public static EmbeddedStorageFoundation<?> configureWriting(final EmbeddedStorageFoundation<?> foundation, final StorageBinaryDataDistributor distributor) {
-        final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
-        connectionFoundation.setInstanceDispatcher(new DistributedStorageConfigurator(
-                distributor,
-                delegate -> StorageBinaryReplicationTarget.New(delegate, distributor)
-        ));
-        return foundation;
-    }
-
-        /// Adds distributed writing with a custom local target wrapper.
+    /// The target factory owns the durability semantics: production must use
+    /// the transport's coordinated factory so local acceptance and publication
+    /// remain one operation, never a local commit followed by an uncoordinated
+    /// distribution.
     ///
     /// @param foundation    foundation to configure
     /// @param distributor   destination for committed data

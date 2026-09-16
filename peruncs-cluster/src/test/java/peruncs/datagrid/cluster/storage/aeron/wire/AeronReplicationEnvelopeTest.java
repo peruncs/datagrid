@@ -17,7 +17,7 @@ class AeronReplicationEnvelopeTest {
     void roundTripPreservesOpaqueSerializerBytes() {
         final byte[] payload = new byte[]{0, 1, 2, 127, -1};
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 9, 42, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 9, 7, 42, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 100, 2, 3, 95, 0, payload
         );
 
@@ -27,6 +27,7 @@ class AeronReplicationEnvelopeTest {
 
         assertEquals(CLUSTER, decoded.clusterId());
         assertEquals(9, decoded.epoch());
+        assertEquals(7, decoded.fencingToken());
         assertEquals(42, decoded.sequence());
         assertEquals(AeronReplicationEnvelope.Kind.STORE_BINARY, decoded.kind());
         assertEquals(100, decoded.payloadLength());
@@ -40,7 +41,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void rejectsCorruptPayloadBeforeDelivery() {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 0, 0, new byte[]{7}
         );
         encoded[AeronReplicationEnvelope.HEADER_LENGTH] = 8;
@@ -54,7 +55,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void rejectsTerminalKindMutationWithHeaderChecksum() {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 1, 0, 1, 0, AeronReplicationEnvelope.crc32c(new byte[]{7}), new byte[0]);
         encoded[6] = 4;
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
@@ -71,10 +72,10 @@ class AeronReplicationEnvelopeTest {
         ));
 
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 0, 0, 1, 0, 0, new byte[0]
         );
-        encoded[5] = 3;
+        encoded[5] = 4;
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length
         ));
@@ -84,16 +85,16 @@ class AeronReplicationEnvelopeTest {
     @Test
     void rejectsInvalidChunkMetadataAndSourceBounds() {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 1, 1, 0, 0, new byte[]{7}
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 0, 0, 2, 0, 0, new byte[0]
         ));
 
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 0, 0, 1, 0, 0, new byte[0]
         );
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
@@ -109,29 +110,29 @@ class AeronReplicationEnvelopeTest {
     @Test
     void rejectsNullsNegativeFieldsAndMarkerPayloads() {
         assertThrows(NullPointerException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                null, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0, 0, new byte[]{1}
+                null, 1, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0, 0, new byte[]{1}
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY, -1, 0, 1, 0, 0, new byte[0]
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY, -1, 0, 1, 0, 0, new byte[0]
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[]{1}
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[]{1}
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, -1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0, 0, new byte[0]
+                CLUSTER, -1, 1, 0, AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0, 0, new byte[0]
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, -1, AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0, 0, new byte[0]
+                CLUSTER, 1, 1, -1, AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0, 0, new byte[0]
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, Long.MAX_VALUE, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 1, Long.MAX_VALUE, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 0, 0, 1, 0, 0, new byte[0]
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.ABORT, 0, 1, 2, 0, 0, new byte[0]
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.ABORT, 0, 1, 2, 0, 0, new byte[0]
         ));
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.ABORT, 0, 0, 1, 0, 7, new byte[0]
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.ABORT, 0, 0, 1, 0, 7, new byte[0]
         ));
     }
 
@@ -139,7 +140,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void rejectsLogicalPayloadBoundsAndReservedHeaderByte() {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 0, 0, new byte[]{7}
         );
         java.nio.ByteBuffer.wrap(encoded).putInt(24, 0);
@@ -148,7 +149,7 @@ class AeronReplicationEnvelopeTest {
         ));
 
         final byte[] reserved = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[0]
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[0]
         );
         reserved[7] = 1;
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
@@ -160,7 +161,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void rejectsTruncatedDataPayloadDeclaredByHeader() {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 0, 0, new byte[]{7}
         );
         java.nio.ByteBuffer.wrap(encoded).putInt(24, 10);
@@ -173,7 +174,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void decodesAtNonZeroOffsetWithoutReadingOutsideSource() {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 3, 8, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 3, 5, 8, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 3, 0, 1, 0, 0, new byte[]{3, 4, 5}
         );
         final byte[] framed = new byte[encoded.length + 6];
@@ -191,7 +192,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void rejectsLengthLargerThanSourceWithoutIntegerUnderflow() {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 0, 0, 1, 0, 0, new byte[0]);
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, Integer.MAX_VALUE));
@@ -201,7 +202,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void envelopePayloadAccessorIsDefensive() {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 0, 0, new byte[]{7});
         final AeronReplicationEnvelope.Envelope envelope = AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length);
@@ -215,7 +216,7 @@ class AeronReplicationEnvelopeTest {
     void envelopeConstructorOwnsPayload() {
         final byte[] payload = new byte[]{7};
         final AeronReplicationEnvelope.Envelope envelope = new AeronReplicationEnvelope.Envelope(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 0, 0, payload);
         payload[0] = 9;
         assertArrayEquals(new byte[]{7}, envelope.payload());
@@ -249,10 +250,74 @@ class AeronReplicationEnvelopeTest {
     @Test
     void ownedEnvelopeValidatesItsPublicFields() {
         assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.COMMIT,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 1, 0, 1, 0, 0, new byte[]{7}));
         assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
-                CLUSTER, 1, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 1, 0, new byte[]{7, 8}));
+    }
+
+        /// Verifies authenticated frames reject unsigned and forged payloads.
+    @Test
+    void authenticatedFramesRequireTheConfiguredSecret() {
+        final byte[] secret = "replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        final byte[] payload = new byte[]{1, 2, 3};
+        final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length
+                + AeronReplicationEnvelope.HMAC_LENGTH];
+        final int length = AeronReplicationEnvelope.withChecksumContext(
+                new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
+                        new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, 7,
+                        AeronReplicationEnvelope.Kind.STORE_BINARY, payload.length, 0, 1, 0, 0,
+                        new UnsafeBuffer(payload), 0, payload.length, secret));
+        assertEquals(encoded.length, length);
+        assertArrayEquals(payload, AeronReplicationEnvelope.decode(
+                new UnsafeBuffer(encoded), 0, length, secret).payload());
+        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+                new UnsafeBuffer(encoded), 0, length));
+        encoded[AeronReplicationEnvelope.HEADER_LENGTH] ^= 1;
+        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+                new UnsafeBuffer(encoded), 0, length, secret));
+    }
+
+        /// Verifies rotation overlap: a frame signed with the retiring key still
+    /// decodes while the primary has moved on, and a forged frame fails both keys.
+    @Test
+    void rotationOverlapAcceptsTheRetiringKey() {
+        final byte[] previous = "previous-replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        final byte[] primary = "primary-replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        final byte[] payload = new byte[]{1, 2, 3};
+        final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length
+                + AeronReplicationEnvelope.HMAC_LENGTH];
+        final int length = AeronReplicationEnvelope.withChecksumContext(
+                new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
+                        new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, 7,
+                        AeronReplicationEnvelope.Kind.STORE_BINARY, payload.length, 0, 1, 0, 0,
+                        new UnsafeBuffer(payload), 0, payload.length, previous));
+        assertEquals(encoded.length, length);
+        assertArrayEquals(payload, AeronReplicationEnvelope.decode(
+                new UnsafeBuffer(encoded), 0, length, primary, previous).payload());
+        assertArrayEquals(payload, AeronReplicationEnvelope.decode(
+                new UnsafeBuffer(encoded), 0, length, previous, null).payload());
+        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+                new UnsafeBuffer(encoded), 0, length, primary, null));
+        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+                new UnsafeBuffer(encoded), 0, length, primary,
+                "unrelated-replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    }
+
+    @Test
+    void signedEncodingChecksTagCapacityBeforeWriting() {
+        final byte[] secret = "replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        final byte[] target = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 3];
+        java.util.Arrays.fill(target, (byte) 0x5a);
+        final byte[] before = target.clone();
+
+        assertThrows(IllegalArgumentException.class, () ->
+                AeronReplicationEnvelope.withChecksumContext(
+                        new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
+                                new UnsafeBuffer(target), 0, CLUSTER, 1, 1, 7,
+                                AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0,
+                                new UnsafeBuffer(new byte[]{1, 2, 3}), 0, 3, secret)));
+        assertArrayEquals(before, target, "a rejected signed frame must not partially overwrite its destination");
     }
 }

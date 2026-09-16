@@ -114,7 +114,8 @@ class BackupArchiveTest {
 
     @Test
     void acceptsCaseInsensitiveBackupFilename() {
-        assertTrue(BackupArchive.isBackupFileName("123.MANUAL.ZIP"));
+        assertTrue(BackupArchive.isBackupFileName(
+                "123.MANUAL.38F5081FA27C4682AC01943D9DB25170.C5537F6F32824C38BAC12D2BC4D76659.5.42.B9A38329F6904FCC9B825E6908C30D9F.ZIP"));
     }
 
     @Test
@@ -160,6 +161,23 @@ class BackupArchiveTest {
                 root.resolve("roomy"), archive, true, BackupArchiveLimits.defaults());
         assertEquals("payload", Files.readString(
                 root.resolve("roomy").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
+    }
+
+    @Test
+    void directoryAndArchiveDigestsAgree(@TempDir final Path root) throws Exception {
+        final Path export = root.resolve("export");
+        Files.createDirectories(export.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("sub"));
+        Files.writeString(export.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), "payload");
+        Files.writeString(export.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("sub").resolve("nested"), "nested");
+        Files.writeString(export.resolve(StorageBackupBackend.MANIFEST_ENTRY), "manifest");
+        Files.writeString(export.resolve(StorageBackupBackend.READY_ENTRY), "");
+
+        final long before = BackupArchive.contentDigestOfDirectory(export);
+        final Path archive = root.resolve("backup.zip");
+        BackupArchive.compressStorage(export, archive);
+
+        assertEquals(before, BackupArchive.contentDigestOfArchive(archive),
+                "identical content must digest identically before and after archiving");
     }
 
     @Test

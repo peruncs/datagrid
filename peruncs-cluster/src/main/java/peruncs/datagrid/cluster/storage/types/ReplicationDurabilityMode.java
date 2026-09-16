@@ -18,6 +18,8 @@ public enum ReplicationDurabilityMode {
     }
 
         /// Returns the stable persisted code for this mode.
+    ///
+    /// @return stable persisted code
     public int code() {
         return this.code;
     }

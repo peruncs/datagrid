@@ -26,7 +26,7 @@ public final class AeronStoreProcessChildMain {
     private AeronStoreProcessChildMain() {
     }
 
-    public static void main(final String[] arguments) throws Exception {
+    static void main(final String[] arguments) throws Exception {
         if (arguments.length != 1) throw new IllegalArgumentException("mode is required");
         final String mode = arguments[0];
         if (!mode.equals("initial") && !mode.equals("restart") && !mode.equals("dictionary"))
@@ -143,6 +143,7 @@ public final class AeronStoreProcessChildMain {
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
                     case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> root.resolve("archive").toString();
                     case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> root.resolve("checkpoint/writer.checkpoint").toString();
+                    case "ECLIPSE_DATAGRID_BACKUP_PATH" -> root.resolve("backups").toString();
                     default -> null;
                 };
             }

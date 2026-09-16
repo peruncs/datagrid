@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
@@ -17,21 +18,31 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Verifies close-once disposal: a failed close is never retried, and
-/// promotion-released reader resources are not disposed again.
+/// Verifies close-once disposal for both fixed roles: every resource is
+/// released exactly once, and a failed close is never retried.
 class StorageNodeManagerCloseTest {
     private static final class CountingHandler implements InvocationHandler {
         final AtomicInteger disposeCalls = new AtomicInteger();
         final AtomicInteger closeCalls = new AtomicInteger();
-        volatile RuntimeException disposeFailure;
+        volatile Throwable disposeFailure;
+        volatile RuntimeException latestFailure;
 
         @Override
-        public Object invoke(final Object proxy, final java.lang.reflect.Method method, final Object[] args) {
+        public Object invoke(final Object proxy, final java.lang.reflect.Method method, final Object[] args)
+                throws Throwable {
             switch (method.getName()) {
                 case "dispose" -> {
                     this.disposeCalls.incrementAndGet();
                     if (this.disposeFailure != null) throw this.disposeFailure;
                     return null;
+                }
+                case "latest" -> {
+                    if (this.latestFailure != null) throw this.latestFailure;
+                    return new ReplicationCursor("test", UUID.randomUUID(), 5L, "");
+                }
+                case "latestSequence" -> {
+                    if (this.latestFailure != null) throw this.latestFailure;
+                    return 5L;
                 }
                 case "close" -> {
                     this.closeCalls.incrementAndGet();
@@ -61,7 +72,8 @@ class StorageNodeManagerCloseTest {
                 type.getClassLoader(), new Class<?>[]{type}, handler);
     }
 
-    private static StorageNodeManager reader(
+    private static StorageNodeManager manager(
+            final StorageNodeManager.Role role,
             final CountingHandler distributor, final CountingHandler client,
             final CountingHandler health, final CountingHandler position) {
         return StorageNodeManager.New(
@@ -71,7 +83,13 @@ class StorageNodeManagerCloseTest {
                 tracked(StorageNodeHealthCheck.class, health),
                 tracked(StorageDiskSpaceReader.class, new CountingHandler()),
                 tracked(ReplicationPositionProvider.class, position),
-                "aeron", StorageNodeManager.Role.READER);
+                "aeron", role);
+    }
+
+    private static StorageNodeManager reader(
+            final CountingHandler distributor, final CountingHandler client,
+            final CountingHandler health, final CountingHandler position) {
+        return manager(StorageNodeManager.Role.READER, distributor, client, health, position);
     }
 
         /// A close that fails mid-way still releases everything exactly once;
@@ -94,33 +112,55 @@ class StorageNodeManagerCloseTest {
         assertEquals(1, position.closeCalls.get(), "position provider re-closed on retry");
     }
 
-        /// Reader resources released by promotion are skipped by a later close.
+        /// Any provider fault — unavailable boundary or transport failure —
+        /// reads as unknown (`-1`) so a metrics scrape never fails.
     @Test
-    void promotionThenCloseSkipsReaderResources() {
+    void latestSequenceFaultsReadAsUnknown() {
+        final CountingHandler position = new CountingHandler();
+        position.latestFailure = new NodeLibraryException("writer boundary not readable");
+        final StorageNodeManager transportFailure = reader(
+                new CountingHandler(), new CountingHandler(), new CountingHandler(), position);
+        assertEquals(-1L, transportFailure.getLatestSequence());
+
+        final CountingHandler unavailable = new CountingHandler();
+        unavailable.latestFailure = new ReplicationPositionUnavailableException(
+                "no writer boundary for this role");
+        final StorageNodeManager boundaryMissing = reader(
+                new CountingHandler(), new CountingHandler(), new CountingHandler(), unavailable);
+        assertEquals(-1L, boundaryMissing.getLatestSequence());
+    }
+
+        /// An Error during close is rethrown even when a RuntimeException came first.
+    @Test
+    void closeRethrowsErrorAheadOfRuntimeException() {
+        final CountingHandler distributor = new CountingHandler();
+        final CountingHandler client = new CountingHandler();
+        distributor.disposeFailure = new IllegalStateException("distributor close failed");
+        client.disposeFailure = new AssertionError("fatal client failure");
+        final StorageNodeManager manager = reader(distributor, client, new CountingHandler(), new CountingHandler());
+
+        final AssertionError fatal = assertThrows(AssertionError.class, manager::close);
+        assertEquals(1, fatal.getSuppressed().length);
+        assertInstanceOf(IllegalStateException.class, fatal.getSuppressed()[0]);
+    }
+
+        /// A fixed distributor closes every resource exactly once.
+    @Test
+    void distributorCloseDisposesEverythingOnce() {
         final CountingHandler distributor = new CountingHandler();
         final CountingHandler client = new CountingHandler();
         final CountingHandler health = new CountingHandler();
         final CountingHandler position = new CountingHandler();
-        final PromotableStorageNodeManager manager = PromotableStorageNodeManager.New(
-                tracked(StorageBinaryDataDistributor.class, distributor),
-                tracked(StorageTaskExecutor.class, new CountingHandler()),
-                tracked(StorageBinaryDataClient.class, client),
-                tracked(StorageNodeHealthCheck.class, health),
-                tracked(StorageDiskSpaceReader.class, new CountingHandler()),
-                tracked(ReplicationPositionProvider.class, position),
-                "neutral");
+        final StorageNodeManager manager =
+                manager(StorageNodeManager.Role.DISTRIBUTOR, distributor, client, health, position);
 
-        manager.switchToDistribution();
-        assertTrue(manager.finishDistributionSwitch());
-        /* Promotion closes the reader health check; readiness must then come
-         * from the distributor instead of the closed reader check. */
-        assertTrue(manager.isReady(), "a promoted node must report ready through the distributor");
-        assertTrue(manager.isHealthy(), "a promoted node must report healthy through the distributor");
+        assertTrue(manager.isDistributor());
+        manager.close();
         manager.close();
 
-        assertEquals(1, client.disposeCalls.get(), "data client disposed twice across promotion and close");
-        assertEquals(1, health.closeCalls.get(), "health check closed twice across promotion and close");
-        assertEquals(1, distributor.disposeCalls.get(), "distributor not disposed on close");
-        assertEquals(1, position.closeCalls.get(), "position provider not closed on close");
+        assertEquals(1, distributor.disposeCalls.get(), "distributor not disposed exactly once");
+        assertEquals(1, client.disposeCalls.get(), "data client not disposed exactly once");
+        assertEquals(1, health.closeCalls.get(), "health check not closed exactly once");
+        assertEquals(1, position.closeCalls.get(), "position provider not closed exactly once");
     }
 }

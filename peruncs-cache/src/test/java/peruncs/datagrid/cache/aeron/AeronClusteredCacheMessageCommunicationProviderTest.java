@@ -36,6 +36,11 @@ import static peruncs.datagrid.cache.test.ClusteredCacheTestSupport.publish;
 
 /// Verifies the Aeron clustered-cache provider over a real embedded MediaDriver.
 class AeronClusteredCacheMessageCommunicationProviderTest {
+    private static byte[] senderId(final long high, final long low) {
+        return ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.BIG_ENDIAN)
+                .putLong(high).putLong(low).array();
+    }
+
     private static void provideSender(final AeronClusteredCacheConfiguration configuration) {
         new AeronClusteredCacheMessageCommunicationProvider()
                 .provideUpdateTimestampsCacheMessageSender(configuration)
@@ -52,50 +57,114 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
 
     private static AeronClusteredCacheConfiguration configuration(final Path driverDirectory) {
         return new AeronClusteredCacheConfiguration(
-                "aeron:ipc", 2001, null, driverDirectory.toString(), false, 10_000L, 10_000L, 1 << 20);
+                "aeron:ipc", 2001, null, driverDirectory.toString(), false, 10_000L, 10_000L, 1 << 20,
+                500L, 5_000L, driverDirectory.resolve("cursors").toString(),
+                null, false, false);
     }
 
     private static AeronClusteredCacheConfiguration withStreamId(
             final AeronClusteredCacheConfiguration base, final int streamId) {
         return new AeronClusteredCacheConfiguration(
                 base.channel(), streamId, base.nodeId(), base.directory(), base.embeddedDriver(),
-                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
     }
 
     private static AeronClusteredCacheConfiguration withChannel(
             final AeronClusteredCacheConfiguration base, final String channel) {
         return new AeronClusteredCacheConfiguration(
                 channel, base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
-                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
     }
 
     private static AeronClusteredCacheConfiguration withNodeId(
             final AeronClusteredCacheConfiguration base, final UUID nodeId) {
         return new AeronClusteredCacheConfiguration(
                 base.channel(), base.streamId(), nodeId, base.directory(), base.embeddedDriver(),
-                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
     }
 
     private static AeronClusteredCacheConfiguration withEmbeddedDriver(
             final AeronClusteredCacheConfiguration base) {
         return new AeronClusteredCacheConfiguration(
                 base.channel(), base.streamId(), base.nodeId(), base.directory(), true,
-                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes());
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
     }
 
     private static AeronClusteredCacheConfiguration withOfferTimeoutMillis(
             final AeronClusteredCacheConfiguration base, final long offerTimeoutMillis) {
         return new AeronClusteredCacheConfiguration(
                 base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
-                base.driverTimeoutMillis(), offerTimeoutMillis, base.maxPayloadBytes());
+                base.driverTimeoutMillis(), offerTimeoutMillis, base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
     }
 
     private static AeronClusteredCacheConfiguration withMaxPayloadBytes(
             final AeronClusteredCacheConfiguration base, final int maxPayloadBytes) {
         return new AeronClusteredCacheConfiguration(
                 base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
-                base.driverTimeoutMillis(), base.offerTimeoutMillis(), maxPayloadBytes);
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), maxPayloadBytes,
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
     }
+
+    private static AeronClusteredCacheConfiguration withHeartbeatIntervalMillis(
+            final AeronClusteredCacheConfiguration base, final long heartbeatIntervalMillis) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                heartbeatIntervalMillis, base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
+    }
+
+    private static AeronClusteredCacheConfiguration withFreshnessTimeoutMillis(
+            final AeronClusteredCacheConfiguration base, final long freshnessTimeoutMillis) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), freshnessTimeoutMillis, base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), base.allowUnsignedFrames());
+    }
+
+    private static AeronClusteredCacheConfiguration withHmacSecret(
+            final AeronClusteredCacheConfiguration base, final byte[] secret) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                secret, base.productionMode(), base.allowUnsignedFrames());
+    }
+
+    private static AeronClusteredCacheConfiguration withProductionMode(
+            final AeronClusteredCacheConfiguration base, final boolean productionMode) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), productionMode, base.allowUnsignedFrames());
+    }
+
+    private static AeronClusteredCacheConfiguration withAllowUnsignedFrames(
+            final AeronClusteredCacheConfiguration base, final boolean allowUnsignedFrames) {
+        return new AeronClusteredCacheConfiguration(
+                base.channel(), base.streamId(), base.nodeId(), base.directory(), base.embeddedDriver(),
+                base.driverTimeoutMillis(), base.offerTimeoutMillis(), base.maxPayloadBytes(),
+                base.heartbeatIntervalMillis(), base.freshnessTimeoutMillis(), base.cursorDirectory(),
+                base.hmacSecret(), base.productionMode(), allowUnsignedFrames);
+    }
+
+    private static final byte[] TEST_SECRET =
+            "0123456789abcdef0123456789abcdef".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    private static final byte[] OTHER_SECRET =
+            "abcdef0123456789abcdef0123456789".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
     private static ClusteredCacheMessageAcceptor acceptor(final BlockingQueue<TimestampsRegionUpdateMessage> received) {
         return acceptor(received, null);
@@ -804,8 +873,10 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                     final byte[] payload = AeronClusteredCachePayloadCodec.encode(
                             new TimestampsRegionUpdateMessage("cache", "table", 1L));
                     final ExpandableArrayBuffer frame = new ExpandableArrayBuffer(128);
-                    raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(frame, otherSender, 1L, payload));
-                    raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(frame, otherSender, 3L, payload));
+                    /* Every sender starts at zero, so the first frame must be
+                     * zero and the skipped sequence must be detected after it. */
+                    raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(frame, otherSender, 0L, payload));
+                    raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(frame, otherSender, 2L, payload));
 
                     assertNotNull(received.poll(10, TimeUnit.SECONDS),
                             "the first contiguous invalidation must be applied");
@@ -821,6 +892,48 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                             "a lost invalidation must fail the volatile receiver closed");
                     assertFalse(receiver.isRunning(),
                             "a receiver with a sequence gap must stop polling");
+                }
+            } finally {
+                receiver.dispose();
+            }
+        }
+    }
+
+    @Test
+    void lateSenderFailsClosedInsteadOfCreatingASecondJoinWindow(@TempDir final Path root) throws Exception {
+        try (MediaDriver driver = launchDriver(root)) {
+            final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(4);
+            final AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+            final AeronClusteredCacheMessageCommunicationProvider provider =
+                    new AeronClusteredCacheMessageCommunicationProvider();
+            final AeronClusteredCacheMessageReceiver receiver =
+                    provider.provideMessageReceiver(properties, acceptor(received));
+            try {
+                receiver.start();
+                try (Aeron aeron = Aeron.connect(new Aeron.Context()
+                        .aeronDirectoryName(root.resolve("driver").toString()));
+                     Publication raw = aeron.addPublication(properties.channel(), properties.streamId())) {
+                    awaitConnected(raw);
+                    final byte[] payload = AeronClusteredCachePayloadCodec.encode(
+                            new TimestampsRegionUpdateMessage("cache", "table", 1L));
+                    final ExpandableArrayBuffer frame = new ExpandableArrayBuffer(128);
+                    final byte[] firstSender = senderId(11L, 12L);
+                    final byte[] lateSender = senderId(21L, 22L);
+                    raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(
+                            frame, firstSender, 0L, payload));
+                    assertNotNull(received.poll(10, TimeUnit.SECONDS),
+                            "the first sender must establish the join boundary");
+                    raw.offer(frame, 0, AeronClusteredCacheMessageCodec.encode(
+                            frame, lateSender, 0L, payload));
+                    final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (receiver.failure() == null && System.nanoTime() < deadline) {
+                        LockSupport.parkNanos(100_000L);
+                    }
+                    assertNotNull(receiver.failure(),
+                            "a sender arriving after the join boundary must require resynchronization");
+                    assertFalse(receiver.isRunning());
+                    assertNull(received.poll(1, TimeUnit.SECONDS),
+                            "the late sender frame must not be applied before resynchronization");
                 }
             } finally {
                 receiver.dispose();
@@ -890,13 +1003,13 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
     }
 
     @Test
-    void receiverFailsClosedWhenSenderIdentityCardinalityIsUnbounded(@TempDir final Path root) {
+    void receiverFailsClosedPastTheTrackedBound(@TempDir final Path root) {
         try (MediaDriver driver = launchDriver(root)) {
             AeronClusteredCacheConfiguration properties = configuration(root.resolve("driver"));
+            final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(2048);
             final AeronClusteredCacheMessageCommunicationProvider provider = new AeronClusteredCacheMessageCommunicationProvider();
             final AeronClusteredCacheMessageReceiver receiver =
-                    provider.provideMessageReceiver(
-                            properties, acceptor(new ArrayBlockingQueue<>(2048)));
+                    provider.provideMessageReceiver(properties, acceptor(received));
             try {
                 receiver.start();
                 try (Aeron aeron = Aeron.connect(new Aeron.Context()
@@ -907,7 +1020,8 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                         final byte[] payload = AeronClusteredCachePayloadCodec.encode(
                                 new TimestampsRegionUpdateMessage("cache", "table", 1L));
                         final ExpandableArrayBuffer frame = new ExpandableArrayBuffer(128);
-                        for (int index = 0; index <= 1_024; index++) {
+                        final int senders = 1_024 + 64;
+                        for (int index = 0; index < senders; index++) {
                             final byte[] sender = ByteBuffer.allocate(Long.BYTES * 2)
                                     .order(ByteOrder.BIG_ENDIAN).putLong(index + 1L).putLong(index + 2L).array();
                             final int length = AeronClusteredCacheMessageCodec.encode(frame, sender, 0L, payload);
@@ -916,18 +1030,157 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                                 LockSupport.parkNanos(10_000L);
                             }
                         }
-                        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                        while (receiver.failure() == null && System.nanoTime() < deadline) {
-                            LockSupport.parkNanos(10_000L);
+                        final long failureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                        while (receiver.failure() == null && System.nanoTime() < failureDeadline) {
+                            LockSupport.parkNanos(100_000L);
                         }
-                        assertNotNull(receiver.failure(), "sender identity cardinality must be bounded");
-                        assertFalse(receiver.isRunning(), "receiver must stop after identity cardinality overflow");
+                        assertNotNull(receiver.failure(),
+                                "an unbounded sender set must fail closed instead of dropping continuity");
+                        assertFalse(receiver.isRunning(), "the sender bound failure must stop the receiver");
+                        assertTrue(received.size() <= AeronClusteredCacheMessageReceiver.MAX_TRACKED_SENDERS,
+                                "frames beyond the sender bound must not be applied");
                     }
                 }
             } finally {
                 receiver.dispose();
             }
         }
+    }
+
+    @Test
+    void signedInvalidationReachesAnotherNode(@TempDir final Path root) throws Exception {
+        try (MediaDriver driver = launchDriver(root)) {
+            final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
+            AeronClusteredCacheConfiguration properties =
+                    withHmacSecret(configuration(root.resolve("driver")), TEST_SECRET);
+
+            final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
+                    new AeronClusteredCacheMessageCommunicationProvider();
+            final AeronClusteredCacheMessageReceiver receiver =
+                    receiverProvider.provideMessageReceiver(properties, acceptor(received));
+            try {
+                receiver.start();
+
+                final AeronClusteredCacheMessageCommunicationProvider senderProvider =
+                        new AeronClusteredCacheMessageCommunicationProvider();
+                final AeronClusteredCacheMessageSender sender =
+                        senderProvider.provideUpdateTimestampsCacheMessageSender(properties);
+                try {
+                    publish(sender, EventType.CREATED, "cache", "signed-table", 42L);
+
+                    final TimestampsRegionUpdateMessage message = received.poll(10, TimeUnit.SECONDS);
+                    assertNotNull(message, "the other node did not receive the signed invalidation");
+                    assertEquals("signed-table", message.tableName());
+                    assertEquals(42L, message.timestamp());
+                    assertTrue(receiver.isRunning(), "a signed stream must stay healthy");
+                    assertNull(receiver.failure());
+                } finally {
+                    sender.dispose();
+                }
+            } finally {
+                receiver.dispose();
+            }
+        }
+    }
+
+    @Test
+    void signedFrameWithoutReceiverSecretFailsClosed(@TempDir final Path root) {
+        try (MediaDriver driver = launchDriver(root)) {
+            final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
+            final AeronClusteredCacheConfiguration base = configuration(root.resolve("driver"));
+            final AeronClusteredCacheConfiguration senderProperties = withHmacSecret(base, TEST_SECRET);
+
+            final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
+                    new AeronClusteredCacheMessageCommunicationProvider();
+            final AeronClusteredCacheMessageReceiver receiver =
+                    receiverProvider.provideMessageReceiver(base, acceptor(received));
+            try {
+                receiver.start();
+
+                final AeronClusteredCacheMessageCommunicationProvider senderProvider =
+                        new AeronClusteredCacheMessageCommunicationProvider();
+                final AeronClusteredCacheMessageSender sender =
+                        senderProvider.provideUpdateTimestampsCacheMessageSender(senderProperties);
+                try {
+                    publish(sender, EventType.CREATED, "cache", "table", 1L);
+
+                    final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (receiver.failure() == null && System.nanoTime() < deadline) {
+                        LockSupport.parkNanos(100_000L);
+                    }
+                    assertNotNull(receiver.failure(),
+                            "a signed frame must fail a receiver without the secret closed");
+                    assertFalse(receiver.isRunning());
+                    assertTrue(received.isEmpty(), "an unauthenticated frame must never be applied");
+                } finally {
+                    sender.dispose();
+                }
+            } finally {
+                receiver.dispose();
+            }
+        }
+    }
+
+    @Test
+    void mismatchedSecretFailsClosed(@TempDir final Path root) {
+        try (MediaDriver driver = launchDriver(root)) {
+            final BlockingQueue<TimestampsRegionUpdateMessage> received = new ArrayBlockingQueue<>(16);
+            final AeronClusteredCacheConfiguration base = configuration(root.resolve("driver"));
+
+            final AeronClusteredCacheMessageCommunicationProvider receiverProvider =
+                    new AeronClusteredCacheMessageCommunicationProvider();
+            final AeronClusteredCacheMessageReceiver receiver = receiverProvider.provideMessageReceiver(
+                    withHmacSecret(base, OTHER_SECRET), acceptor(received));
+            try {
+                receiver.start();
+
+                final AeronClusteredCacheMessageCommunicationProvider senderProvider =
+                        new AeronClusteredCacheMessageCommunicationProvider();
+                final AeronClusteredCacheMessageSender sender = senderProvider
+                        .provideUpdateTimestampsCacheMessageSender(withHmacSecret(base, TEST_SECRET));
+                try {
+                    publish(sender, EventType.CREATED, "cache", "table", 1L);
+
+                    final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (receiver.failure() == null && System.nanoTime() < deadline) {
+                        LockSupport.parkNanos(100_000L);
+                    }
+                    assertNotNull(receiver.failure(), "a frame signed with another secret must fail closed");
+                    assertFalse(receiver.isRunning());
+                    assertTrue(received.isEmpty(), "a forged frame must never be applied");
+                } finally {
+                    sender.dispose();
+                }
+            } finally {
+                receiver.dispose();
+            }
+        }
+    }
+
+    @Test
+    void productionModeRequiresAuthenticationOrAcknowledgement() {
+        final AeronClusteredCacheConfiguration valid = AeronClusteredCacheConfiguration.defaults();
+        assertThrows(IllegalArgumentException.class,
+                () -> withProductionMode(valid, true),
+                "production mode must reject unsigned frames without an explicit acknowledgement");
+        assertDoesNotThrow(() -> withProductionMode(withAllowUnsignedFrames(valid, true), true));
+        assertDoesNotThrow(() -> withProductionMode(withHmacSecret(valid, TEST_SECRET), true));
+        assertThrows(IllegalArgumentException.class,
+                () -> withAllowUnsignedFrames(withHmacSecret(valid, TEST_SECRET), true),
+                "a secret combined with an unsigned acknowledgement is contradictory");
+        assertThrows(IllegalArgumentException.class,
+                () -> withHmacSecret(valid, new byte[8]),
+                "a short secret must be rejected");
+    }
+
+    @Test
+    void productionModeRejectsLoopbackEvenWithEmbeddedDriver() {
+        final AeronClusteredCacheConfiguration prod = withProductionMode(
+                withAllowUnsignedFrames(AeronClusteredCacheConfiguration.defaults(), true), true);
+        assertThrows(IllegalArgumentException.class,
+                () -> provideSender(withEmbeddedDriver(withChannel(
+                        prod, "aeron:udp?endpoint=localhost:40123|control-mode=dynamic"))),
+                "loopback UDP must be rejected in production mode even with an embedded driver");
     }
 
     @Test
@@ -1058,6 +1311,12 @@ class AeronClusteredCacheMessageCommunicationProviderTest {
                 () -> withOfferTimeoutMillis(valid, Long.MAX_VALUE));
         assertThrows(IllegalArgumentException.class,
                 () -> withNodeId(valid, new UUID(0L, 0L)));
+        assertThrows(IllegalArgumentException.class,
+                () -> withHeartbeatIntervalMillis(valid, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> withFreshnessTimeoutMillis(valid,
+                        AeronClusteredCacheConfiguration.DEFAULT_HEARTBEAT_INTERVAL_MILLIS),
+                "the freshness timeout must exceed the heartbeat interval");
         assertThrows(IllegalArgumentException.class,
                 () -> provideSender(withChannel(valid, "not-a-channel")));
         assertThrows(IllegalArgumentException.class,

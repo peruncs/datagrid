@@ -35,7 +35,9 @@ class ClusteredCacheRemoteUpdateSuppressionTest {
                     () -> {
                     },
                     TimeUnit.MINUTES.toNanos(1L),
-                    1024);
+                    TimeUnit.MINUTES.toNanos(1L),
+                    1024,
+                    null);
             cache.registerCacheEntryListener(new ClusteredCacheEntryListenerConfiguration(sender)
                     .getUpdateTimestampsCacheEntryListenerConfiguration());
 

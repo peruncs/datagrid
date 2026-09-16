@@ -37,7 +37,9 @@ final class AeronWatermarkChannel implements AutoCloseable {
     private byte[] sending;
     private byte[] reusable = this.bufferA;
     private boolean closed;
-    private boolean closing;
+    /* Read unsynchronized by available(); every mutation holds the monitor,
+     * so volatile is the only additional visibility needed. */
+    private volatile boolean closing;
     private AeronWatermarkChannel(
             final Publication publication,
             final Subscription subscription,
@@ -117,10 +119,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         Objects.requireNonNull(encoded, "encoded");
         if (encoded.length != AeronAuthenticatedWatermark.ENCODED_LENGTH)
             throw new IllegalArgumentException("Aeron watermark encoding must contain exactly %s bytes".formatted(AeronAuthenticatedWatermark.ENCODED_LENGTH));
-        final RuntimeException terminal = this.failure.get();
-        if (terminal != null) throw new IllegalStateException("Aeron watermark channel failed", terminal);
-        if (!this.running.get() || this.closing)
-            throw new IllegalStateException("Aeron watermark channel is closed or closing");
+        this.requireOpen();
         this.discardPendingForReplacement();
         if (this.reusable == null && this.sending != null) {
             this.reusable = this.sending == this.bufferA ? this.bufferB : this.bufferA;
@@ -138,10 +137,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
             final UUID readerId, final UUID clusterId, final UUID storeGeneration,
             final long writerEpoch, final long recordingId, final long sequence,
             final long position, final byte[] secret) {
-        final RuntimeException terminal = this.failure.get();
-        if (terminal != null) throw new IllegalStateException("Aeron watermark channel failed", terminal);
-        if (!this.running.get() || this.closing)
-            throw new IllegalStateException("Aeron watermark channel is closed or closing");
+        this.requireOpen();
         if (this.pending != null && !this.isReusableBuffer(this.pending)) this.pending = null;
         if (this.pending == null) {
             if (this.reusable == null) {
@@ -159,7 +155,18 @@ final class AeronWatermarkChannel implements AutoCloseable {
     }
 
     boolean available() {
-        return this.running.get() && this.failure.get() == null;
+        return this.running.get() && !this.closing && this.failure.get() == null;
+    }
+
+        /// Rejects publishes once the channel has failed, stopped, or started closing.
+    ///
+    /// Callers hold the monitor so the `closing` flag is observed atomically
+    /// with the pending-buffer hand-off that follows.
+    private void requireOpen() {
+        final RuntimeException terminal = this.failure.get();
+        if (terminal != null) throw new IllegalStateException("Aeron watermark channel failed", terminal);
+        if (!this.running.get() || this.closing)
+            throw new IllegalStateException("Aeron watermark channel is closed or closing");
     }
 
     RuntimeException failure() {

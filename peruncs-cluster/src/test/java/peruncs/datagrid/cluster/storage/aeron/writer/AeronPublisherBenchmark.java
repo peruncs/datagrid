@@ -17,7 +17,7 @@ public final class AeronPublisherBenchmark {
     private AeronPublisherBenchmark() {
     }
 
-    public static void main(final String[] arguments) {
+    static void main(final String[] arguments) {
         int payloadLength = 1_048_576;
         int chunkSize = 16 * 1024;
         int sourceBuffers = 4;

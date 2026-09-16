@@ -7,12 +7,12 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.node.exceptions.ReaderWriteRejectedException;
 import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
 
 import java.nio.file.Path;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// The storage limit gates only the write entry points.
 ///
@@ -34,12 +34,105 @@ class StorageWriteGatingTest {
     }
 
     @Test
-    void restoreAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
+    void everyFluentStorerPathIsGatedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
                     ClusterStorageManager.New(delegate, () -> true, ClusterStorageManager.ShutdownCallback.NoOp());
 
-            assertDoesNotThrow(() -> manager.importData(X.Enum()));
+            assertThrows(StorageLimitReachedException.class, () -> {
+                final var storer = manager.createStorer().reinitialize();
+                storer.store(new Payload("a"));
+                storer.commit();
+            });
+            assertThrows(StorageLimitReachedException.class, () -> {
+                final var storer = manager.createStorer().reinitialize(16L);
+                storer.store(new Payload("b"));
+                storer.commit();
+            });
+            assertThrows(StorageLimitReachedException.class, () -> {
+                final var storer = manager.createStorer().ensureCapacity(16L);
+                storer.store(new Payload("c"));
+                storer.commit();
+            });
+            assertThrows(StorageLimitReachedException.class, () -> {
+                final var storer = manager.createEagerStorer().reinitialize();
+                storer.store(new Payload("d"));
+                storer.commit();
+            });
+            assertThrows(StorageLimitReachedException.class, () -> {
+                final var storer = manager.createLazyStorer().ensureCapacity(16L);
+                storer.store(new Payload("e"));
+                storer.commit();
+            });
+            assertThrows(StorageLimitReachedException.class,
+                    () -> manager.persistenceManager().createStorer().reinitialize().commit());
+            assertThrows(StorageLimitReachedException.class,
+                    () -> manager.persistenceManager().createEagerStorer().commit());
+            assertThrows(StorageLimitReachedException.class,
+                    () -> manager.persistenceManager().createLazyStorer().commit());
+            assertThrows(StorageLimitReachedException.class,
+                    () -> manager.persistenceManager().target().write(null));
+            assertThrows(StorageLimitReachedException.class, () -> manager.setRoot(new Payload("f")));
+        }
+    }
+
+    @Test
+    void readOnlyManagerRejectsEveryMutationApi(@TempDir final Path dir) {
+        try (EmbeddedStorageManager delegate = start(dir)) {
+            delegate.setRoot(new Payload("root"));
+            delegate.storeRoot();
+            final ClusterStorageManager<Object> manager =
+                    ClusterStorageManager.ReadOnly(delegate, ClusterStorageManager.ShutdownCallback.NoOp());
+
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.store(new Payload("a")));
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.storeAll(new Payload("c")));
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.storeAll(java.util.List.of(new Payload("d"))));
+            assertThrows(ReaderWriteRejectedException.class, manager::storeRoot);
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.setRoot(new Payload("e")));
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.createStorer().commit());
+            assertThrows(ReaderWriteRejectedException.class, () -> {
+                final var storer = manager.createStorer().reinitialize();
+                storer.store(new Payload("f"));
+                storer.commit();
+            });
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.createEagerStorer().ensureCapacity(16L).commit());
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.createLazyStorer().commit());
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.persistenceManager().createStorer().commit());
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.persistenceManager().target().write(null));
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.persistenceManager().updateCurrentObjectId(10L));
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.persistenceManager().updateMetadata(null, 0L, 0L));
+            assertTrue(manager.persistenceManager().target().isWritable(),
+                    "read-only raw target must report writable so the Store routes writes into the rejecting write() instead of skipping them silently");
+
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.importData(X.Enum()));
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.importFiles(X.Enum()));
+            assertThrows(UnsupportedOperationException.class, manager::root,
+                    "root() cannot retain the coordinator read lock and must direct callers to readRoot(...)");
+            assertThrows(UnsupportedOperationException.class, manager::viewRoots,
+                    "viewRoots() must not expose a live root on readers");
+            assertThrows(UnsupportedOperationException.class, () -> manager.persistenceManager().viewRoots(),
+                    "the persistence adapter must not expose a live root either");
+            assertDoesNotThrow(() -> manager.readRoot(root -> root == null ? "null" : "present"));
+            assertThrows(IllegalStateException.class, () -> manager.readRoot(root -> root),
+                    "readRoot must reject actions escaping the live graph");
+            assertDoesNotThrow(manager::typeDictionary);
+            assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("g")));
+            assertTrue(manager.isRunning(), "read-only manager must stay usable for reads");
+        }
+    }
+
+    @Test
+    void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
+        try (EmbeddedStorageManager delegate = start(dir)) {
+            final ClusterStorageManager<Object> manager =
+                    ClusterStorageManager.New(delegate, () -> true, ClusterStorageManager.ShutdownCallback.NoOp());
+
+            assertThrows(UnsupportedOperationException.class, () -> manager.importData(X.Enum()));
             assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("c")));
             assertDoesNotThrow(() -> manager.persistenceManager().consolidate());
         }

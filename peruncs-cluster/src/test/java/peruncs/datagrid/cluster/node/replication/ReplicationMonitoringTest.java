@@ -2,7 +2,6 @@ package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.StorageNodeManager;
-import peruncs.datagrid.cluster.node.http.ClusterRestRequestController;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -10,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ReplicationMonitoringTest {
         /// Verifies that Aeron transport state, lag, and readiness are exposed as raw values.
     @Test
-    void exposesAeronTransportStateLagAndReadinessAsPrometheusMetrics() throws Exception {
+    void exposesAeronTransportStateLagAndReadinessAsRawValues() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {
             public boolean isDistributor() {
                 return false;
@@ -55,8 +54,7 @@ class ReplicationMonitoringTest {
             }
         };
 
-        final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager);
-        final var metrics = controller.getReplicationMetrics();
+        final var metrics = manager.replicationMetrics();
         assertEquals(7, metrics.currentSequence());
         assertEquals(10, metrics.latestSequence());
         assertEquals(3, metrics.lagTransactions());
@@ -64,8 +62,7 @@ class ReplicationMonitoringTest {
         assertEquals(ReplicationHealth.State.REPLAYING, metrics.state());
         assertFalse(metrics.ready());
         assertTrue(metrics.healthy());
-        assertEquals(123, controller.getStorageBytes());
-        controller.close();
+        assertEquals(123, manager.readStorageSizeBytes());
     }
 
         /// An unknown writer boundary must report unknown lag, never a healthy zero.
@@ -115,11 +112,9 @@ class ReplicationMonitoringTest {
             }
         };
 
-        try (final ClusterRestRequestController controller = ClusterRestRequestController.StorageNode(manager)) {
-            final var metrics = controller.getReplicationMetrics();
-            assertEquals(7, metrics.currentSequence());
-            assertEquals(-1, metrics.latestSequence());
-            assertEquals(-1, metrics.lagTransactions());
-        }
+        final var metrics = manager.replicationMetrics();
+        assertEquals(7, metrics.currentSequence());
+        assertEquals(-1, metrics.latestSequence());
+        assertEquals(-1, metrics.lagTransactions());
     }
 }

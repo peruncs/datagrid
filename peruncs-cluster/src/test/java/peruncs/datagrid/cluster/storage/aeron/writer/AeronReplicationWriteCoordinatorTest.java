@@ -435,6 +435,165 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
+        /// A lease stolen before the marker offer must never reach Aeron.
+    ///
+    /// The gate pauses at the ownership boundary while a successor steals the
+    /// lease; when released, ownership verification fails and the offer never
+    /// runs. A true cross-process forked variant would add file-lock coverage;
+    /// this test covers the gate logic deterministically in-JVM.
+    @Test
+    void stolenLeaseAtCommitGateNeverOffersMarker() throws Exception {
+            final AtomicInteger offers = new AtomicInteger();
+            final AtomicInteger commitMarkers = new AtomicInteger();
+            final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                    .chunkSize(256).maxTransactionBytes(512).build();
+            final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                    (buffer, offset, length) -> {
+                        offers.incrementAndGet();
+                        try {
+                            if (AeronReplicationEnvelope.decode(buffer, offset, length).kind()
+                                    == AeronReplicationEnvelope.Kind.COMMIT) {
+                                commitMarkers.incrementAndGet();
+                            }
+                        } catch (final RuntimeException notEnvelope) {
+                            /* Data-chunk frames share the offer path; only the
+                             * terminal marker proves the commit escaped. */
+                        }
+                        return length;
+                    }, configuration.maxMessageLength(), configuration, java.util.UUID.randomUUID(), 1, 0);
+        final CountDownLatch atGate = new CountDownLatch(1);
+        final CountDownLatch releaseGate = new CountDownLatch(1);
+        final AtomicBoolean stolen = new AtomicBoolean();
+        final WriterLeaseGate gate = new WriterLeaseGate() {
+            @Override
+            public boolean isValid() {
+                return !stolen.get();
+            }
+
+            @Override
+            public long offerUnderOwnership(final java.util.function.LongSupplier offer) {
+                atGate.countDown();
+                try {
+                    assertTrue(releaseGate.await(10, TimeUnit.SECONDS), "gate test timed out");
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+                if (stolen.get()) {
+                    throw new IllegalStateException("writer fencing lease lost before commit; this writer is fenced");
+                }
+                return offer.getAsLong();
+            }
+        };
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> {
+        },
+                bytes -> true, gate);
+        try {
+            final var prepared = coordinator.prepare(
+                    ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+            final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
+            final Thread committing = Thread.ofVirtual().start(() -> {
+                try {
+                    coordinator.executeWriteAtomically(() -> coordinator.commitOrMarkUncertain(prepared));
+                } catch (final Throwable failure) {
+                    commitFailure.set(failure);
+                }
+            });
+            try {
+                assertTrue(atGate.await(10, TimeUnit.SECONDS), "commit never reached the lease gate");
+                stolen.set(true);
+                releaseGate.countDown();
+                committing.join(TimeUnit.SECONDS.toMillis(10));
+                assertFalse(committing.isAlive(), "commit did not finish after the steal");
+                assertNotNull(commitFailure.get(), "a stolen lease must fail the commit");
+                assertTrue(commitFailure.get().getMessage().contains("lease") ||
+                        (commitFailure.get().getCause() != null &&
+                         commitFailure.get().getCause().getMessage().contains("fenced")),
+                        "unexpected failure: " + commitFailure.get());
+                    assertEquals(0, commitMarkers.get(), "a deposed writer must never offer its commit marker");
+                assertTrue(publisher.isFailed(), "a fenced writer must fail its publisher closed");
+            } finally {
+                releaseGate.countDown();
+                try {
+                    committing.join(TimeUnit.SECONDS.toMillis(10));
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        } finally {
+            coordinator.dispose();
+        }
+    }
+
+    @Test
+    void lostLeasePreventsAbortMarkerEvenDuringShutdown() {
+        final AtomicInteger abortMarkers = new AtomicInteger();
+        final AtomicBoolean leaseValid = new AtomicBoolean(true);
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) -> {
+                    if (AeronReplicationEnvelope.decode(buffer, offset, length).kind()
+                            == AeronReplicationEnvelope.Kind.ABORT) abortMarkers.incrementAndGet();
+                    return length;
+                }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, configuration.durabilityMode(),
+                (state, sequence, length, chunks, crc, position) -> {}, bytes -> true, leaseValid::get);
+        final var prepared = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+        leaseValid.set(false);
+        assertThrows(IllegalStateException.class, () -> coordinator.abort(prepared));
+        coordinator.dispose();
+        assertEquals(0, abortMarkers.get());
+    }
+
+        /// Verifies a lost lease fails admission as fenced, never as capacity exhaustion.
+    @Test
+    void lostLeaseAdmissionFailsClosedWithLeaseError() {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> {
+        },
+                bytes -> false, () -> false);
+        try {
+            final var failure = assertThrows(IllegalStateException.class,
+                    () -> coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
+            assertTrue(failure.getMessage().contains("lease lost"),
+                    "lost lease must not masquerade as capacity exhaustion, was: %s".formatted(failure.getMessage()));
+            assertTrue(publisher.isFailed(), "a fenced writer must fail its publisher closed");
+        } finally {
+            coordinator.dispose();
+        }
+    }
+
+        /// Verifies capacity exhaustion keeps its own message while the lease is valid.
+    @Test
+    void capacityExhaustionKeepsDistinctMessageWhileLeaseIsValid() {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> {
+        },
+                bytes -> false, () -> true);
+        try {
+            final var failure = assertThrows(IllegalStateException.class,
+                    () -> coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
+            assertTrue(failure.getMessage().contains("insufficient free capacity"),
+                    "capacity exhaustion must keep its own message, was: %s".formatted(failure.getMessage()));
+            assertFalse(publisher.isFailed(), "capacity exhaustion must not poison the publisher");
+        } finally {
+            coordinator.dispose();
+        }
+    }
+
         /// Verifies commit failure is marked uncertain and coordinator cannot pretend success.
     @Test
     void commitFailureIsMarkedUncertainAndCoordinatorCannotPretendSuccess() {

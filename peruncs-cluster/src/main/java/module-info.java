@@ -2,10 +2,12 @@
 ///
 /// Applications create the node services, start them in dependency order,
 /// and close them in reverse order. The node lifecycle, storage
-/// adaptation, backup, replication, and HTTP surface live in
-/// `...cluster.node`, `...cluster.node.store`, `...cluster.node.backup`,
-/// `...cluster.node.replication`, and `...cluster.node.http`,
-/// implemented by the Aeron transport in `...cluster.node.aeron`.
+/// adaptation, backup, and replication live in `...cluster.node`,
+/// `...cluster.node.store`, `...cluster.node.backup`, and
+/// `...cluster.node.replication`, implemented by the Aeron transport in
+/// `...cluster.node.aeron`. Control operations are exposed programmatically
+/// through the node managers; the module ships no HTTP surface — any HTTP,
+/// MCP, or UI boundary belongs to the embedding application.
 /// Store binary movement lives in
 /// `...cluster.storage.types`, carried by
 /// `...cluster.storage.aeron.*`, with the embedded Lucene/JVector
@@ -24,16 +26,28 @@
 /// Readers replay from the Archive, join the live stream, and reconnect
 /// from a durable cursor.
 ///
-/// # Fixed roles without consensus
+/// # Fixed roles with a fencing lease
 ///
-/// Writer election and failover need fencing and consensus, a separate
-/// system this transport deliberately avoids. Roles are fixed at
-/// configuration: `writer`, `reader`, or `backup-reader`, or `none` for an
-/// unreplicated node. A reader owns a persistent subscription with no
-/// writer publication path, so promotion is rejected outright instead of
-/// producing a distributor that cannot replicate. Fencing and manual
-/// promotion stay deployment responsibilities; there is only ever the
-/// configured writer.
+/// Roles are fixed at configuration: `writer`, `reader`, or
+/// `backup-reader`, or `none` for an unreplicated node. A reader owns a
+/// persistent subscription with no writer publication path, so promotion is
+/// rejected outright instead of producing a distributor that cannot
+/// replicate. The single-writer invariant itself is enforced, not merely
+/// configured: the writer holds a renewable fencing lease in the shared
+/// backup volume carrying a monotonically increasing token. A different
+/// writer for the same cluster/generation fails acquisition while the
+/// holder's heartbeat is fresh; a stale lease is stolen with a greater
+/// token, the deposed writer loses write admission, and readers fail closed
+/// on any frame carrying a lower token. The same writer — the same stable
+/// node id — restarting after a clean stop or a crash mints the next token
+/// immediately instead of waiting out its own heartbeat; node identity is
+/// the fencing principal, so restarts never black out on fencing. Every envelope, checkpoint, and cursor
+/// carries the token, so interleaved history from two writers is rejected
+/// instead of consumed. Reader watermarks are the deliberate exception: they
+/// carry no fencing token (see the retention section). Automated failover
+/// beyond lease stealing needs consensus, which stays a deployment
+/// responsibility; the lease directory must be shared by all writers of one
+/// cluster.
 ///
 /// # Durable cursors and checkpoints
 ///
@@ -48,6 +62,15 @@
 /// checksum-protected, not authenticated: their trust boundary is the
 /// filesystem, so the metadata directory must stay owner-only and local.
 ///
+/// # Upgrade reseeds
+///
+/// The wire and restart formats are versioned and fail closed on mismatch:
+/// envelopes require version 3 with a 76-byte header and an optional
+/// HMAC-SHA256 frame tag, and checkpoints and
+/// cursors require version 2. A node upgraded from an older format must be
+/// reseeded from a compatible backup or Store image with its cursor; old
+/// files are rejected, never migrated in place.
+///
 /// # Quorum-gated retention
 ///
 /// Deleting Archive segments a slow reader still needs destroys data no
@@ -58,6 +81,14 @@
 /// recording at its exact stop position. Without the shared secret, with
 /// an incomplete quorum, or during an active replay, history is preserved.
 /// The quorum, not any single request, authorizes deletion.
+///
+/// The retention quorum is epoch-bound and excluded from token fencing:
+/// watermarks authenticate reader progress under one epoch but never carry
+/// the writer fencing token, so a watermark can neither fence nor un-fence
+/// a writer. Residual risk: token fencing does not cover retention. A
+/// watermark replayed across epochs is rejected by its epoch binding, but
+/// operators must still treat the retention secret and epoch rotation as
+/// the retention trust boundary.
 ///
 /// # Filesystem backups
 ///
@@ -97,16 +128,12 @@ module peruncs.datagrid.cluster
     // the published module descriptor.
     requires org.eclipes.store.gigamap.jvector;
     requires org.apache.lucene.core;
-    /* Benchmark tests use com.sun.management.ThreadMXBean while production
-     * classes have no runtime dependency on the management implementation. */
-    requires static jdk.management;
 
     exports peruncs.datagrid.cluster.node.exceptions;
     exports peruncs.datagrid.cluster.node.backup;
     exports peruncs.datagrid.cluster.node.replication;
     exports peruncs.datagrid.cluster.node;
     exports peruncs.datagrid.cluster.node.store;
-    exports peruncs.datagrid.cluster.node.http;
     exports peruncs.datagrid.cluster.node.aeron;
     exports peruncs.datagrid.cluster.storage.types;
     exports peruncs.datagrid.cluster.storage.aeron.config;

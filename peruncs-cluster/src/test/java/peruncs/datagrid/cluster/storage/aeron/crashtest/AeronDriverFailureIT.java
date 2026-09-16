@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.crashtest;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.io.IOException;
 import java.nio.file.Files;

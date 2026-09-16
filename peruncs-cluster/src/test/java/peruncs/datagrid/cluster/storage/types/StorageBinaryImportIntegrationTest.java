@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class StorageBinaryImportIntegrationTest {
     private static EmbeddedStorageManager startExisting(final Path path, final CapturingDistributor capture) {
         final var foundation = foundation(path);
-        DistributedStorage.configureWriting(foundation, capture);
+        DistributedStorage.configureWriting(foundation, capture, new ReplicatingTargetFactory(capture));
         return foundation.start();
     }
 
@@ -32,7 +32,7 @@ class StorageBinaryImportIntegrationTest {
             final CapturingDistributor capture
     ) {
         final var foundation = foundation(path);
-        DistributedStorage.configureWriting(foundation, capture);
+        DistributedStorage.configureWriting(foundation, capture, new ReplicatingTargetFactory(capture));
         return foundation.start(initialRoot);
     }
 

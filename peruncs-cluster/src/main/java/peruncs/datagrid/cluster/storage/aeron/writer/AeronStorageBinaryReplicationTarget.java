@@ -22,6 +22,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     private final StorageBinaryDataDistributor dictionarySource;
     private final LongConsumer committedSequence;
     private final BooleanSupplier distributionEnabled;
+    private final Runnable writerIndexValidation;
 
         /// Creates a target with replication enabled for every write.
     ///
@@ -46,11 +47,50 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
                                                 final AeronReplicationWriteCoordinator coordinator, final StorageBinaryDataDistributor dictionarySource,
                                                 final LongConsumer committedSequence, final BooleanSupplier distributionEnabled) {
+        this(delegate, coordinator, dictionarySource, committedSequence, distributionEnabled, null);
+    }
+
+        /// Creates a target with writer-side index enforcement.
+    ///
+    /// The validation hook typically calls
+    /// [peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes#validateForPublication]
+    /// on the writer's connection; it runs at startup through
+    /// [#validateWriterState()] and again before every distributed
+    /// publication, so an index registered directly — bypassing the cluster
+    /// registration paths — fails the writer before the diverging transaction
+    /// is published instead of failing every reader after the fact. A `null`
+    /// hook skips validation: the target sees only the committed `Binary`,
+    /// never the Store connection, so without an injected hook it has no
+    /// roots to validate and cannot join the enforcement itself.
+    ///
+    /// @param delegate              local Store target
+    /// @param coordinator           Aeron transaction coordinator
+    /// @param dictionarySource      source of staged type dictionaries
+    /// @param committedSequence     callback for the committed sequence
+    /// @param distributionEnabled   predicate that enables replication
+    /// @param writerIndexValidation writer index check, or `null` to skip
+    public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
+                                                final AeronReplicationWriteCoordinator coordinator, final StorageBinaryDataDistributor dictionarySource,
+                                                final LongConsumer committedSequence, final BooleanSupplier distributionEnabled,
+                                                final Runnable writerIndexValidation) {
         this.delegate = notNull(delegate);
         this.coordinator = notNull(coordinator);
         this.dictionarySource = dictionarySource;
         this.committedSequence = notNull(committedSequence);
         this.distributionEnabled = notNull(distributionEnabled);
+        this.writerIndexValidation = writerIndexValidation;
+    }
+
+        /// Runs the writer-side index check now.
+    ///
+    /// Call at writer startup for fail-fast enforcement; the distributed
+    /// commit path invokes the same check before every publication. A target
+    /// built without a validation hook accepts silently.
+    ///
+    /// @throws RuntimeException if the writer graph violates the index policy
+    public void validateWriterState() {
+        final Runnable validation = this.writerIndexValidation;
+        if (validation != null) validation.run();
     }
 
         /// Writes locally and completes the matching Aeron transaction.
@@ -69,6 +109,10 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
             }
             return;
         }
+        /* Writer-side index enforcement before any publication step: a direct
+         * external registration fails here, ahead of the local Store write
+         * and the Aeron prepare/commit below. */
+        this.validateWriterState();
         if (this.dictionarySource != null) {
             final String dictionary = this.dictionarySource.consumeTypeDictionary();
             if (dictionary != null) {
@@ -121,7 +165,8 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
             }
             try (prepared) {
                 this.coordinator.markEnqueued(prepared);
-                this.commitAndNotify(prepared);
+                this.coordinator.commitOrMarkUncertain(prepared);
+                this.committedSequence.accept(prepared.sequence());
             }
             return;
         }
@@ -170,14 +215,9 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                 data.iterateChannelChunks(Binary::reset);
             }
             this.coordinator.markEnqueued(prepared);
-            this.commitAndNotify(prepared);
+            this.coordinator.commitOrMarkUncertain(prepared);
+            this.committedSequence.accept(prepared.sequence());
         }
-    }
-
-        /// Commits a prepared transaction and preserves the fail-closed uncertainty marker.
-    private void commitAndNotify(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        this.coordinator.commitOrMarkUncertain(prepared);
-        this.committedSequence.accept(prepared.sequence());
     }
 
         /// Returns whether the local persistence target can accept a write.

@@ -35,7 +35,12 @@
                  java.persistence module. Hibernate 7 uses jakarta.persistence, so
                  the legacy API must be present to resolve that descriptor on the
                  JPMS module path. It is provided and only used for module
-                 resolution; the cache code itself uses Hibernate/Jakarta types. -->
+                 resolution; the cache code itself uses Hibernate/Jakarta types.
+                 Consumer requirement: applications that put peruncs-cache on
+                 their own module path must likewise provide the java.persistence
+                 module (declare this same provided dependency or otherwise
+                 supply the API jar), or their module resolution fails on the
+                 cache-hibernate descriptor. It is never needed at runtime. -->
             <groupId>javax.persistence</groupId>
             <artifactId>javax.persistence-api</artifactId>
             <version>2.2</version>

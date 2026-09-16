@@ -2,33 +2,61 @@ package peruncs.datagrid.cluster.node.backup;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
+import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 /// Encodes and validates the ZIP format used by filesystem backups.
+///
+/// Archive names carry the backup generation — timestamp, slot, cluster,
+/// store image, epoch, recording, and a random publication id — so backups
+/// from different nodes sharing one volume never collide, and unrelated
+/// generations stay distinguishable without opening any archive. The node
+/// provenance and the content digest travel inside the archive as the
+/// `backup-identity` entry; archives without one predate generations and
+/// list with unknown provenance.
 final class BackupArchive {
+        /// Sidecar entry carrying the full backup identity and content digest.
+    static final String BACKUP_IDENTITY_ENTRY = "backup-identity";
+
     private static final LazyConstant<Pattern> BACKUP_NAME = LazyConstant.of(
-            () -> Pattern.compile("^(\\d+)(\\.manual)?\\.zip$", Pattern.CASE_INSENSITIVE));
+            () -> Pattern.compile(
+                    "^(\\d+)(\\.manual)?\\.([0-9a-f]{32})\\.([0-9a-f]{32})\\.(-?\\d+)\\.(-?\\d+)\\.([0-9a-f]{32})\\.zip$",
+                    Pattern.CASE_INSENSITIVE));
     private static final int MAX_ARCHIVE_ENTRIES = 1_000_000;
     private static final int MAX_MANIFEST_BYTES = 1 << 20;
+    private static final int MAX_IDENTITY_BYTES = 4096;
+    private static final int IDENTITY_MAGIC = 0x44474249; // DGBI
+    private static final short IDENTITY_VERSION = 1;
+    private static final UUID NIL_UUID = new UUID(0L, 0L);
 
     private BackupArchive() {
     }
 
     static String toArchiveFileName(final BackupMetadata backup) {
-        return "%s.zip".formatted(backup.timestamp() + (backup.manualSlot() ? ".manual" : ""));
+        return "%d%s.%s.%s.%d.%d.%s.zip".formatted(
+                backup.timestamp(),
+                backup.manualSlot() ? ".manual" : "",
+                hexOrZero(backup.clusterId()),
+                hexOrZero(backup.storeGeneration()),
+                backup.epoch(),
+                backup.recordingId(),
+                backup.backupId() == null ? hexOrZero(null) : hex(backup.backupId()));
     }
 
     static boolean isBackupFileName(final String name) {
@@ -41,9 +69,271 @@ final class BackupArchive {
             throw new NodeLibraryException("Invalid backup filename: %s".formatted(volume.resolve(name)));
         }
         try {
-            return new BackupMetadata(Long.parseLong(matcher.group(1)), matcher.group(2) != null);
-        } catch (final NumberFormatException failure) {
-            throw new NodeLibraryException("Invalid backup timestamp: %s".formatted(volume.resolve(name)), failure);
+            return new BackupMetadata(
+                    Long.parseLong(matcher.group(1)),
+                    matcher.group(2) != null,
+                    orNullUuid(matcher.group(3)),
+                    orNullUuid(matcher.group(4)),
+                    unknownIfNegative(Long.parseLong(matcher.group(5))),
+                    unknownIfNegative(Long.parseLong(matcher.group(6))),
+                    null,
+                    uuid(matcher.group(7)),
+                    BackupMetadata.UNKNOWN);
+        } catch (final IllegalArgumentException failure) {
+            throw new NodeLibraryException("Invalid backup filename: %s".formatted(volume.resolve(name)), failure);
+        }
+    }
+
+    private static long unknownIfNegative(final long value) {
+        return value < 0L ? BackupMetadata.UNKNOWN : value;
+    }
+
+    private static String hex(final UUID id) {
+        return "%016x%016x".formatted(id.getMostSignificantBits(), id.getLeastSignificantBits());
+    }
+
+    private static String hexOrZero(final UUID id) {
+        return id == null ? "0".repeat(32) : hex(id);
+    }
+
+    private static UUID uuid(final String text) {
+        return new UUID(
+                Long.parseUnsignedLong(text.substring(0, 16), 16),
+                Long.parseUnsignedLong(text.substring(16, 32), 16));
+    }
+
+    private static UUID orNullUuid(final String text) {
+        final UUID parsed = uuid(text);
+        return NIL_UUID.equals(parsed) ? null : parsed;
+    }
+
+        /// Writes the full backup identity as an archive sidecar entry.
+    ///
+    /// @param file   destination file for the encoded identity
+    /// @param backup backup identity to encode
+    /// @throws NodeLibraryException if the identity cannot be written
+    static void writeIdentity(final Path file, final BackupMetadata backup) throws NodeLibraryException {
+        if (backup.backupId() == null) {
+            throw new NodeLibraryException("Backup identity is missing its backup id");
+        }
+        if (NIL_UUID.equals(backup.backupId())) {
+            throw new NodeLibraryException("Backup identity carries a nil backup id");
+        }
+        final ByteBuffer data = ByteBuffer.allocate(128);
+        data.putInt(IDENTITY_MAGIC);
+        data.putShort(IDENTITY_VERSION);
+        data.putLong(backup.timestamp());
+        data.put(backup.manualSlot() ? (byte) 1 : (byte) 0);
+        putUuid(data, backup.clusterId());
+        putUuid(data, backup.storeGeneration());
+        data.putLong(backup.epoch());
+        data.putLong(backup.recordingId());
+        putUuid(data, backup.nodeId());
+        data.putLong(backup.backupId().getMostSignificantBits());
+        data.putLong(backup.backupId().getLeastSignificantBits());
+        data.putLong(backup.digest());
+        final byte[] payload = Arrays.copyOf(data.array(), data.position());
+        final ByteBuffer framed = ByteBuffer.allocate(payload.length + Integer.BYTES);
+        framed.put(payload);
+        framed.putInt(Crc32c.compute(payload));
+        try {
+            Files.write(file, framed.array());
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Failed to write backup identity to %s".formatted(file), failure);
+        }
+    }
+
+    private static void putUuid(final ByteBuffer data, final UUID id) {
+        if (id == null) {
+            data.put((byte) 0);
+            data.putLong(0L);
+            data.putLong(0L);
+        } else {
+            data.put((byte) 1);
+            data.putLong(id.getMostSignificantBits());
+            data.putLong(id.getLeastSignificantBits());
+        }
+    }
+
+        /// Reads the backup identity sidecar from an archive.
+    ///
+    /// @param archive archive to inspect
+    /// @return stored identity, or `null` when the archive has no identity entry
+    /// @throws NodeLibraryException if the entry is present but corrupt
+    static BackupMetadata readIdentity(final Path archive) throws NodeLibraryException {
+        try (ZipFile zip = openArchive(archive)) {
+            final ZipEntry entry = zip.getEntry(BACKUP_IDENTITY_ENTRY);
+            if (entry == null || entry.isDirectory()) {
+                return null;
+            }
+            if (entry.getSize() > MAX_IDENTITY_BYTES) {
+                throw new NodeLibraryException("Backup identity is too large in %s".formatted(archive));
+            }
+            final byte[] bytes = readBounded(zip, entry, MAX_IDENTITY_BYTES);
+            return decodeIdentity(archive, bytes);
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Failed to read backup identity from %s".formatted(archive), failure);
+        }
+    }
+
+    private static BackupMetadata decodeIdentity(final Path archive, final byte[] bytes)
+            throws NodeLibraryException {
+        /* Magic, version, timestamp, slot, two flagged UUIDs, two longs, one
+         * flagged UUID, one UUID, one digest, plus the trailing CRC. */
+        final int expected = Integer.BYTES + Short.BYTES + Long.BYTES + 1 +
+                             (1 + Long.BYTES * 2) * 2 + Long.BYTES * 2 +
+                             (1 + Long.BYTES * 2) + Long.BYTES * 2 + Long.BYTES + Integer.BYTES;
+        if (bytes.length != expected) {
+            throw new NodeLibraryException("Backup identity has an unexpected size in %s".formatted(archive));
+        }
+        final int stored = ByteBuffer.wrap(bytes, bytes.length - Integer.BYTES, Integer.BYTES).getInt();
+        if (stored != Crc32c.compute(bytes, 0, bytes.length - Integer.BYTES)) {
+            throw new NodeLibraryException("Backup identity is corrupt in %s".formatted(archive));
+        }
+        final ByteBuffer data = ByteBuffer.wrap(bytes);
+        if (data.getInt() != IDENTITY_MAGIC || data.getShort() != IDENTITY_VERSION) {
+            throw new NodeLibraryException("Backup identity has an unsupported format in %s".formatted(archive));
+        }
+        try {
+            final BackupMetadata identity = new BackupMetadata(
+                    data.getLong(),
+                    data.get() != 0,
+                    getUuid(data),
+                    getUuid(data),
+                    data.getLong(),
+                    data.getLong(),
+                    getUuid(data),
+                    new UUID(data.getLong(), data.getLong()),
+                    data.getLong());
+            if (NIL_UUID.equals(identity.backupId())) {
+                throw new NodeLibraryException("Backup identity carries a nil backup id in %s".formatted(archive));
+            }
+            return identity;
+        } catch (final IllegalArgumentException failure) {
+            throw new NodeLibraryException("Backup identity carries invalid values in %s".formatted(archive), failure);
+        }
+    }
+
+    private static UUID getUuid(final ByteBuffer data) {
+        final boolean present = data.get() != 0;
+        final long most = data.getLong();
+        final long least = data.getLong();
+        if (!present && most == 0L && least == 0L) {
+            return null;
+        }
+        if (!present) {
+            throw new IllegalArgumentException("Backup identity UUID flag contradicts its value");
+        }
+        final UUID parsed = new UUID(most, least);
+        /* A nil UUID carries no identity, just like a zero filename field. */
+        return NIL_UUID.equals(parsed) ? null : parsed;
+    }
+
+    private static byte[] readBounded(final ZipFile zip, final ZipEntry entry, final int maximum)
+            throws IOException {
+        final ByteArrayOutputStream output = new ByteArrayOutputStream(Math.min(256, maximum));
+        final byte[] buffer = new byte[8192];
+        try (InputStream data = zip.getInputStream(entry)) {
+            int read;
+            int total = 0;
+            while ((read = data.read(buffer)) != -1) {
+                if (read > maximum - total) {
+                    throw new IOException("Backup identity exceeds its size limit");
+                }
+                total += read;
+                output.write(buffer, 0, read);
+            }
+        }
+        return output.toByteArray();
+    }
+
+        /// Digests the manifest and storage payload of an export directory.
+    ///
+    /// The digest covers the manifest bytes followed by every regular file
+    /// under `storage`, ordered by slash-separated relative path with each
+    /// path framing its content. Zip framing, entry times, the ready marker,
+    /// and the identity sidecar are excluded, so the same Store image always
+    /// digests identically before and after archiving.
+    ///
+    /// @param root export or extraction root holding `manifest` and `storage`
+    /// @return CRC over the backup content
+    /// @throws NodeLibraryException if the content cannot be read
+    static long contentDigestOfDirectory(final Path root) throws NodeLibraryException {
+        try {
+            final CRC32 digest = new CRC32();
+            digest.update(Files.readAllBytes(root.resolve(StorageBackupBackend.MANIFEST_ENTRY)));
+            final Path storage = root.resolve(StorageBackupBackend.STORAGE_ENTRY);
+            final List<String> names = new ArrayList<>();
+            try (var paths = Files.walk(storage)) {
+                for (final var iterator = paths.iterator(); iterator.hasNext(); ) {
+                    final Path path = iterator.next();
+                    if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                        names.add(storage.relativize(path).toString().replace(java.io.File.separatorChar, '/'));
+                    }
+                }
+            }
+            names.sort(String::compareTo);
+            final byte[] buffer = new byte[8192];
+            for (final String name : names) {
+                digest.update(name.getBytes(StandardCharsets.UTF_8));
+                try (InputStream data = Files.newInputStream(storage.resolve(name))) {
+                    int read;
+                    while ((read = data.read(buffer)) != -1) {
+                        digest.update(buffer, 0, read);
+                    }
+                }
+            }
+            return digest.getValue();
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Failed to digest backup content at %s".formatted(root), failure);
+        }
+    }
+
+        /// Digests the manifest and storage payload carried by an archive.
+    ///
+    /// Entries are visited in the same order as [#contentDigestOfDirectory],
+    /// so a digest taken before compression matches the archived bytes.
+    ///
+    /// @param archive archive to digest
+    /// @return CRC over the backup content
+    /// @throws NodeLibraryException if the content cannot be read
+    static long contentDigestOfArchive(final Path archive) throws NodeLibraryException {
+        try (ZipFile zip = openArchive(archive)) {
+            final ZipEntry manifest = zip.getEntry(StorageBackupBackend.MANIFEST_ENTRY);
+            if (manifest == null || manifest.isDirectory()) {
+                throw new NodeLibraryException("Backup archive is missing manifest in %s".formatted(archive));
+            }
+            final CRC32 digest = new CRC32();
+            final byte[] buffer = new byte[8192];
+            try (InputStream data = zip.getInputStream(manifest)) {
+                int read;
+                while ((read = data.read(buffer)) != -1) {
+                    digest.update(buffer, 0, read);
+                }
+            }
+            /* The directory digest covers storage-relative paths, so the
+             * `storage/` prefix is stripped here to keep both sides identical. */
+            final String prefix = StorageBackupBackend.STORAGE_ENTRY + "/";
+            final List<String> names = new ArrayList<>();
+            for (final var iterator = zip.entries().asIterator(); iterator.hasNext(); ) {
+                final ZipEntry entry = iterator.next();
+                if (!entry.isDirectory() && entry.getName().startsWith(prefix)) {
+                    names.add(entry.getName().substring(prefix.length()));
+                }
+            }
+            names.sort(String::compareTo);
+            for (final String name : names) {
+                digest.update(name.getBytes(StandardCharsets.UTF_8));
+                try (InputStream data = zip.getInputStream(zip.getEntry(prefix + name))) {
+                    int read;
+                    while ((read = data.read(buffer)) != -1) {
+                        digest.update(buffer, 0, read);
+                    }
+                }
+            }
+            return digest.getValue();
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Failed to digest backup archive %s".formatted(archive), failure);
         }
     }
 
@@ -52,8 +342,14 @@ final class BackupArchive {
                 StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
              ZipOutputStream zip = new ZipOutputStream(Channels.newOutputStream(file))) {
             final byte[] transferBuffer = new byte[8192];
-            for (final String rootName : List.of(StorageBackupBackend.STORAGE_ENTRY,
-                    StorageBackupBackend.MANIFEST_ENTRY, StorageBackupBackend.READY_ENTRY)) {
+            final List<String> roots = new ArrayList<>(List.of(StorageBackupBackend.STORAGE_ENTRY,
+                    StorageBackupBackend.MANIFEST_ENTRY, StorageBackupBackend.READY_ENTRY));
+            /* Generation sidecars are written by the backend; hand-built
+             * archives without one stay valid and list with unknown provenance. */
+            if (Files.exists(workingDir.resolve(BACKUP_IDENTITY_ENTRY), LinkOption.NOFOLLOW_LINKS)) {
+                roots.add(BACKUP_IDENTITY_ENTRY);
+            }
+            for (final String rootName : roots) {
                 final Path root = workingDir.resolve(rootName).normalize();
                 if (!root.startsWith(workingDir.normalize()) || !Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
                     throw new IOException("Backup source is missing: %s".formatted(rootName));
