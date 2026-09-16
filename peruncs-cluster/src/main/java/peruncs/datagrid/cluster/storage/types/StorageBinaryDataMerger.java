@@ -9,17 +9,18 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDescription;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
 import java.nio.ByteBuffer;
-import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 import static java.lang.System.Logger.Level.WARNING;
 import static org.eclipse.serializer.math.XMath.notNegative;
@@ -61,14 +62,73 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             final long cachingTimeoutMs,
             final long cachedBinaryLimit,
             final long applyTimeoutMs) {
+        return New(
+                foundation,
+                storage,
+                objectGraphUpdateHandler,
+                cachingTimeoutMs,
+                cachedBinaryLimit,
+                applyTimeoutMs,
+                null
+        );
+    }
+
+        /// Creates a merger with bounded deferred materialization that joins a graph coordinator.
+    ///
+    /// The merger's own Store reads — the post-materialization index scan and
+    /// the type-dictionary conflict scan — run through the coordinator's read
+    /// side, so they overlap application reads but never a materialization.
+    /// Mutations (materialization batches, dictionary merges) run through the
+    /// update handler, which is normally the same coordinator's write side.
+    /// A `null` coordinator keeps the legacy behavior: scans run directly
+    /// because there is no shared lock to join, while mutations still flow
+    /// through the update handler.
+    ///
+    /// @param foundation               persistence foundation
+    /// @param storage                  Store connection
+    /// @param objectGraphUpdateHandler graph update handler
+    /// @param cachingTimeoutMs         maximum wait for a cached batch
+    /// @param cachedBinaryLimit        maximum cached binary count
+    /// @param applyTimeoutMs           maximum wait for one materialization batch
+    /// @param graphCoordinator         per-Store graph coordinator, or `null` to run scans directly
+    /// @return binary merger
+    static StorageBinaryDataMerger New(
+            final BinaryPersistenceFoundation<?> foundation,
+            final StorageConnection storage,
+            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            final long cachingTimeoutMs,
+            final long cachedBinaryLimit,
+            final long applyTimeoutMs,
+            final StorageGraphCoordinator graphCoordinator) {
         return new Default(
                 notNull(foundation),
                 notNull(storage),
                 notNull(objectGraphUpdateHandler),
                 notNegative(cachingTimeoutMs),
                 positive(cachedBinaryLimit),
-                positive(applyTimeoutMs)
+                positive(applyTimeoutMs),
+                graphCoordinator
         );
+    }
+
+        /// Returns the graph coordinator this merger joins for its own Store reads.
+    ///
+    /// Node-owned read paths adopt the read side through the returned
+    /// coordinator:
+    ///
+    /// ```java
+    /// final StorageGraphCoordinator coordinator = merger.graphCoordinator();
+    /// if (coordinator != null) coordinator.read(() -> { /* graph access */ });
+    /// ```
+    ///
+    /// A `null` return means the merger was built without a coordinator: its
+    /// scans run directly because there is no shared lock to join. Custom
+    /// merger implementations without a coordinator likewise return `null`
+    /// and run reads directly.
+    ///
+    /// @return per-Store graph coordinator, or `null` when unwired
+    default StorageGraphCoordinator graphCoordinator() {
+        return null;
     }
 
         /// Returns an asynchronous materialization failure, or `null` while healthy.
@@ -76,10 +136,6 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
     /// @return terminal failure, or `null`
     default RuntimeException failure() {
         return null;
-    }
-
-        /// Wait until the latest accepted import has completed object-graph materialization.
-    default void awaitApplied() {
     }
 
         /// Supplies conservative defaults for deferred object-graph application.
@@ -105,7 +161,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private final ExecutorService executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
                 .name("eclipse-datagrid-store-materializer", 0L)
                 .factory());
-        private final ConcurrentLinkedQueue<ByteBuffer> cachedData = new ConcurrentLinkedQueue<>();
+        /* Every access runs under queueLock (admission, drain, release, and
+         * flush checks), so an ArrayDeque is sufficient and avoids the
+         * per-node allocation a concurrent queue pays on every offer. */
+        private final ArrayDeque<ByteBuffer> cachedData = new ArrayDeque<>();
         /* Queue admission and object-graph materialization are separate concerns.
          * The worker and awaitApplied() can run concurrently, but a Store update
          * must never materialize two batches at once or callbacks can observe and
@@ -116,6 +175,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private final BinaryPersistenceFoundation<?> foundation;
         private final StorageConnection storage;
         private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
+        private final StorageGraphCoordinator graphCoordinator;
         private final long cachingTimeoutMs;
         private final long cacheLimit;
         private final long applyTimeoutMs;
@@ -125,12 +185,20 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
          * the first per-attempt expiry. */
         private final long materializationBudgetMs;
         private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
-        private final AtomicLong cachedBufferCount = new AtomicLong();
+        /* Guarded by queueLock on every mutation; readers snapshot it under the
+         * same lock, so no atomics are needed. */
+        private long cachedBufferCount;
         private volatile boolean flushRequested;
         private volatile boolean disposed;
         private boolean workerScheduled;
         private long cachedBytes;
         private volatile Future<?> updateFuture;
+        /* Reused batch drain: only ever touched under the materialization
+         * lock, which serializes the worker drain and any await-thread drain,
+         * so no further synchronization is needed. The populated prefix holds
+         * the batch; slots past it are always `null`. Grows to the largest
+         * batch seen and stays there. */
+        private ByteBuffer[] drainBuffers = new ByteBuffer[16];
 
         private Default(
                 final BinaryPersistenceFoundation<?> foundation,
@@ -138,11 +206,13 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 final ObjectGraphUpdateHandler objectGraphUpdateHandler,
                 final long cachingTimeoutMs,
                 final long cacheLimit,
-                final long applyTimeoutMs
+                final long applyTimeoutMs,
+                final StorageGraphCoordinator graphCoordinator
         ) {
             this.foundation = foundation;
             this.storage = storage;
             this.objectGraphUpdateHandler = objectGraphUpdateHandler;
+            this.graphCoordinator = graphCoordinator;
             this.cachingTimeoutMs = cachingTimeoutMs;
             this.cacheLimit = cacheLimit;
             this.applyTimeoutMs = applyTimeoutMs;
@@ -187,30 +257,40 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         }
 
                 /// Imports Aeron-owned direct buffers without a second native allocation.
+        ///
+        /// Every precondition and the buffer extraction itself run inside the
+        /// ownership cleanup block: once the assembler hands the binary over, a
+        /// validation throw must still release the native buffers instead of
+        /// leaking them. A `null` binary fails with [NullPointerException];
+        /// malformed buffers fail with [StorageBinaryDataException].
         @Override
         public boolean receiveDataOwned(final Binary data) {
-            final ByteBuffer[] buffers = StorageBinaryDataChunker.ownedArray(org.eclipse.serializer.util.X.notNull(data));
-            if (this.failure.get() != null) {
-                StorageBinaryDataImporter.release(buffers);
-                throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
-            }
-            if (this.disposed) {
-                StorageBinaryDataImporter.release(buffers);
-                throw new IllegalStateException("Storage binary merger is disposed");
-            }
+            ByteBuffer[] buffers = null;
             try {
+                buffers = StorageBinaryDataChunker.ownedArray(notNull(data));
+                if (this.failure.get() != null) {
+                    throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
+                }
+                if (this.disposed) {
+                    throw new IllegalStateException("Storage binary merger is disposed");
+                }
                 /* Same exclusion as the borrowed-copy path: the Store import must
                  * not interleave with a deferred materialization. */
+                final ByteBuffer[] imported = buffers;
                 this.materialization.write(() ->
                 {
-                    StorageBinaryDataImporter.importDirect(this.storage, buffers);
+                    StorageBinaryDataImporter.importDirect(this.storage, imported);
                 });
             } catch (final RuntimeException | Error failure) {
                 /* Ownership has not transferred to the deferred-materialization
-                 * queue when Store import fails. The Aeron callback contract still
-                 * requires this acceptor to release the transferred native buffers. */
+                 * queue on any of these paths. The Aeron callback contract still
+                 * requires this acceptor to release the transferred native
+                 * buffers. When extraction itself failed there is no normalized
+                 * array yet, so fall back to freeing whatever direct buffers the
+                 * binary still exposes. */
                 try {
-                    StorageBinaryDataImporter.release(buffers);
+                    if (buffers != null) StorageBinaryDataImporter.release(buffers);
+                    else StorageBinaryDataChunker.releaseDirect(data);
                 } catch (final RuntimeException | Error cleanupFailure) {
                     if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
                 }
@@ -265,6 +345,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
 
             boolean queued = false;
+            long bufferedCount;
             try {
                 this.queueLock.lock();
                 try {
@@ -281,22 +362,27 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     if (projectedBytes > MAX_CACHED_BYTES) {
                         throw new IllegalStateException("Storage binary materialization cache is full");
                     }
-                    this.cachedData.addAll(Arrays.asList(ownedBuffers));
-                    this.cachedBufferCount.addAndGet(ownedBuffers.length);
+                    /* Bulk add without a wrapper allocation: Collections.addAll
+                     * passes the array straight through to per-element add. */
+                    Collections.addAll(this.cachedData, ownedBuffers);
+                    this.cachedBufferCount += ownedBuffers.length;
                     this.cachedBytes = projectedBytes;
                     queued = true;
+                    bufferedCount = this.cachedBufferCount;
                     if (!this.workerScheduled) {
                         try {
                             this.workerScheduled = true;
                             this.updateFuture = this.executor.submit(this::runMaterializationWorker);
                         } catch (final RuntimeException | Error failure) {
                             /* Submission happens under queueLock, so the worker cannot have
-                             * removed these newly queued buffers yet. */
+                             * removed these newly queued buffers yet. Buffers
+                             * compare by content, so removal must be by identity:
+                             * a content-equal stranger must never be dequeued. */
                             for (final ByteBuffer buffer : ownedBuffers) {
-                                this.cachedData.removeIf(candidate -> candidate == buffer);
+                                removeIdentical(this.cachedData, buffer);
                             }
                             this.cachedBytes = Math.subtractExact(this.cachedBytes, incomingBytes);
-                            this.cachedBufferCount.addAndGet(-ownedBuffers.length);
+                            this.cachedBufferCount -= ownedBuffers.length;
                             queued = false;
                             /* A shutdown racing this admission must surface as the
                              * documented disposal refusal, not a raw executor
@@ -311,7 +397,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     this.queueLock.unlock();
                 }
 
-                if (this.cachedBufferCount.get() > this.cacheLimit) {
+                if (bufferedCount > this.cacheLimit) {
                     try {
                         /* The worker is signalled before this wait when it is still in its
                          * coalescing delay. The wait is bounded and retried a small number
@@ -385,77 +471,118 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             return this.failure.get();
         }
 
+        @Override
+        public StorageGraphCoordinator graphCoordinator() {
+            return this.graphCoordinator;
+        }
+
+                /// Runs a Store read through the coordinator's read side when one is wired.
+        ///
+        /// With a coordinator the scan overlaps application reads but never a
+        /// materialization; without one it runs directly because there is no
+        /// shared lock to join.
+        private void readJoined(final Runnable read) {
+            final StorageGraphCoordinator coordinator = this.graphCoordinator;
+            if (coordinator == null) read.run();
+            else coordinator.read(read);
+        }
+
+                /// Read-phase counterpart of [#readJoined(Runnable)] for scans
+        /// that produce a plan for a later write-side mutation.
+        private <T> T readJoined(final Supplier<T> read) {
+            final StorageGraphCoordinator coordinator = this.graphCoordinator;
+            return coordinator == null ? read.get() : coordinator.read(read);
+        }
+
         private void applyData() {
             this.materialization.write(() ->
             {
-                final ArrayList<ByteBuffer> data = new ArrayList<>();
-                final AtomicBoolean released = new AtomicBoolean();
-
+                /* Drain into the reused scratch array: no list, no exact-size
+                 * copy, no fork, and no per-batch Duration or scope — steady
+                 * state allocates nothing on the heap on this path. The
+                 * scratch grows once to the largest batch seen. */
                 this.queueLock.lock();
+                final int pending;
                 try {
-                    ByteBuffer next;
-                    while ((next = this.cachedData.poll()) != null) {
-                        this.cachedBufferCount.decrementAndGet();
+                    final long count = this.cachedBufferCount;
+                    if (count > Integer.MAX_VALUE) {
+                        throw new IllegalStateException("Storage binary materialization batch exceeds array capacity");
+                    }
+                    pending = (int) count;
+                    if (pending == 0) return;
+                    if (pending > this.drainBuffers.length) {
+                        this.drainBuffers = new ByteBuffer[pending];
+                    }
+                    for (int index = 0; index < pending; index++) {
+                        final ByteBuffer next = this.cachedData.poll();
+                        if (next == null) {
+                            throw new IllegalStateException("Storage binary materialization queue shrank during drain");
+                        }
+                        this.cachedBufferCount--;
                         this.cachedBytes = Math.subtractExact(this.cachedBytes, next.remaining());
-                        data.add(next);
+                        this.drainBuffers[index] = next;
                     }
                 } finally {
                     this.queueLock.unlock();
                 }
-                /* One exact-size array, shared by the release and the materializer
-                 * without the reflective toArray(Class) overload. */
-                final ByteBuffer[] buffers = data.toArray(ByteBuffer[]::new);
-                final Runnable release = () ->
-                {
-                    /* Empty binaries are duplicates of one shared static buffer;
-                     * only the guarded release knows to skip them. */
-                    if (released.compareAndSet(false, true)) {
-                        StorageBinaryDataImporter.release(buffers);
-                    }
-                };
 
+                /* Materialize synchronously on this thread: no structured
+                 * child can retain the drained buffers past the finally below,
+                 * so ownership is always reclaimed — on success, on failure,
+                 * and when the batch overruns its budget. A bounded overall
+                 * timeout is kept as elapsed detection rather than preemption:
+                 * interrupting a wedged Store mid-materialization could leave
+                 * the graph half-applied, so an overrun only marks the merger
+                 * failed after the buffers are already freed. A handler that
+                 * never returns still pins this worker; dispose() bounds that
+                 * wait and reports the pinned buffers instead of freeing them
+                 * underneath the Store. */
+                final long startedNanos = System.nanoTime();
                 try {
-                    ObjectGraphUpdateHandler.runStructured(
-                            this.objectGraphUpdateHandler,
-                            () ->
-                            {
-                                try {
-                                    StorageBinaryDataMaterializer.materialize(this.storage, buffers);
-                                } finally {
-                                    release.run();
-                                }
-                            },
-                            Duration.ofMillis(this.materializationBudgetMs));
-                } catch (final InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    /* The structured scope closes only after its child terminates;
-                     * its finally block remains the sole owner of these buffers. */
-                    if (!(this.disposed && Thread.currentThread().isInterrupted())) {
-                        this.recordFailure("Interrupted while applying Store data", interrupted);
-                    }
-                    throw new IllegalStateException("Interrupted while applying Store data", interrupted);
-                } catch (final StructuredTaskScope.FailedException failure) {
-                    release.run();
-                    final IllegalStateException terminal = new IllegalStateException(
-                            "Timed out or failed while applying Store data",
-                            failure.getCause() == null ? failure : failure.getCause());
-                    this.recordFailure(terminal.getMessage(), terminal);
-                    throw terminal;
-                } catch (final StructuredTaskScope.TimeoutException failure) {
-                    /* The structured scope owns the child until it terminates. Do not
-                     * free direct buffers while materialization may still use them. */
-                    final IllegalStateException terminal = new IllegalStateException(
-                            "Timed out while applying Store data", failure);
-                    this.recordFailure(terminal.getMessage(), terminal);
-                    throw terminal;
+                    this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+                            StorageBinaryDataMaterializer.materialize(this.storage, this.drainBuffers, pending));
+                    /* Reader-side index enforcement: a writer that smuggled an
+                     * external Lucene directory or a non-persisted vector index
+                     * past registration fails this reader closed instead of
+                     * diverging it. The scan visits index metadata only, never
+                     * entity payload. It runs after the write section above has
+                     * released it, through the shared read side when a
+                     * coordinator is wired, so application reads may overlap
+                     * the scan while the next batch stays queued behind the
+                     * materialization lock. */
+                    this.readJoined(() -> ClusterStoreIndexes.validateStorageRoots(this.storage));
                 } catch (final RuntimeException | Error failure) {
-                    release.run();
+                    /* A genuine failure says failed; only an overrun says timed
+                     * out. The two are never conflated into one message. */
                     if (failure instanceof RuntimeException runtime) {
                         this.recordFailure("Store graph update failed", runtime);
                     }
                     throw failure;
+                } finally {
+                    StorageBinaryDataImporter.release(this.drainBuffers, pending);
+                    Arrays.fill(this.drainBuffers, 0, pending, null);
+                }
+                final long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+                if (elapsedMs > this.materializationBudgetMs) {
+                    final IllegalStateException terminal = new IllegalStateException(
+                            "Timed out while applying Store data: batch took %s ms with a budget of %s ms"
+                                    .formatted(elapsedMs, this.materializationBudgetMs));
+                    this.recordFailure(terminal.getMessage(), terminal);
+                    throw terminal;
                 }
             });
+        }
+
+                /// Removes one queued buffer by identity. Buffers compare by content,
+        /// so [ArrayDeque#remove] could dequeue a content-equal stranger.
+        private static void removeIdentical(final ArrayDeque<ByteBuffer> queue, final ByteBuffer buffer) {
+            final var cursor = queue.iterator();
+            while (cursor.hasNext()) {
+                if (cursor.next() == buffer) {
+                    cursor.remove();
+                    return;
+                }
+            }
         }
 
         private void applyDataSafely() {
@@ -498,13 +625,16 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 final var pending = new ArrayList<ByteBuffer>();
                 ByteBuffer buffer;
                 while ((buffer = this.cachedData.poll()) != null) {
-                    this.cachedBufferCount.decrementAndGet();
+                    this.cachedBufferCount--;
                     pending.add(buffer);
                 }
-                this.cachedBufferCount.set(0L);
+                this.cachedBufferCount = 0L;
                 this.cachedBytes = 0L;
-                /* The guarded release skips zero-capacity duplicates of the
-                 * shared empty buffer instead of deallocating them. */
+                /* Failure- and shutdown-path cleanup only: every queued buffer
+                 * is distinctly owned, so the unconditional release frees
+                 * exactly what the queue holds. Never runs while a batch is
+                 * mid-materialization — an in-flight batch lives in the drain
+                 * scratch, not in this queue. */
                 StorageBinaryDataImporter.release(pending.toArray(ByteBuffer[]::new));
             } finally {
                 this.queueLock.unlock();
@@ -535,39 +665,97 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
              * the delivery thread, so this wait cannot deadlock. */
             this.materialization.write(() ->
             {
-                try {
-                    final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
-                            .setClassLoaderProvider(this.foundation.getClassLoaderProvider())
-                            .setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
-                            .setTypeDictionaryLoader(() -> typeDictionaryData)
-                            .getTypeDictionaryProvider()
-                            .provideTypeDictionary();
-                    final PersistenceTypeDictionary localTypeDictionary =
-                            this.storage.persistenceManager().typeDictionary();
-
-                    remoteTypeDictionary.iterateAllTypeDefinitions(remoteType ->
-                    {
-                        final PersistenceTypeDefinition localType =
-                                localTypeDictionary.lookupTypeById(remoteType.typeId());
-                        if (localType == null) {
-                            LOGGER.log(System.Logger.Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
-                            this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
-
-                        } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
-                            throw new StorageBinaryDataException(
-                                    "Remote type definition conflicts with local definition: %s <> %s"
-                                            .formatted(localType, remoteType));
-                        }
-                    });
-                    /* A reader may import data without performing a local Store operation.
-                     * Persist newly registered remote definitions now, before the transaction's
-                     * binary is imported, so a restart can resolve every imported type id. */
-                    this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
-                } catch (final RuntimeException | Error failure) {
-                    this.recordFailure("Store type dictionary update failed", failure);
-                    throw failure;
-                }
+                /* Read phase through the shared read side when a coordinator
+                 * is wired: parsing and conflict detection mutate nothing. The
+                 * worker cannot interleave — it needs the materialization lock
+                 * held here — so the plan stays valid until the write phase. */
+                final ArrayList<PersistenceTypeDefinition> pending =
+                        this.readJoined(() -> planDictionaryMerge(typeDictionaryData));
+                if (pending.isEmpty()) return;
+                /* Mutation phase through the update handler like
+                 * materialization: the materialization lock alone cannot
+                 * exclude application reads that joined the coordinator's read
+                 * side, so handler registration runs on the write side. Lock
+                 * order matches the worker — materialization lock outside,
+                 * coordinator inside — so the two paths cannot deadlock. */
+                this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+                        applyDictionaryMerge(pending));
             });
+        }
+
+                /// Parses the writer's dictionary snapshot and plans handler registrations.
+        ///
+        /// Read-only: unknown remote types are collected, structurally
+        /// conflicting types fail with [StorageBinaryDataException]. Runs on
+        /// the coordinator's read side when one is wired.
+        ///
+        /// @param typeDictionaryData writer's type dictionary snapshot
+        /// @return remote definitions missing locally, in iteration order
+        private ArrayList<PersistenceTypeDefinition> planDictionaryMerge(final String typeDictionaryData) {
+            try {
+                final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
+                        .setClassLoaderProvider(this.foundation.getClassLoaderProvider())
+                        .setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
+                        .setTypeDictionaryLoader(() -> typeDictionaryData)
+                        .getTypeDictionaryProvider()
+                        .provideTypeDictionary();
+                final PersistenceTypeDictionary localTypeDictionary =
+                        this.storage.persistenceManager().typeDictionary();
+
+                final ArrayList<PersistenceTypeDefinition> pending = new ArrayList<>();
+                remoteTypeDictionary.iterateAllTypeDefinitions(remoteType ->
+                {
+                    final PersistenceTypeDefinition localType =
+                            localTypeDictionary.lookupTypeById(remoteType.typeId());
+                    if (localType == null) {
+                        LOGGER.log(System.Logger.Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
+                        pending.add(remoteType);
+                    } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
+                        throw new StorageBinaryDataException(
+                                "Remote type definition conflicts with local definition: %s <> %s"
+                                        .formatted(localType, remoteType));
+                    }
+                });
+                return pending;
+            } catch (final RuntimeException | Error failure) {
+                this.recordFailure("Store type dictionary update failed", failure);
+                throw failure;
+            }
+        }
+
+                /// Registers planned remote definitions and persists them immediately.
+        ///
+        /// Runs on the update handler (the coordinator's write side), before
+        /// the transaction's binary is imported, so a restart can still
+        /// resolve every imported type id. Each registration is re-checked
+        /// under the write side: application code may have registered the
+        /// same type between the read-phase plan and this mutation, and a
+        /// genuine structural conflict still fails terminally.
+        ///
+        /// @param pending remote definitions missing locally
+        private void applyDictionaryMerge(final ArrayList<PersistenceTypeDefinition> pending) {
+            try {
+                final PersistenceTypeDictionary localTypeDictionary =
+                        this.storage.persistenceManager().typeDictionary();
+                for (final PersistenceTypeDefinition remoteType : pending) {
+                    final PersistenceTypeDefinition localType =
+                            localTypeDictionary.lookupTypeById(remoteType.typeId());
+                    if (localType == null) {
+                        this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
+                    } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
+                        throw new StorageBinaryDataException(
+                                "Remote type definition conflicts with local definition: %s <> %s"
+                                        .formatted(localType, remoteType));
+                    }
+                }
+                /* A reader may import data without performing a local Store operation.
+                 * Persist newly registered remote definitions now, before the transaction's
+                 * binary is imported, so a restart can resolve every imported type id. */
+                this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
+            } catch (final RuntimeException | Error failure) {
+                this.recordFailure("Store type dictionary update failed", failure);
+                throw failure;
+            }
         }
 
         /// Shuts the materialization worker down, freeing native buffers only

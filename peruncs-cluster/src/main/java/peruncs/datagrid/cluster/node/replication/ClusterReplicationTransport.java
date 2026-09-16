@@ -2,11 +2,13 @@ package peruncs.datagrid.cluster.node.replication;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.datagrid.cluster.node.backup.BackupMetadata;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataPacketAcceptor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryReplicationTarget;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
 /// Aeron replication transport for one Data Grid cluster instance.
@@ -15,6 +17,13 @@ import java.util.function.UnaryOperator;
 /// retention implementations; [#noOp()] covers nodes with replication
 /// disabled.
 public interface ClusterReplicationTransport extends AutoCloseable {
+        /// Returns the configured identity used to filter compatible backups.
+    ///
+    /// @return configured backup identity, or an unknown identity when the
+    /// transport has no persistent generation
+    default BackupMetadata.Identity configuredBackupIdentity() {
+        return BackupMetadata.Identity.unknown();
+    }
         /// Creates a transport that performs no replication.
     ///
     /// @return disabled transport
@@ -36,7 +45,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
 
             @Override
             public StorageBinaryDataClient client(
-                    final StorageBinaryDataPacketAcceptor packetAcceptor,
+                    final StorageBinaryDataReceiver receiver,
                     final String streamName,
                     final AfterDataMessageConsumedListener cursorListener,
                     final ReplicationCursor startingCursor,
@@ -70,6 +79,16 @@ public interface ClusterReplicationTransport extends AutoCloseable {
                     public void close() {
                     }
                 };
+            }
+
+            @Override
+            public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
+                    final String streamName,
+                    final StorageBinaryDataDistributor distributor,
+                    final Supplier<StorageConnection> writerStorage
+            ) {
+                /* No replication: the local target is the whole story. */
+                return delegate -> delegate;
             }
 
             @Override
@@ -116,14 +135,18 @@ public interface ClusterReplicationTransport extends AutoCloseable {
 
         /// Creates a reader-side client starting at the supplied durable cursor.
     ///
-    /// @param packetAcceptor destination for received packets
+    /// The client delivers complete binaries and type dictionaries to the
+    /// receiver directly; the receiver stays owned by its creator, which also
+    /// disposes it.
+    ///
+    /// @param receiver       destination for received binaries and dictionaries
     /// @param streamName     logical stream name
     /// @param cursorListener callback after data is applied
     /// @param startingCursor durable starting cursor
     /// @param commitPosition whether reader positions are committed
     /// @return binary data client
     StorageBinaryDataClient client(
-            StorageBinaryDataPacketAcceptor packetAcceptor,
+            StorageBinaryDataReceiver receiver,
             String streamName,
             AfterDataMessageConsumedListener cursorListener,
             ReplicationCursor startingCursor,
@@ -151,17 +174,40 @@ public interface ClusterReplicationTransport extends AutoCloseable {
             StorageBinaryDataClient client
     );
 
-        /// Creates a target wrapper for coordinated publication.
+    /// Creates a target wrapper without writer-side index validation.
+    ///
+    /// Convenience overload for tests and transports whose graph has no index
+    /// policy to enforce; production wiring supplies the writer storage and
+    /// uses [#persistenceTargetFactory(String, StorageBinaryDataDistributor, Supplier)].
     ///
     /// @param streamName  logical stream name
     /// @param distributor binary distributor
-    /// @return target factory
+    /// @return target factory without index validation
     default UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
             final String streamName,
             final StorageBinaryDataDistributor distributor
     ) {
-        return delegate -> StorageBinaryReplicationTarget.New(delegate, distributor);
+        return this.persistenceTargetFactory(streamName, distributor, () -> null);
     }
+
+    /// Creates a target wrapper for coordinated publication.
+    ///
+    /// The wrapper owns the Store transaction boundary: local acceptance and
+    /// publication are one operation, coordinated by the transport. Writer
+    /// roles additionally validate the graph against the index policy before
+    /// every distributed write, using the supplied writer storage connection.
+    ///
+    /// @param streamName   logical stream name
+    /// @param distributor  binary distributor
+    /// @param writerStorage supplies the writer's storage connection at write
+    ///                      time, or `null` before it exists; implementations
+    ///                      use it for pre-publication validation
+    /// @return target factory
+    UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
+            String streamName,
+            StorageBinaryDataDistributor distributor,
+            Supplier<StorageConnection> writerStorage
+    );
 
     @Override
     void close();

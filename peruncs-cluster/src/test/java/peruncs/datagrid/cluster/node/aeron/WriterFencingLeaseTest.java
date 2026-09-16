@@ -1,0 +1,276 @@
+package peruncs.datagrid.cluster.node.aeron;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.test.ChildJava;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/// Verifies the writer fencing lease: only one writer per cluster/generation.
+class WriterFencingLeaseTest {
+    private static final Duration STALENESS = Duration.ofMillis(300);
+
+    @Test
+    void forkedDeposedWriterCannotOfferAfterTakeover(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final Process child = new ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "-cp", ChildJava.classpath(), WriterLeaseTakeoverChildMain.class.getName(),
+                volume.toString(), cluster.toString(), generation.toString())
+                .redirectErrorStream(true).start();
+        try {
+            final long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (!Files.exists(volume.resolve("child-ready")) && System.nanoTime() < deadline) {
+                if (!child.isAlive()) fail("lease child exited: " + new String(child.getInputStream().readAllBytes()));
+                Thread.sleep(5);
+            }
+            assertTrue(Files.exists(volume.resolve("child-ready")), "lease child did not reach offer boundary");
+            Thread.sleep(STALENESS.toMillis() * 2L);
+            try (WriterFencingLease successor = WriterFencingLease.acquire(
+                    volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+                assertEquals(2L, successor.fencingToken());
+                Files.writeString(volume.resolve("child-release"), "release");
+                assertTrue(child.waitFor(10, TimeUnit.SECONDS), "deposed child did not exit");
+                assertEquals(0, child.exitValue(), new String(child.getInputStream().readAllBytes()));
+                assertEquals("FENCED", Files.readString(volume.resolve("child-result")));
+                assertFalse(Files.exists(volume.resolve("child-offered")),
+                        "a deposed writer must not run a terminal offer");
+            }
+        } finally {
+            if (child.isAlive()) {
+                child.destroyForcibly();
+                child.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    void secondWriterFailsWhileFirstHoldsTheLease(@TempDir final Path volume) {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        try (final WriterFencingLease first =
+                     WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+            assertEquals(1L, first.fencingToken());
+            assertTrue(first.isCurrent());
+            assertThrows(IllegalStateException.class, () ->
+                    WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS));
+        }
+    }
+
+    @Test
+    void cleanRestartKeepsTheFencingTokenSeries(@TempDir final Path volume) {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final UUID nodeId = UUID.randomUUID();
+        long previousToken;
+        try (final WriterFencingLease first =
+                     WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+            previousToken = first.fencingToken();
+            assertTrue(previousToken >= 1L);
+        }
+        /* A clean restart fences the previous publisher instance immediately
+         * by minting the next token, without waiting for the staleness bound. */
+        try (final WriterFencingLease restarted =
+                     WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+            assertEquals(previousToken + 1L, restarted.fencingToken(),
+                    "a clean restart must fence the previous publisher with the next token");
+            assertTrue(restarted.isCurrent());
+        }
+    }
+
+    @Test
+    void releasedLeaseIsTakenOverWithAMonotonicTokenAfterStaleness(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final WriterFencingLease first =
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS);
+        first.close();
+        assertFalse(first.isCurrent(), "closed lease must not report current");
+        /* The released file still carries a fresh heartbeat, so a different
+         * node must wait out the staleness bound before taking over. */
+        final long releasedToken = tokenAt(volume, cluster, generation);
+        assertThrows(IllegalStateException.class, () ->
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS));
+        Thread.sleep(STALENESS.toMillis() * 2L);
+        try (final WriterFencingLease successor =
+                     WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+            assertEquals(releasedToken + 1L, successor.fencingToken(),
+                    "takeover after release must mint a strictly greater token, never a lower one");
+        }
+    }
+
+    @Test
+    void staleLeaseIsStolenWithAMonotonicToken(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final WriterFencingLease holder =
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS);
+        assertEquals(1L, holder.fencingToken());
+        /* A dead writer stops its heartbeat; the file goes stale and a
+         * successor steals the lease with a strictly greater token. The
+         * zombie's frames then fail the reader's stale-token floor. */
+        holder.suspendHeartbeatForTest();
+        Thread.sleep(STALENESS.toMillis() * 2L);
+        try (holder;
+             final WriterFencingLease successor =
+                     WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+            assertEquals(2L, successor.fencingToken());
+            assertTrue(successor.isCurrent());
+        }
+    }
+
+    @Test
+    void heartbeatKeepsTheLeaseCurrent(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        try (final WriterFencingLease holder =
+                     WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+            Thread.sleep(STALENESS.toMillis() * 2L);
+            assertTrue(holder.isCurrent(), "heartbeat renewal must keep a live holder current");
+            assertThrows(IllegalStateException.class, () ->
+                    WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS));
+        }
+    }
+
+    @Test
+    void leasesAreScopedPerClusterAndGeneration(@TempDir final Path volume) {
+        try (final WriterFencingLease first =
+                     WriterFencingLease.acquire(volume, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), STALENESS);
+             final WriterFencingLease second =
+                     WriterFencingLease.acquire(volume, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), STALENESS)) {
+            assertTrue(first.isCurrent());
+            assertTrue(second.isCurrent());
+        }
+    }
+
+    @Test
+    void concurrentAcquiresSerializeToOneWinner(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final int racers = 8;
+        final AtomicInteger winners = new AtomicInteger();
+        final AtomicInteger rejections = new AtomicInteger();
+        final java.util.List<WriterFencingLease> held = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        try (final var pool = java.util.concurrent.Executors.newFixedThreadPool(racers)) {
+            final var ready = new java.util.concurrent.CountDownLatch(racers);
+            final var starting = new java.util.concurrent.CountDownLatch(1);
+            final var done = new java.util.concurrent.CountDownLatch(racers);
+            for (int index = 0; index < racers; index++) {
+                pool.submit(() -> {
+                    ready.countDown();
+                    try {
+                        assertTrue(starting.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                        try {
+                            held.add(WriterFencingLease.acquire(
+                                    volume, cluster, generation, UUID.randomUUID(), STALENESS));
+                            winners.incrementAndGet();
+                        } catch (final IllegalStateException heldByWinner) {
+                            rejections.incrementAndGet();
+                        }
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            assertTrue(ready.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            starting.countDown();
+            assertTrue(done.await(30, java.util.concurrent.TimeUnit.SECONDS));
+        } finally {
+            for (final WriterFencingLease lease : held) {
+                lease.close();
+            }
+        }
+        assertEquals(1, winners.get(), "racing acquires must mint exactly one starting token");
+        assertEquals(racers - 1, rejections.get(), "every loser must fail instead of minting a duplicate token");
+    }
+
+    @Test
+    void corruptLeaseFailsClosedInsteadOfResetting(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final Path path = WriterFencingLease.leasePath(volume, cluster, generation);
+        Files.write(path, new byte[]{9, 8, 7, 6, 5});
+        assertThrows(IllegalStateException.class, () ->
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS));
+        final var failure = assertThrows(IllegalStateException.class, () ->
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS));
+        assertTrue(failure.getMessage().contains("refusing to reset the fencing token"),
+                "corrupt lease must fail closed, was: %s".formatted(failure.getMessage()));
+    }
+
+    @Test
+    void offerUnderOwnershipFailsAfterTakeoverWithoutOffering(@TempDir final Path volume) {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final UUID nodeId = UUID.randomUUID();
+        try (final WriterFencingLease first =
+                WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+            final AtomicInteger offers = new AtomicInteger();
+            /* Same-node restart mints the next token immediately, fencing the
+             * paused committer without waiting out staleness. Closing first
+             * releases this JVM's ACTIVE guard so the successor can acquire. */
+            first.close();
+            try (final WriterFencingLease successor =
+                    WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+                assertTrue(successor.fencingToken() > 1L);
+                final var failure = assertThrows(IllegalStateException.class, () ->
+                        first.executeUnderOwnership(() -> {
+                            offers.incrementAndGet();
+                            return 99L;
+                        }));
+                assertTrue(failure.getMessage().contains("fenced") || failure.getMessage().contains("closed"),
+                        "unexpected failure: " + failure.getMessage());
+                assertEquals(0, offers.get(), "a deposed writer must never run its offer");
+            }
+        }
+    }
+
+    @Test
+    void closeIsIdempotentAndTheLeaseFileSurvives(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final Path path = WriterFencingLease.leasePath(volume, cluster, generation);
+        final UUID nodeId = UUID.randomUUID();
+        final long heldToken;
+        try (final WriterFencingLease holder =
+                     WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+            heldToken = holder.fencingToken();
+            assertTrue(holder.isCurrent());
+            holder.close();
+            assertFalse(holder.isCurrent(), "closed lease must not report current");
+            holder.close();
+        }
+        /* The file must survive release: deleting it would reset the series to
+         * 1 and brick every reader whose persisted floor is above 1. */
+        assertTrue(Files.exists(path),
+                "close must keep the lease file so the token series survives restarts");
+        assertEquals(heldToken, tokenAt(volume, cluster, generation),
+                "the released file keeps the holder's token and node identity");
+        /* Deleting the lease manually is an operator action that starts a new
+         * series; a fresh acquire then mints token 1 and readers must reseed. */
+        Files.deleteIfExists(path);
+        try (final WriterFencingLease freshSeries =
+                     WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+            assertEquals(1L, freshSeries.fencingToken(), "a manually deleted lease starts a new series");
+        }
+    }
+
+    /// Reads the fencing token recorded in the lease file (magic, version, token...).
+    private static long tokenAt(final Path volume, final UUID cluster, final UUID generation) throws Exception {
+        final byte[] bytes = Files.readAllBytes(WriterFencingLease.leasePath(volume, cluster, generation));
+        return ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getLong(6);
+    }
+}

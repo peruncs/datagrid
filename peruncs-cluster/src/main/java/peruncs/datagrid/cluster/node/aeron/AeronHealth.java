@@ -52,10 +52,6 @@ final class AeronHealth implements ReplicationHealth {
     }
 
     @Override
-    public void init() {
-    }
-
-    @Override
     public long archiveUsableSpaceBytes() {
         return this.archiveUsableSpace.getAsLong();
     }
@@ -87,10 +83,13 @@ final class AeronHealth implements ReplicationHealth {
 
     private boolean ready(final boolean requireLive) {
         /* Do not invoke a lifecycle supplier after this view has been closed.  In
-         * particular, writerReady may initialise an Archive; a health object that
-         * has already been disposed must be a pure, side-effect-free failure view. */
+         * particular, writerReady may initialise an Archive, so it is invoked at
+         * most once per evaluation, only on the live path, and the snapshot is
+         * cached in a local for every check below. A health object that has
+         * already been disposed stays a pure, side-effect-free failure view. */
         if (!this.active || this.closed.getAsBoolean() || this.watermarkFailed.getAsBoolean()) return false;
-        /* Writer readiness is a side-effect-free lifecycle snapshot. */
+        /* Writer readiness may perform I/O; the single cached snapshot below is
+         * the only invocation for this evaluation. */
         final boolean writerIsReady = this.writerReady.getAsBoolean();
         return this.storage.isReady()
                && !this.driverFailed.getAsBoolean() && this.capacityAvailable.getAsBoolean()

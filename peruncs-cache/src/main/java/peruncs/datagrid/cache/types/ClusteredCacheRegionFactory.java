@@ -6,16 +6,28 @@ import org.eclipse.store.cache.hibernate.types.StorageAccess;
 import org.eclipse.store.cache.types.CacheManager;
 import org.hibernate.boot.spi.SessionFactoryOptions;
 import org.hibernate.cache.CacheException;
+import org.hibernate.cache.cfg.spi.DomainDataRegionBuildingContext;
+import org.hibernate.cache.cfg.spi.DomainDataRegionConfig;
 import org.hibernate.cache.internal.DefaultCacheKeysFactory;
 import org.hibernate.cache.spi.CacheKeysFactory;
+import org.hibernate.cache.spi.support.DomainDataStorageAccess;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.hibernate.engine.spi.SharedSessionContractImplementor;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheConfiguration;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageCommunicationProvider;
 import peruncs.datagrid.cache.aeron.AeronClusteredCacheMessageReceiver;
 
-import java.util.Map;
-import java.util.UUID;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.*;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiFunction;
 
 /// This region factory adds clustered invalidation to the Store cache factory.
 ///
@@ -51,6 +63,24 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     private static final String KEY_DRIVER_TIMEOUT_MILLIS = AERON_PREFIX + "driver-timeout-millis";
         /// Key bounding the accepted serialized payload size.
     private static final String KEY_MAX_PAYLOAD_BYTES = AERON_PREFIX + "max-payload-bytes";
+        /// Key setting the idle-sender heartbeat interval in millis.
+    private static final String KEY_HEARTBEAT_INTERVAL_MILLIS = AERON_PREFIX + "heartbeat-interval-millis";
+        /// Key setting the receiver silence tolerance in millis.
+    private static final String KEY_FRESHNESS_TIMEOUT_MILLIS = AERON_PREFIX + "freshness-timeout-millis";
+        /// Key setting the directory holding the persisted per-sender cursors.
+    private static final String KEY_CURSOR_DIRECTORY = AERON_PREFIX + "cursor-directory";
+        /// Key setting the base64 HMAC secret authenticating every cache frame.
+    private static final String KEY_HMAC_SECRET = AERON_PREFIX + "hmac-secret";
+        /// Key setting a file holding the base64 HMAC secret.
+    private static final String KEY_HMAC_SECRET_FILE = AERON_PREFIX + "hmac-secret-file";
+        /// Key setting the base64 retiring HMAC secret accepted during rotation overlap.
+    private static final String KEY_HMAC_SECRET_PREVIOUS = AERON_PREFIX + "hmac-secret-previous";
+        /// Key setting a file holding the base64 retiring HMAC secret.
+    private static final String KEY_HMAC_SECRET_PREVIOUS_FILE = AERON_PREFIX + "hmac-secret-previous-file";
+        /// Key enabling production-only validation.
+    private static final String KEY_PRODUCTION_MODE = AERON_PREFIX + "production-mode";
+        /// Key explicitly acknowledging unsigned frames without a secret.
+    private static final String KEY_ALLOW_UNSIGNED_FRAMES = AERON_PREFIX + "allow-unsigned-frames";
         /// Removed key that selected a serializer type provider.
     private static final String REMOVED_KEY_SERIALIZATION_TYPES_PROVIDER =
             CLUSTERED_PREFIX + "serialization-types-provider";
@@ -59,8 +89,15 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     private volatile ClusteredCacheEntryListenerConfiguration cacheEntryListenerConfiguration;
         /// Receiver created during session-factory preparation.
     private volatile AeronClusteredCacheMessageReceiver cacheMessageReceiver;
+        /// Acceptor applying remote invalidations; retained to replay updates
+    /// buffered while the timestamps cache was not open yet.
+    private volatile ClusteredCacheMessageAcceptor clusteredCacheMessageAcceptor;
         /// Local cache manager used by the message acceptor.
     private volatile CacheManager cacheManager;
+    /// Automatic receiver recovery is attempted at most once per this interval.
+    private static final long RECOVERY_RETRY_INTERVAL_NANOS = 1_000_000_000L;
+    /// `System.nanoTime()` reading of the last recovery attempt.
+    private volatile long lastRecoveryAttemptNanos;
 
         /// Creates a factory with Hibernate's default cache key strategy.
     public ClusteredCacheRegionFactory() {
@@ -102,7 +139,174 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
                 longProperty(properties, KEY_OFFER_TIMEOUT_MILLIS,
                         AeronClusteredCacheConfiguration.DEFAULT_OFFER_TIMEOUT_MILLIS, 0L),
                 intProperty(properties, KEY_MAX_PAYLOAD_BYTES,
-                        AeronClusteredCacheConfiguration.DEFAULT_MAX_PAYLOAD_BYTES, 1));
+                        AeronClusteredCacheConfiguration.DEFAULT_MAX_PAYLOAD_BYTES, 1),
+                longProperty(properties, KEY_HEARTBEAT_INTERVAL_MILLIS,
+                        AeronClusteredCacheConfiguration.DEFAULT_HEARTBEAT_INTERVAL_MILLIS, 1L),
+                longProperty(properties, KEY_FRESHNESS_TIMEOUT_MILLIS,
+                        AeronClusteredCacheConfiguration.DEFAULT_FRESHNESS_TIMEOUT_MILLIS, 1L),
+                stringProperty(properties, KEY_CURSOR_DIRECTORY, null),
+                hmacSecret(properties),
+                booleanProperty(properties, KEY_PRODUCTION_MODE, false),
+                booleanProperty(properties, KEY_ALLOW_UNSIGNED_FRAMES, false),
+                previousHmacSecret(properties));
+    }
+
+        /// Resolves the HMAC secret from the inline key or the secret file.
+    /// The two sources are mutually exclusive; both hold base64 decoding to at
+    /// least 16 bytes. The file must be a regular, non-symbolic file of at
+    /// most 4096 bytes, unreadable by group or others — mirroring the cluster
+    /// retention-secret pattern.
+    ///
+    /// @param properties Hibernate cache properties
+    /// @return decoded secret, or `null` for unsigned frames
+    private static byte[] hmacSecret(@SuppressWarnings("rawtypes") final Map properties) {
+        return secret(properties, KEY_HMAC_SECRET, KEY_HMAC_SECRET_FILE,
+                ClusteredCacheRegionFactory::decodeHmacSecret,
+                ClusteredCacheRegionFactory::decodeHmacSecretFile);
+    }
+
+        /// Resolves the retiring HMAC secret accepted during rotation overlap.
+    ///
+    /// The two sources are mutually exclusive, like the primary secret. Length
+    /// validation rides with the decoders; the rotation-pair check lives in
+    /// the configuration record once the primary is known.
+    ///
+    /// @param properties Hibernate cache properties
+    /// @return decoded previous secret, or `null` when no rotation overlaps
+    private static byte[] previousHmacSecret(@SuppressWarnings("rawtypes") final Map properties) {
+        return secret(properties, KEY_HMAC_SECRET_PREVIOUS, KEY_HMAC_SECRET_PREVIOUS_FILE,
+                ClusteredCacheRegionFactory::decodeHmacSecret,
+                ClusteredCacheRegionFactory::decodeHmacSecretFile);
+    }
+
+        /// Resolves one HMAC secret from its mutually exclusive inline and file
+    /// sources. Length validation rides with the decoders; the rotation-pair
+    /// check lives in the configuration record once the primary is known.
+    ///
+    /// @param properties    Hibernate cache properties
+    /// @param inlineKey     inline base64 property name
+    /// @param fileKey       secret-file property name
+    /// @param inlineDecoder decodes an inline value with its property label
+    /// @param fileDecoder   decodes a secret file with its property label
+    /// @return decoded secret, or `null` when neither source is configured
+    private static byte[] secret(
+            @SuppressWarnings("rawtypes") final Map properties,
+            final String inlineKey,
+            final String fileKey,
+            final BiFunction<String, String, byte[]> inlineDecoder,
+            final BiFunction<String, String, byte[]> fileDecoder
+    ) {
+        final String configured = stringProperty(properties, inlineKey, null);
+        final String configuredFile = stringProperty(properties, fileKey, null);
+        if (configured != null && configuredFile != null) {
+            throw new IllegalArgumentException(
+                    "%s and %s are mutually exclusive".formatted(inlineKey, fileKey));
+        }
+        if (configured != null) {
+            return inlineDecoder.apply(configured, inlineKey);
+        }
+        if (configuredFile != null) {
+            return fileDecoder.apply(configuredFile, fileKey);
+        }
+        return null;
+    }
+
+    private static byte[] decodeHmacSecret(final String configured, final String property) {
+        try {
+            final byte[] secret = Base64.getDecoder().decode(configured);
+            if (secret.length < AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES) {
+                throw new IllegalArgumentException(
+                        "%s must decode to at least %s bytes".formatted(
+                                property, AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES));
+            }
+            return secret;
+        } catch (final IllegalArgumentException failure) {
+            throw new IllegalArgumentException(
+                    "%s must be base64 and decode to at least %s bytes".formatted(
+                            property, AeronClusteredCacheConfiguration.MIN_HMAC_SECRET_BYTES),
+                    failure);
+        }
+    }
+
+    private static byte[] decodeHmacSecretFile(final String fileName, final String property) {
+        final Path path = Paths.get(fileName).toAbsolutePath().normalize();
+        try {
+            final byte[] encoded = readSecretFile(path, 4_096, "HMAC secret");
+            try {
+                return decodeHmacSecret(
+                        new String(encoded, StandardCharsets.US_ASCII).trim(), property);
+            } finally {
+                Arrays.fill(encoded, (byte) 0);
+            }
+        } catch (final IOException | IllegalArgumentException failure) {
+            throw new IllegalArgumentException(
+                    "%s is invalid: %s".formatted(property, path), failure);
+        }
+    }
+
+    /** Reads one HMAC secret through a bounded, stable descriptor snapshot. */
+    private static byte[] readSecretFile(final Path path, final int maxBytes, final String description)
+            throws IOException {
+        final BasicFileAttributes before = Files.readAttributes(
+                path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        if (!before.isRegularFile() || Files.isSymbolicLink(path) || before.size() > maxBytes) {
+            throw new IOException("%s file must be a regular, non-symbolic file <= %s bytes"
+                    .formatted(description, maxBytes));
+        }
+        validateSecretFilePermissions(path, description);
+        final byte[] encoded = new byte[maxBytes + 1];
+        try {
+            final int length;
+            try (FileChannel channel = FileChannel.open(
+                    path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+                if (channel.size() > maxBytes) {
+                    throw new IOException("%s file exceeds %s bytes".formatted(description, maxBytes));
+                }
+                final ByteBuffer destination = ByteBuffer.wrap(encoded);
+                while (destination.hasRemaining()) {
+                    final int read = channel.read(destination);
+                    if (read < 0) break;
+                    if (read == 0) throw new IOException("%s file read made no progress".formatted(description));
+                }
+                if (destination.position() > maxBytes) {
+                    throw new IOException("%s file exceeds %s bytes".formatted(description, maxBytes));
+                }
+                length = destination.position();
+            }
+            final BasicFileAttributes after = Files.readAttributes(
+                    path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (before.fileKey() == null || after.fileKey() == null ||
+                    !Objects.equals(before.fileKey(), after.fileKey()) ||
+                    !after.isRegularFile() || Files.isSymbolicLink(path)) {
+                throw new IOException("%s file changed while it was being read".formatted(description));
+            }
+            return Arrays.copyOf(encoded, length);
+        } finally {
+            Arrays.fill(encoded, (byte) 0);
+        }
+    }
+
+    private static void validateSecretFilePermissions(final Path path, final String description)
+            throws IOException {
+        try {
+            final Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(
+                    path, LinkOption.NOFOLLOW_LINKS);
+            if (permissions.stream().anyMatch(permission -> permission.name().startsWith("GROUP_") ||
+                    permission.name().startsWith("OTHERS_"))) {
+                throw new IOException("%s file must not be accessible by group or others".formatted(description));
+            }
+            final Path parent = path.getParent();
+            if (parent != null) {
+                final Set<PosixFilePermission> parentPermissions = Files.getPosixFilePermissions(
+                        parent, LinkOption.NOFOLLOW_LINKS);
+                if (parentPermissions.contains(PosixFilePermission.GROUP_WRITE) ||
+                        parentPermissions.contains(PosixFilePermission.OTHERS_WRITE)) {
+                    throw new IOException("%s file parent must not be writable by group or others".formatted(description));
+                }
+            }
+        } catch (final UnsupportedOperationException unsupported) {
+            throw new IOException("%s file permissions cannot be verified".formatted(description), unsupported);
+        }
     }
 
     private static UUID parseNodeId(final String configured) {
@@ -173,6 +377,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
 
             final var comProvider = new AeronClusteredCacheMessageCommunicationProvider();
             final var messageAcceptor = new ClusteredCacheMessageAcceptor(this.cacheManager);
+            this.clusteredCacheMessageAcceptor = messageAcceptor;
             final var configuration = clusteredCacheConfiguration(properties);
 
             this.cacheMessageReceiver = comProvider.provideMessageReceiver(configuration, messageAcceptor);
@@ -203,6 +408,57 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         return this.cacheManager;
     }
 
+    /// Builds the entity and collection region access behind the same fail-closed
+    /// health gate as the timestamps region. Remote entity writes invalidate
+    /// through the broadcast timestamps, so serving entity entries while the
+    /// receiver is down would silently expose stale state.
+    @Override
+    protected DomainDataStorageAccess createDomainDataStorageAccess(
+            final DomainDataRegionConfig regionConfig,
+            final DomainDataRegionBuildingContext buildingContext
+    ) {
+        /* Entity/collection cache entries have no table-level invalidation
+         * key. Keeping them enabled would serve stale entities after a remote
+         * writer updates the database. Until key eviction messages exist,
+         * disable these regions so Hibernate always loads current state. */
+        return new NonCachingStorageAccess();
+    }
+
+    /// Builds the query-results region access behind the same fail-closed
+    /// health gate: query results are only trustworthy while timestamp
+    /// invalidations are flowing.
+    @Override
+    protected StorageAccess createQueryResultsRegionStorageAccess(
+            final String regionName,
+            final SessionFactoryImplementor sessionFactory
+    ) {
+        final ClusteredCacheMessageAcceptor messageAcceptor = this.requireMessageAcceptor(regionName);
+        final String defaultedRegionName = this.defaultRegionName(
+                regionName,
+                sessionFactory,
+                DEFAULT_QUERY_RESULTS_REGION_UNQUALIFIED_NAME,
+                LEGACY_QUERY_RESULTS_REGION_UNQUALIFIED_NAMES
+        );
+        return new FailClosedStorageAccess(
+                StorageAccess.New(this.getOrCreateCache(defaultedRegionName, sessionFactory)),
+                this::ensureClusteredHealthy, messageAcceptor.cacheReadLock());
+    }
+
+        /// Returns the clustered message acceptor, failing with a diagnostic
+    /// [CacheException] when a region is created before preparation or after
+    /// release instead of throwing a bare null dereference.
+    ///
+    /// @param regionName region being created, for the failure message
+    /// @return clustered message acceptor, never `null`
+    private ClusteredCacheMessageAcceptor requireMessageAcceptor(final String regionName) {
+        final ClusteredCacheMessageAcceptor messageAcceptor = this.clusteredCacheMessageAcceptor;
+        if (messageAcceptor == null) {
+            throw new CacheException(
+                    "Clustered cache resources are not prepared; cannot create the region %s".formatted(regionName));
+        }
+        return messageAcceptor;
+    }
+
     @Override
     protected StorageAccess createTimestampsRegionStorageAccess(
             final String regionName,
@@ -214,6 +470,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
             throw new CacheException(
                     "Clustered cache resources are not prepared; cannot create the timestamps region %s".formatted(regionName));
         }
+        final ClusteredCacheMessageAcceptor messageAcceptor = this.requireMessageAcceptor(regionName);
         final String defaultedRegionName = this.defaultRegionName(
                 regionName,
                 sessionFactory,
@@ -222,24 +479,63 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         );
         final var cache = this.getOrCreateCache(defaultedRegionName, sessionFactory);
         cache.registerCacheEntryListener(listenerConfiguration.getUpdateTimestampsCacheEntryListenerConfiguration());
-        return new FailClosedStorageAccess(StorageAccess.New(cache), this::ensureClusteredHealthy);
+        /* The timestamps cache has just opened: apply any remote updates that
+         * arrived while it was not open yet so no loss window remains. */
+        messageAcceptor.replayPending();
+        return new FailClosedStorageAccess(StorageAccess.New(cache), this::ensureClusteredHealthy,
+                messageAcceptor.cacheReadLock());
     }
 
-        /// Prevents Hibernate from serving or mutating a timestamps cache after the
+        /// Prevents Hibernate from serving or mutating any clustered cache region —
+    /// entity and collection data, query results, or timestamps — after the
     /// invalidation broadcast has stopped. A volatile broadcast cannot repair a
     /// cache after a receiver gap, so continuing locally would silently serve
-    /// stale query results.
+    /// stale entries.
+    ///
+    /// An unhealthy receiver first triggers one bounded-rate automatic
+    /// re-synchronization, which invalidates every locally cached timestamp
+    /// before declaring the receiver healthy again; only a recovery that
+    /// fails (or one already tried inside the retry interval) leaves the
+    /// region access refusing operations.
     private void ensureClusteredHealthy() {
         final AeronClusteredCacheMessageReceiver receiver = this.cacheMessageReceiver;
         if (receiver == null) {
             throw new CacheException("Clustered cache invalidation receiver is not initialized");
         }
+        if (receiver.failure() == null && receiver.isRunning()) {
+            return;
+        }
+        this.attemptReceiverRecovery(receiver);
         final RuntimeException failure = receiver.failure();
         if (failure != null) {
             throw new CacheException("Clustered cache invalidation receiver has failed", failure);
         }
         if (!receiver.isRunning()) {
             throw new CacheException("Clustered cache invalidation receiver is not running");
+        }
+    }
+
+    /// Attempts one automatic receiver re-synchronization at most once per
+    /// retry interval, so a persistently broken transport cannot turn every
+    /// region access into a recovery storm.
+    private void attemptReceiverRecovery(final AeronClusteredCacheMessageReceiver receiver) {
+        final long now = System.nanoTime();
+        final long last = this.lastRecoveryAttemptNanos;
+        if (last != 0L && now - last < RECOVERY_RETRY_INTERVAL_NANOS) {
+            return;
+        }
+        this.lastRecoveryAttemptNanos = now;
+        try {
+            /* Re-synchronization invalidates every cached timestamp before it
+             * starts the receiver again, so a repaired receiver serves no
+             * state that predates the recovery. */
+            receiver.resynchronize();
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Clustered cache invalidation receiver re-synchronized after a failure; all cached timestamps were invalidated");
+        } catch (final RuntimeException resyncFailure) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Clustered cache invalidation receiver could not be re-synchronized; cache operations stay refused",
+                    resyncFailure);
         }
     }
 
@@ -262,6 +558,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
         }
         /* A re-prepared factory must not consult the manager released above. */
         this.cacheManager = null;
+        this.clusteredCacheMessageAcceptor = null;
         if (failure instanceof final Error error) {
             throw error;
         }
@@ -280,6 +577,7 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     /// @throws Throwable the first dispose failure, with later failures suppressed
     private void disposeClusteredResources() throws Throwable {
         Throwable failure = null;
+        this.clusteredCacheMessageAcceptor = null;
         final ClusteredCacheEntryListenerConfiguration listenerConfiguration =
                 this.cacheEntryListenerConfiguration;
         if (listenerConfiguration != null) {
@@ -312,16 +610,28 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
     }
 
         /// Storage access that refuses all cache operations after receiver failure.
+    /// Every read and mutation path is gated — including the defaulted
+    /// `putFromLoad`, `removeFromCache`, and `clearCache` — so no region can be
+    /// served or mutated while invalidations are not flowing. Only [#release]
+    /// stays ungated: cleanup during shutdown must never throw.
     static final class FailClosedStorageAccess implements StorageAccess {
         private final StorageAccess delegate;
         private final Runnable healthCheck;
+        private final Lock cacheReadLock;
 
         FailClosedStorageAccess(final StorageAccess delegate, final Runnable healthCheck) {
+            this(delegate, healthCheck, new ReentrantLock());
+        }
+
+        FailClosedStorageAccess(final StorageAccess delegate, final Runnable healthCheck, final Lock cacheReadLock) {
             this.delegate = delegate;
             this.healthCheck = healthCheck;
+            this.cacheReadLock = cacheReadLock;
         }
 
         private void check() {
+            /* Recovery may invalidate all caches, so run it before acquiring
+             * the read side of the acceptor's invalidation lock. */
             this.healthCheck.run();
         }
 
@@ -331,7 +641,12 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
                 final SharedSessionContractImplementor session
         ) {
             this.check();
-            return this.delegate.getFromCache(key, session);
+            this.cacheReadLock.lock();
+            try {
+                return this.delegate.getFromCache(key, session);
+            } finally {
+                this.cacheReadLock.unlock();
+            }
         }
 
         @Override
@@ -341,30 +656,103 @@ public class ClusteredCacheRegionFactory extends CacheRegionFactory {
                 final SharedSessionContractImplementor session
         ) {
             this.check();
-            this.delegate.putIntoCache(key, value, session);
+            this.cacheReadLock.lock();
+            try {
+                this.delegate.putIntoCache(key, value, session);
+            } finally {
+                this.cacheReadLock.unlock();
+            }
+        }
+
+        @Override
+        public void putFromLoad(
+                final Object key,
+                final Object value,
+                final SharedSessionContractImplementor session
+        ) {
+            this.check();
+            this.cacheReadLock.lock();
+            try {
+                this.delegate.putFromLoad(key, value, session);
+            } finally {
+                this.cacheReadLock.unlock();
+            }
+        }
+
+        @Override
+        public void removeFromCache(
+                final Object key,
+                final SharedSessionContractImplementor session
+        ) {
+            this.check();
+            this.cacheReadLock.lock();
+            try {
+                this.delegate.removeFromCache(key, session);
+            } finally {
+                this.cacheReadLock.unlock();
+            }
+        }
+
+        @Override
+        public void clearCache(final SharedSessionContractImplementor session) {
+            this.check();
+            this.cacheReadLock.lock();
+            try {
+                this.delegate.clearCache(session);
+            } finally {
+                this.cacheReadLock.unlock();
+            }
         }
 
         @Override
         public boolean contains(final Object key) {
             this.check();
-            return this.delegate.contains(key);
+            this.cacheReadLock.lock();
+            try {
+                return this.delegate.contains(key);
+            } finally {
+                this.cacheReadLock.unlock();
+            }
         }
 
         @Override
         public void evictData() {
             this.check();
-            this.delegate.evictData();
+            this.cacheReadLock.lock();
+            try {
+                this.delegate.evictData();
+            } finally {
+                this.cacheReadLock.unlock();
+            }
         }
 
         @Override
         public void evictData(final Object key) {
             this.check();
-            this.delegate.evictData(key);
+            this.cacheReadLock.lock();
+            try {
+                this.delegate.evictData(key);
+            } finally {
+                this.cacheReadLock.unlock();
+            }
         }
 
         @Override
         public void release() {
             this.delegate.release();
         }
+    }
+
+    /** Disables a region whose entries cannot be invalidated by the wire schema. */
+    static final class NonCachingStorageAccess implements StorageAccess {
+        @Override public Object getFromCache(final Object key, final SharedSessionContractImplementor session) { return null; }
+        @Override public void putIntoCache(final Object key, final Object value, final SharedSessionContractImplementor session) { }
+        @Override public void putFromLoad(final Object key, final Object value, final SharedSessionContractImplementor session) { }
+        @Override public void removeFromCache(final Object key, final SharedSessionContractImplementor session) { }
+        @Override public void clearCache(final SharedSessionContractImplementor session) { }
+        @Override public boolean contains(final Object key) { return false; }
+        @Override public void evictData() { }
+        @Override public void evictData(final Object key) { }
+        @Override public void release() { }
     }
 }

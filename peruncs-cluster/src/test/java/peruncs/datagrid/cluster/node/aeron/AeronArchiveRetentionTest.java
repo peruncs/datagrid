@@ -84,7 +84,7 @@ class AeronArchiveRetentionTest {
 
     private static ReplicationCursor deletionCursor(final long position) {
         return ReplicationCursor.of("aeron", GENERATION, 4, new AeronReplicationCursor(
-                CLUSTER, UUID.randomUUID(), GENERATION, 1, 17, position, 4).encode());
+                CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, position, 4).encode());
     }
 
     private static ReplicationCursor cursor(final UUID reader) {
@@ -186,7 +186,7 @@ class AeronArchiveRetentionTest {
                 READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET);
         retention.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode()));
         final byte[] ordinaryPosition = new AeronReplicationCursor(
-                CLUSTER, UUID.randomUUID(), GENERATION, 1, 17, 4_096, 4).encode();
+                CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, 4_096, 4).encode();
         final IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> retention.deleteThrough(ReplicationCursor.of("aeron", GENERATION, 4, ordinaryPosition)));
         assertEquals("Aeron Archive is not running", failure.getMessage());
@@ -429,12 +429,22 @@ class AeronArchiveRetentionTest {
         final CountDownLatch release = new CountDownLatch(1);
         try (final AeronArchiveRetention retention = new AeronArchiveRetention(SECRET, Set.of(READER), () -> {
             entered.countDown();
-            try {
-                assertTrue(release.await(30, TimeUnit.SECONDS), "ensureWriter was never released");
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("ensureWriter interrupted", interrupted);
+            /* Hold the single agent thread until released, ignoring the
+             * interrupt from the timed-out caller's cancel: if this command
+             * died on cancel, the agent would go free and the bounded wait
+             * under test could return instead of timing out, flipping the
+             * test on scheduling luck. The overall 30-second bound still
+             * fails a genuinely stuck release. */
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            boolean released = false;
+            while (!released && System.nanoTime() < deadline && !Thread.currentThread().isInterrupted()) {
+                try {
+                    released = release.await(100, TimeUnit.MILLISECONDS);
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
+            assertTrue(released, "ensureWriter was never released");
         },
                 unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
                 ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,

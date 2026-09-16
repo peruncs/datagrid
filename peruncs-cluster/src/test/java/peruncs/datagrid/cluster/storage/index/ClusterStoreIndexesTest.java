@@ -6,11 +6,14 @@ import org.eclipse.store.gigamap.lucene.DocumentPopulator;
 import org.eclipse.store.gigamap.lucene.LuceneContext;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
 import org.eclipse.store.gigamap.types.GigaMap;
+import org.eclipse.store.gigamap.types.IndexCategory;
+import org.eclipse.store.gigamap.types.IndexGroup;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +21,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicMarkableReference;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -110,11 +115,246 @@ class ClusterStoreIndexesTest {
     }
 
     @Test
+    void directExternalLuceneRegistrationIsRejectedByGraphValidation() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        root.articles.index().register(LuceneIndex.Category(LuceneContext.New(
+                this.storagePath.resolve("external-lucene"), new ArticlePopulator())));
+
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+    }
+
+    @Test
+    void directExternalVectorRegistrationIsRejectedByGraphValidation() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        final VectorIndices<Article> indices = root.articles.index().register(VectorIndices.Category());
+        indices.add("external-vectors", VectorIndexConfiguration.builder()
+                .dimension(3)
+                .similarityFunction(VectorSimilarityFunction.COSINE)
+                .onDisk(true)
+                .indexDirectory(this.storagePath.resolve("external-vectors"))
+                .build(), new ArticleVectorizer());
+
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+    }
+
+    @Test
+    void unregisteredExternalConfigurationsAreRejectedByGraphValidation() {
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+                LuceneContext.New(this.storagePath.resolve("stray-lucene"), new ArticlePopulator())));
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+                VectorIndexConfiguration.builder()
+                        .dimension(3)
+                        .similarityFunction(VectorSimilarityFunction.COSINE)
+                        .onDisk(true)
+                        .indexDirectory(this.storagePath.resolve("stray-vectors"))
+                        .build()));
+    }
+
+    @Test
+    void externalConfigurationBehindAtomicReferenceIsRejected() {
+        final AtomicReference<Object> reference = new AtomicReference<>(
+                LuceneContext.New(this.storagePath.resolve("wrapped-lucene"), new ArticlePopulator()));
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(reference));
+    }
+
+    @Test
+    void opaqueJdkHolderIsRejectedInsteadOfBeingPruned() {
+        final AtomicMarkableReference<Object> holder = new AtomicMarkableReference<>(
+                LuceneContext.New(this.storagePath.resolve("opaque-jdk-lucene"), new ArticlePopulator()), false);
+        assertThrows(IllegalStateException.class, () -> ClusterStoreIndexes.validateGraph(holder));
+    }
+
+    @Test
+    void externalConfigurationBehindReferenceIsInspected() {
+        final java.lang.ref.WeakReference<Object> reference = new java.lang.ref.WeakReference<>(
+                LuceneContext.New(this.storagePath.resolve("ref-lucene"), new ArticlePopulator()));
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(reference),
+                "a Reference wrapper must not hide an external index from validation");
+    }
+
+    @Test
+    void externalConfigurationBehindSoftReferenceIsInspected() {
+        final java.lang.ref.SoftReference<Object> reference = new java.lang.ref.SoftReference<>(
+                VectorIndexConfiguration.builder()
+                        .dimension(3)
+                        .similarityFunction(VectorSimilarityFunction.COSINE)
+                        .onDisk(true)
+                        .indexDirectory(this.storagePath.resolve("ref-vectors"))
+                        .build());
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(reference),
+                "a SoftReference wrapper must not hide an external index from validation");
+    }
+
+    @Test
+    void indexGroupsBehindReferenceAreInspectedThroughIndexGroup() {
+        final GigaMap<Article> map = GigaMap.New();
+        final LuceneIndex<Article> text = map.index().register(LuceneIndex.Category(LuceneContext.New(
+                this.storagePath.resolve("ref-group-lucene"), new ArticlePopulator())));
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+                new java.lang.ref.WeakReference<>(text)),
+                "an IndexGroup referent must stay visible after simplifying the Reference check");
+        final VectorIndices<Article> vectors = map.index().register(VectorIndices.Category());
+        vectors.add("ref-group-vectors", VectorIndexConfiguration.builder()
+                .dimension(3)
+                .similarityFunction(VectorSimilarityFunction.COSINE)
+                .onDisk(true)
+                .indexDirectory(this.storagePath.resolve("ref-group-vectors"))
+                .build(), new ArticleVectorizer());
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+                new java.lang.ref.WeakReference<>(vectors)),
+                "an IndexGroup referent must stay visible after simplifying the Reference check");
+    }
+
+
+    @Test
+    void embeddedInGraphIndexesPassGraphValidation() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerLucene(root.articles, new ArticlePopulator());
+        ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(), new ArticleVectorizer());
+
+        assertDoesNotThrow(() -> ClusterStoreIndexes.validateGraph(root));
+        assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(root.articles));
+    }
+
+    @Test
+    void materializedStorageRootsPassGraphValidation() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerLucene(root.articles, new ArticlePopulator());
+        ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(), new ArticleVectorizer());
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            root.articles.add(new Article("Eclipse", "distributed storage", new float[]{1, 0, 0}));
+            storage.storeRoot();
+            assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
+        }
+    }
+
+    @Test
     void duplicateLuceneRegistrationFailsExplicitly() {
         final GigaMap<Article> map = GigaMap.New();
         ClusterStoreIndexes.registerLucene(map, new ArticlePopulator());
-        assertThrows(IllegalStateException.class,
+        final IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> ClusterStoreIndexes.registerLucene(map, new ArticlePopulator()));
+        assertTrue(failure.getMessage().contains("already has a Lucene index"),
+                "a duplicate must be named as a duplicate: " + failure.getMessage());
+    }
+
+    @Test
+    void concurrentDuplicateLuceneRegistrationLeavesASingleIndex() throws Exception {
+        final GigaMap<Article> map = GigaMap.New();
+        final int attempts = 8;
+        final AtomicInteger successes = new AtomicInteger();
+        final AtomicInteger duplicates = new AtomicInteger();
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < attempts; i++) {
+                futures.add(executor.submit(() ->
+                {
+                    try {
+                        ClusterStoreIndexes.registerLucene(map, new ArticlePopulator());
+                        successes.incrementAndGet();
+                    } catch (final IllegalStateException expected) {
+                        duplicates.incrementAndGet();
+                    }
+                }));
+            }
+            for (final Future<?> future : futures) future.get(1, TimeUnit.MINUTES);
+        }
+
+        assertEquals(1, successes.get(), "exactly one duplicate registration must win");
+        assertEquals(attempts - 1, duplicates.get());
+        assertNotNull(map.index().get(LuceneIndex.class));
+    }
+
+    @Test
+    void bitmapOnlyMapPassesMapValidation() {
+        /* The core bitmap group is in-graph by construction: enumerating it
+         * must accept the map instead of rejecting an "unknown" category. */
+        assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(GigaMap.New()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked") // The proxy stands in for an unsupported third-party index group.
+    void unknownIndexCategoryIsRejectedByMapValidation() {
+        final GigaMap<Article> map = GigaMap.New();
+        map.index().register(new IndexCategory<>() {
+            @Override
+            public Class<? extends IndexGroup<Article>> indexType() {
+                return (Class<? extends IndexGroup<Article>>) (Class<?>) CustomGroup.class;
+            }
+
+            @Override
+            public IndexGroup.Internal<Article> createIndexGroup(final GigaMap<Article> gigaMap) {
+                return (IndexGroup.Internal<Article>) Proxy.newProxyInstance(
+                        getClass().getClassLoader(),
+                        new Class<?>[]{CustomGroup.class},
+                        (proxy, method, args) ->
+                        {
+                            if (method.getDeclaringClass() == Object.class) {
+                                return switch (method.getName()) {
+                                    case "toString" -> "CustomGroup(?)";
+                                    case "hashCode" -> System.identityHashCode(proxy);
+                                    default -> proxy == args[0];
+                                };
+                            }
+                            final Class<?> type = method.getReturnType();
+                            if (type == boolean.class) return false;
+                            if (type == int.class) return 0;
+                            if (type == long.class) return 0L;
+                            return null;
+                        });
+            }
+        });
+
+        final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> ClusterStoreIndexes.validateMap(map));
+        assertTrue(failure.getMessage().contains("unsupported index group"),
+                "an unknown category must fail closed: " + failure.getMessage());
+    }
+
+    @Test
+    void writerEntryRejectsDirectExternalRegistrations() {
+        final Root luceneRoot = new Root();
+        luceneRoot.articles = GigaMap.New();
+        luceneRoot.articles.index().register(LuceneIndex.Category(LuceneContext.New(
+                this.storagePath.resolve("writer-external-lucene"), new ArticlePopulator())));
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(luceneRoot, this.storagePath.resolve("lucene"))) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> ClusterStoreIndexes.validateForPublication(storage.createConnection()));
+        }
+
+        final Root vectorRoot = new Root();
+        vectorRoot.articles = GigaMap.New();
+        final VectorIndices<Article> indices = vectorRoot.articles.index().register(VectorIndices.Category());
+        indices.add("writer-external-vectors", VectorIndexConfiguration.builder()
+                .dimension(3)
+                .similarityFunction(VectorSimilarityFunction.COSINE)
+                .onDisk(true)
+                .indexDirectory(this.storagePath.resolve("writer-external-vectors"))
+                .build(), new ArticleVectorizer());
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(vectorRoot, this.storagePath.resolve("vectors"))) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> ClusterStoreIndexes.validateForPublication(storage.createConnection()));
+        }
+    }
+
+    @Test
+    void writerEntryAcceptsEmbeddedIndexes() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerLucene(root.articles, new ArticlePopulator());
+        ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(), new ArticleVectorizer());
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            root.articles.add(new Article("Eclipse", "distributed storage", new float[]{1, 0, 0}));
+            storage.storeRoot();
+            assertDoesNotThrow(() -> ClusterStoreIndexes.validateForPublication(storage.createConnection()));
+        }
+    }
+
+    private interface CustomGroup<E> extends IndexGroup.Internal<E> {
     }
 
     @Test

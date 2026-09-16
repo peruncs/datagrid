@@ -69,11 +69,6 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
     @Override
     void close();
 
-        /// Initializes the health checks.
-    ///
-    /// @throws NodeLibraryException if initialization fails
-    void init() throws NodeLibraryException;
-
         /// Combines Store readiness with provider health and lifecycle state.
     final class Default implements StorageNodeHealthCheck {
         private final StorageController storageController;
@@ -86,11 +81,6 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         ) {
             this.storageController = storageController;
             this.replicationHealth = replicationHealth;
-        }
-
-        @Override
-        public void init() throws NodeLibraryException {
-            this.replicationHealth.init();
         }
 
         @Override

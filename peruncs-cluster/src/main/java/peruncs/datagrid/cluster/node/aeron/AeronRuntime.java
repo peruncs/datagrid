@@ -7,7 +7,6 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.exceptions.ActiveDriverException;
 import org.agrona.ErrorHandler;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.io.IOException;
@@ -22,6 +21,14 @@ import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.WARNING;
 
 /// Owns one node's MediaDriver, Aeron client, and Archive client lifecycle.
+///
+/// When [AeronSettings] enables Aeron authentication, the embedded Archive
+/// challenges every control session and the client presents the configured
+/// credentials. Authentication is one layer only: the live, replay, control,
+/// and watermark channels carry no encryption, so they must stay on an
+/// isolated network. That network policy is the defense-in-depth boundary
+/// against observers and denial-of-service; auth only keeps unauthenticated
+/// peers from driving the Archive protocol.
 final class AeronRuntime implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(AeronRuntime.class.getName());
     private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;
@@ -171,7 +178,7 @@ final class AeronRuntime implements AutoCloseable {
         final Path checkpointParent = this.settings.checkpointPath().toAbsolutePath().getParent();
         if (checkpointParent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
         ensurePrivateDirectory(checkpointParent, this.settings.productionMode());
-        final boolean embeddedWriter = NodeLibraryPropertiesProvider.WRITER_ROLE.equals(this.settings.role()) && !this.settings.externalArchive();
+        final boolean embeddedWriter = this.settings.role().isWriter() && !this.settings.externalArchive();
         if (embeddedWriter) ensurePrivateDirectory(this.settings.archiveDirectory(), this.settings.productionMode());
         final MediaDriver.Context media = new MediaDriver.Context()
                 .aeronDirectoryName(this.settings.aeronDirectory().toString())
@@ -199,6 +206,13 @@ final class AeronRuntime implements AutoCloseable {
                     .errorHandler(this.errorHandler)
                     .fileSyncLevel(this.settings.archiveFileSyncLevel())
                     .catalogFileSyncLevel(this.settings.archiveFileSyncLevel());
+            /* The MediaDriver context in this Aeron version exposes no authentication
+             * hooks, so the embedded Archive is the enforcement point: it authenticates
+             * control sessions while the driver stays a local IPC detail. */
+            if (this.settings.authEnabled()) {
+                archiveContext.authenticatorSupplier(this.settings.authenticatorSupplier());
+                archiveContext.authorisationServiceSupplier(this.settings.authorisationServiceSupplier());
+            }
             this.driver = launchDriver(media,
                     () -> ArchivingMediaDriver.launch(media.clone(), archiveContext.clone()));
         } else {
@@ -221,13 +235,17 @@ final class AeronRuntime implements AutoCloseable {
     }
 
     AeronArchive.Context archiveContext() {
-        return new AeronArchive.Context()
+        final AeronArchive.Context context = new AeronArchive.Context()
                 .aeron(this.aeron)
                 .aeronDirectoryName(this.settings.aeronDirectory().toString())
                 .controlRequestChannel(this.settings.controlChannel())
                 .controlResponseChannel(this.settings.controlResponseChannel())
                 .errorHandler(this.errorHandler)
                 .messageTimeoutNs(this.settings.replication().offerTimeoutNanos());
+        if (this.settings.authEnabled()) {
+            context.credentialsSupplier(this.settings.credentialsSupplier());
+        }
+        return context;
     }
 
     void stopDriver() {
@@ -253,6 +271,11 @@ final class AeronRuntime implements AutoCloseable {
     }
 
         /// Exhaustively releases every owned resource and aggregates close failures.
+    ///
+    /// The settings-held auth credentials are erased only once every resource
+    /// is released: closing never re-authenticates, so erasing earlier is
+    /// unnecessary, while erasing on a partial close would leave a retried
+    /// close without diagnostics context.
     private Throwable closeAllQuietly() {
         Throwable failure = null;
         if (this.archive != null) {
@@ -278,6 +301,9 @@ final class AeronRuntime implements AutoCloseable {
             } catch (final Throwable closeFailure) {
                 failure = append(failure, closeFailure, "Aeron driver");
             }
+        }
+        if (failure == null) {
+            this.settings.clearAuthCredentials();
         }
         return failure;
     }

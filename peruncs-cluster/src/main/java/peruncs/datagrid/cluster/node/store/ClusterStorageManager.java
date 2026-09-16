@@ -9,22 +9,31 @@ import org.eclipse.serializer.persistence.types.PersistenceStorer.Creator;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.store.storage.types.*;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.node.exceptions.ReaderWriteRejectedException;
 import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
+import peruncs.datagrid.cluster.storage.types.RejectingPersistenceTarget;
+import peruncs.datagrid.cluster.storage.types.StorageGraphCoordinator;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/// This storage manager adds cluster shutdown and size checks to Store.
+/// This storage manager adds cluster shutdown and write gating to Store.
 ///
-/// The wrapper keeps the Store API visible while adding the node's shutdown
-/// callback. The full implementation also validates storage size before writes
-/// and routes graph updates through the cluster lock.
+/// The manager adapts Store's API for application access while it
+/// runs the node's shutdown callback, rejects writes past the configured
+/// storage limit on a writer, rejects every application write on a reader,
+/// and wraps the raw persistence target so a fluent binary write cannot
+/// bypass the gate. Store import is deliberately unavailable through this
+/// application-facing wrapper; reader roots are available only through a
+/// coordinated read closure. Node-owned bootstrap and replication code use
+/// their internal storage connection instead.
 ///
 /// @param <T> root type
 public interface ClusterStorageManager<T> extends StorageManager {
@@ -40,43 +49,71 @@ public interface ClusterStorageManager<T> extends StorageManager {
             final StorageSizeValidation storageSizeValidation,
             final ShutdownCallback shutdownCallback
     ) {
-        return new Default<>(notNull(delegate), notNull(storageSizeValidation), notNull(shutdownCallback));
+        return New(delegate, storageSizeValidation, shutdownCallback, new StorageGraphCoordinator());
     }
 
-        /// Runs the node callback and always gives the Store a chance to shut down.
-    private static boolean shutdownWithCallback(
-            final StorageManager delegate, final ShutdownCallback shutdownCallback) {
-        Throwable failure = null;
-        boolean result = false;
-        try {
-            shutdownCallback.onShutdown();
-        } catch (final Throwable callbackFailure) {
-            failure = callbackFailure;
-        }
-        try {
-            result = delegate.shutdown();
-        } catch (final Throwable shutdownFailure) {
-            if (failure == null) failure = shutdownFailure;
-            else if (failure != shutdownFailure) failure.addSuppressed(shutdownFailure);
-        }
-        if (failure instanceof Error error) throw error;
-        if (failure instanceof RuntimeException runtime) throw runtime;
-        return result;
+        /// Creates a manager sharing the Store graph coordinator with replication.
+    static <T> ClusterStorageManager<T> New(
+            final StorageManager delegate,
+            final StorageSizeValidation storageSizeValidation,
+            final ShutdownCallback shutdownCallback,
+            final StorageGraphCoordinator graphCoordinator
+    ) {
+        return new Default<>(notNull(delegate), notNull(storageSizeValidation), notNull(shutdownCallback),
+                notNull(graphCoordinator));
     }
 
-        /// Creates a manager that only adds shutdown handling.
+        /// Creates a read-only manager for reader roles.
+    ///
+    /// Reads, maintenance, and restore keep working; every application write
+    /// entry point — `store`, `storeAll`, `storeRoot`, `setRoot`, storers,
+    /// raw persistence target, and public import methods —
+    /// fails with [ReaderWriteRejectedException] so a reader can never
+    /// persist an unreplicated local divergence.
     ///
     /// @param <T>              root type
     /// @param delegate         Store manager
     /// @param shutdownCallback shutdown callback
-    /// @return cluster storage manager
-    static <T> ClusterStorageManager<T> Wrapper(final StorageManager delegate, final ShutdownCallback shutdownCallback) {
-        return new Wrapper<>(notNull(delegate), notNull(shutdownCallback));
+    /// @return read-only cluster storage manager
+    static <T> ClusterStorageManager<T> ReadOnly(final StorageManager delegate, final ShutdownCallback shutdownCallback) {
+        return ReadOnly(delegate, shutdownCallback, new StorageGraphCoordinator());
+    }
+
+        /// Creates a read-only manager sharing the Store graph coordinator.
+    static <T> ClusterStorageManager<T> ReadOnly(
+            final StorageManager delegate,
+            final ShutdownCallback shutdownCallback,
+            final StorageGraphCoordinator graphCoordinator) {
+        return new ReadOnly<>(notNull(delegate), notNull(shutdownCallback), notNull(graphCoordinator));
     }
 
     @Override
     @SuppressWarnings("unchecked")
+    @Deprecated(forRemoval = true)
     Lazy<T> root();
+
+        /// Reads the current root while excluding replication materialization.
+    ///
+    /// The inherited [#root()] method exposes Store's live lazy reference and
+    /// cannot hold a lock across the caller's subsequent object-graph access,
+    /// so it throws on readers: application code must use this closure, which
+    /// covers the complete traversal with the coordinator's read side. The
+    /// action must copy what it needs into an immutable or detached result and
+    /// must not return any live graph object. Only a direct root return can be
+    /// detected here; callers must also avoid returning nested mutable objects.
+    ///
+    /// @param <R>    result type
+    /// @param action graph read; it receives the materialized root, or `null`
+    /// @return action result, never the live graph
+    <R> R readRoot(Function<? super T, ? extends R> action);
+
+        /// Returns the graph coordinator guarding this Store.
+    ///
+    /// Use it to guard traversals that cannot go through [#readRoot], such as
+    /// multi-call queries: `coordinator.read(() -> ...)`.
+    ///
+    /// @return graph coordinator for this Store
+    StorageGraphCoordinator graphCoordinator();
 
     @Override
     ClusterStorageManager<T> start() throws NodeLibraryException;
@@ -113,216 +150,8 @@ public interface ClusterStorageManager<T> extends StorageManager {
         boolean isStorageLimitReached();
     }
 
-        /// Adds the shutdown callback while delegating every Store operation.
-    ///
-    /// @param <T> root type
-    class Wrapper<T> implements ClusterStorageManager<T> {
-        private static final System.Logger LOGGER = System.getLogger(Wrapper.class.getName());
 
-        private final StorageManager delegate;
-        private final ShutdownCallback shutdownCallback;
-
-        private Wrapper(final StorageManager delegate, final ShutdownCallback shutdownCallback) {
-            this.delegate = delegate;
-            this.shutdownCallback = shutdownCallback;
-        }
-
-        @Override
-        public StorageConfiguration configuration() {
-            return this.delegate.configuration();
-        }
-
-        @Override
-        public StorageTypeDictionary typeDictionary() {
-            return this.delegate.typeDictionary();
-        }
-
-        @Override
-        public boolean shutdown() {
-            LOGGER.log(System.Logger.Level.INFO, "Shutting down ClusterStorageManager");
-            return ClusterStorageManager.shutdownWithCallback(this.delegate, this.shutdownCallback);
-        }
-
-        @Override
-        public StorageConnection createConnection() {
-            return this.delegate.createConnection();
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public Object setRoot(final Object newRoot) {
-            return this.delegate.setRoot(newRoot);
-        }
-
-        @Override
-        public long storeRoot() {
-            return this.delegate.storeRoot();
-        }
-
-        @Override
-        public PersistenceRootsView viewRoots() {
-            return this.delegate.viewRoots();
-        }
-
-        @Override
-        public Database database() {
-            return this.delegate.database();
-        }
-
-        @Override
-        public boolean isAcceptingTasks() {
-            return this.delegate.isAcceptingTasks();
-        }
-
-        @Override
-        public boolean isRunning() {
-            return this.delegate.isRunning();
-        }
-
-        @Override
-        public boolean isStartingUp() {
-            return this.delegate.isStartingUp();
-        }
-
-        @Override
-        public boolean isShuttingDown() {
-            return this.delegate.isShuttingDown();
-        }
-
-        @Override
-        public void checkAcceptingTasks() {
-            this.delegate.checkAcceptingTasks();
-        }
-
-        @Override
-        public long initializationTime() {
-            return this.delegate.initializationTime();
-        }
-
-        @Override
-        public long operationModeTime() {
-            return this.delegate.operationModeTime();
-        }
-
-        @Override
-        public boolean isActive() {
-            return this.delegate.isActive();
-        }
-
-        @Override
-        public boolean issueGarbageCollection(final long nanoTimeBudget) {
-            return this.delegate.issueGarbageCollection(nanoTimeBudget);
-        }
-
-        @Override
-        public boolean issueFileCheck(final long nanoTimeBudget) {
-            return this.delegate.issueFileCheck(nanoTimeBudget);
-        }
-
-        @Override
-        public boolean issueCacheCheck(final long nanoTimeBudget, final StorageEntityCacheEvaluator entityEvaluator) {
-            return this.delegate.issueCacheCheck(nanoTimeBudget, entityEvaluator);
-        }
-
-        @Override
-        public void issueFullBackup(
-                final StorageLiveFileProvider targetFileProvider,
-                final PersistenceTypeDictionaryExporter typeDictionaryExporter
-        ) {
-            this.delegate.issueFullBackup(targetFileProvider, typeDictionaryExporter);
-        }
-
-        @Override
-        public void issueTransactionsLogCleanup() {
-            this.delegate.issueTransactionsLogCleanup();
-        }
-
-        @Override
-        public boolean issueStorageFlush() {
-            return this.delegate.issueStorageFlush();
-        }
-
-        @Override
-        public StorageIntegrityCheckResult issueIntegrityCheck(final long nanoTimeBudget) {
-            return this.delegate.issueIntegrityCheck(nanoTimeBudget);
-        }
-
-        @Override
-        public StorageRawFileStatistics createStorageStatistics() {
-            return this.delegate.createStorageStatistics();
-        }
-
-        @Override
-        public void exportChannels(final StorageLiveFileProvider fileProvider, final boolean performGarbageCollection) {
-            this.delegate.exportChannels(fileProvider, performGarbageCollection);
-        }
-
-        @Override
-        public StorageEntityTypeExportStatistics exportTypes(
-                final StorageEntityTypeExportFileProvider exportFileProvider,
-                final Predicate<? super StorageEntityTypeHandler> isExportType
-        ) {
-            return this.delegate.exportTypes(exportFileProvider, isExportType);
-        }
-
-        @Override
-        public void importFiles(final XGettingEnum<AFile> importFiles) {
-            this.delegate.importFiles(importFiles);
-        }
-
-        @Override
-        public void importData(final XGettingEnum<ByteBuffer> importData) {
-            this.delegate.importData(importData);
-        }
-
-        @Override
-        public PersistenceManager<Binary> persistenceManager() {
-            return this.delegate.persistenceManager();
-        }
-
-        @Override
-        public int markUsedFor(final Object instance) {
-            return this.delegate.markUsedFor(instance);
-        }
-
-        @Override
-        public int unmarkUsedFor(final Object instance) {
-            return this.delegate.unmarkUsedFor(instance);
-        }
-
-        @Override
-        public boolean isUsed() {
-            return this.delegate.isUsed();
-        }
-
-        @Override
-        public int markUnused() {
-            return this.delegate.markUnused();
-        }
-
-        @Override
-        public void accessUsageMarks(final Consumer<? super XGettingEnum<Object>> logic) {
-            this.delegate.accessUsageMarks(logic);
-        }
-
-        @Override
-        public Lazy<T> root() throws NodeLibraryException {
-            return this.delegate.root();
-        }
-
-        @Override
-        public ClusterStorageManager<T> start() throws NodeLibraryException {
-            this.delegate.start();
-            return this;
-        }
-
-        @Override
-        public List<StorageAdjacencyDataExporter.AdjacencyFiles> exportAdjacencyData(final Path workingDir) {
-            return this.delegate.exportAdjacencyData(workingDir);
-        }
-    }
-
-        /// Adds size validation and distributed graph-write behavior to Store.
+        /// Adds the write gate, the raw-target gate, and shutdown handling to Store.
     ///
     /// @param <T> root type
     class Default<T> implements ClusterStorageManager<T> {
@@ -330,27 +159,45 @@ public interface ClusterStorageManager<T> extends StorageManager {
         private final StorageSizeValidation storageSizeValidation;
         private final StorageManager delegate;
         private final ShutdownCallback shutdownCallback;
+        private final StorageGraphCoordinator graphCoordinator;
+        private boolean callbackCompleted;
+        private boolean storeShutdownCompleted;
 
         private Default(
                 final StorageManager delegate,
                 final StorageSizeValidation storageSizeValidation,
-                final ShutdownCallback shutdownCallback
+                final ShutdownCallback shutdownCallback,
+                final StorageGraphCoordinator graphCoordinator
         ) {
             this.delegate = delegate;
             this.storageSizeValidation = storageSizeValidation;
             this.shutdownCallback = shutdownCallback;
+            this.graphCoordinator = graphCoordinator;
         }
 
         /* The limit gates only the write entry points (store, storeAll,
          * storeRoot, and Storer.commit). Reads, maintenance, registration,
          * and restore must keep working on a full disk so the node can
          * drain, back up, or recover instead of failing every operation. */
-        private void validateState() throws StorageLimitReachedException {
+        void validateState() throws StorageLimitReachedException {
             if (this.storageSizeValidation.isStorageLimitReached()) {
                 throw new StorageLimitReachedException(
                         "Can not store more objects in storage as the storage limit has been reached"
                 );
             }
+        }
+
+        void rejectApplicationImport() {
+            throw new UnsupportedOperationException(
+                    "Store imports are reserved for the node-owned replication and bootstrap paths");
+        }
+
+                /// Wraps the raw persistence target with this manager's write gate.
+        ///
+        /// @param raw unwrapped target
+        /// @return gated target
+        PersistenceTarget<Binary> gateTarget(final PersistenceTarget<Binary> raw) {
+            return new GatedPersistenceTarget(raw, this::validateState);
         }
 
         @Override
@@ -365,7 +212,13 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public StorageConnection createConnection() {
-            return this.delegate.createConnection();
+            /* A raw delegate connection would bypass this manager's write
+             * gates. The cluster manager is itself a valid StorageConnection;
+             * returning it keeps all connection-scoped calls on the guarded
+             * boundary. Replication and bootstrap imports intentionally use
+             * the node-owned embedded connection, never this application
+             * facade. */
+            return this;
         }
 
         @Override
@@ -393,12 +246,12 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public void importData(final XGettingEnum<ByteBuffer> importData) {
-            this.delegate.importData(importData);
+            this.rejectApplicationImport();
         }
 
         @Override
         public void importFiles(final XGettingEnum<AFile> importFiles) {
-            this.delegate.importFiles(importFiles);
+            this.rejectApplicationImport();
         }
 
         @Override
@@ -482,13 +335,39 @@ public interface ClusterStorageManager<T> extends StorageManager {
         @Override
         @SuppressWarnings("unchecked")
         public Object setRoot(final Object newRoot) {
+            this.validateState();
             return this.delegate.setRoot(newRoot);
         }
 
         @Override
-        public boolean shutdown() {
+        public synchronized boolean shutdown() {
+            if (this.callbackCompleted && this.storeShutdownCompleted) {
+                return false;
+            }
             LOGGER.log(System.Logger.Level.INFO, "Shutting down ClusterStorageManager");
-            return ClusterStorageManager.shutdownWithCallback(this.delegate, this.shutdownCallback);
+            Throwable failure = null;
+            boolean result = false;
+            if (!this.callbackCompleted) {
+                try {
+                    this.shutdownCallback.onShutdown();
+                    this.callbackCompleted = true;
+                } catch (final Throwable callbackFailure) {
+                    failure = callbackFailure;
+                }
+            }
+            if (!this.storeShutdownCompleted) {
+                try {
+                    result = this.delegate.shutdown();
+                    this.storeShutdownCompleted = true;
+                } catch (final Throwable shutdownFailure) {
+                    if (failure == null) failure = shutdownFailure;
+                    else if (failure != shutdownFailure) failure.addSuppressed(shutdownFailure);
+                }
+            }
+            if (failure instanceof Error error) throw error;
+            if (failure instanceof RuntimeException runtime) throw runtime;
+            if (failure != null) throw new IllegalStateException("failed to shut down cluster storage", failure);
+            return result;
         }
 
         @Override
@@ -573,7 +452,35 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public Lazy<T> root() {
+            /* Writers own their image and mutate it through store(); returning
+             * the live reference preserves the Store write flow. Readers
+             * override this to throw: a live reference would escape the
+             * coordinator read lock and observe a half-materialized batch. */
             return this.delegate.root();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <R> R readRoot(final Function<? super T, ? extends R> action) {
+            notNull(action);
+            return this.graphCoordinator.read(() -> {
+                final Object raw = this.delegate.root();
+                final T value = raw instanceof Lazy<?> lazy ? (T) lazy.get() : (T) raw;
+                final R result = action.apply(value);
+                /* Even readRoot(root -> root) would hand a mutable graph object
+                 * to traversal after the lock is released. Reject direct
+                 * escapes; callers must copy what they need inside the closure. */
+                if (result != null && (result == value || result == raw)) {
+                    throw new IllegalStateException(
+                            "readRoot action must not return the live root; copy the needed state inside the closure");
+                }
+                return result;
+            });
+        }
+
+        @Override
+        public StorageGraphCoordinator graphCoordinator() {
+            return this.graphCoordinator;
         }
 
         @Override
@@ -716,6 +623,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
                     final long highestTypeId,
                     final long highestObjectId
             ) {
+                ClusterStorageManager.Default.this.validateState();
                 this.delegate.updateMetadata(typeDictionary, highestTypeId, highestObjectId);
             }
 
@@ -736,7 +644,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public PersistenceRootsView viewRoots() {
-                return this.delegate.viewRoots();
+                return ClusterStorageManager.Default.this.viewRoots();
             }
 
             @Override
@@ -746,7 +654,9 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public PersistenceManager<Binary> updateCurrentObjectId(final long currentObjectId) {
-                return this.delegate.updateCurrentObjectId(currentObjectId);
+                ClusterStorageManager.Default.this.validateState();
+                this.delegate.updateCurrentObjectId(currentObjectId);
+                return this;
             }
 
             @Override
@@ -756,7 +666,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public PersistenceTarget<Binary> target() {
-                return this.delegate.target();
+                return ClusterStorageManager.Default.this.gateTarget(this.delegate.target());
             }
 
             @Override
@@ -766,13 +676,8 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
 
                 /// Registers binary types through the cluster manager boundary.
-        private static final class ClusterPersistenceRegistererAdapter implements PersistenceRegisterer {
-            private final PersistenceRegisterer delegate;
-
-            private ClusterPersistenceRegistererAdapter(final PersistenceRegisterer delegate) {
-                this.delegate = delegate;
-            }
-
+        private record ClusterPersistenceRegistererAdapter(PersistenceRegisterer delegate)
+                implements PersistenceRegisterer {
             @Override
             public <U> long apply(final U instance) {
                 return this.delegate.apply(instance);
@@ -888,17 +793,20 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public Storer reinitialize() {
-                return this.storer.reinitialize();
+                this.storer.reinitialize();
+                return this;
             }
 
             @Override
             public Storer reinitialize(final long initialCapacity) {
-                return this.storer.reinitialize(initialCapacity);
+                this.storer.reinitialize(initialCapacity);
+                return this;
             }
 
             @Override
             public Storer ensureCapacity(final long desiredCapacity) {
-                return this.storer.ensureCapacity(desiredCapacity);
+                this.storer.ensureCapacity(desiredCapacity);
+                return this;
             }
 
             @Override
@@ -915,6 +823,101 @@ public interface ClusterStorageManager<T> extends StorageManager {
             public void registerRegistrationListener(final PersistenceObjectRegistrationListener listener) {
                 this.storer.registerRegistrationListener(listener);
             }
+        }
+    }
+
+        /// Rejects application writes while keeping reads, maintenance, and
+    /// restore working. Replication uses the unwrapped Store connection owned
+    /// by the node; exposing import through this application-facing view would
+    /// let a reader manufacture an unreplicated local image.
+    ///
+    /// The write gate always throws [ReaderWriteRejectedException], which
+    /// flows through the inherited `store`, `storeAll`, `storeRoot`,
+    /// `setRoot`, storer `commit`, raw-target `write`, and import paths.
+    ///
+    /// Object-ID assignment (`createRegisterer`, `ensureObjectId*`,
+    /// `lookupObjectId`) is deliberately ungated: it only hands out in-memory
+    /// identifiers from the local registry and persists nothing by itself. A
+    /// divergent Store image can only be persisted through a gated write
+    /// entry point, so ID assignment stays read-safe while every durable
+    /// mutation is rejected.
+    ///
+    /// @param <T> root type
+    final class ReadOnly<T> extends Default<T> {
+        private ReadOnly(final StorageManager delegate, final ShutdownCallback shutdownCallback,
+                         final StorageGraphCoordinator graphCoordinator) {
+            super(delegate, () -> false, shutdownCallback, graphCoordinator);
+        }
+
+        @Override
+        void validateState() {
+            throw new ReaderWriteRejectedException(
+                    "node role is read-only; application writes are rejected because they would diverge from the writer");
+        }
+
+        @Override
+        void rejectApplicationImport() {
+            throw new ReaderWriteRejectedException(
+                    "node role is read-only; application imports are reserved for the node-owned paths");
+        }
+
+        @Override
+        PersistenceTarget<Binary> gateTarget(final PersistenceTarget<Binary> raw) {
+            return RejectingPersistenceTarget.New(raw);
+        }
+
+        @Override
+        @Deprecated(forRemoval = true)
+        public Lazy<T> root() {
+            /* The merger applies batches on the coordinator write side; a live
+             * reference returned here would be traversed after the read lock is
+             * gone. Application readers must use readRoot(...) or
+             * graphCoordinator().read(...). */
+            throw new UnsupportedOperationException(
+                    "use readRoot(...) for a coherent graph read; root() cannot retain the coordinator read lock");
+        }
+
+        @Override
+        public PersistenceRootsView viewRoots() {
+            throw new UnsupportedOperationException(
+                    "use readRoot(...) for a coherent graph read; viewRoots() exposes live roots");
+        }
+
+    }
+
+        /// Validates the write gate before every raw-target write.
+    ///
+    /// The persistence manager's raw target otherwise bypasses the storer
+    /// `commit` gate, so a fluent binary write would escape storage-limit
+    /// enforcement on writers and application-write rejection on readers.
+    final class GatedPersistenceTarget implements PersistenceTarget<Binary> {
+        private final PersistenceTarget<Binary> delegate;
+        private final Runnable writeGate;
+
+        private GatedPersistenceTarget(final PersistenceTarget<Binary> delegate, final Runnable writeGate) {
+            this.delegate = delegate;
+            this.writeGate = writeGate;
+        }
+
+        @Override
+        public boolean isWritable() {
+            return this.delegate.isWritable();
+        }
+
+        @Override
+        public void write(final Binary data) {
+            this.writeGate.run();
+            this.delegate.write(data);
+        }
+
+        @Override
+        public void prepareTarget() {
+            this.delegate.prepareTarget();
+        }
+
+        @Override
+        public void closeTarget() {
+            this.delegate.closeTarget();
         }
     }
 }

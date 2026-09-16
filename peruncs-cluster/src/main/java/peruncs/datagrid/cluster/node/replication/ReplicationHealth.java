@@ -54,9 +54,6 @@ public interface ReplicationHealth extends AutoCloseable {
         }
     }
 
-        /// Initializes provider-side health probes and counters.
-    void init() throws NodeLibraryException;
-
     @Override
     void close();
 

@@ -4,7 +4,10 @@ import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.ByteOrder;
+import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
@@ -18,14 +21,17 @@ import java.util.zip.CRC32C;
 /// binary through Aeron. A transaction is visible only after its commit marker
 /// and full-binary checksum pass validation.
 ///
-/// The checksum detects accidental corruption. It is not authentication, so
-/// deployments that cross a trust boundary must protect the Aeron channels.
+/// The checksum detects accidental corruption. Configured deployments also append
+/// an HMAC-SHA256 tag, which prevents an untrusted publisher from forging a
+/// transaction or terminal marker on the Aeron channel.
 public final class AeronReplicationEnvelope {
     public static final int MAGIC = 0x44474152; // DGAR
         /// Wire version with a checksum covering every decision-bearing header field.
-    public static final short VERSION = 2;
+    public static final short VERSION = 3;
         /// Header bytes, including the final header CRC32C at offset 64.
-    public static final int HEADER_LENGTH = 68;
+    public static final int HEADER_LENGTH = 76;
+        /// Authentication tag bytes appended after the payload when a key is configured.
+    public static final int HMAC_LENGTH = 32;
         /// Largest logical transaction payload accepted on the wire.
     public static final int MAX_MESSAGE_LENGTH = 64 * 1024 * 1024;
         /// Largest chunk count accepted for one logical payload.
@@ -35,7 +41,20 @@ public final class AeronReplicationEnvelope {
      * is carried through nested codec calls with ScopedValue. It is never retained
      * by a platform or virtual thread. */
     private static final ScopedValue<ChecksumContext> CHECKSUM_CONTEXT = ScopedValue.newInstance();
-    private static final int HEADER_CRC_OFFSET = 64;
+    private static final int HEADER_CRC_OFFSET = 72;
+    private static final String HMAC_ALGORITHM = "HmacSHA256";
+    private static final SecretKeySpec DUMMY_KEY = new SecretKeySpec(new byte[16], HMAC_ALGORITHM);
+    private static final ThreadLocal<Mac> HMAC = ThreadLocal.withInitial(() -> {
+        try {
+            return Mac.getInstance(HMAC_ALGORITHM);
+        } catch (final GeneralSecurityException failure) {
+            throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
+        }
+    });
+    private static final ThreadLocal<CachedKey> HMAC_KEY = ThreadLocal.withInitial(() -> new CachedKey(null, null));
+    private static final ThreadLocal<byte[]> HMAC_EXPECTED = ThreadLocal.withInitial(() -> new byte[HMAC_LENGTH]);
+    private static final ThreadLocal<byte[]> HMAC_RECEIVED = ThreadLocal.withInitial(() -> new byte[HMAC_LENGTH]);
+    private static final ThreadLocal<byte[]> HMAC_STREAM = ThreadLocal.withInitial(() -> new byte[16 * 1024]);
 
     private AeronReplicationEnvelope() {
     }
@@ -65,6 +84,19 @@ public final class AeronReplicationEnvelope {
         return ScopedValue.where(CHECKSUM_CONTEXT, context).call(operation::get);
     }
 
+        /// Clears authentication material retained by the current worker thread.
+    /// Call when a reader or publisher thread is shutting down so a thread-local
+    /// key schedule cannot outlive the transport that supplied it.
+    public static void clearThreadLocalAuthenticationState() {
+        final CachedKey cached = HMAC_KEY.get();
+        if (cached.secret != null) Arrays.fill(cached.secret, (byte) 0);
+        HMAC_KEY.remove();
+        HMAC_EXPECTED.remove();
+        HMAC_RECEIVED.remove();
+        HMAC_STREAM.remove();
+        HMAC.remove();
+    }
+
         /// Returns whether a wire kind carries transaction data rather than a terminal marker.
     public static boolean isPayloadKindCode(final int code) {
         return code == Kind.TYPE_DICTIONARY.code || code == Kind.STORE_BINARY.code;
@@ -77,6 +109,7 @@ public final class AeronReplicationEnvelope {
     /// @param targetOffset  destination offset
     /// @param clusterId     replication cluster identity
     /// @param epoch         writer epoch
+    /// @param fencingToken  writer fencing token; readers reject stale tokens
     /// @param sequence      transaction sequence
     /// @param kind          envelope kind
     /// @param payloadLength logical, unchunked payload length
@@ -94,6 +127,7 @@ public final class AeronReplicationEnvelope {
             final int targetOffset,
             final UUID clusterId,
             final long epoch,
+            final long fencingToken,
             final long sequence,
             final Kind kind,
             final int payloadLength,
@@ -105,9 +139,21 @@ public final class AeronReplicationEnvelope {
             final int payloadOffset,
             final int chunkLength
     ) {
-        return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, sequence, kind, payloadLength,
-                chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength,
-                crc32c(payload, payloadOffset, chunkLength));
+        return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, fencingToken, sequence, kind,
+                payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset,
+                chunkLength, crc32c(payload, payloadOffset, chunkLength), null);
+    }
+
+        /// Encodes an envelope and appends an HMAC tag when a secret is supplied.
+    public static int encode(
+            final MutableDirectBuffer target, final int targetOffset, final UUID clusterId,
+            final long epoch, final long fencingToken, final long sequence, final Kind kind,
+            final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
+            final int commitCrc32c, final DirectBuffer payload, final int payloadOffset,
+            final int chunkLength, final byte[] secret) {
+        return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, fencingToken, sequence, kind,
+                payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset,
+                chunkLength, crc32c(payload, payloadOffset, chunkLength), secret);
     }
 
         /// Encodes an envelope when the caller already computed the payload checksum
@@ -118,6 +164,7 @@ public final class AeronReplicationEnvelope {
     /// @param targetOffset  destination offset
     /// @param clusterId     replication cluster identity
     /// @param epoch         writer epoch
+    /// @param fencingToken  writer fencing token; readers reject stale tokens
     /// @param sequence      transaction sequence
     /// @param kind          envelope kind
     /// @param payloadLength logical payload length
@@ -136,6 +183,7 @@ public final class AeronReplicationEnvelope {
             final int targetOffset,
             final UUID clusterId,
             final long epoch,
+            final long fencingToken,
             final long sequence,
             final Kind kind,
             final int payloadLength,
@@ -147,17 +195,18 @@ public final class AeronReplicationEnvelope {
             final int payloadOffset,
             final int chunkLength,
             final int payloadCrc32c) {
-        final ChecksumContext context = checksumContext();
-        return encodeWithPayloadCrcInternal(target, targetOffset, clusterId, epoch, sequence, kind, payloadLength,
-                chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength,
-                payloadCrc32c, context);
+        return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, fencingToken, sequence, kind,
+                payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset,
+                chunkLength, payloadCrc32c, null);
     }
 
-    private static int encodeWithPayloadCrcInternal(
+        /// Encodes an envelope using a staged payload checksum and optional HMAC key.
+    public static int encodeWithPayloadCrc(
             final MutableDirectBuffer target,
             final int targetOffset,
             final UUID clusterId,
             final long epoch,
+            final long fencingToken,
             final long sequence,
             final Kind kind,
             final int payloadLength,
@@ -169,12 +218,40 @@ public final class AeronReplicationEnvelope {
             final int payloadOffset,
             final int chunkLength,
             final int payloadCrc32c,
+            final byte[] secret) {
+        final ChecksumContext context = checksumContext();
+        return encodeWithPayloadCrcInternal(target, targetOffset, clusterId, epoch, fencingToken, sequence, kind,
+                payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset,
+                chunkLength, payloadCrc32c, secret, context);
+    }
+
+    private static int encodeWithPayloadCrcInternal(
+            final MutableDirectBuffer target,
+            final int targetOffset,
+            final UUID clusterId,
+            final long epoch,
+            final long fencingToken,
+            final long sequence,
+            final Kind kind,
+            final int payloadLength,
+            final int chunkIndex,
+            final int chunkCount,
+            final int chunkOffset,
+            final int commitCrc32c,
+            final DirectBuffer payload,
+            final int payloadOffset,
+            final int chunkLength,
+            final int payloadCrc32c,
+            final byte[] secret,
             final ChecksumContext context
     ) {
-        validate(clusterId, epoch, sequence, kind, payloadLength, chunkIndex, chunkCount,
+        validate(clusterId, epoch, fencingToken, sequence, kind, payloadLength, chunkIndex, chunkCount,
                 chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength);
         final int encodedLength = Math.addExact(HEADER_LENGTH, chunkLength);
-        if (target == null || targetOffset < 0 || targetOffset > target.capacity() - encodedLength) {
+        final int requiredLength = secret == null
+                ? encodedLength
+                : Math.addExact(encodedLength, HMAC_LENGTH);
+        if (target == null || targetOffset < 0 || targetOffset > target.capacity() - requiredLength) {
             throw new IllegalArgumentException("target buffer is too small");
         }
         target.putInt(targetOffset, MAGIC, ByteOrder.BIG_ENDIAN);
@@ -191,6 +268,7 @@ public final class AeronReplicationEnvelope {
         target.putInt(targetOffset + 44, commitCrc32c, ByteOrder.BIG_ENDIAN);
         target.putLong(targetOffset + 48, clusterId.getMostSignificantBits(), ByteOrder.BIG_ENDIAN);
         target.putLong(targetOffset + 56, clusterId.getLeastSignificantBits(), ByteOrder.BIG_ENDIAN);
+        target.putLong(targetOffset + 64, fencingToken, ByteOrder.BIG_ENDIAN);
         target.putInt(targetOffset + HEADER_CRC_OFFSET,
                 context.compute(target, targetOffset, HEADER_CRC_OFFSET), ByteOrder.BIG_ENDIAN);
         // The publisher can stage a multi-buffer chunk directly in the destination
@@ -198,12 +276,15 @@ public final class AeronReplicationEnvelope {
         if (payload != target || payloadOffset != targetOffset + HEADER_LENGTH) {
             target.putBytes(targetOffset + HEADER_LENGTH, payload, payloadOffset, chunkLength);
         }
-        return encodedLength;
+        if (secret == null) return encodedLength;
+        authenticateInto(target, targetOffset, encodedLength, secret, target, targetOffset + encodedLength);
+        return requiredLength;
     }
 
     private static void validate(
             final UUID clusterId,
             final long epoch,
+            final long fencingToken,
             final long sequence,
             final Kind kind,
             final int payloadLength,
@@ -218,7 +299,7 @@ public final class AeronReplicationEnvelope {
         Objects.requireNonNull(clusterId, "clusterId");
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(payload, "payload");
-        if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
+        if (epoch < 0 || fencingToken <= 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
             payloadLength > MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
             chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
@@ -256,11 +337,28 @@ public final class AeronReplicationEnvelope {
     /// Use the reusable view overload in a reader. This method is kept for
     /// tests and callers that need an owned byte array.
     public static Envelope decode(final DirectBuffer source, final int offset, final int length) {
-        final EnvelopeView view = decodeView(source, offset, length);
+        return copyToOwned(source, decodeView(source, offset, length));
+    }
+
+        /// Decodes and authenticates one envelope with the supplied HMAC key.
+    public static Envelope decode(final DirectBuffer source, final int offset, final int length,
+                                  final byte[] secret) {
+        return decode(source, offset, length, secret, null);
+    }
+
+        /// Decodes one envelope, accepting the retiring key during rotation overlap.
+    public static Envelope decode(final DirectBuffer source, final int offset, final int length,
+                                  final byte[] primarySecret, final byte[] previousSecret) {
+        return copyToOwned(source,
+                decodeView(source, offset, length, new EnvelopeView(), primarySecret, previousSecret));
+    }
+
+        /// Copies a decoded view's payload into an owned envelope.
+    private static Envelope copyToOwned(final DirectBuffer source, final EnvelopeView view) {
         final byte[] payload = new byte[view.payloadLengthOnWire];
         source.getBytes(view.payloadOffset, payload);
-        return new Envelope(view.clusterId(), view.epoch, view.sequence, view.kind, view.payloadLength,
-                view.chunkIndex, view.chunkCount, view.chunkOffset, view.commitCrc32c, payload);
+        return new Envelope(view.clusterId(), view.epoch, view.fencingToken, view.sequence, view.kind,
+                view.payloadLength, view.chunkIndex, view.chunkCount, view.chunkOffset, view.commitCrc32c, payload);
     }
 
         /// Convenience form for codec tests; production readers use the reusable view.
@@ -282,21 +380,45 @@ public final class AeronReplicationEnvelope {
             final int length,
             final EnvelopeView view
     ) {
-        return withChecksumContext(view.checksumContext, () -> decodeViewInternal(source, offset, length, view));
+        return decodeView(source, offset, length, view, null);
+    }
+
+        /// Decodes into a reusable view and verifies the optional HMAC key.
+    public static EnvelopeView decodeView(
+            final DirectBuffer source, final int offset, final int length,
+            final EnvelopeView view, final byte[] secret) {
+        return decodeView(source, offset, length, view, secret, null);
+    }
+
+        /// Decodes into a reusable view, accepting the retiring key during rotation overlap.
+    ///
+    /// Verification tries the primary key first and falls back to the
+    /// previous key, so a reader keeps accepting frames the writer signed
+    /// before the rotation. Both keys are legitimate cluster secrets, so the
+    /// try order leaks nothing a forged frame could exploit: it fails both
+    /// either way. A `null` previous key behaves exactly like [#decodeView(DirectBuffer,int,int,EnvelopeView,byte[])].
+    public static EnvelopeView decodeView(
+            final DirectBuffer source, final int offset, final int length,
+            final EnvelopeView view, final byte[] primarySecret, final byte[] previousSecret) {
+        return withChecksumContext(view.checksumContext,
+                () -> decodeViewInternal(source, offset, length, view, primarySecret, previousSecret));
     }
 
     private static EnvelopeView decodeViewInternal(
             final DirectBuffer source,
             final int offset,
             final int length,
-            final EnvelopeView view
+            final EnvelopeView view,
+            final byte[] primarySecret,
+            final byte[] previousSecret
     ) {
         Objects.requireNonNull(view, "view");
         /* Invalidate a reused view before reading any new bytes. If parsing
          * fails halfway through, callers cannot accidentally observe the
          * previous frame through a stale view. */
         view.clear();
-        if (source == null || offset < 0 || length < HEADER_LENGTH || length > source.capacity() ||
+        final int authenticationLength = primarySecret == null ? 0 : HMAC_LENGTH;
+        if (source == null || offset < 0 || length < HEADER_LENGTH + authenticationLength || length > source.capacity() ||
             offset > source.capacity() - length) {
             throw new ReplicationWireException("truncated envelope");
         }
@@ -314,21 +436,26 @@ public final class AeronReplicationEnvelope {
         }
         final Kind kind = Kind.fromCode(kindCode);
         final long epoch = source.getLong(offset + 8, ByteOrder.BIG_ENDIAN);
+        final long fencingToken = source.getLong(offset + 64, ByteOrder.BIG_ENDIAN);
+        if (fencingToken <= 0) {
+            throw new ReplicationWireException("envelope carries no writer fencing token");
+        }
         final long sequence = source.getLong(offset + 16, ByteOrder.BIG_ENDIAN);
         final int payloadLength = source.getInt(offset + 24, ByteOrder.BIG_ENDIAN);
         final int chunkIndex = source.getInt(offset + 28, ByteOrder.BIG_ENDIAN);
         final int chunkCount = source.getInt(offset + 32, ByteOrder.BIG_ENDIAN);
         final int chunkOffset = source.getInt(offset + 36, ByteOrder.BIG_ENDIAN);
+        final int payloadOnWire = length - HEADER_LENGTH - authenticationLength;
         if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
             payloadLength > MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
             chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 ||
             (kind != Kind.COMMIT && kind != Kind.ABORT &&
-             (length - HEADER_LENGTH > payloadLength ||
-              (chunkIndex == chunkCount - 1 && (long) chunkOffset + length - HEADER_LENGTH != payloadLength)))) {
+             (payloadOnWire > payloadLength ||
+              (chunkIndex == chunkCount - 1 && (long) chunkOffset + payloadOnWire != payloadLength)))) {
             throw new ReplicationWireException("invalid envelope bounds");
         }
-        if ((kind == Kind.COMMIT || kind == Kind.ABORT) && length != HEADER_LENGTH) {
+        if ((kind == Kind.COMMIT || kind == Kind.ABORT) && length != HEADER_LENGTH + authenticationLength) {
             throw new ReplicationWireException("marker carries a payload");
         }
         if ((kind == Kind.COMMIT || kind == Kind.ABORT) &&
@@ -336,7 +463,6 @@ public final class AeronReplicationEnvelope {
                     ByteOrder.BIG_ENDIAN) != 0))) {
             throw new ReplicationWireException("non-canonical terminal marker");
         }
-        final int payloadOnWire = length - HEADER_LENGTH;
         if (kind != Kind.COMMIT && kind != Kind.ABORT &&
             ((long) chunkOffset + payloadOnWire > payloadLength)) {
             throw new ReplicationWireException("chunk exceeds logical payload length");
@@ -351,9 +477,14 @@ public final class AeronReplicationEnvelope {
         if (source.getInt(offset + 40, ByteOrder.BIG_ENDIAN) != crc32c(source, offset + HEADER_LENGTH, payloadOnWire)) {
             throw new ReplicationWireException("payload CRC32C mismatch");
         }
+        if (primarySecret != null && !verifyAuthentication(source, offset, HEADER_LENGTH + payloadOnWire, primarySecret) &&
+            (previousSecret == null ||
+             !verifyAuthentication(source, offset, HEADER_LENGTH + payloadOnWire, previousSecret))) {
+            throw new ReplicationWireException("envelope HMAC-SHA256 mismatch");
+        }
         view.set(source, offset + HEADER_LENGTH, payloadOnWire,
                 source.getLong(offset + 48, ByteOrder.BIG_ENDIAN),
-                source.getLong(offset + 56, ByteOrder.BIG_ENDIAN), epoch, sequence, kind,
+                source.getLong(offset + 56, ByteOrder.BIG_ENDIAN), epoch, fencingToken, sequence, kind,
                 payloadLength, chunkIndex, chunkCount, chunkOffset, source.getInt(offset + 44, ByteOrder.BIG_ENDIAN));
         return view;
     }
@@ -380,6 +511,78 @@ public final class AeronReplicationEnvelope {
         }
         return CHECKSUM_CONTEXT.get();
     }
+
+        /// Feeds one buffer range into an initialized MAC through the shared stream
+    /// chunk, so checksums and tags never retain a frame-sized copy.
+    ///
+    /// @return the shared chunk for caller-side wiping
+    private static byte[] updateChunked(final Mac mac, final DirectBuffer source,
+                                        final int offset, final int length) {
+        final byte[] bytes = HMAC_STREAM.get();
+        for (int copied = 0; copied < length; ) {
+            final int amount = Math.min(bytes.length, length - copied);
+            source.getBytes(offset + copied, bytes, 0, amount);
+            mac.update(bytes, 0, amount);
+            copied += amount;
+        }
+        return bytes;
+    }
+
+    private static void authenticateInto(final DirectBuffer source, final int offset, final int length,
+                                         final byte[] secret, final MutableDirectBuffer target,
+                                         final int targetOffset) {
+        if (secret == null || secret.length < 16) {
+            throw new IllegalArgumentException("authentication secret must contain at least 16 bytes");
+        }
+        final Mac mac = HMAC.get();
+        try {
+            mac.init(cachedKey(secret));
+            final byte[] bytes = updateChunked(mac, source, offset, length);
+            final byte[] tag = HMAC_EXPECTED.get();
+            mac.doFinal(tag, 0);
+            target.putBytes(targetOffset, tag, 0, HMAC_LENGTH);
+            Arrays.fill(tag, (byte) 0);
+            Arrays.fill(bytes, (byte) 0);
+        } catch (final GeneralSecurityException failure) {
+            throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
+        } finally {
+            try { mac.init(DUMMY_KEY); } catch (final GeneralSecurityException ignored) { }
+        }
+    }
+
+    private static boolean verifyAuthentication(final DirectBuffer source, final int offset, final int covered,
+                                                final byte[] secret) {
+        final byte[] expected = HMAC_EXPECTED.get();
+        final byte[] received = HMAC_RECEIVED.get();
+        try {
+            final Mac mac = HMAC.get();
+            mac.init(cachedKey(secret));
+            final byte[] bytes = updateChunked(mac, source, offset, covered);
+            mac.doFinal(expected, 0);
+            source.getBytes(offset + covered, received, 0, HMAC_LENGTH);
+            Arrays.fill(bytes, (byte) 0);
+            return java.security.MessageDigest.isEqual(expected, received);
+        } catch (final GeneralSecurityException failure) {
+            throw new IllegalStateException("HMAC-SHA256 is unavailable", failure);
+        } finally {
+            Arrays.fill(expected, (byte) 0);
+            Arrays.fill(received, (byte) 0);
+        }
+    }
+
+    private static SecretKeySpec cachedKey(final byte[] secret) {
+        final CachedKey cached = HMAC_KEY.get();
+        if (cached.spec == null || !Arrays.equals(cached.secret, secret)) {
+            final byte[] copy = secret.clone();
+            final CachedKey replacement = new CachedKey(copy, new SecretKeySpec(copy, HMAC_ALGORITHM));
+            if (cached.secret != null) Arrays.fill(cached.secret, (byte) 0);
+            HMAC_KEY.set(replacement);
+            return replacement.spec;
+        }
+        return cached.spec;
+    }
+
+    private record CachedKey(byte[] secret, SecretKeySpec spec) { }
 
         /// Identifies the data or terminal marker carried by an envelope.
     public enum Kind {
@@ -421,6 +624,7 @@ public final class AeronReplicationEnvelope {
         private long clusterMostSignificantBits;
         private long clusterLeastSignificantBits;
         private long epoch;
+        private long fencingToken;
         private long sequence;
         private Kind kind;
         private int payloadLength;
@@ -439,6 +643,7 @@ public final class AeronReplicationEnvelope {
             this.clusterMostSignificantBits = 0L;
             this.clusterLeastSignificantBits = 0L;
             this.epoch = 0L;
+            this.fencingToken = 0L;
             this.sequence = 0L;
             this.kind = null;
             this.payloadLength = 0;
@@ -450,14 +655,16 @@ public final class AeronReplicationEnvelope {
 
         void set(final DirectBuffer source, final int payloadOffset, final int payloadLengthOnWire,
                  final long clusterMostSignificantBits, final long clusterLeastSignificantBits,
-                 final long epoch, final long sequence, final Kind kind, final int payloadLength,
-                 final int chunkIndex, final int chunkCount, final int chunkOffset, final int commitCrc32c) {
+                 final long epoch, final long fencingToken, final long sequence, final Kind kind,
+                 final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
+                 final int commitCrc32c) {
             this.source = source;
             this.payloadOffset = payloadOffset;
             this.payloadLengthOnWire = payloadLengthOnWire;
             this.clusterMostSignificantBits = clusterMostSignificantBits;
             this.clusterLeastSignificantBits = clusterLeastSignificantBits;
             this.epoch = epoch;
+            this.fencingToken = fencingToken;
             this.sequence = sequence;
             this.kind = kind;
             this.payloadLength = payloadLength;
@@ -478,6 +685,10 @@ public final class AeronReplicationEnvelope {
 
         public long epoch() {
             return this.epoch;
+        }
+
+        public long fencingToken() {
+            return this.fencingToken;
         }
 
         public long sequence() {
@@ -528,6 +739,7 @@ public final class AeronReplicationEnvelope {
     ///
     /// @param clusterId expected cluster identity
     /// @param epoch expected writer epoch
+    /// @param fencingToken writer fencing token
     /// @param sequence transaction sequence
     /// @param kind frame kind
     /// @param payloadLength logical payload length in bytes
@@ -539,6 +751,7 @@ public final class AeronReplicationEnvelope {
     public record Envelope(
             UUID clusterId,
             long epoch,
+            long fencingToken,
             long sequence,
             Kind kind,
             int payloadLength,
@@ -583,6 +796,7 @@ public final class AeronReplicationEnvelope {
             if (this == other) return true;
             if (!(other instanceof Envelope envelope)) return false;
             return this.epoch == envelope.epoch
+                    && this.fencingToken == envelope.fencingToken
                     && this.sequence == envelope.sequence
                     && this.payloadLength == envelope.payloadLength
                     && this.chunkIndex == envelope.chunkIndex
@@ -596,7 +810,7 @@ public final class AeronReplicationEnvelope {
 
         @Override
         public int hashCode() {
-            int result = Objects.hash(this.clusterId, this.epoch, this.sequence, this.kind,
+            int result = Objects.hash(this.clusterId, this.epoch, this.fencingToken, this.sequence, this.kind,
                     this.payloadLength, this.chunkIndex, this.chunkCount, this.chunkOffset,
                     this.commitCrc32c);
             return 31 * result + Arrays.hashCode(this.payload);

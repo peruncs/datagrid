@@ -63,6 +63,7 @@ class AeronReplicationMonitoringTest {
                 if ("ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH".equals(name)) {
                     return root.resolve("checkpoint/writer.checkpoint").toString();
                 }
+                if ("ECLIPSE_DATAGRID_BACKUP_PATH".equals(name)) return root.resolve("backups").toString();
                 return overrideName != null && overrideName.equals(name) ? overrideValue : null;
             }
         };
@@ -88,7 +89,6 @@ class AeronReplicationMonitoringTest {
             positionProvider.latest();
             final StorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
             final ReplicationHealth health = transport.health(() -> true, client);
-            health.init();
             assertEquals("aeron", transport.id());
             assertTrue(health.isReady());
             assertTrue(health.isHealthy());
@@ -214,7 +214,6 @@ class AeronReplicationMonitoringTest {
                         Long.toString(Long.MAX_VALUE)))) {
             final StorageBinaryDataClient client = transport.client(null, "stream", null, null, false);
             final ReplicationHealth health = transport.health(() -> true, client);
-            health.init();
             assertFalse(health.isReady());
             assertFalse(health.isHealthy());
             assertEquals(ReplicationHealth.State.DEGRADED_ARCHIVE, health.state());
@@ -244,10 +243,80 @@ class AeronReplicationMonitoringTest {
                         "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=min")));
     }
 
+        /// A lease stored inside the Aeron driver tree is deleted by the next
+    /// driver start, so the wiring is rejected instead of silently losing it.
+    @Test
+    void rejectsLeaseDirectoryInsideAeronDirectory() {
+        final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
+                "datagrid-lease-overlap-%s".formatted(UUID.randomUUID()));
+        final NodeLibraryPropertiesProvider properties = new NodeLibraryPropertiesProvider.Env() {
+            @Override
+            public String replicationRole() {
+                return "writer";
+            }
+
+            @Override
+            public boolean replicationRoleConfigured() {
+                return true;
+            }
+
+            @Override
+            public String replicationProperty(final String name) {
+                return switch (name) {
+                    case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", "ECLIPSE_DATAGRID_AERON_NODE_ID",
+                            "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> UUID.randomUUID().toString();
+                    case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
+                    case "ECLIPSE_DATAGRID_BACKUP_PATH" -> root.resolve("driver/backups").toString();
+                    default -> null;
+                };
+            }
+        };
+
+        final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> new AeronClusterReplicationTransportProvider().create(properties));
+        assertTrue(failure.getMessage().contains("must not overlap"), failure.getMessage());
+    }
+
+        /// A writer without a shared lease directory cannot fence, so writer
+    /// startup fails with an actionable error instead of publishing unfenced.
+    @Test
+    void writerWithoutSharedLeaseDirectoryFailsAtStartup() {
+        final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
+                "datagrid-lease-absent-%s".formatted(UUID.randomUUID()));
+        final NodeLibraryPropertiesProvider properties = new NodeLibraryPropertiesProvider.Env() {
+            @Override
+            public String replicationRole() {
+                return "writer";
+            }
+
+            @Override
+            public boolean replicationRoleConfigured() {
+                return true;
+            }
+
+            @Override
+            public String replicationProperty(final String name) {
+                return switch (name) {
+                    case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", "ECLIPSE_DATAGRID_AERON_NODE_ID",
+                            "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> UUID.randomUUID().toString();
+                    case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
+                    default -> null;
+                };
+            }
+        };
+        try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
+                .create(properties)) {
+            final StorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+
+            final IllegalStateException failure = assertThrows(IllegalStateException.class,
+                    () -> transport.persistenceTargetFactory("stream", distributor));
+            assertTrue(failure.getMessage().contains("shared lease directory"), failure.getMessage());
+        }
+    }
+
         /// Verifies rejection of malformed numeric and production temporary directory settings.
     @Test
-    void rejectsMalformedNumericAndProductionTemporaryDirectorySettings() {
-        assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
+    void rejectsMalformedNumericAndProductionTemporaryDirectorySettings() {        assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
                 .create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_EPOCH", "not-a-number")));
         final NodeLibraryPropertiesProvider production = new NodeLibraryPropertiesProvider.Env() {
             @Override
