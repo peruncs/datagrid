@@ -9,7 +9,6 @@ import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.lang.ref.Cleaner;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -50,7 +49,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private final Cleaner.Cleanable cleanable;
     private final AeronReplicationEnvelope.ChecksumContext envelopeChecksum =
             new AeronReplicationEnvelope.ChecksumContext();
-    private final byte[] authenticationSecret;
 
     /* Publisher methods are synchronized, so one reusable CRC instance is enough
      * and avoids retaining checksum state on every caller thread. */
@@ -116,8 +114,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         if (offerer == null || configuration == null || clusterId == null || commitPositionAwaiter == null ||
             initialSequence < 0 || initialSequence == Long.MAX_VALUE || maxMessageLength <= 0 ||
             maxMessageLength > configuration.maxMessageLength() ||
-            (long) configuration.chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH +
-            (configuration.authenticated() ? AeronReplicationEnvelope.HMAC_LENGTH : 0) > maxMessageLength) {
+            (long) configuration.chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength) {
             throw new IllegalArgumentException("invalid publisher configuration");
         }
         this.offerer = new AeronOfferRetryer(offerer, configuration);
@@ -128,7 +125,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.nextSequence = initialSequence;
         this.closeAction = closeAction;
         this.commitPositionAwaiter = commitPositionAwaiter;
-        this.authenticationSecret = configuration.authenticationSecret();
         final ByteBuffer envelopeStorage = ByteBuffer.allocateDirect(maxMessageLength);
         this.envelopeBuffer = new UnsafeBuffer(envelopeStorage);
         this.directBufferCleanup = new DirectBufferCleanup(envelopeStorage);
@@ -690,8 +686,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
                         this.epoch, this.fencingToken, sequence, kind, payloadLength, chunkIndex, chunkCount,
                         chunkOffset, commitCrc32c,
-                        payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength,
-                        this.authenticationSecret);
+                        payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength);
                 if (encodedLength > this.maxMessageLength) {
                     throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
                 }
@@ -712,7 +707,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                         AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
                         chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
                         AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
-                        payloadCrc32c, this.authenticationSecret);
+                        payloadCrc32c);
                 if (encodedLength > this.maxMessageLength) {
                     throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
                 }
@@ -939,7 +934,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 }
                 if (free) this.directBufferCleanup.run();
                 this.cleanable.clean();
-                if (this.authenticationSecret != null) Arrays.fill(this.authenticationSecret, (byte) 0);
             }
         }
         try {
@@ -957,7 +951,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
             synchronized (this) {
                 this.closeInProgress = false;
             }
-            AeronReplicationEnvelope.clearThreadLocalAuthenticationState();
         }
     }
 

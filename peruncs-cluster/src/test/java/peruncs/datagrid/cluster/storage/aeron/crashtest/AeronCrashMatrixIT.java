@@ -59,15 +59,25 @@ class AeronCrashMatrixIT {
 
     private Process launch(final Path base, final String mode, final boolean wait)
             throws IOException, InterruptedException {
+        /* Crash-child output goes to files, not pipes: a pipe nobody drains
+         * while the parent waits for a milestone fills up, the child blocks
+         * on write, and a healthy run turns into a timeout. */
+        Files.createDirectories(base.resolve("control"));
+        final Path stdout = base.resolve("control/%s-stdout.log".formatted(mode));
+        final Path stderr = base.resolve("control/%s-stderr.log".formatted(mode));
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final Process process = new ProcessBuilder(javaExecutable, "--enable-preview", "-cp", ChildJava.classpath(),
                 "-Ddg.crash.base=%s".formatted(base), "-Ddg.crash.mode=%s".formatted(mode),
-                AeronCrashChildMain.class.getName()).redirectErrorStream(true).start();
+                AeronCrashChildMain.class.getName())
+                .redirectOutput(stdout.toFile())
+                .redirectError(stderr.toFile())
+                .start();
         if (wait) {
             this.await(base.resolve("control/ready"));
         } else {
             assertTrue(process.waitFor(10, TimeUnit.SECONDS), "child did not complete: %s".formatted(mode));
-            final String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            final String output = Files.exists(stdout)
+                    ? Files.readString(stdout, StandardCharsets.UTF_8) : "";
             assertEquals(0, process.exitValue(), "child failed: %s\n%s".formatted(mode, output));
         }
         return process;

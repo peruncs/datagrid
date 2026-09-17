@@ -112,6 +112,11 @@
 					<!-- Keep forked integration fixtures on the class path. -->
 					<useModulePath>false</useModulePath>
 					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+					<excludes>
+						<!-- The writer/reader soak only runs under -Psoak; it is
+						     far too heavy for the default gate. -->
+						<exclude>**/AeronWriterReaderSoakIT.java</exclude>
+					</excludes>
 				</configuration>
 				<executions>
 					<execution>
@@ -147,6 +152,8 @@
 								<include>**/ProviderCrashMatrixIT.java</include>
 								<include>**/ExternalArchiveCrashIT.java</include>
 								<include>**/AeronStoreIntegrationIT.java</include>
+								<include>**/AeronCrashMatrixIT.java</include>
+								<include>**/AeronReaderCrashMatrixIT.java</include>
 							</includes>
 							<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 							<forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>
@@ -180,6 +187,54 @@
 				<crash.budget.milestone>60000</crash.budget.milestone>
 				<crash.budget.archiveStop>30000</crash.budget.archiveStop>
 				<crash.budget.cell>600000</crash.budget.cell>
+			</properties>
+		</profile>
+		<profile>
+			<id>soak</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-failsafe-plugin</artifactId>
+						<version>3.6.0</version>
+						<configuration>
+							<useModulePath>false</useModulePath>
+							<includes>
+								<include>**/AeronWriterReaderSoakIT.java</include>
+							</includes>
+							<!-- Clear the default-gate exclusion above; under this
+							     profile the soak is the only integration test. -->
+							<excludes combine.self="override" />
+							<!-- Continuous low-overhead flight recording, dumped at fork
+							     exit for offline analysis (jfr summary/print). -->
+							<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -XX:StartFlightRecording=disk=true,dumponexit=true,filename=${project.build.directory}/soak.jfr,maxsize=250M,settings=default</argLine>
+							<forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>
+							<parallel>none</parallel>
+							<systemPropertyVariables>
+									<soak.seconds>${soak.seconds}</soak.seconds>
+									<soak.seed>${soak.seed}</soak.seed>
+									<soak.writer.threads>${soak.writer.threads}</soak.writer.threads>
+									<soak.query.threads>${soak.query.threads}</soak.query.threads>
+									<soak.restarts>${soak.restarts}</soak.restarts>
+							</systemPropertyVariables>
+						</configuration>
+						<executions>
+							<execution>
+								<goals>
+									<goal>integration-test</goal>
+									<goal>verify</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+			<properties>
+				<soak.seconds>30</soak.seconds>
+				<soak.seed>1</soak.seed>
+				<soak.writer.threads>3</soak.writer.threads>
+				<soak.query.threads>2</soak.query.threads>
+				<soak.restarts>6</soak.restarts>
 			</properties>
 		</profile>
 	</profiles>

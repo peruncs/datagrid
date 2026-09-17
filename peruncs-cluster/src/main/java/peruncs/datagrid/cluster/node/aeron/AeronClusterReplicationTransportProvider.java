@@ -13,7 +13,7 @@ import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.backup.BackupMetadata;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.*;
-import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
@@ -31,7 +31,6 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -177,14 +176,10 @@ public final class AeronClusterReplicationTransportProvider {
         private final AtomicReference<RuntimeException> driverFailure = new AtomicReference<>();
         private final AtomicLong rejectedWatermarks = new AtomicLong();
         /* A reader can publish its last durable cursor while the writer is still
-         * recovering its Archive recording. Keep one authenticated value per reader
+         * recovering its Archive recording. Keep one watermark value per reader
          * until the writer boundary exists instead of dropping that acknowledgement. */
-        private final java.util.concurrent.ConcurrentHashMap<UUID, AeronAuthenticatedWatermark>
+        private final java.util.concurrent.ConcurrentHashMap<UUID, AeronReaderWatermark>
                 deferredWatermarks = new java.util.concurrent.ConcurrentHashMap<>();
-                /// One transport-owned copy; avoids cloning the configured HMAC key for every cursor.
-        private byte[] retentionSecret;
-                /// Retiring key accepted during rotation overlap; `null` outside overlap.
-        private byte[] previousRetentionSecret;
         private volatile AeronRuntime runtime;
         private volatile AeronArchiveReplicationPublisher writer;
         private volatile AeronReplicationWriteCoordinator coordinator;
@@ -212,8 +207,6 @@ public final class AeronClusterReplicationTransportProvider {
             this.leaseStalenessMillis = leaseStalenessMillis == null || leaseStalenessMillis <= 0L
                     ? DEFAULT_LEASE_STALENESS_MILLIS : leaseStalenessMillis;
             this.archiveCapacity = new AeronArchiveCapacity(settings);
-            this.retentionSecret = settings.retentionSecret();
-            this.previousRetentionSecret = settings.previousRetentionSecret();
             this.writerRecordingId.set(settings.recordingId());
         }
 
@@ -706,20 +699,19 @@ public final class AeronClusterReplicationTransportProvider {
             };
         }
 
-        /// Returns the authenticated Archive retention controller.
+        /// Returns the Archive retention controller.
         ///
-        /// Without a shared retention secret and an embedded Archive there is
+        /// Without a configured reader set and an embedded Archive there is
         /// nothing safe to delete, so retention reports unsupported and history
-        /// is preserved rather than risking an unauthenticated purge.
+        /// is preserved rather than risking an unacknowledged purge.
         ///
         /// @return retention controller
         @Override
         public synchronized ReplicationLogRetention retention() {
             this.ensureOpen();
             if (this.retention != null) return this.retention;
-            final byte[] retentionSecret = this.retentionSecret;
             if (!this.retentionSupported()) {
-                /* Retention without a shared authentication key and an embedded Archive
+                /* Retention without a configured reader set and an embedded Archive
                  * cannot prove that every reader has crossed the requested boundary. */
                 this.retention = new ReplicationLogRetention() {
                     @Override
@@ -730,7 +722,7 @@ public final class AeronClusterReplicationTransportProvider {
                     @Override
                     public MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
                         throw new UnsupportedOperationException(
-                                "Aeron Archive retention requires an embedded writer and an authenticated watermark secret");
+                                "Aeron Archive retention requires an embedded writer and configured retention readers");
                     }
 
                     @Override
@@ -739,8 +731,7 @@ public final class AeronClusterReplicationTransportProvider {
                 };
                 return this.retention;
             }
-            final AeronArchiveRetention created =
-                    this.newRetentionController(retentionSecret, this.previousRetentionSecret);
+            final AeronArchiveRetention created = this.newRetentionController();
             /* Publish the controller before runtime startup because the writer-side
              * watermark setup consults this field.  If startup fails, however, do not
              * leave a closed/broken controller cached for the next retention() call. */
@@ -759,9 +750,8 @@ public final class AeronClusterReplicationTransportProvider {
             }
         }
 
-        private AeronArchiveRetention newRetentionController(
-                final byte[] retentionSecret, final byte[] previousRetentionSecret) {
-            return new AeronArchiveRetention(retentionSecret, this.settings.retentionReaders(),
+        private AeronArchiveRetention newRetentionController() {
+            return new AeronArchiveRetention(this.settings.retentionReaders(),
                     () ->
                     {
                         if (!this.writerReady())
@@ -787,38 +777,35 @@ public final class AeronClusterReplicationTransportProvider {
                     () -> this.watermarkChannel != null && this.watermarkChannel.available(),
                     this.settings.checkpointPath().resolveSibling(
                             "%s.retention".formatted(this.settings.checkpointPath().getFileName())),
-                    AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS,
-                    previousRetentionSecret);
+                    AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
         }
 
         private void publishReaderWatermark(final CursorSnapshot snapshot, final long recordingId) {
             final AeronWatermarkChannel channel = this.watermarkChannel;
-            final byte[] secret = this.retentionSecret;
-            if (channel == null || secret == null) return;
+            if (channel == null) return;
             channel.publishEncoded(this.settings.nodeId(), this.settings.clusterId(), this.settings.storeGeneration(),
-                    this.settings.epoch(), recordingId, snapshot.sequence(), snapshot.position(), secret);
+                    this.settings.epoch(), recordingId, snapshot.sequence(), snapshot.position());
         }
 
         private void ensureWatermarkChannel() {
-            if (this.watermarkChannel != null || this.retentionSecret == null) return;
+            if (this.watermarkChannel != null) return;
             if (this.settings.role().isWriter()) {
                 if (!this.retentionSupported()) return;
                 if (this.retention == null) {
-                    this.retention = this.newRetentionController(this.retentionSecret, this.previousRetentionSecret);
+                    this.retention = this.newRetentionController();
                 }
                 final AeronArchiveRetention controller = (AeronArchiveRetention) this.retention;
                 this.watermarkChannel = AeronWatermarkChannel.writer(this.aeron(),
                         this.settings.watermarkChannel(), this.settings.watermarkStreamId(), (encoded, offset, length) ->
                         {
                             try {
-                                final AeronAuthenticatedWatermark watermark =
-                                        AeronAuthenticatedWatermark.decode(encoded, offset, length);
+                                final AeronReaderWatermark watermark =
+                                        AeronReaderWatermark.decode(encoded, offset, length);
                                 /* A reader may publish its cursor while the writer is still
-                                 * recovering its recording. Keep one authenticated value per
+                                 * recovering its recording. Keep one value per
                                  * configured reader instead of losing the only acknowledgement. */
                                 if (!this.writerReady()) {
                                     if (this.settings.retentionReaders().contains(watermark.readerId()) &&
-                                        watermark.verifyAny(this.retentionSecret, this.previousRetentionSecret) &&
                                         watermark.clusterId().equals(this.settings.clusterId()) &&
                                         watermark.storeGeneration().equals(this.settings.storeGeneration()) &&
                                         watermark.writerEpoch() == this.settings.epoch()) {
@@ -828,7 +815,7 @@ public final class AeronClusterReplicationTransportProvider {
                                 }
                                 controller.recordReaderWatermark(watermark);
                             } catch (final RuntimeException rejected) {
-                                /* Reject one malformed, unauthenticated, stale, or future
+                                /* Reject one malformed, stale, or future
                                  * watermark without killing delivery of later valid progress. */
                                 final long count = this.rejectedWatermarks.incrementAndGet();
                                 if ((count & (count - 1)) == 0) {
@@ -838,13 +825,21 @@ public final class AeronClusterReplicationTransportProvider {
                             }
                         }, this.settings.replication().offerTimeoutNanos());
             } else {
+                /* A reader always publishes progress: the stream is latest-value
+                 * fire-and-forget, an unreceived value is retained for retry
+                 * until a subscriber connects (or discarded at close if none
+                 * ever does, so shutdown stays clean), and the writer records
+                 * only quorum members — a watermark from a reader outside the
+                 * writer's retention list is rejected there. Publication must
+                 * therefore not depend on this reader's local retention list:
+                 * the documented setup names the quorum on the writer only. */
                 this.watermarkChannel = AeronWatermarkChannel.reader(this.aeron(),
                         this.settings.watermarkChannel(), this.settings.watermarkStreamId(),
                         this.settings.replication().offerTimeoutNanos());
             }
         }
 
-                /// Replays authenticated reader progress received during writer recovery.
+                /// Replays reader progress received during writer recovery.
         private void drainDeferredWatermarks() {
             if (this.deferredWatermarks.isEmpty() || !this.writerReady() || this.retention == null) {
                 return;
@@ -883,7 +878,7 @@ public final class AeronClusterReplicationTransportProvider {
         }
 
         private boolean retentionSupported() {
-            return this.retentionSecret != null && !this.settings.retentionReaders().isEmpty() &&
+            return !this.settings.retentionReaders().isEmpty() &&
                    this.settings.role().isWriter() && !this.settings.externalArchive();
         }
 
@@ -1327,6 +1322,7 @@ public final class AeronClusterReplicationTransportProvider {
             if (this.runtime != null) return;
             if (this.settings.role().isWriter()) this.archiveCapacity.invalidate();
             this.runtime = AeronRuntime.start(this.settings, this::recordDriverFailure,
+                    this::recordSubscriberFailure,
                     () -> crashPoint("BEFORE_PUBLICATION_CONNECTED", -1L));
             try {
                 this.ensureWatermarkChannel();
@@ -1361,6 +1357,21 @@ public final class AeronClusterReplicationTransportProvider {
             final StorageBinaryDataClientAeronArchive current = this.reader;
             if (current != null) {
                 current.fail(normalized);
+            }
+        }
+
+        private void recordSubscriberFailure(final Throwable failure) {
+            /* Fragment-handler failures are application-level: the polling reader
+             * already records them on its own assembler before rethrowing, and Aeron
+             * forwards the same instance here. A failed Store import, CRC mismatch,
+             * or dispose-time interrupt must never poison the shared
+             * MediaDriver/Archive runtime used by subsequent readers, and must not
+             * fail a replacement reader installed after the failing poll. Logging
+             * here keeps the diagnostic; reader state stays with its own instance. */
+            if (this.closing || this.closed) {
+                LOGGER.log(System.Logger.Level.DEBUG, "Aeron subscriber failure during shutdown", failure);
+            } else {
+                LOGGER.log(WARNING, "Aeron subscriber failure", failure);
             }
         }
 
@@ -1411,21 +1422,9 @@ public final class AeronClusterReplicationTransportProvider {
                 }
             }
             if (this.watermarkChannel == null && this.retention == null && this.runtime == null) {
-                this.clearSecrets();
+                this.deferredWatermarks.clear();
             }
             return failure;
-        }
-
-        private void clearSecrets() {
-            this.deferredWatermarks.clear();
-            this.settings.clearRetentionSecret();
-            this.settings.clearReplicationSecrets();
-            final byte[] secret = this.retentionSecret;
-            this.retentionSecret = null;
-            if (secret != null) Arrays.fill(secret, (byte) 0);
-            final byte[] previous = this.previousRetentionSecret;
-            this.previousRetentionSecret = null;
-            if (previous != null) Arrays.fill(previous, (byte) 0);
         }
 
         private Aeron aeron() {
@@ -1532,7 +1531,7 @@ public final class AeronClusterReplicationTransportProvider {
                 if (this.reader == null && this.writer == null && this.coordinator == null &&
                     this.runtime == null && this.retention == null && this.watermarkChannel == null &&
                     this.writerLease == null) {
-                    this.clearSecrets();
+                    this.deferredWatermarks.clear();
                     this.closed = true;
                     return;
                 }
@@ -1639,7 +1638,7 @@ public final class AeronClusterReplicationTransportProvider {
             synchronized (this) {
                 this.distributor = null;
                 this.distributorStream = null;
-                this.clearSecrets();
+                this.deferredWatermarks.clear();
                 this.closed = true;
                 this.closing = false;
             }

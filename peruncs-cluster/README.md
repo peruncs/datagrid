@@ -51,6 +51,29 @@ manufacture a fresh root; the backup node may do so only for a user-uploaded
 Store it then publishes as the starter backup.
 One provider instance owns one configured replication stream; use separate
 provider instances/channels for multiple streams.
+
+### Running multiple clusters on one network
+
+Clusters may share a VPN or other routed network, but each cluster must have
+its own Aeron traffic namespace. Configure distinct live-channel control
+endpoints, distinct replay and watermark endpoints when those channels are
+shared, and distinct stream IDs for every cluster. Do not rely on the cluster
+UUID to separate Aeron traffic: it is carried inside each frame and checked
+only after a subscriber receives that frame.
+
+Every cluster must also use a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`.
+Readers reject frames, cursors, checkpoints, and watermarks whose cluster ID,
+Store generation, or epoch does not match their configuration. If two clusters
+accidentally subscribe to the same live channel and stream, the wrong
+cluster's frame is rejected and the subscriber fails closed; separate channels
+and stream IDs prevent that cross-talk and avoid turning a configuration error
+into a cluster outage.
+
+The cluster ID and CRC32C checks are identity and corruption checks, not
+authentication. Network policy must still restrict which nodes can publish to
+each cluster's live and watermark endpoints. Archive control authentication is
+separate and does not isolate live replication traffic.
+
 The development live-channel default is a dynamic MDC loopback channel
 (`control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=datagrid-<cluster>`)
 so multiple readers can attach. The replay default points at the same local
@@ -68,13 +91,12 @@ recorded-position, and stop waits are independently configurable with
 `ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS`, and
 `ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS`; reader shutdown uses
 `ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
-Replication frames can be authenticated with the shared base64 key in
-`ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET` or an owner-only file named by
-`ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_FILE` (at least 16 decoded bytes).
-Production nodes require this key unless
-`ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE=true` explicitly accepts
-unsigned frames. Every writer and reader must use the same key; a mismatch
-fails closed before Store data is applied.
+Replication integrity comes from header and payload CRC32C checks on every
+frame; there is no per-frame key. Replication must run on an isolated network
+(VPN, firewall rules, or Kubernetes NetworkPolicies): any host that can reach
+the live channel can publish well-formed frames. Every writer and reader must
+use the same cluster id, epoch, and fencing lineage; a mismatch fails closed
+before Store data is applied.
 Archive runtime tuning is controlled by
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL`,
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH`,
@@ -82,30 +104,31 @@ Archive runtime tuning is controlled by
 `ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS`. The provider maps the
 configured threading mode to matching MediaDriver and Archive threading.
 `CHUNK_SIZE + 76` must fit Aeron's publication maximum (`term-length / 8`,
-capped at 16 MiB); authenticated frames add a 32-byte tag. Store bytes are sent directly inside the fixed replication
+capped at 16 MiB). Store bytes are sent directly inside the fixed replication
 envelope; no SBE or second serialization pass is required.
 
-Writer checkpoint persistence is enabled in the provider. Authenticated,
+Writer checkpoint persistence is enabled in the provider. Quorum-gated,
 segment-boundary retention is available only when an embedded writer is started
-with `ECLIPSE_DATAGRID_AERON_RETENTION_SECRET` (base64, at least 16 bytes) and
-`ECLIPSE_DATAGRID_AERON_RETENTION_READERS` (a comma-separated list of reader
-UUIDs). The secret may instead be supplied through
-`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE`, an owner-only regular file
-containing the base64 key. Configure the same secret plus
-`ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL` and
+with `ECLIPSE_DATAGRID_AERON_RETENTION_READERS` (a comma-separated list of
+reader UUIDs). Name the quorum on the writer only: readers need no retention
+list of their own. Configure `ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL` and
 `ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID` on every participant. Each reader
-first persists its recovery cursor and then sends an HMAC-SHA256
-`AeronAuthenticatedWatermark` covering reader, cluster, Store generation,
-epoch, recording, sequence, and position over that dedicated stream. The writer
-records those acknowledgements automatically; call `deleteThrough` with the
-ordinary durable backup cursor naming the desired sequence. The authenticated
-reader quorum, rather than the maintenance request itself, authorizes deletion.
+first persists its recovery cursor and then sends an `AeronReaderWatermark`
+covering reader, cluster, Store generation, epoch, recording, sequence, and
+position over that dedicated stream. Readers publish unconditionally — the
+stream is latest-value fire-and-forget, an unreceived value is retained for
+retry until the writer subscribes (or discarded at close if none ever does),
+and the writer records only quorum members, rejecting any other reader's
+watermark. The writer records those
+acknowledgements automatically; call `deleteThrough` with the ordinary durable
+backup cursor naming the desired sequence. The configured reader quorum,
+rather than the maintenance request itself, authorizes deletion.
 The provider computes the least advanced reader position, pauses coordinator
 admission, stops the recording, purges only complete segments, and extends the
 same recording at its exact stop position before admitting another write. An
 active replay defers maintenance without deleting data. External Archives and
-incomplete reader quorums remain unsupported for deletion. Without the secret
-or reader list, retention is reported as
+incomplete reader quorums remain unsupported for deletion. Without a
+configured reader list, retention is reported as
 unsupported and history is preserved. Operators must monitor Archive capacity
 and rotate or expand storage before it is exhausted.
 The supported capacity procedure is: alert when
@@ -134,57 +157,30 @@ reader identity with `ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL` and either
 reader identity on every reader node; sharing the writer identity would grant
 the writer's recording permissions.
 
-## Network trust and key rotation
+## Network boundary
 
 Each control proves something different; none of them replaces the network
 boundary:
 
 - The writer fencing lease and fencing token are correctness, not security:
   they keep exactly one writer's history linear.
-- CRC32C detects accidental corruption, never forgery.
-- The replication, retention, and cache HMACs authenticate "a holder of the
-  cluster secret", not a unique node. Any host with the secret can publish
-  valid-looking frames, and a staging cluster on the same network must use a
-  different secret or its frames cross-talk.
+- CRC32C detects accidental corruption, never forgery. Any host that can reach
+  the live channel can publish well-formed frames, and a staging cluster on
+  the same network must use a different cluster id or its frames cross-talk.
 - Aeron Archive authentication gates control-plane commands (recording,
   retention, replay). It is defense in depth behind firewall rules and
   NetworkPolicies, which remain the primary boundary and the only per-node
   identity below full PKI.
 
-`ECLIPSE_DATAGRID_NETWORK_PROFILE=trusted-network` is the explicit
-acknowledgement for VPN-contained deployments: it waives the production
-requirement for replication frame HMAC and logs the waiver at startup.
-Archive control authentication is a separate protection domain and always
-needs its own acknowledgement (`ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE`);
-the profile never touches it. The profile never disables fencing, CRC32C, or
-retention-watermark authentication either, and no value is ever inferred — an
-unknown profile refuses startup.
+Run replication on a VPN-contained network: the isolated network is the only
+traffic boundary for replication frames and reader watermarks. Archive
+control authentication is a separate protection domain and always needs its
+own acknowledgement (`ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE`) when
+disabled. Running without it never disables fencing or CRC32C — those are
+correctness checks, not network security.
 
-Rotate a frame or watermark key without a flag-day restart: configure the new
-key as the primary secret (`ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET`,
-`ECLIPSE_DATAGRID_AERON_RETENTION_SECRET`, or the cache `hmac-secret`) and
-the old key as its `*_PREVIOUS` counterpart on every node. Verification tries
-the primary first and falls back to the previous, while signing always uses
-the primary, so old-signed and new-signed frames verify throughout the roll.
-
-Do not drop `*_PREVIOUS` as soon as every node runs the new primary. Frames
-carry no key identity, and a reader keeps a durable cursor: any reader that
-restarts onto — or replays — pre-rotation Archive history still needs the old
-key to verify it. Retain the previous key until every reader cursor has
-advanced past the rotation point and the Archive segments holding old-signed
-frames are purged or have aged out, and only then drop it. When that is hard
-to establish, reseed the lagging readers from a post-rotation image instead.
-The same applies to the cache: retain the previous key until every receiver
-has drained past the rotation, bounded in practice by the freshness timeout
-plus a restart cycle, or bounce the receivers. Archive control credentials
-have no overlap mechanism: rotate those with a coordinated restart.
-
-Key lifetime is bounded honestly: the transport erases its settings-held
-replication, retention, and Archive credential copies on close, and frame
-readers erase their working clones on disposal. Copies owned elsewhere — a
-configuration object shared beyond the transport — live until cleared or
-collected; the cache configuration in particular has no clear hook and lives
-with its region.
+Archive control credentials have no overlap mechanism: rotate those with a
+coordinated restart.
 
 Fixed-writer/no-consensus operation is intentional. The strict one-writer
 invariant is enforced by a renewable writer lease in the shared backup volume:
@@ -253,7 +249,7 @@ other failure to an internal error.
 ## Store binary transport
 
 The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque and
-adds a 76-byte version-3 envelope for cluster identity, fencing token,
+adds a 76-byte version-4 envelope for cluster identity, fencing token,
 sequence, chunking,
 CRC32C, and commit/abort markers. A writer should use
 `AeronStorageBinaryReplicationTarget` with an
@@ -271,14 +267,13 @@ deployments that persist the Aeron-specific identity and replay boundary.
 The envelope is deliberately not an SBE-generated second payload format:
 Eclipse Serializer's `Binary` bytes remain the authoritative Store payload,
 while the fixed header supplies only framing and validation. Chunk size must
-remain below `min(termLength / 8, 16 MiB) - 76`; authenticated frames reserve
-an additional 32-byte tag. Aeron fragments each envelope as needed for the
-selected MTU.
+remain below `min(termLength / 8, 16 MiB) - 76`. Aeron fragments each envelope
+as needed for the selected MTU.
 
-CRC32C detects accidental corruption; when no replication HMAC key is
-configured, it does not authenticate a sender. Bind UDP and Archive-control
-channels to private interfaces and restrict them with firewall or network-policy
-rules; do not enable ACK-driven retention on an untrusted network.
+CRC32C detects accidental corruption; it does not authenticate a sender. Bind
+UDP and Archive-control channels to private interfaces and restrict them with
+firewall or network-policy rules; do not enable ACK-driven retention on an
+untrusted network.
 
 Run the transport and UDP/Archive integration tests with:
 

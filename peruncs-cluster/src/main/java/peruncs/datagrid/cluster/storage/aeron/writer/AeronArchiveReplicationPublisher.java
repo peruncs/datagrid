@@ -27,6 +27,7 @@ import java.util.function.LongPredicate;
 /// is reported only after the Archive's recorded position reaches that marker.
 /// The Archive and Aeron client are borrowed from the transport; this class
 /// closes only the publication and its recording.
+@SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter") // shared AeronArchive client is the lock domain, see field comment
 public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /* The Archive control channel is not thread-safe, so every control
      * operation synchronizes on this shared client: the lock domain follows

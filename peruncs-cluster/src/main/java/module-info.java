@@ -65,8 +65,8 @@
 /// # Upgrade reseeds
 ///
 /// The wire and restart formats are versioned and fail closed on mismatch:
-/// envelopes require version 3 with a 76-byte header and an optional
-/// HMAC-SHA256 frame tag, and checkpoints and
+/// envelopes require version 4 with a fixed 76-byte header plus the chunk
+/// payload, and checkpoints and
 /// cursors require version 2. A node upgraded from an older format must be
 /// reseeded from a compatible backup or Store image with its cursor; old
 /// files are rejected, never migrated in place.
@@ -75,20 +75,32 @@
 ///
 /// Deleting Archive segments a slow reader still needs destroys data no
 /// replay can recover. Readers therefore advertise their durable boundary
-/// as HMAC-signed watermarks, and the writer deletes history only through
+/// as CRC-checked watermarks, and the writer deletes history only through
 /// the complete configured reader quorum — pausing admission, stopping the
 /// recording, purging only complete segments, and extending the same
-/// recording at its exact stop position. Without the shared secret, with
+/// recording at its exact stop position. With
 /// an incomplete quorum, or during an active replay, history is preserved.
 /// The quorum, not any single request, authorizes deletion.
 ///
 /// The retention quorum is epoch-bound and excluded from token fencing:
-/// watermarks authenticate reader progress under one epoch but never carry
+/// watermarks report reader progress under one epoch but never carry
 /// the writer fencing token, so a watermark can neither fence nor un-fence
 /// a writer. Residual risk: token fencing does not cover retention. A
 /// watermark replayed across epochs is rejected by its epoch binding, but
-/// operators must still treat the retention secret and epoch rotation as
-/// the retention trust boundary.
+/// operators must still treat the isolated replication network as
+/// the retention trust boundary: any host on it can report reader progress.
+///
+/// Multiple clusters may share a routed network only when their Aeron traffic
+/// namespaces are separate. Give each cluster distinct live, replay, and
+/// watermark channel endpoints (or otherwise distinct channel destinations)
+/// and distinct stream IDs. Also assign a unique cluster ID to every cluster.
+/// The cluster ID is checked inside received envelopes, cursors, checkpoints,
+/// and watermarks; it does not prevent a subscriber from receiving another
+/// cluster's frame. Accidentally sharing a channel and stream therefore causes
+/// a mismatch and fail-closed subscriber, while separate channels and streams
+/// prevent cross-talk. CRC32C and cluster IDs do not authenticate publishers;
+/// firewall, VPN, or network-policy rules remain the live-channel trust
+/// boundary.
 ///
 /// # Filesystem backups
 ///

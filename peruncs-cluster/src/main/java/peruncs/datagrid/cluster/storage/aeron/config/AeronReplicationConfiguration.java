@@ -6,7 +6,6 @@ import org.agrona.BitUtil;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
-import java.util.Arrays;
 import java.util.Objects;
 
 /// Immutable framing and durability limits shared by one writer and its
@@ -16,8 +15,6 @@ import java.util.Objects;
 /// rejects values that could create a frame the writer cannot publish or the
 /// reader cannot assemble.
 public final class AeronReplicationConfiguration {
-        /// Minimum HMAC key length for authenticated replication frames.
-    public static final int MIN_HMAC_SECRET_BYTES = 16;
         /// Default Aeron term length in bytes.
     public static final int DEFAULT_TERM_LENGTH = 16 * 1024 * 1024;
         /// Default publication MTU in bytes.
@@ -44,9 +41,6 @@ public final class AeronReplicationConfiguration {
     private final long readerStopTimeoutNanos;
     private final ReplicationDurabilityMode durabilityMode;
     private final AeronRetryPolicy retryPolicy;
-    private final byte[] authenticationSecret;
-    private final byte[] previousAuthenticationSecret;
-    private final boolean allowUnsignedFrames;
 
     private AeronReplicationConfiguration(
             final int termLength,
@@ -59,10 +53,7 @@ public final class AeronReplicationConfiguration {
             final long recordingStopTimeoutNanos,
             final long readerStopTimeoutNanos,
             final ReplicationDurabilityMode durabilityMode,
-            final AeronRetryPolicy retryPolicy,
-            final byte[] authenticationSecret,
-            final byte[] previousAuthenticationSecret,
-            final boolean allowUnsignedFrames
+            final AeronRetryPolicy retryPolicy
     ) {
         this.termLength = termLength;
         this.mtuLength = mtuLength;
@@ -75,10 +66,6 @@ public final class AeronReplicationConfiguration {
         this.readerStopTimeoutNanos = readerStopTimeoutNanos;
         this.durabilityMode = durabilityMode;
         this.retryPolicy = retryPolicy;
-        this.authenticationSecret = authenticationSecret == null ? null : authenticationSecret.clone();
-        this.previousAuthenticationSecret =
-                previousAuthenticationSecret == null ? null : previousAuthenticationSecret.clone();
-        this.allowUnsignedFrames = allowUnsignedFrames;
     }
 
         /// Returns the validated default configuration.
@@ -176,52 +163,6 @@ public final class AeronReplicationConfiguration {
         return this.retryPolicy;
     }
 
-        /// Returns a copy of the replication HMAC key, or `null` for unsigned frames.
-    ///
-    /// The primary key signs every published frame and verifies received
-    /// ones; the previous key only verifies, during rotation overlap.
-    ///
-    /// @return defensive copy of the HMAC key, or `null`
-    public byte[] authenticationSecret() {
-        return this.authenticationSecret == null ? null : this.authenticationSecret.clone();
-    }
-
-        /// Returns a copy of the retiring HMAC key accepted during rotation overlap.
-    ///
-    /// Verification tries the primary key first and falls back to this key,
-    /// so readers keep accepting frames signed before the rotation while the
-    /// writer already signs with the primary. Signing never uses this key.
-    ///
-    /// @return defensive copy of the previous HMAC key, or `null`
-    public byte[] previousAuthenticationSecret() {
-        return this.previousAuthenticationSecret == null ? null : this.previousAuthenticationSecret.clone();
-    }
-
-        /// Erases both HMAC keys held by this configuration.
-    ///
-    /// Readers obtain their own clones at construction and erase those on
-    /// disposal, so clearing here only affects future readers. The owning
-    /// transport calls this on close; configurations shared beyond the
-    /// transport keep their copies until cleared or collected.
-    public void clearSecrets() {
-        if (this.authenticationSecret != null) Arrays.fill(this.authenticationSecret, (byte) 0);
-        if (this.previousAuthenticationSecret != null) Arrays.fill(this.previousAuthenticationSecret, (byte) 0);
-    }
-
-        /// Returns whether unsigned replication frames are explicitly allowed.
-    ///
-    /// @return `true` when unsigned frames are allowed
-    public boolean allowUnsignedFrames() {
-        return this.allowUnsignedFrames;
-    }
-
-        /// Returns whether every frame is authenticated with HMAC-SHA256.
-    ///
-    /// @return `true` when an authentication key is configured
-    public boolean authenticated() {
-        return this.authenticationSecret != null;
-    }
-
         /// Returns the largest envelope message that this publication may offer.
     /// Aeron fragments that message according to the MTU; the logical chunk must
     /// still fit within this publication limit.
@@ -244,9 +185,6 @@ public final class AeronReplicationConfiguration {
         private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
         private ReplicationDurabilityMode durabilityMode = ReplicationDurabilityMode.ARCHIVE_FIRST;
         private AeronRetryPolicy retryPolicy = AeronRetryPolicy.Default();
-        private byte[] authenticationSecret;
-        private byte[] previousAuthenticationSecret;
-        private boolean allowUnsignedFrames = true;
 
                 /// Creates a builder initialized with the documented defaults.
         public Builder() {
@@ -351,42 +289,6 @@ public final class AeronReplicationConfiguration {
             return this;
         }
 
-                /// Sets the HMAC-SHA256 key used on every replication frame.
-        ///
-        /// The primary key signs published frames and verifies received
-        /// ones.
-        ///
-        /// @param value key bytes, or `null` to disable frame authentication
-        /// @return this builder
-        public Builder authenticationSecret(final byte[] value) {
-            this.authenticationSecret = value == null ? null : value.clone();
-            return this;
-        }
-
-                /// Sets the retiring HMAC-SHA256 key accepted during rotation overlap.
-        ///
-        /// Verification tries the primary key first and falls back to this
-        /// key; signing never uses it. Rotation is: configure the new key as
-        /// primary with the old key here and roll every node. Keep the old key
-        /// until every reader cursor passes the rotation point and old-signed
-        /// Archive segments are purged; otherwise reseed lagging readers.
-        ///
-        /// @param value previous key bytes, or `null` when no rotation overlaps
-        /// @return this builder
-        public Builder previousAuthenticationSecret(final byte[] value) {
-            this.previousAuthenticationSecret = value == null ? null : value.clone();
-            return this;
-        }
-
-                /// Sets whether unsigned frames are accepted when no key is configured.
-        ///
-        /// @param value explicit insecure-operation acknowledgement
-        /// @return this builder
-        public Builder allowUnsignedFrames(final boolean value) {
-            this.allowUnsignedFrames = value;
-            return this;
-        }
-
                 /// Validates and creates the immutable configuration.
         ///
         /// @return validated configuration
@@ -419,31 +321,8 @@ public final class AeronReplicationConfiguration {
                 throw new IllegalArgumentException(
                         "all Aeron timeouts must be positive and durabilityMode/retryPolicy must be set");
             }
-            if (this.authenticationSecret != null && this.authenticationSecret.length < MIN_HMAC_SECRET_BYTES) {
-                throw new IllegalArgumentException(
-                        "authenticationSecret must contain at least %s bytes".formatted(MIN_HMAC_SECRET_BYTES));
-            }
-            if (this.previousAuthenticationSecret != null && this.authenticationSecret == null) {
-                throw new IllegalArgumentException(
-                        "previousAuthenticationSecret requires a configured authenticationSecret");
-            }
-            if (this.previousAuthenticationSecret != null &&
-                this.previousAuthenticationSecret.length < MIN_HMAC_SECRET_BYTES) {
-                throw new IllegalArgumentException(
-                        "previousAuthenticationSecret must contain at least %s bytes".formatted(MIN_HMAC_SECRET_BYTES));
-            }
-            if (this.previousAuthenticationSecret != null &&
-                Arrays.equals(this.previousAuthenticationSecret, this.authenticationSecret)) {
-                throw new IllegalArgumentException(
-                        "previousAuthenticationSecret must differ from authenticationSecret; a rotation to the same key is a misconfiguration");
-            }
-            if ((this.authenticationSecret != null || this.previousAuthenticationSecret != null) && this.allowUnsignedFrames) {
-                throw new IllegalArgumentException(
-                        "allowUnsignedFrames contradicts a configured authenticationSecret");
-            }
             final int maxMessageLength = maxMessageLengthForTermLength(this.termLength);
-            final int authenticationLength = this.authenticationSecret == null ? 0 : AeronReplicationEnvelope.HMAC_LENGTH;
-            if ((long) this.chunkSize + AeronReplicationEnvelope.HEADER_LENGTH + authenticationLength > maxMessageLength) {
+            if ((long) this.chunkSize + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength) {
                 throw new IllegalArgumentException(
                         "chunkSize plus envelope exceeds Aeron maxMessageLength=%s".formatted(maxMessageLength));
             }
@@ -458,10 +337,7 @@ public final class AeronReplicationConfiguration {
                     this.recordingStopTimeoutNanos,
                     this.readerStopTimeoutNanos,
                     this.durabilityMode,
-                    this.retryPolicy,
-                    this.authenticationSecret,
-                    this.previousAuthenticationSecret,
-                    this.allowUnsignedFrames
+                    this.retryPolicy
             );
         }
     }

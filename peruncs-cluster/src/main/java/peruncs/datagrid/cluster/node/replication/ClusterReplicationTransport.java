@@ -106,9 +106,11 @@ public interface ClusterReplicationTransport extends AutoCloseable {
                     }
 
                     public void init() {
+                        // No-op transport has no health state to initialize.
                     }
 
                     public void close() {
+                        // No-op transport holds no health resources.
                     }
                 };
             }

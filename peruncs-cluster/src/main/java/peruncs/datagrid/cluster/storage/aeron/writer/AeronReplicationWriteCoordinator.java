@@ -798,7 +798,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                         "Aeron commit did not finish within the recorded-position timeout");
             }
             try {
-                this.commitDone.await(remaining, TimeUnit.NANOSECONDS);
+                /* A signal only hints at progress and a timeout only means
+                 * re-check: the loop guard plus the deadline above decide. */
+                final boolean signalled = this.commitDone.await(remaining, TimeUnit.NANOSECONDS);
+                if (signalled) continue;
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException(

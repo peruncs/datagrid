@@ -86,16 +86,39 @@ class AeronStoreIntegrationIT {
             final int controlPort,
             final int livePort,
             final int watermarkPort,
-            final String retentionSecret,
             final Set<UUID> retentionReaders,
             final String expectedValue,
             final boolean expectDictionary
+    ) throws Exception {
+        replicateAndVerify(readerRoot, storePath, role, nodeId, clusterId, generation,
+                startingCursor, target, controlPort, livePort, watermarkPort, retentionReaders,
+                expectedValue, expectDictionary, null, -1);
+    }
+
+    private static void replicateAndVerify(
+            final Path readerRoot,
+            final Path storePath,
+            final String role,
+            final UUID nodeId,
+            final UUID clusterId,
+            final UUID generation,
+            final ReplicationCursor startingCursor,
+            final ReplicationCursor target,
+            final int controlPort,
+            final int livePort,
+            final int watermarkPort,
+            final Set<UUID> retentionReaders,
+            final String expectedValue,
+            final boolean expectDictionary,
+            final String watermarkChannelOverride,
+            final int watermarkStreamIdOverride
     ) throws Exception {
         Files.createDirectories(readerRoot);
         final Path cursorPath = readerRoot.resolve("cursor");
         try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(
                 properties(readerRoot, clusterId, nodeId, generation, role, -1L,
-                        controlPort, livePort, watermarkPort, retentionSecret, retentionReaders));
+                        controlPort, livePort, watermarkPort, retentionReaders,
+                        watermarkChannelOverride, watermarkStreamIdOverride));
              StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(cursorPath)) {
             final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
             final EmbeddedStorageManager reader = readerFoundation.start();
@@ -272,7 +295,7 @@ class AeronStoreIntegrationIT {
             final int watermarkPort
     ) {
         return properties(root, clusterId, nodeId, generation, role, recordingId,
-                controlPort, livePort, watermarkPort, null, Set.of());
+                controlPort, livePort, watermarkPort, Set.of());
     }
 
     static NodeLibraryPropertiesProvider properties(
@@ -285,8 +308,25 @@ class AeronStoreIntegrationIT {
             final int controlPort,
             final int livePort,
             final int watermarkPort,
-            final String retentionSecret,
             final Set<UUID> retentionReaders
+    ) {
+        return properties(root, clusterId, nodeId, generation, role, recordingId,
+                controlPort, livePort, watermarkPort, retentionReaders, null, -1);
+    }
+
+    static NodeLibraryPropertiesProvider properties(
+            final Path root,
+            final UUID clusterId,
+            final UUID nodeId,
+            final UUID generation,
+            final String role,
+            final long recordingId,
+            final int controlPort,
+            final int livePort,
+            final int watermarkPort,
+            final Set<UUID> retentionReaders,
+            final String watermarkChannelOverride,
+            final int watermarkStreamIdOverride
     ) {
         return new NodeLibraryPropertiesProvider.Env() {
             @Override
@@ -320,8 +360,12 @@ class AeronStoreIntegrationIT {
                     case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
                     case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
                          "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
-                    case "ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(watermarkPort);
-                    case "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET" -> retentionSecret;
+                    case "ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL" -> watermarkChannelOverride != null
+                            ? watermarkChannelOverride
+                            : "aeron:udp?endpoint=localhost:%s".formatted(watermarkPort);
+                    case "ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID" -> watermarkStreamIdOverride >= 0
+                            ? Integer.toString(watermarkStreamIdOverride)
+                            : null;
                     case "ECLIPSE_DATAGRID_AERON_RETENTION_READERS" -> retentionReaders.stream()
                             .sorted().map(UUID::toString).collect(java.util.stream.Collectors.joining(","));
                     default -> null;
@@ -422,14 +466,12 @@ class AeronStoreIntegrationIT {
         final UUID ordinaryReaderId = UUID.randomUUID();
         final UUID backupReaderId = UUID.randomUUID();
         final Set<UUID> retentionReaders = Set.of(ordinaryReaderId, backupReaderId);
-        final String retentionSecret = Base64.getEncoder().encodeToString(
-                "store-integration-retention-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         final Path writerStore = root.resolve("writer-store");
         final Path ordinaryStore = root.resolve("ordinary-store");
         final Path backupStore = root.resolve("backup-store");
         try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
                 properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
-                        controlPort, livePort, watermarkPort, retentionSecret, retentionReaders))) {
+                        controlPort, livePort, watermarkPort, retentionReaders))) {
             final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
             final Root initial = new Root();
             initial.values.add("baseline");
@@ -453,7 +495,7 @@ class AeronStoreIntegrationIT {
 
             replicateAndVerify(root.resolve("ordinary-reader"), ordinaryStore, "reader", ordinaryReaderId,
                     clusterId, generation, baseline, firstTarget, controlPort, livePort, watermarkPort,
-                    retentionSecret, retentionReaders, "ordinary-update", true);
+                    retentionReaders, "ordinary-update", true);
 
             writerRoot.values.add("restart-update");
             writer.store(writerRoot.values);
@@ -465,11 +507,11 @@ class AeronStoreIntegrationIT {
             }
             replicateAndVerify(root.resolve("ordinary-reader"), ordinaryStore, "reader", ordinaryReaderId,
                     clusterId, generation, persisted, secondTarget, controlPort, livePort, watermarkPort,
-                    retentionSecret, retentionReaders, "restart-update", false);
+                    retentionReaders, "restart-update", false);
 
             replicateAndVerify(root.resolve("backup-reader"), backupStore, "backup-reader", backupReaderId,
                     clusterId, generation, baseline, secondTarget, controlPort, livePort, watermarkPort,
-                    retentionSecret, retentionReaders, "restart-update", true);
+                    retentionReaders, "restart-update", true);
             final long watermarkDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (!writerTransport.retention().isSupported() && System.nanoTime() < watermarkDeadline) {
                 java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
@@ -489,7 +531,72 @@ class AeronStoreIntegrationIT {
             final ReplicationCursor postRetentionTarget = latest(writerTransport);
             replicateAndVerify(root.resolve("ordinary-reader"), ordinaryStore, "reader", ordinaryReaderId,
                     clusterId, generation, postRetentionStart, postRetentionTarget, controlPort, livePort, watermarkPort,
-                    retentionSecret, retentionReaders, "post-retention-update", false);
+                    retentionReaders, "post-retention-update", false);
+            writer.shutdown();
+        } finally {
+            delete(root);
+        }
+    }
+
+        /// Reader watermarks honor a non-default channel and stream id end to end,
+    /// using exactly the documented setup: the quorum list lives on the writer
+    /// only, while the reader carries no retention list at all. The reader
+    /// must still publish progress where configured, the writer must receive
+    /// it there, and the retention quorum must assemble and purge on that
+    /// basis. A publisher gated on the local list would leave the quorum
+    /// empty and the purge refused.
+    @Test
+    void configuredWatermarkChannelAndStreamDriveRetentionQuorum() throws Exception {
+        final Path root = Files.createTempDirectory("dg-aeron-watermark-config-");
+        final UUID clusterId = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final int controlPort = freePort();
+        final int livePort = freePort();
+        final int watermarkPort = freePort();
+        final String watermarkChannel = "aeron:udp?endpoint=localhost:%s".formatted(freePort());
+        final int watermarkStreamId = 7777;
+        final UUID readerId = UUID.randomUUID();
+        final Set<UUID> retentionReaders = Set.of(readerId);
+        final Path writerStore = root.resolve("writer-store");
+        final Path readerStore = root.resolve("reader-store");
+        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+                properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
+                        controlPort, livePort, watermarkPort, retentionReaders,
+                        watermarkChannel, watermarkStreamId))) {
+            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final Root initial = new Root();
+            initial.values.add("baseline");
+            final EmbeddedStorageManager seeded = start(writerStore, initial, distributor,
+                    writerTransport.persistenceTargetFactory("store", distributor));
+            seeded.storeRoot();
+            seeded.shutdown();
+            final ReplicationCursor baseline = latest(writerTransport);
+            copyDirectory(writerStore, readerStore);
+
+            final EmbeddedStorageManager writer = startExisting(writerStore, distributor,
+                    writerTransport.persistenceTargetFactory("store", distributor));
+            final Root writerRoot = writer.root();
+            writerRoot.values.add("watermark-config-update");
+            writerRoot.payload = new byte[256 * 1024];
+            java.util.Arrays.fill(writerRoot.payload, (byte) 0x5a);
+            writer.storeAll(List.of(writerRoot, writerRoot.values));
+            final ReplicationCursor target = latest(writerTransport);
+            /* Documented setup: the quorum list lives on the writer only. The
+             * reader carries an empty local list and must publish anyway. */
+            replicateAndVerify(root.resolve("reader"), readerStore, "reader", readerId,
+                    clusterId, generation, baseline, target, controlPort, livePort, watermarkPort,
+                    Set.of(), "watermark-config-update", false,
+                    watermarkChannel, watermarkStreamId);
+            final long watermarkDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (!writerTransport.retention().isSupported() && System.nanoTime() < watermarkDeadline) {
+                java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+            }
+            assertTrue(writerTransport.retention().isSupported(),
+                    "writer did not assemble the retention quorum on the configured watermark channel/stream");
+            assertEquals(
+                    peruncs.datagrid.cluster.node.replication.ReplicationLogRetention.MaintenanceResult.Status.DELETED,
+                    writerTransport.retention().deleteThrough(target).status(),
+                    "configured watermark quorum must permit online purge");
             writer.shutdown();
         } finally {
             delete(root);
@@ -852,9 +959,12 @@ class AeronStoreIntegrationIT {
     static final class ReaderNode implements AutoCloseable {
         private final ClusterReplicationTransport transport;
         private final StoredReplicationCursorManager cursorManager;
+        private final EmbeddedStorageFoundation<?> foundation;
         private final EmbeddedStorageManager storage;
-        private final StorageBinaryDataReceiver receiver;
-        private final StorageBinaryDataClient client;
+        private final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        private final String role;
+        private StorageBinaryDataReceiver receiver;
+        private StorageBinaryDataClient client;
         private boolean closed;
 
         private ReaderNode(
@@ -871,23 +981,13 @@ class AeronStoreIntegrationIT {
         ) {
             this.transport = new AeronClusterReplicationTransportProvider().create(properties(
                     nodeRoot, clusterId, nodeId, generation, role, -1L, controlPort, livePort, watermarkPort));
+            this.role = role;
             try {
                 this.cursorManager = StoredReplicationCursorManager.NewAtomic(nodeRoot.resolve("cursor"));
-                final EmbeddedStorageFoundation<?> foundation = foundation(storePath);
-                this.storage = foundation.start();
-                this.receiver = StorageBinaryDataMerger.New(
-                        foundation.getConnectionFoundation(), this.storage.createConnection(),
-                        ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
-                this.client = this.transport.client(this.receiver, "store", new AfterDataMessageConsumedListener() {
-                    @Override
-                    public void onApplied(final ReplicationCursor cursor) {
-                        ReaderNode.this.cursorManager.set(cursor);
-                    }
-
-                    @Override
-                    public void close() {
-                    }
-                }, startingCursor, "backup-reader".equals(role));
+                this.foundation = foundation(storePath);
+                this.storage = this.foundation.start();
+                this.receiver = this.newReceiver();
+                this.client = this.newClient(startingCursor);
             } catch (final RuntimeException | Error failure) {
                 try {
                     this.transport.close();
@@ -896,6 +996,30 @@ class AeronStoreIntegrationIT {
                 }
                 throw failure;
             }
+        }
+
+        private StorageBinaryDataReceiver newReceiver() {
+            return StorageBinaryDataMerger.New(
+                    this.foundation.getConnectionFoundation(), this.storage.createConnection(),
+                    ObjectGraphUpdateHandler.PerStore(this.coordinator), 0L, 1L,
+                    StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
+        }
+
+        StorageGraphCoordinator graphCoordinator() {
+            return this.coordinator;
+        }
+
+        private StorageBinaryDataClient newClient(final ReplicationCursor startingCursor) {
+            return this.transport.client(this.receiver, "store", new AfterDataMessageConsumedListener() {
+                @Override
+                public void onApplied(final ReplicationCursor cursor) {
+                    ReaderNode.this.cursorManager.set(cursor);
+                }
+
+                @Override
+                public void close() {
+                }
+            }, startingCursor, "backup-reader".equals(this.role));
         }
 
         static ReaderNode open(
@@ -958,6 +1082,10 @@ class AeronStoreIntegrationIT {
             return this.client.isRunning();
         }
 
+        boolean isLive() {
+            return this.client.isLive();
+        }
+
         void stopAtLatest() {
             this.client.stopAtLatestMessage();
             final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
@@ -969,6 +1097,29 @@ class AeronStoreIntegrationIT {
             }
             assertEquals(StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY,
                     this.client.stopOutcome(), "reader did not stop at a resolved boundary");
+        }
+
+        /**
+         * Replaces only the Aeron reader and merger while retaining the live Store.
+         * This exercises a transport restart without reopening the Store in the
+         * same JVM, which can race Store materializer teardown.
+         */
+        void restartTransport(final ReplicationCursor startingCursor) {
+            if (this.closed) throw new IllegalStateException("reader is closed");
+            this.client.dispose();
+            this.disposeReceiver();
+            this.receiver = this.newReceiver();
+            try {
+                this.client = this.newClient(startingCursor);
+                this.client.start();
+            } catch (final RuntimeException | Error failure) {
+                try {
+                    this.disposeReceiver();
+                } catch (final RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw failure;
+            }
         }
 
         Root root() {
@@ -984,7 +1135,9 @@ class AeronStoreIntegrationIT {
         }
 
         private void disposeReceiver() {
-            if (this.receiver instanceof Disposable disposable) {
+            final StorageBinaryDataReceiver current = this.receiver;
+            this.receiver = null;
+            if (current instanceof Disposable disposable) {
                 disposable.dispose();
             }
         }
@@ -995,10 +1148,8 @@ class AeronStoreIntegrationIT {
             this.closed = true;
             RuntimeException failure = null;
             try {
-                this.client.dispose();
-            } catch (final RuntimeException closeFailure) {
-                failure = closeFailure;
-            }
+                if (this.client != null) this.client.dispose();
+            } catch (final RuntimeException closeFailure) { failure = closeFailure; }
             try {
                 this.disposeReceiver();
             } catch (final RuntimeException closeFailure) {

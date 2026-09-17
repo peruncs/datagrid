@@ -1031,7 +1031,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             /* Eagerly create the manager so misconfiguration fails at startup.
              * The foundation owns its lifecycle; embedders borrow it through
              * backupNodeManager(). */
-            this.getBackupNodeManager();
+            Objects.requireNonNull(this.getBackupNodeManager());
 
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->
@@ -1164,7 +1164,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             /* Eagerly create the manager so misconfiguration fails at startup.
              * The foundation owns its lifecycle; embedders borrow it through
              * storageNodeManager(). */
-            this.getStorageNodeManager();
+            Objects.requireNonNull(this.getStorageNodeManager());
 
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->

@@ -246,8 +246,7 @@ class ReaderSeedBootstrapTest {
                 case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> this.aeronHome.resolve("archive").toString();
                 case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" ->
                         this.aeronHome.resolve("writer.checkpoint").toString();
-                case "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE",
-                        "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE" -> "true";
+                case "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE" -> "true";
                 /* Documentation addresses: the seed gate under test throws
                  * before any Aeron channel is opened, so these are never
                  * connected. Production mode only requires them to be

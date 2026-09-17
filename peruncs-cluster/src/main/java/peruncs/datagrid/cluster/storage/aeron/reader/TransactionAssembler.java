@@ -11,7 +11,6 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -34,8 +33,6 @@ final class TransactionAssembler {
     private final StorageBinaryDataReceiver receiver;
     private final Runnable transactionResolved;
     private final ReaderDeliveryListener deliveryListener;
-    private final byte[] authenticationSecret;
-    private final byte[] previousAuthenticationSecret;
     private final AtomicLong lastResolvedSequence = new AtomicLong();
     /* Materialisation can succeed before the durable cursor callback completes.
      * Keep that observation separate for health/lag reporting. */
@@ -140,8 +137,6 @@ final class TransactionAssembler {
         this.receiver = receiver;
         this.transactionResolved = transactionResolved;
         this.deliveryListener = deliveryListener;
-        this.authenticationSecret = configuration.authenticationSecret();
-        this.previousAuthenticationSecret = configuration.previousAuthenticationSecret();
         if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
             throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
         }
@@ -162,8 +157,7 @@ final class TransactionAssembler {
                 final boolean deliver;
                 synchronized (this) {
                     final AeronReplicationEnvelope.EnvelopeView envelope =
-                            AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView,
-                                    this.authenticationSecret, this.previousAuthenticationSecret);
+                            AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
                     if (this.failure.get() != null) return;
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
                 }
@@ -445,8 +439,6 @@ final class TransactionAssembler {
                 }
             }
         }
-        if (this.authenticationSecret != null) Arrays.fill(this.authenticationSecret, (byte) 0);
-        if (this.previousAuthenticationSecret != null) Arrays.fill(this.previousAuthenticationSecret, (byte) 0);
     }
 
         /// Holds fragments and commit metadata for one transaction.

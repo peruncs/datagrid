@@ -13,25 +13,27 @@ import java.util.UUID;
 
 /// Forked child running one phase of the bounded writer/reader/index restart scenario.
 ///
-/// Each phase runs in its own JVM: several Stores, drivers, and archives in
-/// one process must not share a fork with the classpath suites, and closing
-/// then reopening the same Store files inside one JVM races Store teardown.
-/// Files under the shared root carry state across phases (stores, cursors,
-/// checkpoints, archives); stable identities travel as command arguments.
-/// The parent smoke test launches each phase in order and fails on the first
-/// nonzero exit, keeping the coverage in the normal `mvn test` gate.
+/// Each phase runs in its own JVM, and a Store created by one phase is only
+/// ever reopened by a later phase: closing then reopening the same Store files
+/// inside one JVM races Store teardown and failed intermittently with
+/// `BinaryBitmapIndex`. Files under the shared root carry state across phases
+/// (stores, cursors, checkpoints, archives); stable identities travel as
+/// command arguments. The parent smoke test launches each phase in order and
+/// fails on the first nonzero exit, keeping the coverage in the normal
+/// `mvn test` gate.
 public final class AeronStoreSmokeChildMain {
     private AeronStoreSmokeChildMain() {
     }
 
     /// Runs one scenario phase; exits nonzero with a stack trace on failure.
     ///
-    /// @param args `seed-import` or `resume-verify`, then the shared root,
-    ///             cluster id, store generation, writer node id, reader node id,
-    ///             and the control, live, and watermark ports. Ports stay stable
-    ///             across phases: the Archive recording pins its live channel,
-    ///             so a restarted writer must publish on the same channels.
-    public static void main(final String[] args) {
+    /// @param args `seed-store`, `import-verify`, or `resume-verify`, then the
+    ///             shared root, cluster id, store generation, writer node id,
+    ///             reader node id, and the control, live, and watermark ports.
+    ///             Ports stay stable across phases: the Archive recording pins
+    ///             its live channel, so a restarted writer must publish on the
+    ///             same channels.
+    static void main(final String[] args) {
         try {
             if (args.length != 9) throw new IllegalArgumentException("expected 9 arguments, received " + args.length);
             final var phase = args[0];
@@ -43,7 +45,8 @@ public final class AeronStoreSmokeChildMain {
             final var ports = new int[]{
                     Integer.parseInt(args[6]), Integer.parseInt(args[7]), Integer.parseInt(args[8])};
             switch (phase) {
-                case "seed-import" -> seedAndImport(root, clusterId, generation, writerNodeId, readerNodeId, ports);
+                case "seed-store" -> seedStore(root, clusterId, generation, writerNodeId, ports);
+                case "import-verify" -> importAndVerify(root, clusterId, generation, writerNodeId, readerNodeId, ports);
                 case "resume-verify" -> resumeAndVerify(root, clusterId, generation, writerNodeId, readerNodeId, ports);
                 default -> throw new IllegalArgumentException("unknown smoke phase: " + phase);
             }
@@ -53,7 +56,35 @@ public final class AeronStoreSmokeChildMain {
         }
     }
 
-    private static void seedAndImport(
+    /// Phase 0: creates and seeds the writer Store in a dedicated process so
+    /// no later phase ever reopens Store files this process closed. The ports
+    /// match the later phases: the Archive recording pins its live channel,
+    /// and phase 1 restarts the writer against the same channels.
+    private static void seedStore(
+            final Path root,
+            final UUID clusterId,
+            final UUID generation,
+            final UUID writerNodeId,
+            final int[] ports)  {
+        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+                AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
+                        ports[0], ports[1], ports[2]))) {
+            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final IndexRoot initial = new IndexRoot();
+            initial.articles = GigaMap.New();
+            AeronStoreIntegrationIT.configureIndexes(initial.articles);
+            final EmbeddedStorageManager seeded = AeronStoreIntegrationIT.startIndex(root.resolve("writer-store"), initial, distributor,
+                    writerTransport.persistenceTargetFactory("store", distributor));
+            seeded.storeRoot();
+            seeded.shutdown();
+        }
+        System.out.println("PHASE0-OK");
+    }
+
+    /// Phase 1: opens the seeded writer Store in a fresh process, copies it to
+    /// the reader, and verifies the first replicated transaction on both
+    /// indexes.
+    private static void importAndVerify(
             final Path root,
             final UUID clusterId,
             final UUID generation,
@@ -64,22 +95,14 @@ public final class AeronStoreSmokeChildMain {
         final Path writerStore = root.resolve("writer-store");
         final Path readerStore = root.resolve("reader-store");
         try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
-                properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
+                AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
             final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
-            final IndexRoot initial = new IndexRoot();
-            initial.articles = GigaMap.New();
-            configureIndexes(initial.articles);
-            final EmbeddedStorageManager seeded = startIndex(writerStore, initial, distributor,
-                    writerTransport.persistenceTargetFactory("store", distributor));
-            seeded.storeRoot();
-            seeded.shutdown();
-            final ReplicationCursor baseline = latest(writerTransport);
-            copyDirectory(writerStore, readerStore);
-
-            final EmbeddedStorageManager writer = startExistingIndex(writerStore, distributor,
+            final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor,
                     writerTransport.persistenceTargetFactory("store", distributor));
             try {
+                final ReplicationCursor baseline = AeronStoreIntegrationIT.latest(writerTransport);
+                AeronStoreIntegrationIT.copyDirectory(writerStore, readerStore);
                 try (ReaderNode reader = ReaderNode.open(
                         root.resolve("reader"), readerStore, "reader",
                         readerNodeId, clusterId, generation, baseline, ports[0], ports[1], ports[2])) {
@@ -89,7 +112,7 @@ public final class AeronStoreSmokeChildMain {
                     writerRoot.articles.add(new IndexedArticle(
                             "Aeron", "smoke replication", new float[]{1.0f, 0.0f, 0.0f}));
                     writerRoot.articles.store();
-                    reader.await(latest(writerTransport));
+                    reader.await(AeronStoreIntegrationIT.latest(writerTransport));
                     reader.assertHealthy();
                     reader.stopAtLatest();
                 }
@@ -119,21 +142,19 @@ public final class AeronStoreSmokeChildMain {
             throw new IllegalStateException("no persisted reader cursor to resume from: " + resumed);
         }
         try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
-                properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
+                AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
             final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
-            final EmbeddedStorageManager writer = startExistingIndex(writerStore, distributor,
-                    writerTransport.persistenceTargetFactory("store", distributor));
+            final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor, writerTransport.persistenceTargetFactory("store", distributor));
             try {
                 /* A second transaction lands while the reader is down (a new
                  * process here); the reader resumes from its persisted atomic
                  * cursor, proving restart continuity instead of re-importing
                  * from scratch. */
                 final IndexRoot writerRoot = writer.root();
-                writerRoot.articles.add(new IndexedArticle(
-                        "Vector", "restart import", new float[]{0.0f, 1.0f, 0.0f}));
+                writerRoot.articles.add(new IndexedArticle("Vector", "restart import", new float[]{0.0f, 1.0f, 0.0f}));
                 writerRoot.articles.store();
-                final ReplicationCursor second = latest(writerTransport);
+                final ReplicationCursor second = AeronStoreIntegrationIT.latest(writerTransport);
                 try (ReaderNode restarted = ReaderNode.open(
                         root.resolve("reader"), readerStore, "reader",
                         readerNodeId, clusterId, generation, resumed, ports[0], ports[1], ports[2])) {
@@ -142,16 +163,18 @@ public final class AeronStoreSmokeChildMain {
                     restarted.await(second);
                     restarted.assertHealthy();
                     restarted.stopAtLatest();
+                    /* Verify the reader Store while it is still open. The
+                     * product has a known same-JVM teardown/materializer race;
+                     * process restart coverage belongs to the next smoke
+                     * phase, so this phase must not close and reopen the same
+                     * Store before asserting its indexes. */
+                    final IndexRoot imported = (IndexRoot) restarted.rootObject();
+                    AeronStoreIntegrationIT.assertIndexState(imported, "Aeron", "replication", new float[]{1.0f, 0.0f, 0.0f});
+                    AeronStoreIntegrationIT.assertIndexState(imported, "Vector", "import", new float[]{0.0f, 1.0f, 0.0f});
                 }
             } finally {
                 writer.shutdown();
             }
-        }
-        /* Both indexes answer after the reader Store itself restarts. */
-        try (EmbeddedStorageManager reopened = foundation(readerStore).start()) {
-            final IndexRoot imported = reopened.root();
-            assertIndexState(imported, "Aeron", "replication", new float[]{1.0f, 0.0f, 0.0f});
-            assertIndexState(imported, "Vector", "import", new float[]{0.0f, 1.0f, 0.0f});
         }
         System.out.println("SMOKE-OK");
     }

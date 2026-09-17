@@ -74,10 +74,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
 
         /// Creates a merger with bounded deferred materialization that joins a graph coordinator.
     ///
-    /// The merger's own Store reads — the post-materialization index scan and
-    /// the type-dictionary conflict scan — run through the coordinator's read
-    /// side, so they overlap application reads but never a materialization.
-    /// Mutations (materialization batches, dictionary merges) run through the
+    /// The whole import — baseline capture, materialization, the
+    /// post-materialization index scan, and validation — runs through the
+    /// coordinator's write side as one section, so joined application reads
+    /// observe whole batch boundaries. The type-dictionary conflict scan is
+    /// the only merger read left on the read side. Mutations (materialization
+    /// batches, dictionary merges) run through the
     /// update handler, which is normally the same coordinator's write side.
     /// A `null` coordinator keeps the legacy behavior: scans run directly
     /// because there is no shared lock to join, while mutations still flow
@@ -485,7 +487,6 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             if (coordinator == null) read.run();
             else coordinator.read(read);
         }
-
                 /// Read-phase counterpart of [#readJoined(Runnable)] for scans
         /// that produce a plan for a later write-side mutation.
         private <T> T readJoined(final Supplier<T> read) {
@@ -539,22 +540,40 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 final long startedNanos = System.nanoTime();
                 try {
                     this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
-                            StorageBinaryDataMaterializer.materialize(this.storage, this.drainBuffers, pending));
-                    /* Reader-side index enforcement: a writer that smuggled an
-                     * external Lucene directory or a non-persisted vector index
-                     * past registration fails this reader closed instead of
-                     * diverging it. The scan visits index metadata only, never
-                     * entity payload. It runs after the write section above has
-                     * released it, through the shared read side when a
-                     * coordinator is wired, so application reads may overlap
-                     * the scan while the next batch stays queued behind the
-                     * materialization lock. */
-                    this.readJoined(() -> ClusterStoreIndexes.validateStorageRoots(this.storage));
+                    {
+                        /* One coordinator write section covers the batch end
+                         * to end: materialization, validation, and index
+                         * refresh. Application reads joining the read side
+                         * observe either the pre-batch or the post-batch
+                         * boundary — never a materialized graph with stale
+                         * search views. */
+                        /* Reader-side index maintenance FIRST: imports
+                         * materialize entities without the map API, so no
+                         * index group observes them and both search views
+                         * freeze at the first query. Retirement runs before
+                         * the swap, not after: closing the Lucene writer over
+                         * the commit point it references deletes nothing,
+                         * while closing it after the swap deletes the
+                         * replicated files it never created — including the
+                         * commit point — and the next reopen wipes the rest.
+                         * The swap then lands in a view-less index and the
+                         * next query reopens over the current files. Runs
+                         * only for non-empty batches: applyData returns early
+                         * when idle. */
+                        ClusterStoreIndexes.refreshImportedIndexes(this.storage);
+                        StorageBinaryDataMaterializer.materialize(this.storage, this.drainBuffers, pending);
+                        /* Reader-side index enforcement: a writer that smuggled
+                         * an external Lucene directory or a non-persisted
+                         * vector index past registration fails this reader
+                         * closed instead of diverging it. The scan visits
+                         * index metadata only, never entity payload. */
+                        ClusterStoreIndexes.validateStorageRoots(this.storage);
+                    });
                 } catch (final RuntimeException | Error failure) {
                     /* A genuine failure says failed; only an overrun says timed
                      * out. The two are never conflated into one message. */
                     if (failure instanceof RuntimeException runtime) {
-                        this.recordFailure("Store graph update failed", runtime);
+                        this.noteFailure("Store graph update failed", runtime);
                     }
                     throw failure;
                 } finally {
@@ -566,7 +585,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     final IllegalStateException terminal = new IllegalStateException(
                             "Timed out while applying Store data: batch took %s ms with a budget of %s ms"
                                     .formatted(elapsedMs, this.materializationBudgetMs));
-                    this.recordFailure(terminal.getMessage(), terminal);
+                    this.noteFailure(terminal.getMessage(), terminal);
                     throw terminal;
                 }
             });
@@ -717,7 +736,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 });
                 return pending;
             } catch (final RuntimeException | Error failure) {
-                this.recordFailure("Store type dictionary update failed", failure);
+                this.noteFailure("Store type dictionary update failed", failure);
                 throw failure;
             }
         }
@@ -752,7 +771,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * binary is imported, so a restart can resolve every imported type id. */
                 this.foundation.getTypeHandlerManager().exportPendingTypeDictionaryChanges();
             } catch (final RuntimeException | Error failure) {
-                this.recordFailure("Store type dictionary update failed", failure);
+                this.noteFailure("Store type dictionary update failed", failure);
                 throw failure;
             }
         }
@@ -847,7 +866,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 this.awaitMaterialization(pending, "imported Store data materialization");
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
-                this.recordFailure("Interrupted while waiting for imported Store data materialization", e);
+                this.noteFailure("Interrupted while waiting for imported Store data materialization", e);
                 this.releaseCachedData();
                 throw new StorageBinaryDataException("Interrupted while waiting for imported Store data materialization", e);
             } catch (final ExecutionException e) {
@@ -896,12 +915,18 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
         }
 
+        /* Records the first failure without returning it, for paths that rethrow
+         * the original cause to preserve its type and stack. See [#recordFailure]
+         * for paths that throw the canonical first failure. */
+        private void noteFailure(final String message, final Throwable cause) {
+            this.failure.compareAndSet(null, new IllegalStateException(message, cause));
+        }
+
         /* Records the first failure and returns it; later failures are dropped so
          * concurrent paths cannot overwrite the root cause. Callers throw the
          * result themselves, which is why this method only records. */
         private RuntimeException recordFailure(final String message, final Throwable cause) {
-            final RuntimeException terminal = new IllegalStateException(message, cause);
-            this.failure.compareAndSet(null, terminal);
+            this.noteFailure(message, cause);
             return this.failure.get();
         }
     }

@@ -8,7 +8,6 @@ import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
@@ -316,7 +315,6 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
             throw e;
         } finally {
             this.finishRun(lifecycleStopped);
-            AeronReplicationEnvelope.clearThreadLocalAuthenticationState();
         }
     }
 

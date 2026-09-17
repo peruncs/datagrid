@@ -1,5 +1,11 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import io.github.jbellis.jvector.graph.GraphIndexBuilder;
+import io.github.jbellis.jvector.graph.OnHeapGraphIndex;
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.store.AlreadyClosedException;
+import org.apache.lucene.store.Directory;
 import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.typing.KeyValue;
@@ -17,12 +23,14 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.gigamap.types.IndexGroup;
 import org.eclipse.store.storage.types.StorageConnection;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 
 /// Keeps clustered text and vector search inside the Store object graph and
@@ -59,14 +67,15 @@ import java.util.concurrent.atomic.AtomicReference;
 /// direct index referents but prunes other runtime referents to avoid scanning
 /// Store's bookkeeping graph. Other opaque JDK holders with state fail closed.
 ///
-/// Every map that passes through registration or validation is also tracked
-/// in an explicit weak registry ([registerMap]). The writer entry point
-/// validates tracked maps directly and uses the pruned walk only to discover
-/// and check untracked metadata, so a steady-state write never pays for the
-/// application's data set.
+/// Validation is scoped to the Store being written or read: the root scan
+/// discovers the maps belonging to that Store, so a still-referenced map from
+/// another Store or stream never blocks an unrelated writer. A GigaMap is
+/// validated wherever the scan meets it; registration exists to build the
+/// supported index kinds, not to track maps.
 public final class ClusterStoreIndexes {
     private static final String EXTERNAL_LUCENE_MESSAGE = "Cluster replication supports only embedded Lucene indexes; external directories are not supported";
     private static final String EXTERNAL_VECTOR_MESSAGE = "Cluster replication supports only in-graph JVector indexes; external index directories are not supported";
+    private static final String BACKGROUND_VECTOR_MESSAGE = "Cluster replication supports only synchronous JVector indexing; background graph workers cannot be retired safely on import";
     private static final String UNKNOWN_INDEX_MESSAGE = "Cluster replication supports only embedded Lucene, in-graph JVector, and core bitmap indexes";
         /* Registration check-then-act must not lock on the foreign index object:
          * any other code synchronizing on it could deadlock with registration,
@@ -79,23 +88,21 @@ public final class ClusterStoreIndexes {
          * here. */
     private static final int MAX_VALIDATED_OBJECTS = 4096;
 
-        /* Explicit registry of GigaMap instances known to the cluster index
-         * boundary: maps registered through this class, maps that passed
-         * validation, and maps applications register directly. The registry
-         * is process-wide and the index policy is cluster-wide, so one
-         * writer entry validates every tracked map; only proven maps are
-         * ever added. Weak keys keep tracking from retaining application
-         * state; all access synchronizes on the set itself. */
-    private static final Set<GigaMap<?>> TRACKED_MAPS =
-            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
-
         /* Per-class index-relevance cache backing the traversal prune. A class
          * is relevant when its instances could reach index metadata; anything
          * unprovable (interfaces, abstract types, `Object` fields, JDK state,
          * reflection failures) stays relevant so the walk fails closed rather
          * than skipping unknown state. Deterministic per class, so concurrent
          * duplicate analyses are harmless. */
-    private static final ConcurrentHashMap<Class<?>, Boolean> INDEX_RELEVANT = new ConcurrentHashMap<>();
+    /* ClassValue lets application classes unload with their class loader. A
+     * process that creates and retires many Store class loaders must not keep
+     * every analyzed Class strongly reachable forever. */
+    private static final ClassValue<Boolean> INDEX_RELEVANT = new ClassValue<>() {
+        @Override
+        protected Boolean computeValue(final Class<?> type) {
+            return analyzeIndexRelevant(type, new HashSet<>());
+        }
+    };
 
         /* Worker-local validation scratch: the seen set and the traversal queue
          * are reused across scans instead of allocating an IdentityHashMap and
@@ -110,6 +117,7 @@ public final class ClusterStoreIndexes {
         final IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
         final ArrayDeque<Object> queue = new ArrayDeque<>();
         final ArrayList<IndexGroup<?>> groups = new ArrayList<>();
+        final ArrayList<GigaMap<?>> maps = new ArrayList<>();
     }
 
     private ClusterStoreIndexes() {
@@ -166,10 +174,6 @@ public final class ClusterStoreIndexes {
                 }
                 throw new IllegalStateException("failed to register clustered Lucene index");
             }
-            /* Track only proven maps: a failed registration must never enter
-             * the registry, or every later writer entry would re-fail on it;
-             * the root walk still covers untracked maps. */
-            TRACKED_MAPS.add(map);
             return registered;
         } catch (final RuntimeException raced) {
             /* A foreign registration slipped in between the check and the
@@ -238,10 +242,7 @@ public final class ClusterStoreIndexes {
             if (indices == null) {
                 indices = checkedMap.index().register(VectorIndices.Category());
             }
-            final VectorIndex<E> added = addVectorLocked(indices, checkedName, configuration, checkedVectorizer);
-            /* Track only proven maps: see [#registerLuceneLocked]. */
-            TRACKED_MAPS.add(checkedMap);
-            return added;
+            return addVectorLocked(indices, checkedName, configuration, checkedVectorizer);
         });
     }
 
@@ -267,14 +268,24 @@ public final class ClusterStoreIndexes {
         }
     }
 
-        /// Rejects any JVector configuration that uses an external directory.
+        /// Rejects any JVector configuration that replication cannot carry.
+    ///
+    /// External directories never reach a reader, and background graph
+    /// workers (eventual indexing, background optimization) cannot be
+    /// retired safely: the import refresh closes and nulls the builder and
+    /// graph, and no public upstream lifecycle stops an in-flight worker
+    /// first, so a worker could use a retired builder mid-import.
     ///
     /// @param configuration configuration to check
-    /// @throws IllegalArgumentException if on-disk mode or a directory is configured
+    /// @throws IllegalArgumentException if on-disk mode, a directory, or a
+    ///                                  background graph mode is configured
     public static void validateVectorConfiguration(final VectorIndexConfiguration configuration) {
         final VectorIndexConfiguration checked = Objects.requireNonNull(configuration, "configuration");
         if (checked.onDisk() || checked.indexDirectory() != null) {
             throw new IllegalArgumentException(EXTERNAL_VECTOR_MESSAGE);
+        }
+        if (checked.eventualIndexing() || checked.backgroundOptimization()) {
+            throw new IllegalArgumentException(BACKGROUND_VECTOR_MESSAGE);
         }
     }
 
@@ -284,7 +295,8 @@ public final class ClusterStoreIndexes {
     /// created by a persistence handler rather than by application code.
     ///
     /// @param map map to validate
-    /// @throws IllegalArgumentException if a vector index uses external storage
+    /// @throws IllegalArgumentException if a vector index uses external
+    ///                                  storage or a background graph mode
     public static void validateVectorIndexes(final GigaMap<?> map) {
         final VectorIndices<?> indices = Objects.requireNonNull(map, "map").index().get(VectorIndices.Category());
         if (indices == null) {
@@ -293,22 +305,7 @@ public final class ClusterStoreIndexes {
         validateVectorIndicesGroup(indices);
     }
 
-    /// Tracks a map with the cluster index boundary without registering an index.
-    ///
-    /// The writer entry point ([validateForPublication]) validates tracked
-    /// maps directly and walks Store roots only for untracked metadata, so
-    /// registering the application's maps keeps every distributed write
-    /// cheap. Maps registered through [#registerLucene] and [#registerVector]
-    /// are tracked automatically; use this for maps that carry no cluster
-    /// index, or whose indexes were attached before this class was adopted.
-    /// Tracking never validates: it only names the map for later checks.
-    ///
-    /// @param map map to track
-    public static void registerMap(final GigaMap<?> map) {
-        TRACKED_MAPS.add(Objects.requireNonNull(map, "map"));
-    }
-
-    /// Validates every index attached to one map; validated maps join the tracking set.
+    /// Validates every index attached to one map.
     ///
     /// Every registered index group is enumerated: embedded Lucene and
     /// in-graph vector groups are validated, the core bitmap group is
@@ -344,10 +341,6 @@ public final class ClusterStoreIndexes {
         } finally {
             scratch.groups.clear();
         }
-        /* Track only proven maps: a map that fails validation must never
-         * enter the registry, or every later writer entry would re-fail on
-         * another store's rejected map. */
-        TRACKED_MAPS.add(checked);
     }
 
         /// Snapshots every index group registered on a map into `collected`.
@@ -415,14 +408,11 @@ public final class ClusterStoreIndexes {
     ///                                  non-persisted vector index is reachable from the root
     /// @throws IllegalStateException    if a large index-relevant graph cannot be inspected completely
     public static void validateGraph(final Object root) {
-        validateGraphInternal(root, null);
+        validateGraphInternal(root);
     }
 
-        /// Validates one root, skipping maps the caller already checked.
-    ///
-    /// @param root              Store root to validate
-    /// @param alreadyValidated  maps to skip, or `null` to check every map
-    private static void validateGraphInternal(final Object root, final Set<GigaMap<?>> alreadyValidated) {
+        /// Validates one root's reachable index metadata.
+    private static void validateGraphInternal(final Object root) {
         if (root == null) return;
         final ValidationScratch scratch = SCRATCH.get();
         scratch.seen.clear();
@@ -443,9 +433,7 @@ public final class ClusterStoreIndexes {
                      * every reader batch pay for the whole data set. Objects
                      * whose class cannot reach index metadata were pruned
                      * before enqueueing, so only relevant objects count above. */
-                    if (alreadyValidated == null || !alreadyValidated.contains(map)) {
-                        validateMap(map);
-                    }
+                    validateMap(map);
                 } else if (current instanceof LuceneIndex<?> lucene) {
                     validateLuceneIndex(lucene);
                 } else if (current instanceof LuceneContext<?> context) {
@@ -486,32 +474,351 @@ public final class ClusterStoreIndexes {
                 });
     }
 
-        /// Writer-side enforcement entry: validates every Store root before publication.
+        /// Reader-side maintenance entry: refreshes every replicated search view
+    /// reachable from this Store's roots after a replicated batch is applied.
+    ///
+    /// Imports materialize entities without calling the map's add/update/remove
+    /// API, so no index group observes the change and both search views freeze
+    /// at whatever the first query built: Lucene's cached near-real-time reader
+    /// reopens only when a write-path mutation marks it stale, and JVector's
+    /// transient graph rebuilds exactly once after load. The chaos soak proved
+    /// a commit-only refresh insufficient: the graph converged with zero misses
+    /// while both indexes missed 327 of 370 live articles on every reader.
+    ///
+    /// The refresh is two-tracked because the two indexes replicate
+    /// differently. Lucene's complete directory content ships inside the Store
+    /// (graph directory committed at the writer's `store()` boundary), so the
+    /// reader must only retire its cached handles: the next query reopens over
+    /// the already-current files. A reader-side rollback or rebuild is not
+    /// just unnecessary here, it is corrupting: rollback deletes the
+    /// replicated commit point the writer never created, and reopening over
+    /// the commit-less remainder wipes the rest. The retired writer is
+    /// closed, never kept open across batches, so no file deleter ever spans
+    /// an import swap. JVector instead keeps only vectors in the
+    /// Store with a transient search graph, so the refresh resets that graph
+    /// to its just-loaded state: the next access rebuilds it from the
+    /// already-current vector store — the same lazy rebuild every restart
+    /// performs, with no vectorize call and no per-entity graph surgery.
+    ///
+    /// Per-entity graph surgery during import is deliberately avoided: the
+    /// group's update and re-insert entries assume writer-side invariants
+    /// (repaired neighbor lists, warmed builder state) that do not hold for a
+    /// just-materialized graph, and bisecting a native allocator abort in the
+    /// reader soak isolated the crash to those calls. The reset uses only the
+    /// lifecycle the index already exercises on every load and close, so an
+    /// unqueried stream of small batches pays a few field writes per batch
+    /// and rebuilds once when finally queried, instead of rebuilding — or
+    /// re-vectorizing — every entity per batch.
+    ///
+    /// Everything runs under the map monitor, the same lock queries use, and
+    /// the merger holds one coordinator write section across retirement,
+    /// materialization, and validation, so joined application reads observe
+    /// either the pre-batch or the post-batch boundary — never a materialized
+    /// graph with stale search views. Retirement precedes the swap: the
+    /// merger calls this before materializing, so every close still observes
+    /// the directory state its handles reference. Callers invoke this only
+    /// for non-empty batches.
+    ///
+    /// @param storage storage connection owning the materialized graph
+    @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter") // map is the shared GigaMap monitor, not a local lock
+    public static void refreshImportedIndexes(final StorageConnection storage) {
+        Objects.requireNonNull(storage, "storage");
+        final ValidationScratch scratch = SCRATCH.get();
+        collectMaps(storage, scratch);
+        try {
+            for (final GigaMap<?> map : scratch.maps) {
+                synchronized (map) {
+                    collectIndexGroups(map, scratch.groups);
+                    try {
+                        for (final IndexGroup<?> group : scratch.groups) {
+                            if (group instanceof VectorIndices<?> vectors) {
+                                resetVectorSearchGraphs(vectors);
+                            } else if (group instanceof LuceneIndex<?> lucene) {
+                                invalidateLuceneView(lucene);
+                            }
+                            /* Bitmap groups carry no cached search views: their
+                             * structural state ships inside the Store and
+                             * materializes directly, so nothing needs refresh. */
+                        }
+                    } finally {
+                        scratch.groups.clear();
+                    }
+                }
+            }
+        } finally {
+            scratch.maps.clear();
+        }
+    }
+
+    private static void collectMaps(final StorageConnection storage, final ValidationScratch scratch) {
+        scratch.seen.clear();
+        scratch.queue.clear();
+        scratch.maps.clear();
+        try {
+            storage.persistenceManager()
+                    .viewRoots()
+                    .iterateEntries((identifier, value) -> {
+                        if (value != null && scratch.seen.put(value, Boolean.TRUE) == null) {
+                            scratch.queue.add(value);
+                        }
+                    });
+            int visited = 0;
+            while (!scratch.queue.isEmpty()) {
+                if (++visited > MAX_VALIDATED_OBJECTS) {
+                    throw new IllegalStateException(
+                            "index refresh exceeded %s index-relevant objects; refusing an unprovable replication boundary"
+                                    .formatted(MAX_VALIDATED_OBJECTS));
+                }
+                final Object current = scratch.queue.poll();
+                if (current instanceof GigaMap<?> map) {
+                    scratch.maps.add(map);
+                } else {
+                    enqueueReachable(current, scratch.queue, scratch.seen);
+                }
+            }
+            scratch.maps.sort(Comparator.comparingInt(System::identityHashCode));
+        } finally {
+            scratch.seen.clear();
+            scratch.queue.clear();
+        }
+    }
+
+        /// Resets every vector search graph in a group to its just-loaded state.
+    ///
+    /// The transient HNSW builder and graph are closed and dropped and the
+    /// one-shot rebuild guard is cleared, so the next search or mutation
+    /// re-initializes and rebuilds from the already-current vector store —
+    /// the same lazy rebuild every restart performs, and the same shape the
+    /// upstream close leaves behind. Deferred builder operations are dropped
+    /// with the builder they were computed against; the rebuild recomputes
+    /// graph state from the store. No entity is vectorized and no graph node
+    /// is surgically mutated, so import batches converge without depending on
+    /// writer-side graph invariants.
+    ///
+    /// This retire-and-rebuild is sound only for synchronously indexed
+    /// graphs: background graph workers are rejected at registration and
+    /// root validation (see [#validateVectorConfiguration]), because no
+    /// public upstream lifecycle stops an in-flight worker before its
+    /// builder is retired here.
+    ///
+    /// The transient fields are located reflectively and retired through
+    /// Store's offset-based memory accessor — the same technique as
+    /// [#collectIndexGroups] and [#invalidateLuceneView] — so no runtime
+    /// `--add-opens` flag is required. A layout this code no longer
+    /// recognizes fails closed. Our own validation already rejects on-disk
+    /// vector configurations, so the skipped-in-incremental-mode rebuild path
+    /// cannot apply here: the rebuild always runs.
+    ///
+    /// @param vectors group whose search graphs to reset
+    /// @throws IllegalStateException if the upstream field layout changed
+    private static void resetVectorSearchGraphs(final VectorIndices<?> vectors) {
+        Objects.requireNonNull(vectors, "vectors");
+        final ArrayList<VectorIndex<?>> found = new ArrayList<>();
+        vectors.accessIndices(indices -> indices.values().iterate(found::add));
+        for (final VectorIndex<?> index : found) {
+            resetVectorSearchGraph(index);
+        }
+    }
+
+    private static void resetVectorSearchGraph(final VectorIndex<?> index) {
+        final Object target = Objects.requireNonNull(index, "index");
+        Field builderField = null;
+        Field graphField = null;
+        Field rebuiltField = null;
+        Field deferredField = null;
+        for (Class<?> type = target.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (final Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+                switch (field.getName()) {
+                    case "builder" -> {
+                        if (builderField == null && GraphIndexBuilder.class.isAssignableFrom(field.getType())) {
+                            builderField = field;
+                        }
+                    }
+                    case "index" -> {
+                        if (graphField == null && OnHeapGraphIndex.class.isAssignableFrom(field.getType())) {
+                            graphField = field;
+                        }
+                    }
+                    case "graphRebuilt" -> {
+                        if (rebuiltField == null && field.getType() == boolean.class) {
+                            rebuiltField = field;
+                        }
+                    }
+                    case "deferredBuilderOps" -> {
+                        if (deferredField == null && ConcurrentLinkedQueue.class.isAssignableFrom(field.getType())) {
+                            deferredField = field;
+                        }
+                    }
+                    default -> {
+                    }
+                }
+            }
+            if (builderField != null && graphField != null && rebuiltField != null && deferredField != null) break;
+        }
+        if (builderField == null || graphField == null || rebuiltField == null || deferredField == null) {
+            throw new IllegalStateException(
+                    "cannot reset vector search graph on %s; unsupported Store version"
+                            .formatted(target.getClass().getName()));
+        }
+        final GraphIndexBuilder builder =
+                (GraphIndexBuilder) XMemory.getObject(target, XMemory.objectFieldOffset(builderField));
+        final OnHeapGraphIndex graph =
+                (OnHeapGraphIndex) XMemory.getObject(target, XMemory.objectFieldOffset(graphField));
+        final Object deferred = XMemory.getObject(target, XMemory.objectFieldOffset(deferredField));
+        /* Drop operations computed against the retired builder first: the
+         * rebuild recomputes graph state from the store. */
+        if (deferred instanceof ConcurrentLinkedQueue<?> queued) queued.clear();
+        /* Same order as the upstream close: release the builder and the graph
+         * eagerly instead of abandoning them, then clear the rebuild guard so
+         * the next access re-initializes over current state. Only the map
+         * monitor is held here, matching every other refresh mutation; the
+         * merger's write section keeps joined reads out until this returns. */
+        if (builder != null) {
+            try {
+                builder.close();
+            } catch (final IOException failure) {
+                throw new IllegalStateException(
+                        "cannot close vector search builder on %s".formatted(target.getClass().getName()), failure);
+            }
+            XMemory.setObject(target, XMemory.objectFieldOffset(builderField), null);
+        }
+        if (graph != null) {
+            graph.close();
+            XMemory.setObject(target, XMemory.objectFieldOffset(graphField), null);
+        }
+        XMemory.set_byte(target, XMemory.objectFieldOffset(rebuiltField), (byte) 0);
+    }
+
+        /// Retires a reader's cached Lucene handles without committing, so the
+    /// next query reopens over the replicated files.
+    ///
+    /// The transient fields are located reflectively and retired through
+    /// Store's offset-based memory accessor — the same technique as
+    /// [#collectIndexGroups] — so no runtime `--add-opens` flag is required.
+    /// A layout this code no longer recognizes fails closed: an unprovable
+    /// refresh is reported instead of silently keeping a stale search view.
+    ///
+    /// Every handle is released, not abandoned: the reader, the writer, the
+    /// directory, and the analyzer are all closed. The writer is closed
+    /// rather than rolled back: rollback deletes every directory file the
+    /// writer did not create — on a reader, the replicated commit point
+    /// itself — while a reader issues no writes, so closing commits nothing
+    /// new. The searcher object itself owns no
+    /// resources beyond its reader (it is always built over the reader
+    /// field), so dropping the reference frees it. Closing the directory is
+    /// safe: the graph directory's files live in the persisted file-entries
+    /// registry, which is a separate field the refresh never touches, so the
+    /// next query recreates the directory over the same current files.
+    ///
+    /// @param lucene index whose cached view to retire
+    /// @throws IllegalStateException if the upstream field layout changed
+    private static void invalidateLuceneView(final LuceneIndex<?> lucene) {
+        final Object target = Objects.requireNonNull(lucene, "lucene");
+        Field directoryField = null;
+        Field writerField = null;
+        Field readerField = null;
+        Field searcherField = null;
+        Field analyzerField = null;
+        Field readerStaleField = null;
+        for (Class<?> type = target.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (final Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+                switch (field.getName()) {
+                    case "directory" -> {
+                        if (directoryField == null) directoryField = field;
+                    }
+                    case "writer" -> {
+                        if (writerField == null) writerField = field;
+                    }
+                    case "reader" -> {
+                        if (readerField == null) readerField = field;
+                    }
+                    case "searcher" -> {
+                        if (searcherField == null) searcherField = field;
+                    }
+                    case "analyzer" -> {
+                        if (analyzerField == null) analyzerField = field;
+                    }
+                    case "readerStale" -> {
+                        if (readerStaleField == null && field.getType() == boolean.class) {
+                            readerStaleField = field;
+                        }
+                    }
+                    default -> {
+                    }
+                }
+            }
+            if (directoryField != null && writerField != null && readerField != null &&
+                searcherField != null && analyzerField != null) break;
+        }
+        if (directoryField == null || writerField == null || readerField == null ||
+            searcherField == null || analyzerField == null) {
+            throw new IllegalStateException(
+                    "cannot invalidate Lucene view on %s; unsupported Store version"
+                            .formatted(target.getClass().getName()));
+        }
+        final Analyzer analyzer = (Analyzer) XMemory.getObject(target, XMemory.objectFieldOffset(analyzerField));
+        final Closeable writer = (Closeable) XMemory.getObject(target, XMemory.objectFieldOffset(writerField));
+        final DirectoryReader reader =
+                (DirectoryReader) XMemory.getObject(target, XMemory.objectFieldOffset(readerField));
+        final Directory directory =
+                (Directory) XMemory.getObject(target, XMemory.objectFieldOffset(directoryField));
+        /* Same order as the upstream close: analyzer, writer, reader,
+         * directory. The writer is closed — never rolled back: rollback
+         * deletes every directory file the writer did not create, which on a
+         * reader is exactly the replicated commit point, and the next query
+         * would reopen over a commit-less directory and wipe the rest. A
+         * reader issues no writes, so closing commits nothing new; it only
+         * releases the writer so the next query reopens over the current
+         * replicated files. The writer is never kept open across batches, so
+         * no file deleter ever spans an import swap. */
+        closeQuietly(target, analyzer, analyzerField);
+        closeQuietly(target, writer, writerField);
+        closeQuietly(target, reader, readerField);
+        closeQuietly(target, directory, directoryField);
+        XMemory.setObject(target, XMemory.objectFieldOffset(searcherField), null);
+        if (readerStaleField != null) {
+            XMemory.set_byte(target, XMemory.objectFieldOffset(readerStaleField), (byte) 0);
+        }
+    }
+
+    private static void closeQuietly(final Object target, final Closeable handle, final Field field) {
+        if (handle == null) return;
+        try {
+            handle.close();
+        } catch (final AlreadyClosedException alreadyClosed) {
+            // A previous refresh already retired it; the field below still needs nulling.
+        } catch (final IOException failure) {
+            throw new IllegalStateException(
+                    "cannot close reader Lucene handle on %s".formatted(target.getClass().getName()), failure);
+        }
+        XMemory.setObject(target, XMemory.objectFieldOffset(field), null);
+    }
+
+    /// Writer-side enforcement entry: validates this Store's roots before publication.
     ///
     /// Call this at writer startup and from the writer commit path, so an index
     /// registered directly — bypassing [#registerLucene] and [#registerVector] —
     /// fails the writer before the diverging transaction is published instead of
-    /// failing every reader after the fact. Tracked maps (see [registerMap])
-    /// are validated directly from the registry; the bounded, fail-closed walk
-    /// then covers only untracked metadata, so a steady-state write never pays
-    /// for the application's data set (see the class javadoc).
+    /// failing every reader after the fact.
+    ///
+    /// Validation is scoped to the Store being written: the bounded, fail-closed
+    /// root scan discovers exactly the maps reachable from this Store's roots
+    /// and validates each one, so a still-referenced map from another Store or
+    /// stream never blocks an unrelated writer. The scan never descends into
+    /// entity payloads, so a steady-state write never pays for the
+    /// application's data set (see the class javadoc).
     ///
     /// @param storage storage connection owning the writer graph
-    /// @throws IllegalArgumentException if any root violates the index policy
+    /// @throws IllegalArgumentException if any root of this Store violates the index policy
     /// @throws IllegalStateException    if a root cannot be inspected completely
     public static void validateForPublication(final StorageConnection storage) {
         Objects.requireNonNull(storage, "storage");
-        final Set<GigaMap<?>> validated = Collections.newSetFromMap(new IdentityHashMap<>());
-        synchronized (TRACKED_MAPS) {
-            validated.addAll(TRACKED_MAPS);
-        }
-        for (final GigaMap<?> tracked : validated) {
-            validateMap(tracked);
-        }
         storage.persistenceManager()
                 .viewRoots()
                 .iterateEntries((identifier, value) -> {
-                    if (value != null) validateGraphInternal(value, validated);
+                    if (value != null) validateGraph(value);
                 });
     }
 
@@ -663,11 +970,7 @@ public final class ClusterStoreIndexes {
     /// @param type class to classify
     /// @return `true` when its instances must be traversed
     private static boolean isIndexRelevant(final Class<?> type) {
-        final Boolean cached = INDEX_RELEVANT.get(type);
-        if (cached != null) return cached;
-        final boolean relevant = analyzeIndexRelevant(type, new HashSet<>());
-        INDEX_RELEVANT.putIfAbsent(type, relevant);
-        return relevant;
+        return INDEX_RELEVANT.get(type);
     }
 
     private static boolean isIndexMetadataType(final Class<?> type) {
@@ -702,7 +1005,7 @@ public final class ClusterStoreIndexes {
                 for (final Field field : fields) {
                     if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) continue;
                     final Class<?> fieldType = field.getType();
-                    if (fieldType.isPrimitive() || isLeafValue(fieldType)) continue;
+                    if (isLeafValue(fieldType)) continue;
                     if (isIndexMetadataType(fieldType)) return true;
                     if (fieldType.isArray()) {
                         final Class<?> component = fieldType.componentType();

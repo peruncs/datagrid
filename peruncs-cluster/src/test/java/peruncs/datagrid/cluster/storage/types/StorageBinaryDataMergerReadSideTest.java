@@ -18,17 +18,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Proves the merger's own Store reads join the coordinator's read side.
+/// Proves the merger's batch section holds the coordinator's write side.
 ///
-/// The post-materialization index scan must overlap application reads while a
-/// materialization write still excludes it. The scan is pinned mid-flight by
-/// intercepting `viewRoots`, so both properties are observed deterministically
-/// instead of inferred from timing.
+/// View retirement, materialization, validation, and index refresh run as one
+/// write section, so joined application reads observe either the pre-batch or
+/// the post-batch boundary — never a materialized graph with stale search
+/// views. The section is pinned mid-flight by intercepting `viewRoots`, so
+/// both exclusion properties are observed deterministically instead of
+/// inferred from timing. (Only the type-dictionary conflict scan still joins
+/// the read side; see [StorageGraphCoordinator].)
 class StorageBinaryDataMergerReadSideTest {
     private static final long TIMEOUT_MS = 10_000L;
 
     @Test
-    void validationScanOverlapsReadsButNotWrites(@TempDir final Path readerRoot) throws Exception {
+    void batchSectionExcludesReadsAndWrites(@TempDir final Path readerRoot) throws Exception {
         final CountDownLatch validationEntered = new CountDownLatch(1);
         final CountDownLatch releaseValidation = new CountDownLatch(1);
         try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
@@ -76,28 +79,31 @@ class StorageBinaryDataMergerReadSideTest {
                 assertTrue(validationEntered.await(TIMEOUT_MS, TimeUnit.MILLISECONDS),
                         "the worker never reached the validation scan");
 
-                /* A read overlaps the merger's scan instead of serializing
-                 * behind it. This probe runs before any writer queues: the
-                 * coordinator is fair, so a queued writer would block later
-                 * readers even though reads overlap each other. */
+                /* A joined read stays out while the batch section holds the
+                 * write side: overlapping it could observe a retired view
+                 * over not-yet-materialized entities. */
                 final AtomicBoolean readRan = new AtomicBoolean();
                 final Thread reading = Thread.ofVirtual().start(
                         () -> coordinator.read(() -> readRan.set(true)));
-                reading.join(TIMEOUT_MS);
-                assertFalse(reading.isAlive(), "a read did not overlap the merger validation scan");
-                assertTrue(readRan.get());
+                reading.join(500L);
+                assertTrue(reading.isAlive(),
+                        "a read overlapped the merger batch section");
+                assertFalse(readRan.get());
 
-                /* A write stays out while the merger's scan holds the read side. */
+                /* A write stays out while the merger's scan holds the write side. */
                 final AtomicBoolean writeRan = new AtomicBoolean();
                 final Thread writing = Thread.ofVirtual().start(
                         () -> coordinator.write(() -> writeRan.set(true)));
                 writing.join(500L);
                 assertTrue(writing.isAlive(),
-                        "a write entered while the merger validation scan held the read side");
+                        "a write entered while the merger batch section held the write side");
                 assertFalse(writeRan.get());
 
                 releaseValidation.countDown();
                 merger.awaitApplied();
+                reading.join(TIMEOUT_MS);
+                assertFalse(reading.isAlive(), "the read never finished after the scan released");
+                assertTrue(readRan.get(), "the read never ran after the scan released");
                 writing.join(TIMEOUT_MS);
                 assertFalse(writing.isAlive(), "the write never finished after the scan released");
                 assertTrue(writeRan.get(), "the write never ran after the scan released");

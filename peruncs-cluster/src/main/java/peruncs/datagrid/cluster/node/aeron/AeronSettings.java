@@ -23,8 +23,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.util.*;
 
 /// Validated configuration for one Aeron transport. Structural values are
-/// immutable; the internal retention-key copy is erased by its owning transport
-/// during shutdown.
+/// immutable.
 ///
 /// @param replication                     validated publication framing and timeout settings
 /// @param clusterId                       stable cluster identity shared by all members
@@ -54,7 +53,6 @@ import java.util.*;
 /// @param archiveReplicationChannel       Archive replication channel
 /// @param watermarkChannel                reader-watermark channel
 /// @param watermarkStreamId               reader-watermark stream id
-/// @param retentionSecret                 copied HMAC key for authenticated retention, or `null`
 /// @param retentionReaders                configured reader identities required for retention
 /// @param authEnabled                     whether Aeron Archive control-session authentication is enabled;
 ///                                          disabled auth in production mode requires the explicit
@@ -63,11 +61,6 @@ import java.util.*;
 /// @param authCredentials                 copied Aeron auth credentials, or `null` when disabled
 /// @param authReaderPrincipal             optional reader principal accepted by a writer Archive
 /// @param authReaderCredentials           copied credentials for the optional reader principal
-/// @param networkProfile                  effective network trust profile; `trusted-network` waives
-///                                        the production replication-HMAC requirement as one
-///                                        explicit acknowledgement, never inferred
-/// @param previousRetentionSecret         copied retiring retention key accepted during rotation
-///                                        overlap, or `null`
 record AeronSettings(
         AeronReplicationConfiguration replication,
         UUID clusterId,
@@ -97,36 +90,13 @@ record AeronSettings(
         String archiveReplicationChannel,
         String watermarkChannel,
         int watermarkStreamId,
-        byte[] retentionSecret,
         Set<UUID> retentionReaders,
         boolean authEnabled,
         String authPrincipal,
         byte[] authCredentials,
         String authReaderPrincipal,
-        byte[] authReaderCredentials,
-        NetworkProfile networkProfile,
-        byte[] previousRetentionSecret
+        byte[] authReaderCredentials
 ) {
-    private static final System.Logger LOGGER = System.getLogger(AeronSettings.class.getName());
-
-        /// Network trust profile for one transport.
-    ///
-    /// `authenticated` is the default: every production authentication gate
-    /// applies unless its own explicit acknowledgement is set.
-    /// `trusted-network` is one explicit acknowledgement covering replication
-    /// frame HMAC only, for deployments where a VPN or firewall is the
-    /// traffic boundary. Archive control-session authentication always needs
-    /// its own acknowledgement: control operations are a separate protection
-    /// domain from replication traffic. The profile never disables writer
-    /// fencing, CRC32C, or retention-watermark authentication — those are
-    /// correctness checks, not network security.
-    enum NetworkProfile {
-                /// Every production authentication gate applies.
-        AUTHENTICATED,
-                /// Replication HMAC may run unauthenticated.
-        TRUSTED_NETWORK
-    }
-
     private static final int MAX_SECRET_FILE_BYTES = 4096;
     private static final int ARCHIVE_PROTOCOL_ID = MessageHeaderDecoder.SCHEMA_ID;
     /* Reader clients only need discovery, position queries, and replay. Keep
@@ -168,8 +138,6 @@ record AeronSettings(
     };
 
     AeronSettings {
-        retentionSecret = retentionSecret == null ? null : retentionSecret.clone();
-        previousRetentionSecret = previousRetentionSecret == null ? null : previousRetentionSecret.clone();
         retentionReaders = retentionReaders == null ? Set.of() : Set.copyOf(retentionReaders);
         authCredentials = authCredentials == null ? null : authCredentials.clone();
         authReaderCredentials = authReaderCredentials == null ? null : authReaderCredentials.clone();
@@ -184,32 +152,10 @@ record AeronSettings(
         /* One normalized role for transport setup; a legacy/new conflict
          * fails here, before any gate reads it. */
         final NodeRole role = properties.nodeRole();
-        /* The trust profile is parsed before any gate that reads it. An
-         * unknown value fails closed: no profile silently degrades to
-         * unauthenticated operation. */
-        final NetworkProfile networkProfile = networkProfile(properties);
-        final boolean trustedNetwork = networkProfile == NetworkProfile.TRUSTED_NETWORK;
         /* The replication framing is configured with typed builder values read
          * once from the provider. No intermediate string map crosses into the
          * replication configuration: the builder is its only construction path. */
         final AeronReplicationConfiguration.Builder replicationBuilder = AeronReplicationConfiguration.builder();
-        final byte[] replicationSecret = replicationSecret(properties);
-        final byte[] previousReplicationSecret = previousSecret(properties,
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS",
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS_FILE",
-                AeronSettings::decodeReplicationSecret, AeronSettings::decodeReplicationSecretFile);
-        requireRotationPair(replicationSecret, previousReplicationSecret,
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET",
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS");
-        final boolean allowUnsignedReplication = booleanSetting(
-                properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", false);
-        if (replicationSecret != null && allowUnsignedReplication) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE contradicts a configured replication secret");
-        }
-        replicationBuilder.authenticationSecret(replicationSecret)
-                .previousAuthenticationSecret(previousReplicationSecret)
-                .allowUnsignedFrames(replicationSecret == null);
         integerSetting(properties, "ECLIPSE_DATAGRID_AERON_TERM_LENGTH", replicationBuilder::termLength);
         integerSetting(properties, "ECLIPSE_DATAGRID_AERON_MTU_LENGTH", replicationBuilder::mtuLength);
         integerSetting(properties, "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE", replicationBuilder::chunkSize);
@@ -312,29 +258,16 @@ record AeronSettings(
             throw new IllegalArgumentException(
                     "ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID must be non-negative and distinct from data/replay streams");
         }
-        final byte[] retentionSecret = retentionSecret(properties);
-        final byte[] previousRetentionSecret = previousSecret(properties,
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS",
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS_FILE",
-                AeronSettings::decodeRetentionSecret, AeronSettings::decodeRetentionSecretFile);
-        requireRotationPair(retentionSecret, previousRetentionSecret,
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET",
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS");
+        /* Retention needs a configured reader set on an embedded writer. Any
+         * other combination reports unsupported at runtime and preserves
+         * history instead of failing startup: a missing reader set is an
+         * incomplete deployment, not a corrupt one. */
         final Set<UUID> retentionReaders = retentionReaders(properties);
-        if (role.isWriter() && (retentionSecret != null) == retentionReaders.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET and ECLIPSE_DATAGRID_AERON_RETENTION_READERS must be configured together");
-        }
-        if (externalArchive && role.isWriter() &&
-            (retentionSecret != null || !retentionReaders.isEmpty())) {
-            throw new IllegalArgumentException(
-                    "authenticated retention requires an embedded Aeron Archive writer");
-        }
         final boolean authEnabled = booleanSetting(properties,
                 "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", false);
-        /* Archive control authentication is never waived by the network
-         * profile: control operations stay authenticated even on a trusted
-         * network, and need their own explicit acknowledgement. */
+        /* Archive control authentication needs its own explicit
+         * acknowledgement: control operations are a separate protection
+         * domain from replication traffic. */
         if (!authEnabled && properties.isProdMode()
             && !booleanSetting(properties, "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", false)) {
             throw new IllegalArgumentException(
@@ -392,13 +325,6 @@ record AeronSettings(
                 throw new IllegalArgumentException(
                         "production writers require a separate ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL and credentials");
             }
-        }
-        if (properties.isProdMode() && replicationSecret == null && !allowUnsignedReplication && !trustedNetwork) {
-            throw new IllegalArgumentException(
-                    "Aeron replication frame authentication must be configured in production mode "
-                            + "(ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET), or explicitly acknowledged with "
-                            + "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE=true or "
-                            + "ECLIPSE_DATAGRID_NETWORK_PROFILE=trusted-network");
         }
         final String controlChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL", "aeron:udp?endpoint=localhost:40124");
         final String controlResponseChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL", "aeron:udp?endpoint=localhost:0");
@@ -472,93 +398,26 @@ record AeronSettings(
                 archiveReplicationChannel,
                 watermarkChannel,
                 watermarkStreamId,
-                retentionSecret,
                 retentionReaders,
                 authEnabled,
                 authEnabled ? authPrincipal.trim() : null,
                 authCredentials,
                 authEnabled && authReaderPrincipal != null && !authReaderPrincipal.isBlank()
                         ? authReaderPrincipal.trim() : null,
-                authReaderCredentials,
-                networkProfile,
-                previousRetentionSecret
+                authReaderCredentials
         );
-        if (trustedNetwork && properties.isProdMode()) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "ECLIPSE_DATAGRID_NETWORK_PROFILE=trusted-network: production node runs without "
-                    + "replication frame HMAC; the VPN or firewall is the only traffic boundary. Aeron "
-                    + "Archive control authentication is "
-                    + (authEnabled ? "enabled" : "DISABLED by its separate insecure override")
-                    + "; writer fencing, CRC32C, and retention-watermark authentication stay enforced.");
-        }
         /* The record constructor keeps its own defensive copy. Erase the parser's
          * temporaries immediately so configuration loading does not leave extra
-         * long-lived keys on the heap. */
-        if (retentionSecret != null) Arrays.fill(retentionSecret, (byte) 0);
-        if (previousRetentionSecret != null) Arrays.fill(previousRetentionSecret, (byte) 0);
+         * long-lived credential copies on the heap. */
         if (authCredentials != null) Arrays.fill(authCredentials, (byte) 0);
         if (authReaderCredentials != null) Arrays.fill(authReaderCredentials, (byte) 0);
-        if (replicationSecret != null) Arrays.fill(replicationSecret, (byte) 0);
-        if (previousReplicationSecret != null) Arrays.fill(previousReplicationSecret, (byte) 0);
         return settings;
     }
 
-        /// Parses the network trust profile, defaulting to authenticated operation.
-    ///
-    /// A blank value behaves as unset. Any other unknown value fails closed:
-    /// no profile silently degrades to unauthenticated operation.
-    ///
-    /// @param properties property provider
-    /// @return effective network trust profile
-    private static NetworkProfile networkProfile(final NodeLibraryPropertiesProvider properties) {
-        final String configured = value(properties, "ECLIPSE_DATAGRID_NETWORK_PROFILE", null);
-        if (configured == null || configured.isBlank() ||
-            "authenticated".equalsIgnoreCase(configured.trim())) {
-            return NetworkProfile.AUTHENTICATED;
-        }
-        if ("trusted-network".equalsIgnoreCase(configured.trim())) {
-            return NetworkProfile.TRUSTED_NETWORK;
-        }
-        throw new IllegalArgumentException(
-                "ECLIPSE_DATAGRID_NETWORK_PROFILE must be authenticated or trusted-network");
-    }
-
-    private static byte[] replicationSecret(final NodeLibraryPropertiesProvider properties) {
-        final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET", null);
-        final String configuredFile = value(properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_FILE", null);
-        if (configured != null && !configured.isBlank() && configuredFile != null && !configuredFile.isBlank()) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET and *_SECRET_FILE are mutually exclusive");
-        }
-        if (configured == null || configured.isBlank()) {
-            return configuredFile == null || configuredFile.isBlank()
-                    ? null : decodeReplicationSecretFile(configuredFile.trim());
-        }
-        return decodeReplicationSecret(configured.trim(), "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET");
-    }
-
-    private static byte[] decodeReplicationSecretFile(final String fileName) {
-        return decodeReplicationSecretFile(fileName, "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_FILE");
-    }
-
-    private static byte[] decodeReplicationSecretFile(final String fileName, final String property) {
-        final Path path = Paths.get(fileName).toAbsolutePath().normalize();
-        try {
-            final byte[] encoded = readSecretFile(path, MAX_SECRET_FILE_BYTES, "replication secret");
-            try {
-                return decodeReplicationSecret(
-                        new String(encoded, StandardCharsets.US_ASCII).trim(), property);
-            } finally {
-                Arrays.fill(encoded, (byte) 0);
-            }
-        } catch (final IOException | IllegalArgumentException failure) {
-            throw new IllegalArgumentException("%s is invalid: %s".formatted(property, path), failure);
-        }
-    }
-
     /** Reads one secret file through a bounded, stable descriptor snapshot. */
-    private static byte[] readSecretFile(final Path path, final int maxBytes, final String description)
-            throws IOException {
+    private static byte[] readSecretFile(final Path path) throws IOException {
+        final int maxBytes = MAX_SECRET_FILE_BYTES;
+        final String description = "auth credentials";
         final BasicFileAttributes before = Files.readAttributes(
                 path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
         if (!before.isRegularFile() || Files.isSymbolicLink(path) || before.size() > maxBytes) {
@@ -621,21 +480,6 @@ record AeronSettings(
         }
     }
 
-    private static byte[] decodeReplicationSecret(final String configured, final String property) {
-        try {
-            final byte[] secret = Base64.getDecoder().decode(configured);
-            if (secret.length < AeronReplicationConfiguration.MIN_HMAC_SECRET_BYTES) {
-                throw new IllegalArgumentException(
-                        "%s must decode to at least %s bytes".formatted(property,
-                                AeronReplicationConfiguration.MIN_HMAC_SECRET_BYTES));
-            }
-            return secret;
-        } catch (final IllegalArgumentException failure) {
-            throw new IllegalArgumentException("%s must be base64 and decode to at least %s bytes".formatted(
-                    property, AeronReplicationConfiguration.MIN_HMAC_SECRET_BYTES), failure);
-        }
-    }
-
     private static Set<UUID> retentionReaders(final NodeLibraryPropertiesProvider properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", null);
         if (configured == null || configured.isBlank()) return Set.of();
@@ -650,40 +494,6 @@ record AeronSettings(
         return Set.copyOf(readers);
     }
 
-    private static byte[] retentionSecret(final NodeLibraryPropertiesProvider properties) {
-        final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET", null);
-        final String configuredFile = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE", null);
-        if (configured != null && !configured.isBlank() && configuredFile != null && !configuredFile.isBlank()) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET and *_SECRET_FILE are mutually exclusive");
-        }
-        if (configured == null || configured.isBlank()) {
-            return configuredFile == null || configuredFile.isBlank()
-                    ? null : decodeRetentionSecretFile(configuredFile.trim());
-        }
-        return decodeRetentionSecret(configured.trim(), "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET");
-    }
-
-    private static byte[] decodeRetentionSecretFile(final String fileName) {
-        return decodeRetentionSecretFile(fileName, "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE");
-    }
-
-    private static byte[] decodeRetentionSecretFile(final String fileName, final String property) {
-        final Path path = Paths.get(fileName).toAbsolutePath().normalize();
-        try {
-            final byte[] encoded = readSecretFile(path, MAX_SECRET_FILE_BYTES, "retention secret");
-            try {
-                return decodeRetentionSecret(
-                        new String(encoded, StandardCharsets.US_ASCII).trim(), property);
-            } finally {
-                Arrays.fill(encoded, (byte) 0);
-            }
-        } catch (final IOException | IllegalArgumentException failure) {
-            throw new IllegalArgumentException("%s is invalid: %s".formatted(property, path),
-                    failure);
-        }
-    }
-
         /// Decodes an inline secret value, labelling failures with its property.
     private interface InlineSecretDecoder {
         byte[] decode(String configured, String property);
@@ -694,21 +504,17 @@ record AeronSettings(
         byte[] decode(String fileName, String property);
     }
 
-        /// Reads a retiring HMAC key accepted during rotation overlap.
-    ///
-    /// The inline and file sources stay mutually exclusive, like every
-    /// primary secret. Length validation rides with the decoders; the
-    /// rotation-pair check happens at the call site once the primary is
-    /// known. The two decoder types are distinct so swapping them at a call
-    /// site fails compilation instead of decoding silently wrong.
+        /// Reads credentials from an inline value or a secret file, which stay
+    /// mutually exclusive. The two decoder types are distinct so swapping them
+    /// at a call site fails compilation instead of decoding silently wrong.
     ///
     /// @param properties    property provider
     /// @param inlineKey     inline base64 property name
     /// @param fileKey       secret-file property name
     /// @param inlineDecoder decodes an inline value with its property label
     /// @param fileDecoder   decodes a secret file with its property label
-    /// @return decoded previous key, or `null` when no rotation overlaps
-    private static byte[] previousSecret(
+    /// @return decoded credentials, or `null` when unconfigured
+    private static byte[] credentialsSetting(
             final NodeLibraryPropertiesProvider properties,
             final String inlineKey,
             final String fileKey,
@@ -725,40 +531,6 @@ record AeronSettings(
                     ? null : fileDecoder.decode(configuredFile.trim(), fileKey);
         }
         return inlineDecoder.decode(configured.trim(), inlineKey);
-    }
-
-        /// Validates a rotation pair: a previous key requires a primary key and must differ from it.
-    ///
-    /// @param primary      primary key, or `null`
-    /// @param previous     previous key, or `null`
-    /// @param primaryKey   primary property name for failure messages
-    /// @param previousKey  previous property name for failure messages
-    private static void requireRotationPair(
-            final byte[] primary,
-            final byte[] previous,
-            final String primaryKey,
-            final String previousKey
-    ) {
-        if (previous == null) return;
-        if (primary == null) {
-            throw new IllegalArgumentException("%s requires %s".formatted(previousKey, primaryKey));
-        }
-        if (Arrays.equals(previous, primary)) {
-            throw new IllegalArgumentException(
-                    "%s must differ from %s; a rotation to the same key is a misconfiguration"
-                            .formatted(previousKey, primaryKey));
-        }
-    }
-
-    private static byte[] decodeRetentionSecret(final String configured, final String property) {
-        try {
-            final byte[] secret = Base64.getDecoder().decode(configured);
-            if (secret.length < 16) throw new IllegalArgumentException(
-                    "%s must decode to at least 16 bytes".formatted(property));
-            return secret;
-        } catch (final IllegalArgumentException failure) {
-            throw new IllegalArgumentException("%s must be base64 and decode to at least 16 bytes".formatted(property), failure);
-        }
     }
 
     private static boolean booleanSetting(final NodeLibraryPropertiesProvider properties,
@@ -781,14 +553,14 @@ record AeronSettings(
             final String credentialsProperty,
             final String credentialsFileProperty
     ) {
-        return previousSecret(properties, credentialsProperty, credentialsFileProperty,
+        return credentialsSetting(properties, credentialsProperty, credentialsFileProperty,
                 AeronSettings::decodeAuthCredentials, AeronSettings::decodeAuthCredentialsFile);
     }
 
     private static byte[] decodeAuthCredentialsFile(final String fileName, final String property) {
         final Path path = Paths.get(fileName).toAbsolutePath().normalize();
         try {
-            final byte[] encoded = readSecretFile(path, MAX_SECRET_FILE_BYTES, "auth credentials");
+            final byte[] encoded = readSecretFile(path);
             try {
                 return decodeAuthCredentials(
                         new String(encoded, StandardCharsets.US_ASCII).trim(),
@@ -1070,34 +842,8 @@ record AeronSettings(
     }
 
     @Override
-    public byte[] retentionSecret() {
-        return this.retentionSecret == null ? null : this.retentionSecret.clone();
-    }
-
-        /// Returns a copy of the retiring retention key accepted during rotation overlap.
-    ///
-    /// @return defensive copy of the previous retention key, or `null`
-    public byte[] previousRetentionSecret() {
-        return this.previousRetentionSecret == null ? null : this.previousRetentionSecret.clone();
-    }
-
-    @Override
     public Set<UUID> retentionReaders() {
         return this.retentionReaders;
-    }
-
-        /// Erases the in-memory retention keys when the owning transport closes.
-    void clearRetentionSecret() {
-        if (this.retentionSecret != null) Arrays.fill(this.retentionSecret, (byte) 0);
-        if (this.previousRetentionSecret != null) Arrays.fill(this.previousRetentionSecret, (byte) 0);
-    }
-
-        /// Erases the replication HMAC keys held by the replication configuration.
-    ///
-    /// Reader assemblers keep their own clones (erased on disposal); this
-    /// clears the configuration copy so a closed transport retains no keys.
-    void clearReplicationSecrets() {
-        this.replication.clearSecrets();
     }
 
     @Override

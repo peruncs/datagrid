@@ -4,7 +4,7 @@ import io.aeron.archive.client.ArchiveException;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
-import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 
 import java.nio.ByteBuffer;
@@ -20,12 +20,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Verifies retention authentication before any Archive operation is attempted.
+/// Verifies the retention quorum before any Archive operation is attempted.
 class AeronArchiveRetentionTest {
     private static final UUID CLUSTER = UUID.randomUUID();
     private static final UUID GENERATION = UUID.randomUUID();
     private static final UUID READER = UUID.randomUUID();
-    private static final byte[] SECRET = "retention-test-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
     private static AeronArchiveRetention retention(final Runnable ensureWriter) {
         return retention(ensureWriter, null, true);
@@ -41,7 +40,7 @@ class AeronArchiveRetentionTest {
 
     private static AeronArchiveRetention retention(final Runnable ensureWriter, final Path state,
                                                    final boolean watermarkDeliveryAvailable) {
-        return new AeronArchiveRetention(SECRET, Set.of(READER), ensureWriter, unavailableRecording(), () -> 17,
+        return new AeronArchiveRetention(Set.of(READER), ensureWriter, unavailableRecording(), () -> 17,
                 () -> new AeronWriterBoundary(4, 17, 8_192), ignored -> 0L,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
                 () -> watermarkDeliveryAvailable, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
@@ -54,7 +53,7 @@ class AeronArchiveRetentionTest {
 
     private static AeronArchiveRetention retention(final Set<UUID> readers, final Path state,
                                                    final Runnable ensureWriter) {
-        return new AeronArchiveRetention(SECRET, readers, ensureWriter, unavailableRecording(), () -> 17,
+        return new AeronArchiveRetention(readers, ensureWriter, unavailableRecording(), () -> 17,
                 () -> new AeronWriterBoundary(4, 17, 8_192), ignored -> 0L,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
                 () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
@@ -74,7 +73,7 @@ class AeronArchiveRetentionTest {
     }
 
     private static AeronArchiveRetention retentionWithPurger(final java.util.function.LongUnaryOperator purger) {
-        return new AeronArchiveRetention(SECRET, Set.of(READER), () -> {
+        return new AeronArchiveRetention(Set.of(READER), () -> {
         },
                 new AeronArchiveRetention.RecordingPositions(
                         ignored -> 0L, ignored -> 16L * 1_024 * 1_024, ignored -> -1L), () -> 17,
@@ -88,8 +87,8 @@ class AeronArchiveRetentionTest {
     }
 
     private static ReplicationCursor cursor(final UUID reader) {
-        return ReplicationCursor.of("aeron", GENERATION, 4, AeronAuthenticatedWatermark.sign(
-                reader, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET).encode());
+        return ReplicationCursor.of("aeron", GENERATION, 4, AeronReaderWatermark.of(
+                reader, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode());
     }
 
     @Test
@@ -128,7 +127,7 @@ class AeronArchiveRetentionTest {
         final AeronArchiveRetention retention = retention(() -> started.set(true));
         assertThrows(IllegalArgumentException.class, () -> retention.recordReaderWatermark(
                 new ReplicationCursor("aeron", GENERATION, 1, "010203")));
-        assertFalse(started.get(), "authentication must precede lazy writer startup");
+        assertFalse(started.get(), "identity checks must precede lazy writer startup");
         retention.close();
     }
 
@@ -136,19 +135,19 @@ class AeronArchiveRetentionTest {
     void unresolvedWatermarkIsRejectedBeforeStartingTheWriter() {
         final AtomicBoolean started = new AtomicBoolean();
         final AeronArchiveRetention retention = retention(() -> started.set(true));
-        final AeronAuthenticatedWatermark unresolved = AeronAuthenticatedWatermark.sign(
-                READER, CLUSTER, GENERATION, 1, 17, -1, -1, SECRET);
-        assertThrows(SecurityException.class, () -> retention.recordReaderWatermark(unresolved));
+        final AeronReaderWatermark unresolved = AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, -1, -1);
+        assertThrows(IllegalArgumentException.class, () -> retention.recordReaderWatermark(unresolved));
         assertFalse(started.get(), "an unresolved watermark must not start lazy writer recovery");
         retention.close();
     }
 
     @Test
-    void authenticatedConfiguredWatermarkCompletesTheQuorum() {
+    void configuredWatermarkCompletesTheQuorum() {
         final AeronArchiveRetention retention = retention(() -> {
         });
-        final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
-                READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET);
+        final AeronReaderWatermark watermark = AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 4, 4_096);
         retention.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode()));
         assertTrue(retention.isSupported());
         retention.close();
@@ -158,8 +157,8 @@ class AeronArchiveRetentionTest {
     void decodedControlWatermarkCompletesTheQuorumWithoutCursorReencoding() {
         final AeronArchiveRetention retention = retention(() -> {
         });
-        retention.recordReaderWatermark(AeronAuthenticatedWatermark.sign(
-                READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET));
+        retention.recordReaderWatermark(AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 4, 4_096));
         assertTrue(retention.isSupported());
         retention.close();
     }
@@ -179,11 +178,11 @@ class AeronArchiveRetentionTest {
     }
 
     @Test
-    void ordinaryBackupCursorCanRequestDeletionAfterAuthenticatedQuorum() {
+    void ordinaryBackupCursorCanRequestDeletionAfterQuorum() {
         final AeronArchiveRetention retention = retention(() -> {
         });
-        final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
-                READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET);
+        final AeronReaderWatermark watermark = AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 4, 4_096);
         retention.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode()));
         final byte[] ordinaryPosition = new AeronReplicationCursor(
                 CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, 4_096, 4).encode();
@@ -200,8 +199,8 @@ class AeronArchiveRetentionTest {
             throw new ArchiveException(
                     "invalid detach: replay in progress - state=ACTIVE", ArchiveException.GENERIC);
         });
-        retention.recordReaderWatermark(AeronAuthenticatedWatermark.sign(
-                READER, CLUSTER, GENERATION, 1, 17, 4, acknowledgedPosition, SECRET));
+        retention.recordReaderWatermark(AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 4, acknowledgedPosition));
         final ReplicationLogRetention.MaintenanceResult result =
                 retention.deleteThrough(deletionCursor(acknowledgedPosition));
         assertEquals(ReplicationLogRetention.MaintenanceResult.Status.DEFERRED_ACTIVE_REPLAY, result.status());
@@ -216,8 +215,8 @@ class AeronArchiveRetentionTest {
             throw new ArchiveException(
                     "unrelated Archive failure", ArchiveException.GENERIC);
         });
-        retention.recordReaderWatermark(AeronAuthenticatedWatermark.sign(
-                READER, CLUSTER, GENERATION, 1, 17, 4, acknowledgedPosition, SECRET));
+        retention.recordReaderWatermark(AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 4, acknowledgedPosition));
         final IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> retention.deleteThrough(deletionCursor(acknowledgedPosition)));
         assertInstanceOf(ArchiveException.class, failure.getCause());
@@ -228,8 +227,8 @@ class AeronArchiveRetentionTest {
     void watermarkAheadOfDurableWriterBoundaryIsRejected() {
         final AeronArchiveRetention retention = retention(() -> {
         });
-        final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
-                READER, CLUSTER, GENERATION, 1, 17, 5, 4_096, SECRET);
+        final AeronReaderWatermark watermark = AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 5, 4_096);
         assertThrows(IllegalStateException.class, () -> retention.recordReaderWatermark(
                 ReplicationCursor.of("aeron", GENERATION, 5, watermark.encode())));
         assertFalse(retention.isSupported(), "an acknowledgement beyond the writer boundary must not complete quorum");
@@ -237,12 +236,12 @@ class AeronArchiveRetentionTest {
     }
 
     @Test
-    void authenticatedReaderProgressSurvivesControllerRestart() throws Exception {
+    void readerProgressSurvivesControllerRestart() throws Exception {
         final Path state = Files.createTempFile("aeron-retention-", ".state");
         try {
             Files.deleteIfExists(state);
-            final AeronAuthenticatedWatermark watermark = AeronAuthenticatedWatermark.sign(
-                    READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET);
+            final AeronReaderWatermark watermark = AeronReaderWatermark.of(
+                    READER, CLUSTER, GENERATION, 1, 17, 4, 4_096);
             final ReplicationCursor cursor = ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode());
             final AeronArchiveRetention first = retention(() -> {
             }, state);
@@ -307,26 +306,26 @@ class AeronArchiveRetentionTest {
         final Path state = Files.createTempFile("aeron-retention-retired-", ".state");
         try {
             Files.deleteIfExists(state);
-            final AeronArchiveRetention first = new AeronArchiveRetention(SECRET, Set.of(READER, secondReader),
+            final AeronArchiveRetention first = new AeronArchiveRetention(Set.of(READER, secondReader),
                     () -> {
                     }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             first.retireReader(secondReader);
             first.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4,
-                    AeronAuthenticatedWatermark.sign(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET).encode()));
+                    AeronReaderWatermark.of(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode()));
             assertTrue(first.isSupported());
             first.close();
 
-            final AeronArchiveRetention restarted = new AeronArchiveRetention(SECRET, Set.of(READER, secondReader),
+            final AeronArchiveRetention restarted = new AeronArchiveRetention(Set.of(READER, secondReader),
                     () -> {
                     }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             assertTrue(restarted.isSupported());
-            assertThrows(SecurityException.class, () -> restarted.recordReaderWatermark(ReplicationCursor.of(
-                    "aeron", GENERATION, 4, AeronAuthenticatedWatermark.sign(
-                    secondReader, CLUSTER, GENERATION, 1, 17, 4, 4_096, SECRET).encode())));
+            assertThrows(IllegalArgumentException.class, () -> restarted.recordReaderWatermark(ReplicationCursor.of(
+                    "aeron", GENERATION, 4, AeronReaderWatermark.of(
+                    secondReader, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode())));
             restarted.close();
         } finally {
             Files.deleteIfExists(state);
@@ -349,7 +348,7 @@ class AeronArchiveRetentionTest {
 
             final AeronArchiveRetention restarted = retention(readers, state);
             assertTrue(restarted.isSupported());
-            assertThrows(SecurityException.class,
+            assertThrows(IllegalArgumentException.class,
                     () -> restarted.recordReaderWatermark(cursor(retiredReader)));
             restarted.close();
         } finally {
@@ -370,7 +369,7 @@ class AeronArchiveRetentionTest {
             final AeronArchiveRetention restarted = retention(Set.of(replacementReader), state);
             final IllegalStateException failure = assertThrows(IllegalStateException.class,
                     restarted::isSupported);
-            assertTrue(failure.getMessage().contains("cannot load authenticated Aeron retention state"));
+            assertTrue(failure.getMessage().contains("cannot load Aeron retention state"));
             restarted.close();
         } finally {
             Files.deleteIfExists(state);
@@ -386,7 +385,7 @@ class AeronArchiveRetentionTest {
              * file malformed. Loading must be atomic: a retry after the file is fixed
              * must still be able to acknowledge both configured readers. */
             final ByteBuffer encoded = ByteBuffer.allocate(Integer.BYTES * 3 + 32)
-                    .putInt(3).putInt(0).putInt(2)
+                    .putInt(4).putInt(0).putInt(2)
                     .putLong(secondReader.getMostSignificantBits()).putLong(secondReader.getLeastSignificantBits())
                     .putLong(secondReader.getMostSignificantBits()).putLong(secondReader.getLeastSignificantBits());
             Files.write(state, encoded.array());
@@ -427,7 +426,7 @@ class AeronArchiveRetentionTest {
     void queuedCommandWaitIsBoundedWhenTheAgentIsStuck() throws Exception {
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
-        try (final AeronArchiveRetention retention = new AeronArchiveRetention(SECRET, Set.of(READER), () -> {
+        try (final AeronArchiveRetention retention = new AeronArchiveRetention(Set.of(READER), () -> {
             entered.countDown();
             /* Hold the single agent thread until released, ignoring the
              * interrupt from the timed-out caller's cancel: if this command
@@ -448,7 +447,7 @@ class AeronArchiveRetentionTest {
         },
                 unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
                 ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
-                () -> true, null, 300L)) {
+                () -> true, null, 60_000L)) {
             final AtomicReference<Throwable> background = new AtomicReference<>();
             final Thread stuck = Thread.ofVirtual().start(() -> {
                 try {
@@ -457,25 +456,98 @@ class AeronArchiveRetentionTest {
                     background.set(failure);
                 }
             });
+            /* The stuck command must outlive the assertion below: sharing the
+             * retention operation timeout between the stuck command and the
+             * bounded wait races the two identical deadlines against each
+             * other, so the wait is bounded on its own calling thread while
+             * the retention timeout comfortably exceeds the whole test. */
+            final java.util.concurrent.ExecutorService caller =
+                    java.util.concurrent.Executors.newSingleThreadExecutor();
             try {
                 assertTrue(entered.await(30, TimeUnit.SECONDS), "agent did not start the blocking command");
+                final java.util.concurrent.Future<Boolean> waiting = caller.submit(retention::isSupported);
                 final long start = System.nanoTime();
-                final IllegalStateException failure =
-                        assertThrows(IllegalStateException.class, retention::isSupported);
+                assertThrows(TimeoutException.class, () -> waiting.get(300, TimeUnit.MILLISECONDS));
                 final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertInstanceOf(TimeoutException.class, failure.getCause(),
-                        "expected a TimeoutException cause, got " + failure.getCause());
                 assertTrue(elapsedMillis < 10_000L,
                         "retention wait was not bounded: %s ms".formatted(elapsedMillis));
             } finally {
                 release.countDown();
                 stuck.join(30_000L);
                 assertFalse(stuck.isAlive(), "background command did not finish after release");
+                caller.shutdownNow();
             }
-            final Throwable backgroundFailure = background.get();
-            assertTrue(backgroundFailure == null || backgroundFailure instanceof IllegalStateException,
-                    "unexpected background failure " + backgroundFailure);
+            assertNull(background.get(), "unexpected background failure " + background.get());
         }
+    }
+
+    @Test
+    void interruptedCloseStaysRetryableUntilQuorumCleanup() throws Exception {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        final AeronArchiveRetention retention = retention(() -> {
+            entered.countDown();
+            /* Ignore close-path shutdownNow interrupts like an uninterruptible
+             * Archive call would: this command must outlive the first close
+             * attempt and finish only on release. */
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            boolean released = false;
+            while (!released && System.nanoTime() < deadline) {
+                try {
+                    released = release.await(100, TimeUnit.MILLISECONDS);
+                } catch (final InterruptedException interrupted) {
+                    Thread.interrupted();
+                }
+            }
+        });
+        final AtomicReference<Throwable> background = new AtomicReference<>();
+        final Thread stuck = Thread.ofVirtual().start(() -> {
+            try {
+                retention.recordReaderWatermark(cursor(READER));
+            } catch (final Throwable failure) {
+                background.set(failure);
+            }
+        });
+        try {
+            assertTrue(entered.await(30, TimeUnit.SECONDS), "agent did not start the blocking command");
+            /* An agent command that outlives the first close attempt: interrupt
+             * the closer mid-termination so quorum cleanup is skipped. */
+            final Thread closing = Thread.ofVirtual().start(retention::close);
+            Thread.sleep(500);
+            closing.interrupt();
+            closing.join(30_000L);
+            assertFalse(closing.isAlive(), "interrupted close did not return");
+            assertFalse(retentionAgent(retention).isTerminated(),
+                    "interrupted close must not have finished termination");
+            release.countDown();
+            stuck.join(30_000L);
+            assertFalse(stuck.isAlive(), "agent command did not finish after release");
+            /* The retry must finish termination and quorum cleanup; a close
+             * that returns early here leaves the agent executor running. */
+            retention.close();
+            assertTrue(retentionAgent(retention).isTerminated(),
+                    "retryable close did not terminate the agent");
+            assertThrows(IllegalStateException.class,
+                    () -> retention.recordReaderWatermark(cursor(READER)),
+                    "closed retention kept accepting commands");
+            retention.close();
+            assertTrue(retentionAgent(retention).isTerminated(),
+                    "completed close was not idempotent");
+        } finally {
+            release.countDown();
+            retention.close();
+        }
+        assertNull(background.get(), "unexpected background failure " + background.get());
+    }
+
+    private static java.util.concurrent.ExecutorService retentionAgent(
+            final AeronArchiveRetention retention) throws Exception {
+        /* White-box lifecycle probe: termination has no public observable —
+         * post-shutdown submissions are rejected whether the executor is idle
+         * or terminated — so the test reads the agent directly. */
+        final java.lang.reflect.Field agent = AeronArchiveRetention.class.getDeclaredField("agent");
+        agent.setAccessible(true);
+        return (java.util.concurrent.ExecutorService) agent.get(retention);
     }
 
     @Test

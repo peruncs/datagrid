@@ -31,13 +31,16 @@ import static org.eclipse.serializer.util.X.notNull;
 /// });
 /// ```
 ///
-/// The merger's own Store reads join too: its post-materialization index
-/// scan and the type-dictionary conflict scan run through [#read(Runnable)]
-/// when the merger was built with this coordinator (see
-/// [StorageBinaryDataMerger#graphCoordinator()]). Its type-dictionary
-/// *mutation* deliberately does not use the read side — it runs through the
-/// update handler on the write side, because the read side would not exclude
-/// a concurrent materialization from the handlers being registered.
+/// The merger's own scans join too, on different sides: view retirement,
+/// materialization, validation, and index refresh run on the write side as
+/// one section, so joined reads never observe a half-refreshed batch; only
+/// the type-dictionary conflict scan runs through [#read(Runnable)] when the
+/// merger was built with this coordinator (see
+/// [StorageBinaryDataMerger#graphCoordinator()]).
+/// The type-dictionary *mutation* deliberately does not use the read side —
+/// it runs through the update handler on the write side, because the read
+/// side would not exclude a concurrent materialization from the handlers
+/// being registered.
 ///
 /// # Paths that do not join, and why
 ///

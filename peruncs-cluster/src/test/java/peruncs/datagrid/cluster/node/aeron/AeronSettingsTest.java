@@ -74,13 +74,12 @@ class AeronSettingsTest {
     }
 
     @Test
-    void externalArchiveWriterRejectsRetentionConfiguration() {
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+    void externalArchiveWriterAcceptsRetentionReadersAsUnsupported() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
                 "ECLIPSE_DATAGRID_AERON_EXTERNAL_ARCHIVE", "true",
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET",
-                Base64.getEncoder().encodeToString("sixteen-byte-key".getBytes()),
                 "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", UUID.randomUUID().toString()
-        ))));
+        )));
+        assertEquals(1, settings.retentionReaders().size());
     }
 
     @Test
@@ -92,38 +91,23 @@ class AeronSettingsTest {
     }
 
     @Test
-    void rejectsShortRetentionSecret() {
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET", Base64.getEncoder().encodeToString(new byte[8])
-        ))));
-    }
-
-    @Test
-    void readsRetentionSecretFromOwnerOnlyFile(@TempDir final Path temporaryDirectory) throws Exception {
-        final byte[] secret = "sixteen-byte-key".getBytes(StandardCharsets.US_ASCII);
-        final Path file = temporaryDirectory.resolve("retention.secret");
-        Files.writeString(file, Base64.getEncoder().encodeToString(secret), StandardCharsets.US_ASCII);
-        Files.setPosixFilePermissions(file, Set.of(PosixFilePermission.OWNER_READ));
-
+    void removedSecretSettingsAreIgnored() {
+        /* A stale deployment environment may still export the removed
+         * replication, retention, rotation, and network-profile settings.
+         * They are inert: parsing succeeds and no secret is retained. */
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_FILE", file.toString(),
-                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", UUID.randomUUID().toString()
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET",
+                Base64.getEncoder().encodeToString("datagrid-replication-key".getBytes(StandardCharsets.US_ASCII)),
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS",
+                Base64.getEncoder().encodeToString("datagrid-previous-key!".getBytes(StandardCharsets.US_ASCII)),
+                "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", "true",
+                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET",
+                Base64.getEncoder().encodeToString("sixteen-byte-key".getBytes(StandardCharsets.US_ASCII)),
+                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS",
+                Base64.getEncoder().encodeToString("sixteen-byte-key".getBytes(StandardCharsets.US_ASCII)),
+                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "trusted-network"
         )));
-
-        assertArrayEquals(secret, settings.retentionSecret());
-    }
-
-    @Test
-    void readsReplicationSecretFromOwnerOnlyFile(@TempDir final Path temporaryDirectory) throws Exception {
-        final byte[] secret = "sixteen-byte-key".getBytes(StandardCharsets.US_ASCII);
-        final Path file = temporaryDirectory.resolve("replication.secret");
-        Files.writeString(file, Base64.getEncoder().encodeToString(secret), StandardCharsets.US_ASCII);
-        Files.setPosixFilePermissions(file, Set.of(PosixFilePermission.OWNER_READ));
-
-        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_FILE", file.toString())));
-
-        assertArrayEquals(secret, settings.replication().authenticationSecret());
+        assertTrue(settings.retentionReaders().isEmpty());
     }
 
     @Test
@@ -377,8 +361,7 @@ class AeronSettingsTest {
     @Test
     void prodModeAcceptsAcknowledgedInsecureAuth() {
         final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true",
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", "true")));
+                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true")));
 
         assertFalse(settings.authEnabled());
         assertNull(settings.authenticatorSupplier());
@@ -401,119 +384,18 @@ class AeronSettingsTest {
                 Base64.getEncoder().encodeToString("datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII)),
                 "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL", "datagrid-reader",
                 "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS",
-                Base64.getEncoder().encodeToString("datagrid-reader-secret".getBytes(StandardCharsets.US_ASCII)),
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET",
-                Base64.getEncoder().encodeToString("datagrid-replication-key".getBytes(StandardCharsets.US_ASCII)))));
+                Base64.getEncoder().encodeToString("datagrid-reader-secret".getBytes(StandardCharsets.US_ASCII)))));
 
         assertTrue(settings.authEnabled());
         assertEquals("datagrid-node", settings.authPrincipal());
     }
 
-        /// The default profile is authenticated operation.
+        /// Retention without a reader set stays unconfigured rather than failing:
+    /// the transport reports retention unsupported and preserves history.
     @Test
-    void defaultNetworkProfileIsAuthenticated() {
-        assertEquals(AeronSettings.NetworkProfile.AUTHENTICATED,
-                AeronSettings.fromEnvironment(properties(Map.of())).networkProfile());
-        assertEquals(AeronSettings.NetworkProfile.AUTHENTICATED,
-                AeronSettings.fromEnvironment(prodProperties(Map.of(
-                        "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true",
-                        "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", "true"))).networkProfile());
-    }
-
-        /// An unknown profile fails closed instead of silently degrading.
-    @Test
-    void unknownNetworkProfileIsRejected() {
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "vpn"))));
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(prodProperties(Map.of(
-                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "vpn",
-                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true",
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_ALLOW_INSECURE", "true"))));
-    }
-
-        /// The trusted-network profile waives the replication gate only: Archive
-    /// control authentication always needs its own acknowledgement, even on a
-    /// trusted network.
-    @Test
-    void trustedNetworkProfileWaivesOnlyTheReplicationGate() {
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(prodProperties(Map.of(
-                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "trusted-network"))));
-        final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
-                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "trusted-network",
-                "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true")));
-
-        assertEquals(AeronSettings.NetworkProfile.TRUSTED_NETWORK, settings.networkProfile());
-        assertFalse(settings.authEnabled());
-    }
-
-        /// The profile spelling is case-insensitive and tolerates surrounding whitespace.
-    @Test
-    void trustedNetworkProfileSpellingIsLenient() {
-        assertEquals(AeronSettings.NetworkProfile.TRUSTED_NETWORK,
-                AeronSettings.fromEnvironment(prodProperties(Map.of(
-                        "ECLIPSE_DATAGRID_NETWORK_PROFILE", " Trusted-Network ",
-                        "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true"))).networkProfile());
-    }
-
-        /// A previous key rides alongside its primary and is exposed for rotation overlap.
-    @Test
-    void previousSecretsAreAcceptedAndExposed() {
-        final String primary = Base64.getEncoder().encodeToString(
-                "datagrid-replication-key".getBytes(StandardCharsets.US_ASCII));
-        final String previous = Base64.getEncoder().encodeToString(
-                "datagrid-previous-key!".getBytes(StandardCharsets.US_ASCII));
-        final UUID reader = UUID.randomUUID();
-        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET", primary,
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", previous,
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET", primary,
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS", previous,
-                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", reader.toString())));
-
-        assertArrayEquals(Base64.getDecoder().decode(previous),
-                settings.replication().previousAuthenticationSecret());
-        assertArrayEquals(Base64.getDecoder().decode(previous), settings.previousRetentionSecret());
-    }
-
-        /// A previous key without its primary, equal to its primary, or from both
-    /// sources at once is rejected.
-    @Test
-    void previousSecretsRequireADistinctPrimary() {
-        final String primary = Base64.getEncoder().encodeToString(
-                "datagrid-replication-key".getBytes(StandardCharsets.US_ASCII));
-        final String previous = Base64.getEncoder().encodeToString(
-                "datagrid-previous-key!".getBytes(StandardCharsets.US_ASCII));
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", previous))));
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET", primary,
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", primary))));
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET", primary,
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS", previous,
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS_FILE", "/nonexistent-secret"))));
-        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS", previous,
-                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", UUID.randomUUID().toString()))));
-    }
-
-        /// Closing the transport erases the configuration copies of both
-    /// replication keys; readers keep their own clones until disposal.
-    @Test
-    void transportCloseErasesReplicationSecrets() {
-        final byte[] primary = "datagrid-replication-key".getBytes(StandardCharsets.US_ASCII);
-        final byte[] previous = "datagrid-previous-key!".getBytes(StandardCharsets.US_ASCII);
-        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET",
-                Base64.getEncoder().encodeToString(primary),
-                "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET_PREVIOUS",
-                Base64.getEncoder().encodeToString(previous))));
-
-        assertArrayEquals(primary, settings.replication().authenticationSecret());
-        settings.clearReplicationSecrets();
-
-        assertArrayEquals(new byte[primary.length], settings.replication().authenticationSecret());
-        assertArrayEquals(new byte[previous.length], settings.replication().previousAuthenticationSecret());
+    void writerWithoutRetentionReadersLeavesRetentionUnconfigured() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
+        assertTrue(settings.retentionReaders().isEmpty());
     }
 
         /// Production-shaped settings with routable endpoints and home-directory paths.

@@ -1,9 +1,11 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import io.aeron.Aeron;
+import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 
 import java.nio.file.Path;
 import java.util.UUID;
@@ -17,9 +19,9 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Exercises the deployed reader-to-writer progress stream without reflection.
 class AeronWatermarkChannelTest {
     private static byte[] watermarkBytes() {
-        final byte[] bytes = new byte[116];
+        final byte[] bytes = new byte[92];
         bytes[0] = 1;
-        bytes[115] = 4;
+        bytes[91] = 4;
         return bytes;
     }
 
@@ -190,6 +192,76 @@ class AeronWatermarkChannelTest {
     }
 
     @Test
+    void unconnectedPublicationIsDroppedInsteadOfFailingClose(@TempDir final Path directory) throws Exception {
+        final MediaDriver.Context context = new MediaDriver.Context()
+                .aeronDirectoryName(directory.resolve("unconnected-driver").toString())
+                .dirDeleteOnStart(true)
+                .dirDeleteOnShutdown(true);
+        try (MediaDriver driver = MediaDriver.launch(context);
+             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
+            /* No subscriber on this stream: every offer reports NOT_CONNECTED.
+             * A latest-value stream drops what nobody receives — the next
+             * cursor advance or restart re-advertises — so close must succeed
+             * instead of failing to flush the unreceivable value. */
+            try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(
+                    aeron, "aeron:ipc", 84, TimeUnit.SECONDS.toNanos(30))) {
+                reader.publishEncoded(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                        1, 2, 3, 4);
+                /* Let the worker observe NOT_CONNECTED. Close must then take the
+                 * discard path immediately instead of waiting for 30 seconds. */
+                Thread.sleep(250L);
+                final long started = System.nanoTime();
+                reader.close();
+                assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2),
+                        "an unconnected watermark close must not wait for the flush timeout");
+                assertTrue(reader.isClosed());
+                assertNull(reader.failure());
+            }
+        }
+    }
+
+    @Test
+    void publishedWatermarkArrivesWhenSubscriberConnectsLate(@TempDir final Path directory) throws Exception {
+        final MediaDriver.Context context = new MediaDriver.Context()
+                .aeronDirectoryName(directory.resolve("late-subscriber-driver").toString())
+                .dirDeleteOnStart(true)
+                .dirDeleteOnShutdown(true);
+        try (MediaDriver driver = MediaDriver.launch(context);
+             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
+            final UUID readerId = UUID.randomUUID();
+            final UUID clusterId = UUID.randomUUID();
+            final UUID generation = UUID.randomUUID();
+            try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(
+                    aeron, "aeron:ipc", 85, TimeUnit.SECONDS.toNanos(30))) {
+                reader.publishEncoded(readerId, clusterId, generation, 7L, 8L, 9L, 10L);
+                /* Let the worker offer while nobody subscribes, so the value
+                 * can only arrive via retry — never via a first offer that
+                 * raced the subscriber — with no further transaction and no
+                 * reader restart. */
+                Thread.sleep(500L);
+                final AtomicReference<AeronReaderWatermark> received = new AtomicReference<>();
+                try (Subscription subscription = aeron.addSubscription("aeron:ipc", 85)) {
+                    final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (received.get() == null && System.nanoTime() < deadline) {
+                        subscription.poll((buffer, offset, length, header) ->
+                                received.set(AeronReaderWatermark.decode(buffer, offset, length)), 16);
+                        if (received.get() == null) Thread.sleep(10L);
+                    }
+                }
+                final AeronReaderWatermark watermark = received.get();
+                assertNotNull(watermark, "late subscriber never received the retained watermark");
+                assertEquals(readerId, watermark.readerId());
+                assertEquals(clusterId, watermark.clusterId());
+                assertEquals(generation, watermark.storeGeneration());
+                assertEquals(7L, watermark.writerEpoch());
+                assertEquals(8L, watermark.recordingId());
+                assertEquals(9L, watermark.sequence());
+                assertEquals(10L, watermark.position());
+            }
+        }
+    }
+
+    @Test
     void callerOwnedPublishCanBeMixedWithEncodedPublish(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()
                 .aeronDirectoryName(directory.resolve("mixed-publish-driver").toString())
@@ -209,10 +281,10 @@ class AeronWatermarkChannelTest {
                  AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 82)) {
                 final byte[] callerOwned = watermarkBytes();
                 reader.publish(callerOwned);
-                callerOwned[115] = 99;
+                callerOwned[91] = 99;
                 assertTrue(firstReceived.await(5, TimeUnit.SECONDS));
                 reader.publishEncoded(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                        1, 2, 3, 4, new byte[32]);
+                        1, 2, 3, 4);
                 assertTrue(secondReceived.await(5, TimeUnit.SECONDS),
                         "fixed buffers must remain reusable after caller-owned publish");
             }

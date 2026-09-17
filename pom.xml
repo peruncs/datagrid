@@ -40,7 +40,6 @@
     </properties>
 
 	<modules>
-		<module>peruncs-cache</module>
 		<module>peruncs-cluster</module>
 	</modules>
 
@@ -140,7 +139,6 @@
                     <version>3.4.2</version>
                     <configuration>
                         <archive>
-                            <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
                             <manifestEntries>
                                 <built-by>${project.organization.name}</built-by>
                             </manifestEntries>
@@ -159,7 +157,6 @@
                             </goals>
                             <configuration>
                                 <archive>
-                                    <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
                                     <manifestEntries>
                                         <built-by>${project.organization.name}</built-by>
                                     </manifestEntries>

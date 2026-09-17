@@ -75,7 +75,7 @@ class AeronReplicationEnvelopeTest {
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 0, 0, 1, 0, 0, new byte[0]
         );
-        encoded[5] = 4;
+        encoded[5] = 5;
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length
         ));
@@ -257,58 +257,43 @@ class AeronReplicationEnvelopeTest {
                 1, 0, 1, 1, 0, new byte[]{7, 8}));
     }
 
-        /// Verifies authenticated frames reject unsigned and forged payloads.
+        /// Verifies the fixed layout: a 76-byte header plus the chunk payload,
+    /// with no authentication trailer, identified as version 4.
     @Test
-    void authenticatedFramesRequireTheConfiguredSecret() {
-        final byte[] secret = "replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    void frameLayoutIsFixedHeaderPlusPayload() {
+        assertEquals(4, AeronReplicationEnvelope.VERSION);
+        assertEquals(76, AeronReplicationEnvelope.HEADER_LENGTH);
         final byte[] payload = new byte[]{1, 2, 3};
-        final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length
-                + AeronReplicationEnvelope.HMAC_LENGTH];
+        final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length + 8];
+        java.util.Arrays.fill(encoded, (byte) 0x5a);
         final int length = AeronReplicationEnvelope.withChecksumContext(
                 new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
                         new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, 7,
                         AeronReplicationEnvelope.Kind.STORE_BINARY, payload.length, 0, 1, 0, 0,
-                        new UnsafeBuffer(payload), 0, payload.length, secret));
-        assertEquals(encoded.length, length);
+                        new UnsafeBuffer(payload), 0, payload.length));
+        assertEquals(AeronReplicationEnvelope.HEADER_LENGTH + payload.length, length);
         assertArrayEquals(payload, AeronReplicationEnvelope.decode(
-                new UnsafeBuffer(encoded), 0, length, secret).payload());
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
-                new UnsafeBuffer(encoded), 0, length));
-        encoded[AeronReplicationEnvelope.HEADER_LENGTH] ^= 1;
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
-                new UnsafeBuffer(encoded), 0, length, secret));
+                new UnsafeBuffer(encoded), 0, length).payload());
+        for (int i = length; i < encoded.length; i++) {
+            assertEquals((byte) 0x5a, encoded[i], "encoding must not write past header plus payload");
+        }
     }
 
-        /// Verifies rotation overlap: a frame signed with the retiring key still
-    /// decodes while the primary has moved on, and a forged frame fails both keys.
+        /// Verifies encode-time rejection of negative sequence, epoch, and fencing values.
     @Test
-    void rotationOverlapAcceptsTheRetiringKey() {
-        final byte[] previous = "previous-replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-        final byte[] primary = "primary-replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    void rejectsNegativeSequenceEpochAndFencingToken() {
         final byte[] payload = new byte[]{1, 2, 3};
-        final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length
-                + AeronReplicationEnvelope.HMAC_LENGTH];
-        final int length = AeronReplicationEnvelope.withChecksumContext(
-                new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
-                        new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, 7,
-                        AeronReplicationEnvelope.Kind.STORE_BINARY, payload.length, 0, 1, 0, 0,
-                        new UnsafeBuffer(payload), 0, payload.length, previous));
-        assertEquals(encoded.length, length);
-        assertArrayEquals(payload, AeronReplicationEnvelope.decode(
-                new UnsafeBuffer(encoded), 0, length, primary, previous).payload());
-        assertArrayEquals(payload, AeronReplicationEnvelope.decode(
-                new UnsafeBuffer(encoded), 0, length, previous, null).payload());
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
-                new UnsafeBuffer(encoded), 0, length, primary, null));
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
-                new UnsafeBuffer(encoded), 0, length, primary,
-                "unrelated-replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
+                CLUSTER, 1, 1, -1, AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0, payload));
+        assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
+                CLUSTER, -1, 1, 7, AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0, payload));
+        assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelopeTestSupport.encode(
+                CLUSTER, 1, -1, 7, AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0, payload));
     }
 
     @Test
-    void signedEncodingChecksTagCapacityBeforeWriting() {
-        final byte[] secret = "replication-secret".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-        final byte[] target = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 3];
+    void encodingChecksTargetCapacityBeforeWriting() {
+        final byte[] target = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 2];
         java.util.Arrays.fill(target, (byte) 0x5a);
         final byte[] before = target.clone();
 
@@ -317,7 +302,7 @@ class AeronReplicationEnvelopeTest {
                         new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
                                 new UnsafeBuffer(target), 0, CLUSTER, 1, 1, 7,
                                 AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0,
-                                new UnsafeBuffer(new byte[]{1, 2, 3}), 0, 3, secret)));
-        assertArrayEquals(before, target, "a rejected signed frame must not partially overwrite its destination");
+                                new UnsafeBuffer(new byte[]{1, 2, 3}), 0, 3)));
+        assertArrayEquals(before, target, "a rejected frame must not partially overwrite its destination");
     }
 }

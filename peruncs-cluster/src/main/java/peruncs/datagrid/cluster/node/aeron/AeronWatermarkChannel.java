@@ -7,7 +7,7 @@ import org.agrona.DirectBuffer;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
-import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronAuthenticatedWatermark;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.Arrays;
@@ -23,8 +23,9 @@ import java.util.concurrent.atomic.AtomicReference;
 final class AeronWatermarkChannel implements AutoCloseable {
     private final Receiver receiver;
     private final long closeTimeoutNanos;
-    private final byte[] bufferA = new byte[AeronAuthenticatedWatermark.ENCODED_LENGTH];
-    private final byte[] bufferB = new byte[AeronAuthenticatedWatermark.ENCODED_LENGTH];
+    private final Aeron aeron;
+    private final byte[] bufferA = new byte[AeronReaderWatermark.ENCODED_LENGTH];
+    private final byte[] bufferB = new byte[AeronReaderWatermark.ENCODED_LENGTH];
     /* Agrona's zero-capacity buffer avoids retaining a heap byte[]; wrap the
      * latest caller-owned encoding immediately before each offer. */
     private final UnsafeBuffer sendBuffer = new UnsafeBuffer();
@@ -37,10 +38,15 @@ final class AeronWatermarkChannel implements AutoCloseable {
     private byte[] sending;
     private byte[] reusable = this.bufferA;
     private boolean closed;
+    /* Set after an offer observes no subscriber. Close can discard that value
+     * immediately; waiting for the configured flush timeout cannot make an
+     * absent subscriber receive it. */
+    private boolean subscriberAbsent;
     /* Read unsynchronized by available(); every mutation holds the monitor,
      * so volatile is the only additional visibility needed. */
     private volatile boolean closing;
     private AeronWatermarkChannel(
+            final Aeron aeron,
             final Publication publication,
             final Subscription subscription,
             final Receiver receiver,
@@ -52,6 +58,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         if (publication != null && receiver != null)
             throw new IllegalArgumentException("writer watermark channels cannot have a receiver");
         if (closeTimeoutNanos <= 0) throw new IllegalArgumentException("closeTimeoutNanos must be positive");
+        this.aeron = Objects.requireNonNull(aeron, "aeron");
         this.publication = publication;
         this.subscription = subscription;
         this.receiver = receiver;
@@ -68,7 +75,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         Objects.requireNonNull(receiver, "receiver");
         final Subscription subscription = aeron.addSubscription(channel, streamId);
         try {
-            return new AeronWatermarkChannel(null, subscription, receiver, closeTimeoutNanos);
+            return new AeronWatermarkChannel(aeron, null, subscription, receiver, closeTimeoutNanos);
         } catch (final RuntimeException | Error failure) {
             try {
                 subscription.close();
@@ -90,7 +97,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         Objects.requireNonNull(channel, "channel");
         final Publication publication = aeron.addPublication(channel, streamId);
         try {
-            return new AeronWatermarkChannel(publication, null, null, closeTimeoutNanos);
+            return new AeronWatermarkChannel(aeron, publication, null, null, closeTimeoutNanos);
         } catch (final RuntimeException | Error failure) {
             try {
                 publication.close();
@@ -117,8 +124,8 @@ final class AeronWatermarkChannel implements AutoCloseable {
     /// mutate its array as soon as this method returns.
     synchronized void publish(final byte[] encoded) {
         Objects.requireNonNull(encoded, "encoded");
-        if (encoded.length != AeronAuthenticatedWatermark.ENCODED_LENGTH)
-            throw new IllegalArgumentException("Aeron watermark encoding must contain exactly %s bytes".formatted(AeronAuthenticatedWatermark.ENCODED_LENGTH));
+        if (encoded.length != AeronReaderWatermark.ENCODED_LENGTH)
+            throw new IllegalArgumentException("Aeron watermark encoding must contain exactly %s bytes".formatted(AeronReaderWatermark.ENCODED_LENGTH));
         this.requireOpen();
         this.discardPendingForReplacement();
         if (this.reusable == null && this.sending != null) {
@@ -136,7 +143,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
     synchronized void publishEncoded(
             final UUID readerId, final UUID clusterId, final UUID storeGeneration,
             final long writerEpoch, final long recordingId, final long sequence,
-            final long position, final byte[] secret) {
+            final long position) {
         this.requireOpen();
         if (this.pending != null && !this.isReusableBuffer(this.pending)) this.pending = null;
         if (this.pending == null) {
@@ -150,8 +157,8 @@ final class AeronWatermarkChannel implements AutoCloseable {
             this.reusable = null;
         }
         if (this.pending == null) throw new IllegalStateException("Aeron watermark channel has no encoding buffer");
-        AeronAuthenticatedWatermark.signEncodedInto(this.pending, readerId, clusterId, storeGeneration,
-                writerEpoch, recordingId, sequence, position, secret);
+        AeronReaderWatermark.encodeInto(this.pending, readerId, clusterId, storeGeneration,
+                writerEpoch, recordingId, sequence, position);
     }
 
     boolean available() {
@@ -197,16 +204,34 @@ final class AeronWatermarkChannel implements AutoCloseable {
                         if (result > 0) {
                             synchronized (this) {
                                 this.sending = null;
+                                this.subscriberAbsent = false;
                                 /* The publication has copied the frame. Do not retain the
-                                 * HMAC tag in the reusable heap buffer between offers. */
+                                 * last watermark in the reusable heap buffer between offers. */
                                 Arrays.fill(value, (byte) 0);
                                 this.reclaimSentBuffer(value);
                             }
                             work++;
-                        } else if (result == Publication.NOT_CONNECTED || result == Publication.BACK_PRESSURED ||
+                        } else if (result == Publication.NOT_CONNECTED && this.aeron.isClosed()) {
+                            /* The client is gone: no subscriber can ever arrive.
+                             * Fail the worker so transport supervision observes
+                             * the dead client instead of spinning silently. */
+                            throw new IllegalStateException(
+                                    "Aeron watermark client is closed with an unsent position");
+                        } else if (result == Publication.NOT_CONNECTED ||
+                                   result == Publication.BACK_PRESSURED ||
                                    result == Publication.ADMIN_ACTION) {
+                            /* No receiver yet, a slow receiver, or an admin hold:
+                             * keep the latest value and retry on the next poll.
+                             * Retaining across NOT_CONNECTED is what lets a
+                             * subscriber that arrives later — a writer that
+                             * starts after the reader published — still receive
+                             * the durable cursor with no further transaction
+                             * and no reader restart. Close discards a value
+                             * that is still unconnected (see [#close]), so
+                             * retaining here never fails a clean shutdown. */
                             synchronized (this) {
                                 this.sending = null;
+                                this.subscriberAbsent = result == Publication.NOT_CONNECTED;
                                 if (this.pending == null) this.pending = value;
                                 else this.reclaimSentBuffer(value);
                             }
@@ -233,11 +258,12 @@ final class AeronWatermarkChannel implements AutoCloseable {
 
     /// Shuts the watermark worker down, flushing the last durable position first.
     ///
-    /// A bounded wait lets a pending watermark publish; if it cannot flush,
-    /// closing fails instead of silently dropping the reader's final
-    /// boundary. An interrupted or timed-out close resets so it can be
-    /// retried, and in-flight values left behind fail the close rather than
-    /// vanishing.
+    /// A bounded wait lets a pending watermark publish; if a subscriber exists
+    /// and it still cannot flush, closing fails instead of silently dropping
+    /// the reader's final boundary. A value with no subscriber even now is
+    /// discarded — nobody will ever receive it. An interrupted or timed-out
+    /// close resets so it can be retried, and in-flight values left behind
+    /// fail the close rather than vanishing.
     @Override
     public void close() {
         final RuntimeException initialFailure;
@@ -259,17 +285,18 @@ final class AeronWatermarkChannel implements AutoCloseable {
                         pending = this.pending != null;
                         alive = this.worker.isAlive();
                     }
-                    if (!pending || this.failure.get() != null || !alive || ReplicationRetry.expired(deadline)) break;
+                    final boolean subscriberAbsent;
+                    synchronized (this) {
+                        subscriberAbsent = this.subscriberAbsent;
+                    }
+                    final boolean disconnected = !this.publication.isConnected();
+                    if (!pending || subscriberAbsent || disconnected || this.failure.get() != null || !alive ||
+                        ReplicationRetry.expired(deadline)) break;
                     idle.idle(0);
                 }
-                final boolean pending;
-                synchronized (this) {
-                    pending = this.pending != null;
-                }
-                if (pending) {
-                    closeFailure = append(closeFailure, new IllegalStateException(
-                            "Aeron watermark channel could not flush its last durable reader position"));
-                }
+                /* No verdict here: a value still pending after the wait may yet
+                 * be discarded by the final arbitration below when nobody
+                 * subscribes. Only the post-join state decides. */
             }
             synchronized (this) {
                 this.running.set(false);
@@ -294,7 +321,26 @@ final class AeronWatermarkChannel implements AutoCloseable {
                 throw new IllegalStateException("Aeron watermark channel did not stop");
             }
             synchronized (this) {
-                if (this.pending != null || this.sending != null) {
+                /* One final offer arbitrates a value still pending after the
+                 * wait: delivered and back-pressured keep their existing
+                 * meaning, while NOT_CONNECTED discards — nobody is there to
+                 * receive it, and failing close for such a boundary would make
+                 * every unsubscribed shutdown noisy. (Publication connection
+                 * state cannot arbitrate: an established but subscriberless
+                 * publication still reports connected.) */
+                if (this.pending != null && this.publication != null) {
+                    this.sendBuffer.wrap(this.pending);
+                    final long result = this.publication.offer(this.sendBuffer);
+                    if (result > 0 || result == Publication.NOT_CONNECTED) {
+                        if (result <= 0) Arrays.fill(this.pending, (byte) 0);
+                        this.pending = null;
+                    }
+                }
+                if (this.pending != null) {
+                    closeFailure = append(closeFailure, new IllegalStateException(
+                            "Aeron watermark channel could not flush its last durable reader position"));
+                }
+                if (this.sending != null) {
                     closeFailure = append(closeFailure, new IllegalStateException(
                             "Aeron watermark channel stopped with an in-flight value"));
                 }

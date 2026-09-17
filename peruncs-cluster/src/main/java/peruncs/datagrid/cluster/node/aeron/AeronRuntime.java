@@ -35,18 +35,22 @@ final class AeronRuntime implements AutoCloseable {
 
     private final AeronSettings settings;
     private final ErrorHandler errorHandler;
+    private final ErrorHandler subscriberErrorHandler;
     private AutoCloseable driver;
     private Aeron aeron;
     private AeronArchive archive;
 
-    private AeronRuntime(final AeronSettings settings, final ErrorHandler errorHandler) {
+    private AeronRuntime(final AeronSettings settings, final ErrorHandler errorHandler,
+                         final ErrorHandler subscriberErrorHandler) {
         this.settings = settings;
         this.errorHandler = errorHandler;
+        this.subscriberErrorHandler = subscriberErrorHandler;
     }
 
     static AeronRuntime start(final AeronSettings settings, final ErrorHandler errorHandler,
+                              final ErrorHandler subscriberErrorHandler,
                               final Runnable beforeDriverLaunch) {
-        final AeronRuntime runtime = new AeronRuntime(settings, errorHandler);
+        final AeronRuntime runtime = new AeronRuntime(settings, errorHandler, subscriberErrorHandler);
         try {
             runtime.start(beforeDriverLaunch);
             return runtime;
@@ -222,7 +226,7 @@ final class AeronRuntime implements AutoCloseable {
                 .aeronDirectoryName(this.settings.aeronDirectory().toString())
                 .driverTimeoutMs(this.settings.driverTimeoutMillis())
                 .errorHandler(this.errorHandler)
-                .subscriberErrorHandler(this.errorHandler));
+                .subscriberErrorHandler(this.subscriberErrorHandler));
         this.archive = AeronArchive.connect(this.archiveContext());
     }
 

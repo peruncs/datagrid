@@ -43,8 +43,6 @@ final class WriterFencingLease implements AutoCloseable {
     private static final short VERSION = 2;
     private static final int ENCODED_BYTES = Integer.BYTES + Short.BYTES + Long.BYTES + Long.BYTES * 2
             + Long.BYTES * 2 + Long.BYTES + Integer.BYTES;
-    /// Heartbeat freshness bound used when the caller does not supply one.
-    private static final Duration DEFAULT_MAX_STALENESS = Duration.ofSeconds(30);
     /* Serializes acquisition inside one JVM. The file lock below serializes
      * across processes; without this mutex two threads of one process would
      * fail with OverlappingFileLockException instead of acquiring in turn. */
@@ -100,31 +98,12 @@ final class WriterFencingLease implements AutoCloseable {
             throw new IllegalStateException("cannot create writer lease directory %s".formatted(volumeDirectory), failure);
         }
         synchronized (ACQUIRE_LOCK) {
-            final WriterFencingLease active = ACTIVE.get(volumeDirectory.resolve(
-                    "writer-lease-%s-%s.lease".formatted(clusterId, storeGeneration)));
+            final WriterFencingLease active = ACTIVE.get(leasePath(volumeDirectory, clusterId, storeGeneration));
             if (active != null && active.isCurrent()) {
                 throw new IllegalStateException("a writer lease is already held in this JVM");
             }
             return acquireLocked(volumeDirectory, clusterId, storeGeneration, nodeId, maxStaleness);
         }
-    }
-
-        /// Creates and acquires a lease with the default heartbeat freshness bound.
-    ///
-    /// @param volumeDirectory shared backup volume directory
-    /// @param clusterId       replication cluster identity
-    /// @param storeGeneration Store generation identity
-    /// @param nodeId          acquiring node identity
-    /// @return held lease
-    /// @throws IllegalStateException if another writer holds a fresh lease, the lease file is corrupt,
-    ///                               or the token series is exhausted
-    public static WriterFencingLease acquire(
-            final Path volumeDirectory,
-            final UUID clusterId,
-            final UUID storeGeneration,
-            final UUID nodeId
-    ) {
-        return acquire(volumeDirectory, clusterId, storeGeneration, nodeId, DEFAULT_MAX_STALENESS);
     }
 
     private static WriterFencingLease acquireLocked(
@@ -188,7 +167,7 @@ final class WriterFencingLease implements AutoCloseable {
                             clusterId, storeGeneration),
                     failure);
         }
-        final WriterFencingLease lease = new WriterFencingLease(path, token, nodeId, PROCESS_HOLDER_ID, maxStaleness);
+        final WriterFencingLease lease = new WriterFencingLease(path, token, nodeId, maxStaleness);
         ACTIVE.put(path, lease);
         lease.startHeartbeat();
         return lease;
@@ -200,7 +179,7 @@ final class WriterFencingLease implements AutoCloseable {
     /// @param clusterId       replication cluster identity
     /// @param storeGeneration Store generation identity
     /// @return lease path
-    public static Path leasePath(final Path volumeDirectory, final UUID clusterId, final UUID storeGeneration) {
+    static Path leasePath(final Path volumeDirectory, final UUID clusterId, final UUID storeGeneration) {
         return volumeDirectory.resolve("writer-lease-%s-%s.lease".formatted(clusterId, storeGeneration));
     }
 
@@ -221,11 +200,11 @@ final class WriterFencingLease implements AutoCloseable {
     private boolean lastCheckResult;
 
     private WriterFencingLease(
-            final Path path, final long token, final UUID nodeId, final UUID holderId, final Duration maxStaleness) {
+            final Path path, final long token, final UUID nodeId, final Duration maxStaleness) {
         this.path = path;
         this.token = token;
         this.nodeId = nodeId;
-        this.holderId = holderId;
+        this.holderId = PROCESS_HOLDER_ID;
         this.maxStalenessMillis = maxStaleness.toMillis();
         this.checkIntervalMillis = Math.max(1L, maxStaleness.toMillis() / 3L);
         this.heartbeat = Executors.newSingleThreadScheduledExecutor(
@@ -484,7 +463,8 @@ final class WriterFencingLease implements AutoCloseable {
             }
             bytes = new byte[ENCODED_BYTES];
             final ByteBuffer view = ByteBuffer.wrap(bytes);
-            while (view.hasRemaining() && channel.read(view) >= 0) {
+            while (view.hasRemaining()) {
+                if (channel.read(view) < 0) break;
             }
             if (view.hasRemaining()) {
                 throw new IllegalStateException(

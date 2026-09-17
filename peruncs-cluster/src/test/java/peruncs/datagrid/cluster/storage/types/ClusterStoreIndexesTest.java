@@ -10,6 +10,7 @@ import org.eclipse.store.gigamap.types.IndexCategory;
 import org.eclipse.store.gigamap.types.IndexGroup;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
+import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -66,6 +67,65 @@ class ClusterStoreIndexesTest {
     }
 
     @Test
+    void eventualIndexingIsRejectedForReplicatedVectors() {
+        final VectorIndexConfiguration eventual = VectorIndexConfiguration.builder()
+                .dimension(3)
+                .similarityFunction(VectorSimilarityFunction.COSINE)
+                .eventualIndexing(true)
+                .build();
+        assertThrows(IllegalArgumentException.class,
+                () -> ClusterStoreIndexes.validateVectorConfiguration(eventual));
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        assertThrows(IllegalArgumentException.class,
+                () -> ClusterStoreIndexes.registerVector(
+                        root.articles, "article-vectors", eventual, new ArticleVectorizer()));
+        /* A mode smuggled past registration through the raw upstream add,
+         * then persisted and reloaded, must still fail root validation: the
+         * import refresh cannot retire a graph an in-flight background
+         * worker may be using. */
+        root.articles.index().register(VectorIndices.Category())
+                .add("article-vectors", eventual, new ArticleVectorizer());
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            storage.storeRoot();
+        }
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(this.storagePath)) {
+            final Root reloaded = (Root) storage.root();
+            assertThrows(IllegalArgumentException.class,
+                    () -> ClusterStoreIndexes.validateVectorIndexes(reloaded.articles));
+        }
+    }
+
+    @Test
+    void backgroundOptimizationIsRejectedForReplicatedVectors() {
+        final VectorIndexConfiguration optimized = VectorIndexConfiguration.builder()
+                .dimension(3)
+                .similarityFunction(VectorSimilarityFunction.COSINE)
+                .optimizationIntervalMs(1_000L)
+                .build();
+        assertThrows(IllegalArgumentException.class,
+                () -> ClusterStoreIndexes.validateVectorConfiguration(optimized));
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        assertThrows(IllegalArgumentException.class,
+                () -> ClusterStoreIndexes.registerVector(
+                        root.articles, "article-vectors", optimized, new ArticleVectorizer()));
+        /* Same smuggled-persisted-reloaded path as eventual indexing: root
+         * validation reads the stored configuration, so no background mode
+         * can reach a reader unnoticed. */
+        root.articles.index().register(VectorIndices.Category())
+                .add("article-vectors", optimized, new ArticleVectorizer());
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            storage.storeRoot();
+        }
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(this.storagePath)) {
+            final Root reloaded = (Root) storage.root();
+            assertThrows(IllegalArgumentException.class,
+                    () -> ClusterStoreIndexes.validateVectorIndexes(reloaded.articles));
+        }
+    }
+
+    @Test
     void embeddedIndexesFollowAddUpdateDeleteAndReload() {
         final Root root = new Root();
         root.articles = GigaMap.New();
@@ -112,6 +172,91 @@ class ClusterStoreIndexesTest {
             assertEquals(1, result.size());
             assertEquals("Aeron", result.toList().getFirst().entity().title);
             assertEquals(0, VECTORIZE_CALLS.get(), "computed vectors must be loaded from Store state");
+        }
+    }
+
+    @Test
+    void refreshResetsGraphsWithoutEagerVectorization() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerLucene(root.articles, new ArticlePopulator());
+        ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(), new ArticleVectorizer());
+        final int entities = 1_000;
+        final List<Long> ids = new ArrayList<>(entities);
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            for (int index = 0; index < entities; index++) {
+                ids.add(root.articles.add(new Article(
+                        "doc" + index, "body-" + index, new float[]{index + 1.0f, 1.0f, 0.0f})));
+            }
+            storage.storeRoot();
+            final StorageConnection connection = storage.createConnection();
+            /* One imported batch touching three entities out of a thousand:
+             * an update, an add, and a remove. The refresh resets the vector
+             * graphs to their just-loaded state instead of touching entities:
+             * no vectorize call happens at refresh time, and the next search
+             * rebuilds the graph from the already-current vector store — the
+             * same lazy rebuild every restart performs. */
+            root.articles.update(ids.get(7), article ->
+            {
+                article.body = "updated-body-7";
+                article.vector = new float[]{-1.0f, 0.0f, 0.0f};
+            });
+            root.articles.add(new Article("docnew", "body-new", new float[]{0.0f, -1.0f, 0.0f}));
+            root.articles.removeById(ids.get(13));
+            /* Cross the commit boundary first: uncommitted writer-buffered
+             * documents are near-real-time-visible only, and a reader-side
+             * refresh must close the writer rather than roll it back —
+             * rollback deletes the replicated commit point — exactly as the
+             * replicated Store arrives committed. */
+            root.articles.store();
+            VECTORIZE_CALLS.set(0);
+            ClusterStoreIndexes.refreshImportedIndexes(connection);
+            assertEquals(0, VECTORIZE_CALLS.get(), "refresh must reset graphs without vectorizing entities");
+            final VectorIndices<Article> vectors = root.articles.index().get(VectorIndices.Category());
+            assertEquals("doc7", vectors.get("article-vectors")
+                    .search(new float[]{-1.0f, 0.0f, 0.0f}, 1).toList().getFirst().entity().title);
+            assertEquals("docnew", vectors.get("article-vectors")
+                    .search(new float[]{0.0f, -1.0f, 0.0f}, 1).toList().getFirst().entity().title);
+            final VectorSearchResult<Article> nearRemoved = vectors.get("article-vectors")
+                    .search(new float[]{14.0f, 1.0f, 0.0f}, 5);
+            assertTrue(nearRemoved.toList().stream().noneMatch(hit -> hit.entity().title.equals("doc13")),
+                    "removed entity still indexed");
+            final LuceneIndex<Article> text = root.articles.index().get(LuceneIndex.class);
+            assertEquals(1, text.query("title:doc7").size());
+            assertEquals(0, text.query("title:doc13").size());
+        }
+    }
+
+    @Test
+    void repeatedRefreshRetiresAndReopensLuceneViews() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerLucene(root.articles, new ArticlePopulator());
+        ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(), new ArticleVectorizer());
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            final long kept = root.articles.add(new Article("kept", "steady body", new float[]{1, 0, 0}));
+            storage.storeRoot();
+            final StorageConnection connection = storage.createConnection();
+            final LuceneIndex<Article> text = root.articles.index().get(LuceneIndex.class);
+            /* Twenty-five import cycles, each opening the Lucene view with a
+             * query and retiring it with a refresh — plus a second refresh
+             * over already-retired (nulled) handles, which must succeed
+             * without double-close failures. Every cycle reopens over the
+             * current files with identical results: retired handles release
+             * their resources instead of accumulating, and no refresh ever
+             * commits against the replicated files. */
+            for (int cycle = 0; cycle < 25; cycle++) {
+                final int round = cycle;
+                assertEquals(1, text.query("title:kept").size(), "cycle " + cycle);
+                root.articles.update(kept, article -> article.body = "steady body " + round);
+                root.articles.store();
+                ClusterStoreIndexes.refreshImportedIndexes(connection);
+                ClusterStoreIndexes.refreshImportedIndexes(connection);
+                assertEquals(1, text.query("title:kept").size(), "reopen after cycle " + cycle);
+                assertEquals(1, text.query("body:steady").size(), "reopen after cycle " + cycle);
+            }
+            final VectorIndices<Article> vectors = root.articles.index().get(VectorIndices.Category());
+            assertEquals(1, vectors.get("article-vectors").search(new float[]{1, 0, 0}, 1).size());
         }
     }
 
@@ -346,7 +491,6 @@ class ClusterStoreIndexesTest {
     void largeOrdinaryGraphPassesValidation() {
         final Root root = new Root();
         root.articles = GigaMap.New();
-        ClusterStoreIndexes.registerMap(root.articles);
         root.catalog = new ArrayList<>();
         for (int index = 0; index < 5_000; index++) {
             root.catalog.add(new CatalogEntry("title-" + index, index));
@@ -374,6 +518,31 @@ class ClusterStoreIndexesTest {
         /* Pruning ordinary entities must not hide the directly registered
          * external index among them. */
         assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+    }
+
+    @Test
+    void writerEntryScopesValidationToTheStoreBeingWritten() {
+        /* Store A holds a directly registered external Lucene index. */
+        final Root violating = new Root();
+        violating.articles = GigaMap.New();
+        violating.articles.index().register(LuceneIndex.Category(LuceneContext.New(
+                this.storagePath.resolve("other-store-external-lucene"), new ArticlePopulator())));
+        try (EmbeddedStorageManager other = EmbeddedStorage.start(violating, this.storagePath.resolve("other"))) {
+            other.storeRoot();
+            /* Store B is clean: validation of B must pass even though the
+             * violating map of Store A is still live in this JVM. */
+            final Root clean = new Root();
+            clean.articles = GigaMap.New();
+            ClusterStoreIndexes.registerLucene(clean.articles, new ArticlePopulator());
+            try (EmbeddedStorageManager mine = EmbeddedStorage.start(clean, this.storagePath.resolve("mine"))) {
+                mine.storeRoot();
+                assertDoesNotThrow(() -> ClusterStoreIndexes.validateForPublication(mine.createConnection()),
+                        "another Store's violating map must not block this writer");
+                assertThrows(IllegalArgumentException.class,
+                        () -> ClusterStoreIndexes.validateForPublication(other.createConnection()),
+                        "the violating Store must still fail its own validation");
+            }
+        }
     }
 
     @Test
