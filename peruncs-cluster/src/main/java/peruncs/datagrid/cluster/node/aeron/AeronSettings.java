@@ -851,12 +851,7 @@ record AeronSettings(
         return this.authCredentials == null ? null : this.authCredentials.clone();
     }
 
-    /** Returns a defensive copy of the optional reader credentials. */
-    public byte[] authReaderCredentials() {
-        return this.authReaderCredentials == null ? null : this.authReaderCredentials.clone();
-    }
-
-        /// Erases the settings-held Aeron auth credentials when the owning transport closes.
+    /// Erases the settings-held Aeron auth credentials when the owning transport closes.
     ///
     /// The owning [AeronRuntime] calls this once its driver, client, and Archive
     /// are all released, so a closed node keeps no long-lived credential copy.

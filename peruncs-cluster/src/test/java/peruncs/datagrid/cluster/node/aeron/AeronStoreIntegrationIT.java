@@ -122,9 +122,11 @@ class AeronStoreIntegrationIT {
              StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(cursorPath)) {
             final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
             final EmbeddedStorageManager reader = readerFoundation.start();
-            final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(
-                    readerFoundation.getConnectionFoundation(), reader.createConnection(),
-                    ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
+            final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
+                    .foundation(readerFoundation.getConnectionFoundation()).storage(reader.createConnection())
+                    .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
+                    .cachingTimeoutMs(0L).cachedBinaryLimit(1L)
+                    .applyTimeoutMs(StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS).build());
             final StorageBinaryDataClient client = transport.client(receiver, "store", new AfterDataMessageConsumedListener() {
                         @Override
                         public void onApplied(final ReplicationCursor cursor) {
@@ -999,10 +1001,11 @@ class AeronStoreIntegrationIT {
         }
 
         private StorageBinaryDataReceiver newReceiver() {
-            return StorageBinaryDataMerger.New(
-                    this.foundation.getConnectionFoundation(), this.storage.createConnection(),
-                    ObjectGraphUpdateHandler.PerStore(this.coordinator), 0L, 1L,
-                    StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS);
+            return StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
+                    .foundation(this.foundation.getConnectionFoundation()).storage(this.storage.createConnection())
+                    .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(this.coordinator))
+                    .cachingTimeoutMs(0L).cachedBinaryLimit(1L)
+                    .applyTimeoutMs(StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS).build());
         }
 
         StorageGraphCoordinator graphCoordinator() {

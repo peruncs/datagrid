@@ -53,6 +53,13 @@ public interface ClusterStorageManager<T> extends StorageManager {
     }
 
         /// Creates a manager sharing the Store graph coordinator with replication.
+    ///
+    /// @param <T>              root type
+    /// @param delegate         Store manager
+    /// @param storageSizeValidation size validation policy
+    /// @param shutdownCallback shutdown callback
+    /// @param graphCoordinator graph coordinator shared with replication
+    /// @return cluster storage manager
     static <T> ClusterStorageManager<T> New(
             final StorageManager delegate,
             final StorageSizeValidation storageSizeValidation,
@@ -80,6 +87,12 @@ public interface ClusterStorageManager<T> extends StorageManager {
     }
 
         /// Creates a read-only manager sharing the Store graph coordinator.
+    ///
+    /// @param <T>              root type
+    /// @param delegate         Store manager
+    /// @param shutdownCallback shutdown callback
+    /// @param graphCoordinator graph coordinator shared with replication
+    /// @return read-only cluster storage manager
     static <T> ClusterStorageManager<T> ReadOnly(
             final StorageManager delegate,
             final ShutdownCallback shutdownCallback,

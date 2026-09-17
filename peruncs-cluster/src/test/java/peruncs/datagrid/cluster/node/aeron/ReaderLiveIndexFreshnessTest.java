@@ -18,6 +18,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Deterministic regression for live-reader index freshness.
@@ -53,7 +54,7 @@ class ReaderLiveIndexFreshnessTest {
                 assertJVectorHas(initial);
             }
             try (EmbeddedStorageManager reopened = AeronStoreIntegrationIT.foundation(root.resolve("writer")).start()) {
-                final IndexRoot imported = (IndexRoot) reopened.root();
+                final IndexRoot imported = reopened.root();
                 assertGraphHas(imported, titles);
                 assertLuceneHas(imported, titles);
                 assertJVectorHas(imported);
@@ -104,7 +105,7 @@ class ReaderLiveIndexFreshnessTest {
 
             final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor,
                     writerTransport.persistenceTargetFactory("store", distributor));
-            final IndexRoot writerRoot = (IndexRoot) writer.root();
+            final IndexRoot writerRoot = writer.root();
             try {
                 final ReplicationCursor baseline = AeronStoreIntegrationIT.latest(writerTransport);
                 final ReaderNode[] readers = new ReaderNode[readerStores.length];
@@ -185,8 +186,8 @@ class ReaderLiveIndexFreshnessTest {
                     assertGraphHas(writerRoot, liveTitles);
                     assertLuceneHas(writerRoot, liveTitles);
                     assertJVectorHas(writerRoot, liveVectors);
-                    for (int i = 0; i < readers.length; i++) {
-                        final IndexRoot readerRoot = (IndexRoot) readers[i].rootObject();
+                    for (final ReaderNode reader : readers) {
+                        final IndexRoot readerRoot = (IndexRoot) reader.rootObject();
                         assertGraphHas(readerRoot, liveTitles);
                         assertLuceneHas(readerRoot, liveTitles);
                         assertJVectorHas(readerRoot, liveVectors);
@@ -263,7 +264,7 @@ class ReaderLiveIndexFreshnessTest {
             assertTrue(nearest.toList().stream().anyMatch(hit -> entry.getKey().equals(hit.entity().title)),
                     "JVector missed " + entry.getKey());
         }
-        assertTrue(titles.size() > 0, "expected indexed articles");
+        assertFalse(titles.isEmpty(), "expected indexed articles");
     }
 
     @SuppressWarnings("unchecked") // Lucene's class token cannot retain its entity type.

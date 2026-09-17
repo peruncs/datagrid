@@ -18,7 +18,6 @@ import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BooleanSupplier;
 import java.util.function.LongPredicate;
 
 /// Publishes the replication stream and waits for the Archive to record it.
@@ -708,44 +707,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         return this.publication;
     }
 
-        /// Creates a coordinator with a local write-admission predicate.
-    ///
-    /// @param durabilityMode ordering between local acceptance and Archive
-    /// @param writer         receiver for checkpoint transitions
-    /// @param writeAdmission predicate receiving payload plus dictionary bytes before local acceptance
-    /// @return a coordinator backed by this publisher
-    public AeronReplicationWriteCoordinator newWriteCoordinator(
-            final ReplicationDurabilityMode durabilityMode,
-            final CheckpointWriter writer,
-            final LongPredicate writeAdmission) {
-        Objects.requireNonNull(writer, "writer");
-        return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer,
-                writeAdmission);
-    }
-
-        /// Creates a coordinator that refuses admission once the writer lease is lost.
-    ///
-    /// Lease validity is checked before Archive capacity, so a fenced writer
-    /// fails with a distinct lease-lost error instead of a misleading
-    /// capacity-exhaustion message, and the publisher is failed closed.
-    ///
-    /// @param durabilityMode ordering between local acceptance and Archive
-    /// @param writer         receiver for checkpoint transitions
-    /// @param writeAdmission predicate receiving payload plus dictionary bytes before local acceptance
-    /// @param leaseValid     supplier reporting whether the writer lease is still current
-    /// @return a coordinator backed by this publisher
-    public AeronReplicationWriteCoordinator newWriteCoordinator(
-            final ReplicationDurabilityMode durabilityMode,
-            final CheckpointWriter writer,
-            final LongPredicate writeAdmission,
-            final BooleanSupplier leaseValid) {
-        Objects.requireNonNull(writer, "writer");
-        Objects.requireNonNull(leaseValid, "leaseValid");
-        return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer,
-                writeAdmission, WriterLeaseGate.of(leaseValid));
-    }
-
-        /// Creates a coordinator whose terminal markers run under lease ownership.
+    /// Creates a coordinator whose terminal markers run under lease ownership.
     ///
     /// @param durabilityMode ordering between local acceptance and Archive
     /// @param writer         receiver for checkpoint transitions

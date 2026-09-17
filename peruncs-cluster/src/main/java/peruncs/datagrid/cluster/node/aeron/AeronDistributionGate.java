@@ -11,18 +11,18 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 
-/// The Aeron distributor state shared with the Store integration.
-/// Data publication is intentionally rejected here. Aeron Store writes must use
+/// Guards the Aeron distribution state shared with the Store integration.
+/// Direct data publication is intentionally rejected here. Aeron Store writes must use
 /// the provider's persistence-target factory so local acceptance, Archive
 /// publication, and checkpoint fencing share one transaction owner.
-final class AeronDistributor implements StorageBinaryDataDistributor {
+final class AeronDistributionGate implements StorageBinaryDataDistributor {
     private final BooleanSupplier writer;
     private final LongConsumer sequenceSynchronizer;
     private final AtomicLong index = new AtomicLong(-1L);
     private final AtomicBoolean ignored = new AtomicBoolean();
     private final AtomicReference<String> dictionary = new AtomicReference<>();
 
-    AeronDistributor(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer) {
+    AeronDistributionGate(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer) {
         this.writer = Objects.requireNonNull(writer, NodeLibraryPropertiesProvider.WRITER_ROLE);
         this.sequenceSynchronizer = Objects.requireNonNull(sequenceSynchronizer, "sequenceSynchronizer");
     }

@@ -20,10 +20,7 @@ class StorageNodeManagerRolesTest {
         /// A fixed-role reader never distributes.
     @Test
     void readerNeverDistributes() {
-        final StorageNodeManager manager = StorageNodeManager.New(
-                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
-                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron", StorageNodeManager.Role.READER);
+        final StorageNodeManager manager = manager(StorageNodeManager.Role.READER, "aeron");
 
         assertFalse(manager.isDistributor());
         assertEquals("aeron", manager.getReplicationTransport());
@@ -33,11 +30,7 @@ class StorageNodeManagerRolesTest {
         /// health from the distributor instead of a reader health check.
     @Test
     void writerManagerIsDistributor() {
-        final StorageNodeManager manager = StorageNodeManager.New(
-                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
-                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron",
-                StorageNodeManager.Role.DISTRIBUTOR);
+        final StorageNodeManager manager = manager(StorageNodeManager.Role.DISTRIBUTOR, "aeron");
 
         assertTrue(manager.isDistributor());
         assertTrue(manager.isReady(), "a distributor must not depend on a reader health check");
@@ -48,11 +41,16 @@ class StorageNodeManagerRolesTest {
     @Test
     void readerReportsClientSequence() {
         final StorageBinaryDataClient client = stub(StorageBinaryDataClient.class);
-        final StorageNodeManager manager = StorageNodeManager.New(
-                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
-                client, stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "none",
-                StorageNodeManager.Role.READER);
+        final StorageNodeManager manager = StorageNodeManager.New(StorageNodeManager.Configuration.builder()
+                .dataDistributor(stub(StorageBinaryDataDistributor.class))
+                .storageTaskExecutor(stub(StorageTaskExecutor.class))
+                .dataClient(client)
+                .healthCheck(stub(StorageNodeHealthCheck.class))
+                .storageDiskSpaceReader(stub(StorageDiskSpaceReader.class))
+                .positionProvider(stub(ReplicationPositionProvider.class))
+                .replicationTransport("none")
+                .role(StorageNodeManager.Role.READER)
+                .build());
 
         assertFalse(manager.isDistributor());
         assertEquals(0L, manager.getCurrentSequence());
@@ -61,18 +59,24 @@ class StorageNodeManagerRolesTest {
         /// The distributor flag reflects the fixed role.
     @Test
     void distributorFlagReflectsFixedRole() {
-        final StorageNodeManager reader = StorageNodeManager.New(
-                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
-                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron", StorageNodeManager.Role.READER);
-        final StorageNodeManager writer = StorageNodeManager.New(
-                stub(StorageBinaryDataDistributor.class), stub(StorageTaskExecutor.class),
-                stub(StorageBinaryDataClient.class), stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class), stub(ReplicationPositionProvider.class), "aeron",
-                StorageNodeManager.Role.DISTRIBUTOR);
+        final StorageNodeManager reader = manager(StorageNodeManager.Role.READER, "aeron");
+        final StorageNodeManager writer = manager(StorageNodeManager.Role.DISTRIBUTOR, "aeron");
 
         assertFalse(reader.isDistributor());
         assertTrue(writer.isDistributor());
+    }
+
+    private static StorageNodeManager manager(final StorageNodeManager.Role role, final String transport) {
+        return StorageNodeManager.New(StorageNodeManager.Configuration.builder()
+                .dataDistributor(stub(StorageBinaryDataDistributor.class))
+                .storageTaskExecutor(stub(StorageTaskExecutor.class))
+                .dataClient(stub(StorageBinaryDataClient.class))
+                .healthCheck(stub(StorageNodeHealthCheck.class))
+                .storageDiskSpaceReader(stub(StorageDiskSpaceReader.class))
+                .positionProvider(stub(ReplicationPositionProvider.class))
+                .replicationTransport(transport)
+                .role(role)
+                .build());
     }
 
     @SuppressWarnings("unchecked")

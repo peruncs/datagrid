@@ -74,11 +74,11 @@ class StorageBinaryDataMergerAllocationTest {
 
             final EmbeddedStorageManager reader = foundation(root).start();
             try {
-                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
-                        StorageBinaryDataMergerTestSupport.foundation(),
-                        reader.createConnection(),
-                        ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()),
-                        0L, 1_000_000L, 60_000L);
+                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
+                        .foundation(StorageBinaryDataMergerTestSupport.foundation())
+                        .storage(reader.createConnection())
+                        .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
+                        .cachingTimeoutMs(0L).cachedBinaryLimit(1_000_000L).applyTimeoutMs(60_000L).build());
                 try {
                     for (int i = 0; i < WARMUP_TRANSACTIONS; i++) {
                         merger.receiveDataOwned(transactionBinary(transaction));

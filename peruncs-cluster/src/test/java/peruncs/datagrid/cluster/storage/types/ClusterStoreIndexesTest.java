@@ -90,7 +90,7 @@ class ClusterStoreIndexesTest {
             storage.storeRoot();
         }
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(this.storagePath)) {
-            final Root reloaded = (Root) storage.root();
+            final Root reloaded = storage.root();
             assertThrows(IllegalArgumentException.class,
                     () -> ClusterStoreIndexes.validateVectorIndexes(reloaded.articles));
         }
@@ -119,7 +119,7 @@ class ClusterStoreIndexesTest {
             storage.storeRoot();
         }
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(this.storagePath)) {
-            final Root reloaded = (Root) storage.root();
+            final Root reloaded = storage.root();
             assertThrows(IllegalArgumentException.class,
                     () -> ClusterStoreIndexes.validateVectorIndexes(reloaded.articles));
         }
@@ -646,9 +646,9 @@ class ClusterStoreIndexesTest {
     }
 
     private static final class CatalogEntry {
-        String title;
-        long ordinal;
-        LocalDate created;
+        final String title;
+        final long ordinal;
+        final LocalDate created;
 
         CatalogEntry(final String title, final long ordinal) {
             this.title = title;

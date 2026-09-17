@@ -9,6 +9,8 @@ import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
+import java.util.Objects;
+
 import static org.eclipse.serializer.util.X.notNull;
 
 /// This manager controls a storage node with a fixed replication role.
@@ -27,14 +29,10 @@ public interface StorageNodeManager extends ClusterNodeManager {
         DISTRIBUTOR
     }
 
-        /// Creates a storage node manager for a fixed replication role.
+        /// Immutable collaborators and role used to create a storage node manager.
     ///
-    /// A [Role#READER] manager never distributes and offers no way to start
-    /// distributing; a [Role#DISTRIBUTOR] manager always distributes from startup.
-    /// The manager borrows every collaborator: the caller retains ownership of
-    /// all of them, including `storageTaskExecutor`, and [Base#close()] never
-    /// closes the executor, the disk-space reader, or any other collaborator
-    /// beyond the distributor, client, health check, and position provider.
+    /// The builder keeps role wiring readable at the call site and makes it
+    /// impossible to swap two same-typed collaborators accidentally.
     ///
     /// @param dataDistributor        binary distributor
     /// @param storageTaskExecutor    storage task executor, owned by the caller
@@ -44,26 +42,129 @@ public interface StorageNodeManager extends ClusterNodeManager {
     /// @param positionProvider       position provider
     /// @param replicationTransport   transport id
     /// @param role                   fixed replication role
-    /// @return storage node manager
-    static StorageNodeManager New(
-            final StorageBinaryDataDistributor dataDistributor,
-            final StorageTaskExecutor storageTaskExecutor,
-            final StorageBinaryDataClient dataClient,
-            final StorageNodeHealthCheck healthCheck,
-            final StorageDiskSpaceReader storageDiskSpaceReader,
-            final ReplicationPositionProvider positionProvider,
-            final String replicationTransport,
-            final Role role
+    record Configuration(
+            StorageBinaryDataDistributor dataDistributor,
+            StorageTaskExecutor storageTaskExecutor,
+            StorageBinaryDataClient dataClient,
+            StorageNodeHealthCheck healthCheck,
+            StorageDiskSpaceReader storageDiskSpaceReader,
+            ReplicationPositionProvider positionProvider,
+            String replicationTransport,
+            Role role
     ) {
-        return switch (notNull(role)) {
-            case DISTRIBUTOR -> new Distributor(
-                    notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient),
-                    notNull(healthCheck), notNull(storageDiskSpaceReader), notNull(positionProvider),
-                    replicationTransport);
-            case READER -> new Reader(
-                    notNull(dataDistributor), notNull(storageTaskExecutor), notNull(dataClient),
-                    notNull(healthCheck), notNull(storageDiskSpaceReader), notNull(positionProvider),
-                    replicationTransport);
+        /// Validates the manager wiring once at the configuration boundary.
+        public Configuration {
+            Objects.requireNonNull(dataDistributor, "dataDistributor");
+            Objects.requireNonNull(storageTaskExecutor, "storageTaskExecutor");
+            Objects.requireNonNull(dataClient, "dataClient");
+            Objects.requireNonNull(healthCheck, "healthCheck");
+            Objects.requireNonNull(storageDiskSpaceReader, "storageDiskSpaceReader");
+            Objects.requireNonNull(positionProvider, "positionProvider");
+            Objects.requireNonNull(role, "role");
+            if (replicationTransport == null || replicationTransport.isBlank()) {
+                throw new IllegalArgumentException("replicationTransport must not be blank");
+            }
+        }
+
+        /// Starts a builder for a fixed-role storage node.
+        ///
+        /// @return empty configuration builder
+        public static Builder builder() {
+            return new Builder();
+        }
+
+        /// Builds a storage node manager configuration without positional
+        /// arguments whose identical types can be confused at a call site.
+        public static final class Builder {
+            private StorageBinaryDataDistributor dataDistributor;
+            private StorageTaskExecutor storageTaskExecutor;
+            private StorageBinaryDataClient dataClient;
+            private StorageNodeHealthCheck healthCheck;
+            private StorageDiskSpaceReader storageDiskSpaceReader;
+            private ReplicationPositionProvider positionProvider;
+            private String replicationTransport;
+            private Role role;
+
+            /// @param value binary distributor
+            /// @return this builder
+            public Builder dataDistributor(final StorageBinaryDataDistributor value) {
+                this.dataDistributor = value;
+                return this;
+            }
+
+            /// @param value storage task executor
+            /// @return this builder
+            public Builder storageTaskExecutor(final StorageTaskExecutor value) {
+                this.storageTaskExecutor = value;
+                return this;
+            }
+
+            /// @param value replication client
+            /// @return this builder
+            public Builder dataClient(final StorageBinaryDataClient value) {
+                this.dataClient = value;
+                return this;
+            }
+
+            /// @param value health check
+            /// @return this builder
+            public Builder healthCheck(final StorageNodeHealthCheck value) {
+                this.healthCheck = value;
+                return this;
+            }
+
+            /// @param value disk-space reader
+            /// @return this builder
+            public Builder storageDiskSpaceReader(final StorageDiskSpaceReader value) {
+                this.storageDiskSpaceReader = value;
+                return this;
+            }
+
+            /// @param value latest-position provider
+            /// @return this builder
+            public Builder positionProvider(final ReplicationPositionProvider value) {
+                this.positionProvider = value;
+                return this;
+            }
+
+            /// @param value transport id
+            /// @return this builder
+            public Builder replicationTransport(final String value) {
+                this.replicationTransport = value;
+                return this;
+            }
+
+            /// @param value fixed replication role
+            /// @return this builder
+            public Builder role(final Role value) {
+                this.role = value;
+                return this;
+            }
+
+            /// @return validated immutable manager configuration
+            public Configuration build() {
+                return new Configuration(dataDistributor, storageTaskExecutor, dataClient, healthCheck,
+                        storageDiskSpaceReader, positionProvider, replicationTransport, role);
+            }
+        }
+    }
+
+        /// Creates a storage node manager for a fixed replication role.
+    ///
+    /// A [Role#READER] manager never distributes and offers no way to start
+    /// distributing; a [Role#DISTRIBUTOR] manager always distributes from startup.
+    /// The manager borrows every collaborator: the caller retains ownership of
+    /// all of them, including `storageTaskExecutor`, and [Base#close()] never
+    /// closes the executor, the disk-space reader, or any other collaborator
+    /// beyond the distributor, client, health check, and position provider.
+    ///
+    /// @param configuration immutable manager configuration
+    /// @return storage node manager
+    static StorageNodeManager New(final Configuration configuration) {
+        final Configuration settings = notNull(configuration);
+        return switch (settings.role()) {
+            case DISTRIBUTOR -> new Distributor(settings);
+            case READER -> new Reader(settings);
         };
     }
 
@@ -114,25 +215,14 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// @param storageDiskSpaceReader disk-space reader
         /// @param positionProvider       position provider
         /// @param replicationTransport   transport id
-        protected Base(
-                final StorageBinaryDataDistributor dataDistributor,
-                final StorageTaskExecutor storageTaskExecutor,
-                final StorageBinaryDataClient dataClient,
-                final StorageNodeHealthCheck healthCheck,
-                final StorageDiskSpaceReader storageDiskSpaceReader,
-                final ReplicationPositionProvider positionProvider,
-                final String replicationTransport
-        ) {
-            this.dataDistributor = dataDistributor;
-            this.dataClient = dataClient;
-            this.healthCheck = healthCheck;
-            this.storageDiskSpaceReader = storageDiskSpaceReader;
-            this.storageTaskExecutor = storageTaskExecutor;
-            this.positionProvider = positionProvider;
-            if (replicationTransport == null || replicationTransport.isBlank()) {
-                throw new IllegalArgumentException("replicationTransport must not be blank");
-            }
-            this.replicationTransport = replicationTransport;
+        protected Base(final Configuration configuration) {
+            this.dataDistributor = configuration.dataDistributor();
+            this.dataClient = configuration.dataClient();
+            this.healthCheck = configuration.healthCheck();
+            this.storageDiskSpaceReader = configuration.storageDiskSpaceReader();
+            this.storageTaskExecutor = configuration.storageTaskExecutor();
+            this.positionProvider = configuration.positionProvider();
+            this.replicationTransport = configuration.replicationTransport();
         }
 
         @Override
@@ -298,17 +388,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
         /// A storage node that only reads. Its role is fixed at creation:
     /// it applies replicated writes and never distributes.
     final class Reader extends Base {
-        private Reader(
-                final StorageBinaryDataDistributor dataDistributor,
-                final StorageTaskExecutor storageTaskExecutor,
-                final StorageBinaryDataClient dataClient,
-                final StorageNodeHealthCheck healthCheck,
-                final StorageDiskSpaceReader storageDiskSpaceReader,
-                final ReplicationPositionProvider positionProvider,
-                final String replicationTransport
-        ) {
-            super(dataDistributor, storageTaskExecutor, dataClient, healthCheck,
-                    storageDiskSpaceReader, positionProvider, replicationTransport);
+        private Reader(final Configuration configuration) {
+            super(configuration);
         }
 
         @Override
@@ -324,17 +405,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
     /// as its current sequence instead of the placeholder cursor a reader
     /// client would expose.
     final class Distributor extends Base {
-        private Distributor(
-                final StorageBinaryDataDistributor dataDistributor,
-                final StorageTaskExecutor storageTaskExecutor,
-                final StorageBinaryDataClient dataClient,
-                final StorageNodeHealthCheck healthCheck,
-                final StorageDiskSpaceReader storageDiskSpaceReader,
-                final ReplicationPositionProvider positionProvider,
-                final String replicationTransport
-        ) {
-            super(dataDistributor, storageTaskExecutor, dataClient, healthCheck,
-                    storageDiskSpaceReader, positionProvider, replicationTransport);
+        private Distributor(final Configuration configuration) {
+            super(configuration);
         }
 
         @Override

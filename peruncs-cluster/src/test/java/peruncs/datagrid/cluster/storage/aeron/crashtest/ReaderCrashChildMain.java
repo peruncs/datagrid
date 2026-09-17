@@ -9,7 +9,7 @@ import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpo
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
-import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeronArchive;
+import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
@@ -80,21 +80,26 @@ public final class ReaderCrashChildMain {
                     .messageTimeoutNs(configuration.offerTimeoutNanos());
             final long recordingId = Long.parseLong(required("dg.reader.recordingId"));
             final Cursor cursor = readCursor(base.resolve("reader.cursor"));
-            final AtomicReference<StorageBinaryDataClientAeronArchive> readerRef = new AtomicReference<>();
+            final AtomicReference<AeronArchiveReader> readerRef = new AtomicReference<>();
             final ReaderFixture fixture = new ReaderFixture(base, point, new AtomicReference<>());
-            final StorageBinaryDataClientAeronArchive reader = StorageBinaryDataClientAeronArchive.New(
-                    aeron, archiveContext, recordingId, cursor == null
-                            ? io.aeron.archive.client.PersistentSubscription.FROM_START : cursor.position,
-                    required("dg.reader.liveChannel"), LIVE_STREAM_ID,
-                    required("dg.reader.replayChannel"), REPLAY_STREAM_ID, configuration, CLUSTER_ID, EPOCH,
-                    cursor == null ? -1 : cursor.sequence, fixture, () ->
+            final AeronArchiveReader reader = AeronArchiveReader.New(
+                    AeronArchiveReader.Configuration.builder()
+                    .aeron(aeron).archiveContext(archiveContext).recordingId(recordingId)
+                    .startPosition(cursor == null
+                            ? io.aeron.archive.client.PersistentSubscription.FROM_START : cursor.position)
+                    .liveChannel(required("dg.reader.liveChannel")).liveStreamId(LIVE_STREAM_ID)
+                    .replayChannel(required("dg.reader.replayChannel")).replayStreamId(REPLAY_STREAM_ID)
+                    .replicationConfiguration(configuration).clusterId(CLUSTER_ID).epoch(EPOCH)
+                    .initialSequence(cursor == null ? -1 : cursor.sequence)
+                    .initialPosition(cursor == null ? -1 : cursor.position)
+                    .receiver(fixture).transactionResolved(() ->
                     {
-                        final StorageBinaryDataClientAeronArchive current = readerRef.get();
+                        final AeronArchiveReader current = readerRef.get();
                         if (current != null) {
                             writeCursor(base.resolve("reader.cursor"),
                                     current.lastResolvedSequence(), current.lastResolvedPosition(), point, control);
                         }
-                    }, new Listener(fixture, uncertainty, point, recordingId));
+                    }).deliveryListener(new Listener(fixture, uncertainty, point, recordingId)).build());
             readerRef.set(reader);
             try {
                 reader.start();

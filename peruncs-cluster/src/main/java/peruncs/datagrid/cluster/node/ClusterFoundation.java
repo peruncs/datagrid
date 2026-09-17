@@ -76,91 +76,22 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         public Builder() {
         }
 
-        /// Sets the backup backend.
-        /// @param value backup backend
-        /// @return this builder
-        public Builder setStorageBackupBackend(final StorageBackupBackend value) { this.backupBackend = value; return this; }
-        /// Sets the storage task executor.
-        /// @param value storage executor
-        /// @return this builder
-        public Builder setStorageTaskExecutor(final StorageTaskExecutor value) { this.storageTaskExecutor = value; return this; }
-        /// Sets the backup task executor.
-        /// @param value backup executor
-        /// @return this builder
-        public Builder setStorageBackupTaskExecutor(final StorageBackupTaskExecutor value) { this.storageBackupTaskExecutor = value; return this; }
-        /// Sets the replication transport.
-        /// @param value replication transport
-        /// @return this builder
-        public Builder setClusterReplicationTransport(final ClusterReplicationTransport value) { this.replicationTransport = value; return this; }
-        /// Sets the binary data merger.
-        /// @param value binary data merger
-        /// @return this builder
-        public Builder setStorageBinaryDataMerger(final StorageBinaryDataMerger value) { this.dataMerger = value; return this; }
-        /// Sets the post-consumption listener.
-        /// @param value post-consumption listener
-        /// @return this builder
-        public Builder setAfterDataMessageConsumedListener(final AfterDataMessageConsumedListener value) { this.afterDataMessageConsumedListener = value; return this; }
-        /// Sets the persisted replication cursor manager.
-        /// @param value cursor manager
-        /// @return this builder
-        public Builder setStoredReplicationCursorManager(final StoredReplicationCursorManager value) { this.storedReplicationCursorManager = value; return this; }
-        /// Sets the backup manager.
-        /// @param value backup manager
-        /// @return this builder
-        public Builder setStorageBackupManager(final StorageBackupManager value) { this.storageBackupManager = value; return this; }
         /// Sets the root object supplier.
         /// @param value root supplier
         /// @return this builder
         public Builder setRootSupplier(final Supplier<Object> value) { this.rootSupplier = value; return this; }
-        /// Sets the object-graph update handler.
-        /// @param value update handler
-        /// @return this builder
-        public Builder setObjectGraphUpdateHandler(final ObjectGraphUpdateHandler value) { this.graphUpdateHandler = value; return this; }
         /// Sets the embedded Store foundation.
         /// @param value embedded Store foundation
         /// @return this builder
         public Builder setEmbeddedStorageFoundation(final EmbeddedStorageFoundation<?> value) { this.embeddedStorageFoundation = value; return this; }
-        /// Sets the backup node manager.
-        /// @param value backup node manager
-        /// @return this builder
-        public Builder setBackupNodeManager(final BackupNodeManager value) { this.backupNodeManager = value; return this; }
-        /// Sets the binary data client.
-        /// @param value binary data client
-        /// @return this builder
-        public Builder setStorageBinaryDataClient(final StorageBinaryDataClient value) { this.dataClient = value; return this; }
-        /// Sets the binary data distributor.
-        /// @param value binary data distributor
-        /// @return this builder
-        public Builder setStorageBinaryDataDistributor(final StorageBinaryDataDistributor value) { this.dataDistributor = value; return this; }
-        /// Sets the node health check.
-        /// @param value health check
-        /// @return this builder
-        public Builder setStorageNodeHealthCheck(final StorageNodeHealthCheck value) { this.healthCheck = value; return this; }
         /// Sets the properties provider.
         /// @param value properties provider
         /// @return this builder
         public Builder setNodeLibraryPropertiesProvider(final NodeLibraryPropertiesProvider value) { this.propertiesProvider = value; return this; }
-        /// Sets the disk-space reader.
-        /// @param value disk-space reader
-        /// @return this builder
-        public Builder setStorageDiskSpaceReader(final StorageDiskSpaceReader value) { this.storageDiskSpaceReader = value; return this; }
-        /// Sets the storage node manager.
-        /// @param value storage node manager
-        /// @return this builder
-        public Builder setStorageNodeManager(final StorageNodeManager value) { this.storageNodeManager = value; return this; }
         /// Sets whether asynchronous distribution is enabled.
         /// @param value whether asynchronous distribution is enabled
         /// @return this builder
         public Builder setEnableAsyncDistribution(final boolean value) { this.enableAsyncDistribution = value; return this; }
-        /// Sets the replication position provider.
-        /// @param value position provider
-        /// @return this builder
-        public Builder setReplicationPositionProvider(final ReplicationPositionProvider value) { this.positionProvider = value; return this; }
-        /// Sets replication-log retention policy.
-        /// @param value retention policy
-        /// @return this builder
-        public Builder setReplicationLogRetention(final ReplicationLogRetention value) { this.replicationRetention = value; return this; }
-
         /// Builds the immutable node foundation.
         /// @return configured cluster foundation
         public ClusterFoundation build() {
@@ -650,16 +581,16 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             final String transport = this.getClusterReplicationTransport().id();
             final boolean writer =
                     this.getNodeLibraryPropertiesProvider().nodeRole() == NodeRole.WRITER;
-            return StorageNodeManager.New(
-                    this.getStorageBinaryDataDistributor(),
-                    this.getStorageTaskExecutor(),
-                    this.getStorageBinaryDataClient(),
-                    this.getStorageNodeHealthCheck(),
-                    this.getStorageDiskSpaceReader(),
-                    this.getReplicationPositionProvider(),
-                    transport,
-                    writer ? StorageNodeManager.Role.DISTRIBUTOR : StorageNodeManager.Role.READER
-            );
+            return StorageNodeManager.New(StorageNodeManager.Configuration.builder()
+                    .dataDistributor(this.getStorageBinaryDataDistributor())
+                    .storageTaskExecutor(this.getStorageTaskExecutor())
+                    .dataClient(this.getStorageBinaryDataClient())
+                    .healthCheck(this.getStorageNodeHealthCheck())
+                    .storageDiskSpaceReader(this.getStorageDiskSpaceReader())
+                    .positionProvider(this.getReplicationPositionProvider())
+                    .replicationTransport(transport)
+                    .role(writer ? StorageNodeManager.Role.DISTRIBUTOR : StorageNodeManager.Role.READER)
+                    .build());
         }
 
                 /// Creates the configured binary distributor.
@@ -697,15 +628,15 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 throw new IllegalStateException(
                         "cannot create the replication merger before embedded storage has started");
             }
-            return StorageBinaryDataMerger.New(
-                    this.getEmbeddedStorageFoundation().getConnectionFoundation(),
-                    replicationStorage,
-                    this.getObjectGraphUpdateHandler(),
-                    cachingTimeoutMs,
-                    cachedDataLimit,
-                    applyTimeoutMs,
-                    this.graphCoordinator
-            );
+            return StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
+                    .foundation(this.getEmbeddedStorageFoundation().getConnectionFoundation())
+                    .storage(replicationStorage)
+                    .objectGraphUpdateHandler(this.getObjectGraphUpdateHandler())
+                    .cachingTimeoutMs(cachingTimeoutMs)
+                    .cachedBinaryLimit(cachedDataLimit)
+                    .applyTimeoutMs(applyTimeoutMs)
+                    .graphCoordinator(this.graphCoordinator)
+                    .build());
         }
 
         private StorageBackupBackend getStorageBackupBackend() {

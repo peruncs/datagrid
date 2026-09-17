@@ -188,7 +188,7 @@ class AeronReaderCrashMatrixIT {
                 .replicationChannel(REPLAY_CHANNEL);
         Process child = null;
         Process recovery = null;
-        try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
+        try (ArchivingMediaDriver _ = ArchivingMediaDriver.launch(mediaContext, archiveContext);
              AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
                      .aeronDirectoryName(mediaDirectory.toString())
                      .controlRequestChannel(controlChannel)

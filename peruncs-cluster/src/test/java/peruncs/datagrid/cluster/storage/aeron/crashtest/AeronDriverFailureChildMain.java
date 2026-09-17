@@ -26,7 +26,7 @@ public final class AeronDriverFailureChildMain {
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
         try (MediaDriver driver = MediaDriver.launchEmbedded(mediaContext);
-             Aeron aeron = Aeron.connect(new Aeron.Context()
+             Aeron _ = Aeron.connect(new Aeron.Context()
                      .aeronDirectoryName(aeronDirectory.toString())
                      .driverTimeoutMs(250)
                      .errorHandler(error ->

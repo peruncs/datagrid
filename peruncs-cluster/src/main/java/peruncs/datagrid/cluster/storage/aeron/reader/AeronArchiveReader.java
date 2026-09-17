@@ -26,7 +26,144 @@ import java.util.concurrent.atomic.AtomicReference;
 /// only after replay catches up, so a restart needs no separate snapshot path.
 /// The subscription belongs to this reader; the caller remains responsible for
 /// the shared Aeron and Archive clients.
-public final class StorageBinaryDataClientAeronArchive implements Disposable {
+public final class AeronArchiveReader implements Disposable {
+    /// Immutable setup for one Archive replay and live reader.
+    ///
+    /// The builder groups subscription wiring, recovered cursor, and delivery
+    /// callbacks so same-typed values cannot be swapped at the call site.
+    ///
+    /// @param aeron                    shared Aeron client
+    /// @param archiveContext           Archive connection settings
+    /// @param recordingId              Archive recording id
+    /// @param startPosition            first replay position
+    /// @param liveChannel              live publication channel
+    /// @param liveStreamId             live publication stream
+    /// @param replayChannel            replay channel
+    /// @param replayStreamId           replay stream
+    /// @param replicationConfiguration framing and timeout limits
+    /// @param clusterId                expected cluster identity
+    /// @param epoch                    expected writer epoch
+    /// @param initialSequence          last sequence already applied
+    /// @param initialPosition          last resolved Archive position
+    /// @param receiver                 destination for complete Store binaries
+    /// @param transactionResolved      callback after a transaction is delivered
+    /// @param deliveryListener         callback around Store materialisation
+    public record Configuration(
+            Aeron aeron,
+            AeronArchive.Context archiveContext,
+            long recordingId,
+            long startPosition,
+            String liveChannel,
+            int liveStreamId,
+            String replayChannel,
+            int replayStreamId,
+            AeronReplicationConfiguration replicationConfiguration,
+            UUID clusterId,
+            long epoch,
+            long initialSequence,
+            long initialPosition,
+            StorageBinaryDataReceiver receiver,
+            Runnable transactionResolved,
+            ReaderDeliveryListener deliveryListener
+    ) {
+        /// Validates required reader collaborators and recovered cursor bounds.
+        public Configuration {
+            Objects.requireNonNull(aeron, "aeron");
+            Objects.requireNonNull(archiveContext, "archiveContext");
+            Objects.requireNonNull(replicationConfiguration, "replicationConfiguration");
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(receiver, "receiver");
+            Objects.requireNonNull(transactionResolved, "transactionResolved");
+            if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
+                throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
+            }
+        }
+
+        /// Starts a builder for an Archive reader.
+        ///
+        /// @return empty reader configuration builder
+        public static Builder builder() {
+            return new Builder();
+        }
+
+        /// Builds reader configuration without a long positional argument list.
+        public static final class Builder {
+            private Aeron aeron;
+            private AeronArchive.Context archiveContext;
+            private long recordingId;
+            private long startPosition;
+            private String liveChannel;
+            private int liveStreamId;
+            private String replayChannel;
+            private int replayStreamId;
+            private AeronReplicationConfiguration replicationConfiguration;
+            private UUID clusterId;
+            private long epoch;
+            private long initialSequence = -1L;
+            private long initialPosition = -1L;
+            private StorageBinaryDataReceiver receiver;
+            private Runnable transactionResolved = () -> {
+            };
+            private ReaderDeliveryListener deliveryListener;
+
+            /// @param value shared Aeron client
+            /// @return this builder
+            public Builder aeron(final Aeron value) { this.aeron = value; return this; }
+            /// @param value Archive connection settings
+            /// @return this builder
+            public Builder archiveContext(final AeronArchive.Context value) { this.archiveContext = value; return this; }
+            /// @param value Archive recording id
+            /// @return this builder
+            public Builder recordingId(final long value) { this.recordingId = value; return this; }
+            /// @param value first replay position
+            /// @return this builder
+            public Builder startPosition(final long value) { this.startPosition = value; return this; }
+            /// @param value live channel
+            /// @return this builder
+            public Builder liveChannel(final String value) { this.liveChannel = value; return this; }
+            /// @param value live stream id
+            /// @return this builder
+            public Builder liveStreamId(final int value) { this.liveStreamId = value; return this; }
+            /// @param value replay channel
+            /// @return this builder
+            public Builder replayChannel(final String value) { this.replayChannel = value; return this; }
+            /// @param value replay stream id
+            /// @return this builder
+            public Builder replayStreamId(final int value) { this.replayStreamId = value; return this; }
+            /// @param value replication framing and timeout configuration
+            /// @return this builder
+            public Builder replicationConfiguration(final AeronReplicationConfiguration value) { this.replicationConfiguration = value; return this; }
+            /// @param value cluster identity
+            /// @return this builder
+            public Builder clusterId(final UUID value) { this.clusterId = value; return this; }
+            /// @param value writer epoch
+            /// @return this builder
+            public Builder epoch(final long value) { this.epoch = value; return this; }
+            /// @param value already applied sequence
+            /// @return this builder
+            public Builder initialSequence(final long value) { this.initialSequence = value; return this; }
+            /// @param value already resolved Archive position
+            /// @return this builder
+            public Builder initialPosition(final long value) { this.initialPosition = value; return this; }
+            /// @param value Store binary receiver
+            /// @return this builder
+            public Builder receiver(final StorageBinaryDataReceiver value) { this.receiver = value; return this; }
+            /// @param value post-transaction callback
+            /// @return this builder
+            public Builder transactionResolved(final Runnable value) { this.transactionResolved = value; return this; }
+            /// @param value Store materialisation callback, or `null`
+            /// @return this builder
+            public Builder deliveryListener(final ReaderDeliveryListener value) { this.deliveryListener = value; return this; }
+
+            /// @return immutable reader configuration
+            public Configuration build() {
+                return new Configuration(aeron, archiveContext, recordingId, startPosition, liveChannel,
+                        liveStreamId, replayChannel, replayStreamId, replicationConfiguration, clusterId,
+                        epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
+            }
+        }
+    }
+
     private final PersistentSubscription subscription;
     private final TransactionAssembler assembler;
     private final long stopTimeoutNanos;
@@ -53,25 +190,19 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
             new AtomicReference<>(StorageBinaryDataClient.StopOutcome.NOT_STARTED);
 
 
-    StorageBinaryDataClientAeronArchive(
+    AeronArchiveReader(
             final PersistentSubscription subscription,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final long initialPosition,
-            final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved,
-            final ReaderDeliveryListener deliveryListener) {
+            final Configuration configuration) {
         this.subscription = Objects.requireNonNull(subscription, "subscription");
         try {
-            final AeronReplicationConfiguration requiredConfiguration =
-                    Objects.requireNonNull(configuration, "configuration");
+            final Configuration required = Objects.requireNonNull(configuration, "configuration");
+            final AeronReplicationConfiguration requiredConfiguration = required.replicationConfiguration();
             this.stopTimeoutNanos = requiredConfiguration.readerStopTimeoutNanos();
             this.idleStrategy = requiredConfiguration.retryPolicy().idleStrategy();
             this.assembler = new TransactionAssembler(
-                    requiredConfiguration, clusterId, epoch, initialSequence, initialPosition, receiver,
-                    transactionResolved, deliveryListener
+                    requiredConfiguration, required.clusterId(), required.epoch(), required.initialSequence(),
+                    required.initialPosition(), required.receiver(), required.transactionResolved(),
+                    required.deliveryListener()
             );
         } catch (final RuntimeException | Error failure) {
             try {
@@ -83,144 +214,29 @@ public final class StorageBinaryDataClientAeronArchive implements Disposable {
         }
     }
 
-        /// Creates a reader with no delivery durability callback.
+        /// Creates a reader with the supplied Archive, live, and cursor setup.
+    /// The reader does not close the shared Aeron or Archive clients.
     ///
-    /// @param aeron               shared Aeron client, not owned by the reader
-    /// @param archiveContext      Archive connection settings
-    /// @param recordingId         recording to replay
-    /// @param startPosition       first Archive position to replay
-    /// @param liveChannel         live publication channel
-    /// @param liveStreamId        live publication stream
-    /// @param replayChannel       replay channel
-    /// @param replayStreamId      replay stream
-    /// @param configuration       shared framing and timeout limits
-    /// @param clusterId           expected cluster identity
-    /// @param epoch               expected writer epoch
-    /// @param initialSequence     last sequence already applied by the Store
-    /// @param receiver            destination for complete Store binaries
-    /// @param transactionResolved callback after a transaction is delivered
-    /// @return a reader that owns its subscriptions
-    public static StorageBinaryDataClientAeronArchive New(
-            final Aeron aeron,
-            final AeronArchive.Context archiveContext,
-            final long recordingId,
-            final long startPosition,
-            final String liveChannel,
-            final int liveStreamId,
-            final String replayChannel,
-            final int replayStreamId,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved) {
-        return New(aeron, archiveContext, recordingId, startPosition, liveChannel, liveStreamId,
-                replayChannel, replayStreamId, configuration, clusterId, epoch, initialSequence, receiver,
-                transactionResolved, null, startPosition);
-    }
-
-        /// Creates a reader with callbacks around Store materialisation.
-    ///
-    /// The reader does not close `aeron` or the Archive client. Call
-    /// [#dispose()] when the reader is no longer needed.
-    ///
-    /// @param aeron               shared Aeron client, not owned by the reader
-    /// @param archiveContext      Archive connection settings
-    /// @param recordingId         recording to replay
-    /// @param startPosition       first Archive position to replay
-    /// @param liveChannel         live publication channel
-    /// @param liveStreamId        live publication stream
-    /// @param replayChannel       replay channel
-    /// @param replayStreamId      replay stream
-    /// @param configuration       shared framing and timeout limits
-    /// @param clusterId           expected cluster identity
-    /// @param epoch               expected writer epoch
-    /// @param initialSequence     last sequence already applied by the Store
-    /// @param receiver            destination for complete Store binaries
-    /// @param transactionResolved callback after a transaction is delivered
-    /// @param deliveryListener    callback around Store materialisation
-    /// @return a reader that owns its subscriptions
-    public static StorageBinaryDataClientAeronArchive New(
-            final Aeron aeron,
-            final AeronArchive.Context archiveContext,
-            final long recordingId,
-            final long startPosition,
-            final String liveChannel,
-            final int liveStreamId,
-            final String replayChannel,
-            final int replayStreamId,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved,
-            final ReaderDeliveryListener deliveryListener
-    ) {
-        return New(aeron, archiveContext, recordingId, startPosition, liveChannel, liveStreamId,
-                replayChannel, replayStreamId, configuration, clusterId, epoch, initialSequence, receiver,
-                transactionResolved, deliveryListener, startPosition);
-    }
-
-        /// Creates a reader with a complete recovered sequence and recording position.
-    /// The initial position is retained in the atomic cursor snapshot until the
-    /// first newly resolved transaction, so a reader that has not caught up cannot
-    /// expose an unrelated position.
-    ///
-    /// @param aeron               shared Aeron client, not owned by the reader
-    /// @param archiveContext      Archive connection settings
-    /// @param recordingId         recording to replay
-    /// @param startPosition       first Archive position to replay
-    /// @param liveChannel         live publication channel
-    /// @param liveStreamId        live publication stream
-    /// @param replayChannel       replay channel
-    /// @param replayStreamId      replay stream
-    /// @param configuration       shared framing and timeout limits
-    /// @param clusterId           expected cluster identity
-    /// @param epoch               expected writer epoch
-    /// @param initialSequence     last sequence already applied by the Store
-    /// @param receiver            destination for complete Store binaries
-    /// @param transactionResolved callback after a transaction is delivered
-    /// @param deliveryListener    callback around Store materialisation
-    /// @param initialPosition     last resolved Archive position, or `-1` for a new reader
-    /// @return a reader that owns its subscriptions
-    public static StorageBinaryDataClientAeronArchive New(
-            final Aeron aeron,
-            final AeronArchive.Context archiveContext,
-            final long recordingId,
-            final long startPosition,
-            final String liveChannel,
-            final int liveStreamId,
-            final String replayChannel,
-            final int replayStreamId,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved,
-            final ReaderDeliveryListener deliveryListener,
-            final long initialPosition
-    ) {
-        final AeronArchive.Context subscriptionArchiveContext = archiveContext.clone().aeron(aeron);
+    /// @param configuration immutable reader configuration
+    /// @return a reader that owns its subscription
+    public static AeronArchiveReader New(final Configuration configuration) {
+        final Configuration settings = Objects.requireNonNull(configuration, "configuration");
+        final Aeron aeron = settings.aeron();
+        final AeronArchive.Context subscriptionArchiveContext = settings.archiveContext().clone().aeron(aeron);
         final PersistentSubscription.Context subscriptionContext = new PersistentSubscription.Context()
                 .aeron(aeron)
                 .ownsAeronClient(false)
-                .recordingId(recordingId)
-                .startPosition(startPosition)
-                .liveChannel(liveChannel)
-                .liveStreamId(liveStreamId)
-                .replayChannel(replayChannel)
-                .replayStreamId(replayStreamId)
+                .recordingId(settings.recordingId())
+                .startPosition(settings.startPosition())
+                .liveChannel(settings.liveChannel())
+                .liveStreamId(settings.liveStreamId())
+                .replayChannel(settings.replayChannel())
+                .replayStreamId(settings.replayStreamId())
                 .aeronArchiveContext(subscriptionArchiveContext);
         PersistentSubscription subscription = null;
         try {
             subscription = PersistentSubscription.create(subscriptionContext);
-            return new StorageBinaryDataClientAeronArchive(
-                    subscription, configuration, clusterId, epoch, initialSequence, initialPosition, receiver,
-                    transactionResolved, deliveryListener
-            );
+            return new AeronArchiveReader(subscription, settings);
         } catch (final RuntimeException | Error failure) {
             if (subscription != null) {
                 try {

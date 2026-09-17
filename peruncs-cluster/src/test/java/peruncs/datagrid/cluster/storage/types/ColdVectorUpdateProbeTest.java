@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
-import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.jvector.VectorSimilarityFunction;
 import org.eclipse.store.gigamap.jvector.Vectorizer;
 import org.eclipse.store.gigamap.types.GigaMap;
@@ -12,8 +11,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
 
 /// Scratch probe: repeated remove+add churn on one entity.
 class ColdVectorUpdateProbeTest {
@@ -21,7 +18,7 @@ class ColdVectorUpdateProbeTest {
     Path storagePath;
 
     static final class Article {
-        String title;
+        final String title;
         float[] vector;
         Article(final String title, final float[] vector) {
             this.title = title;
@@ -43,7 +40,6 @@ class ColdVectorUpdateProbeTest {
     }
 
     @Test
-    @SuppressWarnings({"unchecked", "rawtypes"})
     void repeatedRemoveAddChurn() {
         final CountingVectorizer vectorizer = new CountingVectorizer();
         final Root root = new Root();
@@ -54,18 +50,16 @@ class ColdVectorUpdateProbeTest {
                         .similarityFunction(VectorSimilarityFunction.COSINE)
                         .build(),
                 vectorizer);
-        final List<Long> ids = new ArrayList<>();
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
             for (int i = 0; i < 40; i++) {
-                ids.add(root.articles.add(new Article("a" + i, new float[]{i + 1.0f, 1.0f, 0.0f})));
+                root.articles.add(new Article("a" + i, new float[]{i + 1.0f, 1.0f, 0.0f}));
             }
             root.articles.store();
             storage.storeRoot();
         }
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(this.storagePath)) {
             final StorageConnection connection = storage.createConnection();
-            final Root cold = (Root) storage.root();
-            final VectorIndices<Article> groups = cold.articles.index().get(VectorIndices.Category());
+            final Root cold = storage.root();
             final long id = 31L;
             for (int round = 0; round < 30; round++) {
                 final Article entity = cold.articles.get(id);

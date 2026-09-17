@@ -800,8 +800,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             try {
                 /* A signal only hints at progress and a timeout only means
                  * re-check: the loop guard plus the deadline above decide. */
-                final boolean signalled = this.commitDone.await(remaining, TimeUnit.NANOSECONDS);
-                if (signalled) continue;
+                this.commitDone.await(remaining, TimeUnit.NANOSECONDS);
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException(

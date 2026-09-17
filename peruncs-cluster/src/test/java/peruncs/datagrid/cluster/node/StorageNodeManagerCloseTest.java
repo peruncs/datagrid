@@ -76,14 +76,16 @@ class StorageNodeManagerCloseTest {
             final StorageNodeManager.Role role,
             final CountingHandler distributor, final CountingHandler client,
             final CountingHandler health, final CountingHandler position) {
-        return StorageNodeManager.New(
-                tracked(StorageBinaryDataDistributor.class, distributor),
-                tracked(StorageTaskExecutor.class, new CountingHandler()),
-                tracked(StorageBinaryDataClient.class, client),
-                tracked(StorageNodeHealthCheck.class, health),
-                tracked(StorageDiskSpaceReader.class, new CountingHandler()),
-                tracked(ReplicationPositionProvider.class, position),
-                "aeron", role);
+        return StorageNodeManager.New(StorageNodeManager.Configuration.builder()
+                .dataDistributor(tracked(StorageBinaryDataDistributor.class, distributor))
+                .storageTaskExecutor(tracked(StorageTaskExecutor.class, new CountingHandler()))
+                .dataClient(tracked(StorageBinaryDataClient.class, client))
+                .healthCheck(tracked(StorageNodeHealthCheck.class, health))
+                .storageDiskSpaceReader(tracked(StorageDiskSpaceReader.class, new CountingHandler()))
+                .positionProvider(tracked(ReplicationPositionProvider.class, position))
+                .replicationTransport("aeron")
+                .role(role)
+                .build());
     }
 
     private static StorageNodeManager reader(

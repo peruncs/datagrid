@@ -72,10 +72,10 @@ class AeronReaderWatermarkTest {
         assertThrows(IllegalArgumentException.class,
                 () -> AeronReaderWatermark.decode(new byte[91]));
         final byte[] badMagic = encoded.clone();
-        badMagic[0] ^= 0xFF;
+        badMagic[0] ^= (byte) 0xFF;
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.decode(badMagic));
         final byte[] badVersion = encoded.clone();
-        badVersion[7] ^= 0xFF;
+        badVersion[7] ^= (byte) 0xFF;
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.decode(badVersion));
     }
 

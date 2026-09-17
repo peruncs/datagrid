@@ -106,7 +106,7 @@ class AeronWriterReaderSoakIT {
             for (final Path readerStore : readerStores) AeronStoreIntegrationIT.copyDirectory(writerStore, readerStore);
             final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor,
                     writerTransport.persistenceTargetFactory("store", distributor));
-            final IndexRoot writerRoot = (IndexRoot) writer.root();
+            final IndexRoot writerRoot = writer.root();
             try {
                 final ReaderNode[] holders = new ReaderNode[readerStores.length];
                 final ReadWriteLock[] gates = new ReadWriteLock[readerStores.length];
@@ -507,21 +507,21 @@ class AeronWriterReaderSoakIT {
          * inside the deadline is measured lag, expiry is divergence. */
         final VectorIndices<IndexedArticle> vectors = root.articles.index().get(VectorIndices.Category());
         for (final ArticleState state : present) {
-            assertIndexVisible(startNanos, holders, gates, readerIndex, root, visibilityDeadlineNanos,
+            assertIndexVisible(startNanos, holders, gates, readerIndex, visibilityDeadlineNanos,
                     "Lucene missed " + state.title(),
                     () -> luceneIndex(root.articles).query("title:" + state.title()).size() == 1);
-            assertIndexVisible(startNanos, holders, gates, readerIndex, root, visibilityDeadlineNanos,
+            assertIndexVisible(startNanos, holders, gates, readerIndex, visibilityDeadlineNanos,
                     "JVector missed " + state.title(), () -> jvectorHits(vectors, state));
         }
         for (final String title : absent) {
-            assertIndexVisible(startNanos, holders, gates, readerIndex, root, visibilityDeadlineNanos,
+            assertIndexVisible(startNanos, holders, gates, readerIndex, visibilityDeadlineNanos,
                     "Lucene retained deleted " + title,
                     () -> luceneIndex(root.articles).query("title:" + title).isEmpty());
         }
     }
 
     private void assertIndexVisible(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                        final int readerIndex, final IndexRoot root,
+                                        final int readerIndex,
                                         final long visibilityDeadlineNanos, final String what,
                                         final java.util.function.BooleanSupplier visible) {
         final long firstMissNanos = System.nanoTime();
@@ -749,7 +749,7 @@ class AeronWriterReaderSoakIT {
         }
         final List<Map.Entry<Thread, StackTraceElement[]>> traces =
                 new ArrayList<>(Thread.getAllStackTraces().entrySet());
-        traces.sort((left, right) -> left.getKey().getName().compareTo(right.getKey().getName()));
+        traces.sort(Comparator.comparing(e -> e.getKey().getName()));
         System.out.println("SOAK thread count=" + traces.size());
         for (final Map.Entry<Thread, StackTraceElement[]> entry : traces) {
             final Thread thread = entry.getKey();

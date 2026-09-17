@@ -15,6 +15,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
@@ -22,8 +23,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import static java.lang.System.Logger.Level.WARNING;
-import static org.eclipse.serializer.math.XMath.notNegative;
-import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Applies committed Store binary data on a reader node.
@@ -45,7 +44,11 @@ import static org.eclipse.serializer.util.X.notNull;
 /// update, or a slow Store would stall the Aeron polling thread and look like
 /// transport loss.
 public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disposable {
-        /// Creates a merger with bounded deferred materialization.
+        /// Immutable configuration for one bounded binary merger.
+    ///
+    /// The coordinator is optional. When present, post-materialization graph
+    /// scans join its read/write boundary; when absent, the merger preserves
+    /// the direct-scan behavior used by standalone storage clients.
     ///
     /// @param foundation               persistence foundation
     /// @param storage                  Store connection
@@ -53,62 +56,114 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
     /// @param cachingTimeoutMs         maximum wait for a cached batch
     /// @param cachedBinaryLimit        maximum cached binary count
     /// @param applyTimeoutMs           maximum wait for one materialization batch
-    /// @return binary merger
-    static StorageBinaryDataMerger New(
-            final BinaryPersistenceFoundation<?> foundation,
-            final StorageConnection storage,
-            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
-            final long cachingTimeoutMs,
-            final long cachedBinaryLimit,
-            final long applyTimeoutMs) {
-        return New(
-                foundation,
-                storage,
-                objectGraphUpdateHandler,
-                cachingTimeoutMs,
-                cachedBinaryLimit,
-                applyTimeoutMs,
-                null
-        );
+    /// @param graphCoordinator         per-Store graph coordinator, or `null`
+    record Configuration(
+            BinaryPersistenceFoundation<?> foundation,
+            StorageConnection storage,
+            ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            long cachingTimeoutMs,
+            long cachedBinaryLimit,
+            long applyTimeoutMs,
+            StorageGraphCoordinator graphCoordinator
+    ) {
+        /// Validates the merger collaborators and timing limits.
+        public Configuration {
+            Objects.requireNonNull(foundation, "foundation");
+            Objects.requireNonNull(storage, "storage");
+            Objects.requireNonNull(objectGraphUpdateHandler, "objectGraphUpdateHandler");
+            if (cachingTimeoutMs < 0L) throw new IllegalArgumentException("cachingTimeoutMs must not be negative");
+            if (cachedBinaryLimit <= 0L) throw new IllegalArgumentException("cachedBinaryLimit must be positive");
+            if (applyTimeoutMs <= 0L) throw new IllegalArgumentException("applyTimeoutMs must be positive");
+        }
+
+        /// Starts a builder for a merger configuration.
+        ///
+        /// @return empty configuration builder
+        public static Builder builder() {
+            return new Builder();
+        }
+
+        /// Builds a merger configuration without a positional parameter list.
+        public static final class Builder {
+            private BinaryPersistenceFoundation<?> foundation;
+            private StorageConnection storage;
+            private ObjectGraphUpdateHandler objectGraphUpdateHandler;
+            private long cachingTimeoutMs;
+            private long cachedBinaryLimit;
+            private long applyTimeoutMs;
+            private StorageGraphCoordinator graphCoordinator;
+
+            /// @param value persistence foundation
+            /// @return this builder
+            public Builder foundation(final BinaryPersistenceFoundation<?> value) {
+                this.foundation = value;
+                return this;
+            }
+
+            /// @param value Store connection
+            /// @return this builder
+            public Builder storage(final StorageConnection value) {
+                this.storage = value;
+                return this;
+            }
+
+            /// @param value graph update handler
+            /// @return this builder
+            public Builder objectGraphUpdateHandler(final ObjectGraphUpdateHandler value) {
+                this.objectGraphUpdateHandler = value;
+                return this;
+            }
+
+            /// @param value maximum cache wait in milliseconds
+            /// @return this builder
+            public Builder cachingTimeoutMs(final long value) {
+                this.cachingTimeoutMs = value;
+                return this;
+            }
+
+            /// @param value maximum cached binary count
+            /// @return this builder
+            public Builder cachedBinaryLimit(final long value) {
+                this.cachedBinaryLimit = value;
+                return this;
+            }
+
+            /// @param value maximum materialization wait in milliseconds
+            /// @return this builder
+            public Builder applyTimeoutMs(final long value) {
+                this.applyTimeoutMs = value;
+                return this;
+            }
+
+            /// @param value optional Store graph coordinator
+            /// @return this builder
+            public Builder graphCoordinator(final StorageGraphCoordinator value) {
+                this.graphCoordinator = value;
+                return this;
+            }
+
+            /// @return immutable merger configuration
+            public Configuration build() {
+                return new Configuration(foundation, storage, objectGraphUpdateHandler,
+                        cachingTimeoutMs, cachedBinaryLimit, applyTimeoutMs, graphCoordinator);
+            }
+        }
     }
 
-        /// Creates a merger with bounded deferred materialization that joins a graph coordinator.
+        /// Creates a merger with bounded deferred materialization.
     ///
-    /// The whole import — baseline capture, materialization, the
-    /// post-materialization index scan, and validation — runs through the
-    /// coordinator's write side as one section, so joined application reads
-    /// observe whole batch boundaries. The type-dictionary conflict scan is
-    /// the only merger read left on the read side. Mutations (materialization
-    /// batches, dictionary merges) run through the
-    /// update handler, which is normally the same coordinator's write side.
-    /// A `null` coordinator keeps the legacy behavior: scans run directly
-    /// because there is no shared lock to join, while mutations still flow
-    /// through the update handler.
-    ///
-    /// @param foundation               persistence foundation
-    /// @param storage                  Store connection
-    /// @param objectGraphUpdateHandler graph update handler
-    /// @param cachingTimeoutMs         maximum wait for a cached batch
-    /// @param cachedBinaryLimit        maximum cached binary count
-    /// @param applyTimeoutMs           maximum wait for one materialization batch
-    /// @param graphCoordinator         per-Store graph coordinator, or `null` to run scans directly
+    /// @param configuration immutable merger configuration
     /// @return binary merger
-    static StorageBinaryDataMerger New(
-            final BinaryPersistenceFoundation<?> foundation,
-            final StorageConnection storage,
-            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
-            final long cachingTimeoutMs,
-            final long cachedBinaryLimit,
-            final long applyTimeoutMs,
-            final StorageGraphCoordinator graphCoordinator) {
+    static StorageBinaryDataMerger New(final Configuration configuration) {
+        final Configuration settings = notNull(configuration);
         return new Default(
-                notNull(foundation),
-                notNull(storage),
-                notNull(objectGraphUpdateHandler),
-                notNegative(cachingTimeoutMs),
-                positive(cachedBinaryLimit),
-                positive(applyTimeoutMs),
-                graphCoordinator
+                notNull(settings.foundation()),
+                notNull(settings.storage()),
+                notNull(settings.objectGraphUpdateHandler()),
+                settings.cachingTimeoutMs(),
+                settings.cachedBinaryLimit(),
+                settings.applyTimeoutMs(),
+                settings.graphCoordinator()
         );
     }
 
@@ -477,17 +532,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             return this.graphCoordinator;
         }
 
-                /// Runs a Store read through the coordinator's read side when one is wired.
-        ///
-        /// With a coordinator the scan overlaps application reads but never a
-        /// materialization; without one it runs directly because there is no
-        /// shared lock to join.
-        private void readJoined(final Runnable read) {
-            final StorageGraphCoordinator coordinator = this.graphCoordinator;
-            if (coordinator == null) read.run();
-            else coordinator.read(read);
-        }
-                /// Read-phase counterpart of [#readJoined(Runnable)] for scans
+                /// Read-phase counterpart of [#readJoined(Supplier)] for scans
         /// that produce a plan for a later write-side mutation.
         private <T> T readJoined(final Supplier<T> read) {
             final StorageGraphCoordinator coordinator = this.graphCoordinator;

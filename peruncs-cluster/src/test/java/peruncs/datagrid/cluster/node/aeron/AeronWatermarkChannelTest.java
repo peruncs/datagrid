@@ -42,7 +42,7 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("blocking-driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context);
+        try (MediaDriver _ = MediaDriver.launch(context);
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
             final CountDownLatch receiverEntered = new CountDownLatch(1);
             final CountDownLatch releaseReceiver = new CountDownLatch(1);
@@ -86,7 +86,7 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("closed-driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context);
+        try (MediaDriver _ = MediaDriver.launch(context);
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
             final AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 78);
             reader.close();
@@ -101,7 +101,7 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("terminal-publication-driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context)) {
+        try (MediaDriver _ = MediaDriver.launch(context)) {
             final Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()));
             final AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 81);
             aeron.close();
@@ -123,7 +123,7 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("interrupted-close-driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context);
+        try (MediaDriver _ = MediaDriver.launch(context);
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
             final CountDownLatch receiverEntered = new CountDownLatch(1);
             final CountDownLatch releaseReceiver = new CountDownLatch(1);
@@ -168,7 +168,7 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context);
+        try (MediaDriver _ = MediaDriver.launch(context);
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
             final CountDownLatch received = new CountDownLatch(1);
             final AtomicReference<byte[]> actual = new AtomicReference<>();
@@ -267,13 +267,13 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("mixed-publish-driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context);
+        try (MediaDriver _ = MediaDriver.launch(context);
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
             final CountDownLatch firstReceived = new CountDownLatch(1);
             final CountDownLatch secondReceived = new CountDownLatch(1);
             final AtomicInteger deliveries = new AtomicInteger();
-            try (AeronWatermarkChannel writer = AeronWatermarkChannel.writer(aeron, "aeron:ipc", 82,
-                    (value, offset, length) ->
+            try (AeronWatermarkChannel _ = AeronWatermarkChannel.writer(aeron, "aeron:ipc", 82,
+                    (_, _, _) ->
                     {
                         if (deliveries.getAndIncrement() == 0) firstReceived.countDown();
                         else secondReceived.countDown();

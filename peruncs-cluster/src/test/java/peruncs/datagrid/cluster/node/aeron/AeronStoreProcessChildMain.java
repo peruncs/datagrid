@@ -158,9 +158,6 @@ public final class AeronStoreProcessChildMain {
     public static final class StoreType {
         public String value;
 
-        public StoreType() {
-        }
-
         StoreType(final String value) {
             this.value = value;
         }

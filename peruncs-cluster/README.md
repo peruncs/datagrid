@@ -259,7 +259,7 @@ CRC32C, and commit/abort markers. A writer should use
 Archive prepare chunks -> local Store enqueue -> Archive commit
 ```
 
-Readers use `StorageBinaryDataClientAeronArchive.New(...)` for replay, live
+Readers use `AeronArchiveReader.New(...)` for replay, live
 join, and reconnect. Persist the DataGrid cursor/checkpoint after each
 completed commit. `AeronReplicationCheckpointStore` is provided for
 deployments that persist the Aeron-specific identity and replay boundary.

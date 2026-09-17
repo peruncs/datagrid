@@ -11,11 +11,14 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
-/// Aeron replication transport for one Data Grid cluster instance.
+/// Replication transport for one Data Grid cluster instance.
 ///
 /// The transport supplies the distributor, reader, position, health, and
 /// retention implementations; [#noOp()] covers nodes with replication
-/// disabled.
+/// disabled. This is an intentional domain port, not a broker compatibility
+/// layer: the neutral node package uses it to avoid a dependency on Aeron and
+/// to represent the supported `none` role without nulls. Aeron is currently
+/// the only production implementation.
 public interface ClusterReplicationTransport extends AutoCloseable {
         /// Returns the configured identity used to filter compatible backups.
     ///
@@ -103,10 +106,6 @@ public interface ClusterReplicationTransport extends AutoCloseable {
 
                     public boolean isHealthy() {
                         return storage.isReady();
-                    }
-
-                    public void init() {
-                        // No-op transport has no health state to initialize.
                     }
 
                     public void close() {

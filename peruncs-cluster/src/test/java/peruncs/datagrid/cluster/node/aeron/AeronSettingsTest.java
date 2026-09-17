@@ -253,6 +253,7 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(credentials)
         ), false, "reader"));
         final var service = settings.authorisationServiceSupplier().get();
+        assertNotNull(service);
         final byte[] principal = "datagrid-reader".getBytes(StandardCharsets.US_ASCII);
         assertTrue(service.isAuthorised(MessageHeaderDecoder.SCHEMA_ID, ReplayRequestDecoder.TEMPLATE_ID, null, principal));
         assertFalse(service.isAuthorised(MessageHeaderDecoder.SCHEMA_ID,

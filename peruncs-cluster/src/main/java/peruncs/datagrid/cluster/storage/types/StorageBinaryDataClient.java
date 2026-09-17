@@ -5,9 +5,11 @@ import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 
 import java.util.Objects;
 
-/// Aeron reader lifecycle. The Aeron reader exposes a [ReplicationCursor].
+/// Replication reader lifecycle. The Aeron reader exposes a [ReplicationCursor].
 /// A client must not report a message as consumed until the Store merger has
-/// accepted the complete committed binary.
+/// accepted the complete committed binary. This port belongs to the storage
+/// domain so the node layer can model disabled replication and test readers
+/// without importing transport classes.
 public interface StorageBinaryDataClient extends Disposable {
         /// Starts reading from the configured transport.
     void start();

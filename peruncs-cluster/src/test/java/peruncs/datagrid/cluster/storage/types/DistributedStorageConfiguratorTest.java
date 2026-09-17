@@ -108,6 +108,7 @@ class DistributedStorageConfiguratorTest {
                 new NoOpDistributor(), delegate -> targetProxy(written));
 
         final PersistenceTarget<Binary> decorated = configurator.apply(new BothContracts());
+        assertNotNull(decorated);
         decorated.write(null);
 
         assertEquals(1, written.size());

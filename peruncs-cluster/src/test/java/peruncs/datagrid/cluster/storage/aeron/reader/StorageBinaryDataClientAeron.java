@@ -13,7 +13,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Test-only live reader used by low-level UDP tests. Production clustering
-/// uses [StorageBinaryDataClientAeronArchive]; both readers share
+/// uses [AeronArchiveReader]; both readers share
 /// [TransactionAssembler] for commit-gated delivery and CRC validation.
 public final class StorageBinaryDataClientAeron implements Disposable {
     private final Subscription subscription;

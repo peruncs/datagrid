@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.RecordingInspector;
-import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeronArchive;
+import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
@@ -342,27 +342,20 @@ class AeronArchiveReplicationIT {
             await(resumed.publication()::isConnected, 10_000);
             resumed.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(resumedData)});
             assertEquals(recordingId, awaitRecordingId(resumed));
-            final StorageBinaryDataClientAeronArchive client = StorageBinaryDataClientAeronArchive.New(
-                    archive.context().aeron(),
-                    new AeronArchive.Context()
+            final AeronArchiveReader client = AeronArchiveReader.New(
+                    AeronArchiveReader.Configuration.builder()
+                    .aeron(archive.context().aeron())
+                    .archiveContext(new AeronArchive.Context()
                             .aeronDirectoryName(directory)
                             .controlRequestChannel(controlChannel)
                             .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
-                            .messageTimeoutNs(10_000_000_000L),
-                    recordingId,
-                    io.aeron.archive.client.PersistentSubscription.FROM_START,
-                    liveChannel,
-                    1001,
-                    "aeron:udp?endpoint=localhost:0",
-                    1002,
-                    configuration,
-                    clusterId,
-                    2,
-                    -1,
-                    receiver,
-                    () -> {
-                    }
-            );
+                            .messageTimeoutNs(10_000_000_000L))
+                    .recordingId(recordingId)
+                    .startPosition(io.aeron.archive.client.PersistentSubscription.FROM_START)
+                    .liveChannel(liveChannel).liveStreamId(1001)
+                    .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
+                    .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                    .initialSequence(-1).receiver(receiver).build());
             client.start();
 
             await(() -> client.lastResolvedSequence() == 1 || client.failure() != null, 15_000);
@@ -376,14 +369,18 @@ class AeronArchiveReplicationIT {
             final long restartSequence = client.lastResolvedSequence();
             client.dispose();
             final RecordingReceiver restartedReceiver = new RecordingReceiver();
-            final StorageBinaryDataClientAeronArchive restarted = StorageBinaryDataClientAeronArchive.New(
-                    archive.context().aeron(),
-                    new AeronArchive.Context().aeronDirectoryName(directory)
+            final AeronArchiveReader restarted = AeronArchiveReader.New(
+                    AeronArchiveReader.Configuration.builder()
+                    .aeron(archive.context().aeron())
+                    .archiveContext(new AeronArchive.Context().aeronDirectoryName(directory)
                             .controlRequestChannel(controlChannel).controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
-                            .messageTimeoutNs(10_000_000_000L),
-                    recordingId, restartPosition, liveChannel, 1001, "aeron:udp?endpoint=localhost:0", 1002,
-                    configuration, clusterId, 2, restartSequence, restartedReceiver, () -> {
-                    });
+                            .messageTimeoutNs(10_000_000_000L))
+                    .recordingId(recordingId).startPosition(restartPosition)
+                    .liveChannel(liveChannel).liveStreamId(1001)
+                    .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
+                    .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                    .initialSequence(restartSequence).initialPosition(restartPosition)
+                    .receiver(restartedReceiver).build());
             restarted.start();
             final byte[] thirdData = new byte[]{1, 3, 3, 7};
             resumed.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(thirdData)});

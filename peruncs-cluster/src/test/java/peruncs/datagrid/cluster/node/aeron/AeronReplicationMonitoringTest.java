@@ -148,7 +148,7 @@ class AeronReplicationMonitoringTest {
 
     @Test
     void readerCannotChangeWriterMessageIndex() {
-        final AeronDistributor distributor = new AeronDistributor(() -> false,
+        final AeronDistributionGate distributor = new AeronDistributionGate(() -> false,
                 ignored -> {
                     throw new AssertionError("reader must not synchronize a writer sequence");
                 });

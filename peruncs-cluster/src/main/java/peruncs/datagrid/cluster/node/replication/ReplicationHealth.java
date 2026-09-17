@@ -2,7 +2,11 @@ package peruncs.datagrid.cluster.node.replication;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
-/// Aeron transport health.
+/// Replication-provider health.
+///
+/// This neutral contract keeps node readiness independent of the Aeron
+/// implementation. Aeron is currently the only production provider, but the
+/// node layer also needs a no-replication view and small test doubles.
 public interface ReplicationHealth extends AutoCloseable {
         /// Returns true only when the node may serve the configured replication role.
     ///

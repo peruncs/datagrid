@@ -19,7 +19,7 @@ import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpo
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.reader.CursorSnapshot;
 import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
-import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeronArchive;
+import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronStorageBinaryReplicationTarget;
@@ -183,7 +183,7 @@ public final class AeronClusterReplicationTransportProvider {
         private volatile AeronRuntime runtime;
         private volatile AeronArchiveReplicationPublisher writer;
         private volatile AeronReplicationWriteCoordinator coordinator;
-        private volatile StorageBinaryDataClientAeronArchive reader;
+        private volatile AeronArchiveReader reader;
         /* Published together after the terminal checkpoint is durable.  Readers of
          * positionProvider() must never combine fields from two transactions. */
         private volatile AeronWriterBoundary writerBoundary = new AeronWriterBoundary(-1, -1, -1);
@@ -329,7 +329,7 @@ public final class AeronClusterReplicationTransportProvider {
             if (this.distributor != null) {
                 throw new IllegalStateException("Aeron transport supports one replication stream per provider");
             }
-            this.distributor = new AeronDistributor(
+            this.distributor = new AeronDistributionGate(
                     () -> this.settings.role().isWriter(),
                     value ->
                     {
@@ -448,7 +448,7 @@ public final class AeronClusterReplicationTransportProvider {
             if (aeronCursor && cursor.logicalSequence() >= 0 && cursor.storeGeneration() == null) {
                 throw new IllegalArgumentException("resolved Aeron cursor must identify its Store generation");
             }
-            final AtomicReference<StorageBinaryDataClientAeronArchive> readerRef = new AtomicReference<>();
+            final AtomicReference<AeronArchiveReader> readerRef = new AtomicReference<>();
             /* Decode once and validate the token together with the recording
              * identity, so the seed floor below can never come from a cursor
              * whose identity checks failed. */
@@ -458,28 +458,32 @@ public final class AeronClusterReplicationTransportProvider {
              * The reader recording id is also used by its uncertainty-marker callback,
              * so it must not change until the old polling thread has exited. */
             if (this.reader != null) {
-                final StorageBinaryDataClientAeronArchive previous = this.reader;
+                final AeronArchiveReader previous = this.reader;
                 previous.dispose();
                 this.reader = null;
             }
             this.readerRecordingId.set(recordingId);
-            final StorageBinaryDataClientAeronArchive replacement;
+            final AeronArchiveReader replacement;
             try {
-                replacement = StorageBinaryDataClientAeronArchive.New(
-                        this.aeron(),
-                        archiveContext(),
-                        recordingId,
-                        aeronCursor && cursorPosition >= 0 ? cursorPosition : io.aeron.archive.client.PersistentSubscription.FROM_START, this.settings.liveChannel(),
-                        this.settings.streamId(),
-                        this.settings.replayChannel(),
-                        this.settings.streamId() + 1,
-                        this.settings.replication(),
-                        this.settings.clusterId(),
-                        this.settings.epoch(),
-                        aeronCursor ? cursor.logicalSequence() : -1,
-                        new ReceiverAdapter(this, receiver),
-                        () -> {
-                            final StorageBinaryDataClientAeronArchive current = readerRef.get();
+                replacement = AeronArchiveReader.New(
+                        AeronArchiveReader.Configuration.builder()
+                        .aeron(this.aeron())
+                        .archiveContext(archiveContext())
+                        .recordingId(recordingId)
+                        .startPosition(aeronCursor && cursorPosition >= 0
+                                ? cursorPosition : io.aeron.archive.client.PersistentSubscription.FROM_START)
+                        .liveChannel(this.settings.liveChannel())
+                        .liveStreamId(this.settings.streamId())
+                        .replayChannel(this.settings.replayChannel())
+                        .replayStreamId(this.settings.streamId() + 1)
+                        .replicationConfiguration(this.settings.replication())
+                        .clusterId(this.settings.clusterId())
+                        .epoch(this.settings.epoch())
+                        .initialSequence(aeronCursor ? cursor.logicalSequence() : -1)
+                        .initialPosition(aeronCursor ? cursorPosition : -1)
+                        .receiver(new ReceiverAdapter(this, receiver))
+                        .transactionResolved(() -> {
+                            final AeronArchiveReader current = readerRef.get();
                             if (current != null && current == this.reader) {
                                 final CursorSnapshot snapshot = current.cursorSnapshot();
                                 this.nextSequence.accumulateAndGet(snapshot.sequence() + 1, Math::max);
@@ -502,10 +506,9 @@ public final class AeronClusterReplicationTransportProvider {
                                  * retention quorum after a durable import. */
                                 this.publishReaderWatermark(snapshot, recordingId);
                             }
-                        },
-                        this.readerDeliveryListener(),
-                        aeronCursor ? cursorPosition : -1
-                );
+                        })
+                        .deliveryListener(this.readerDeliveryListener())
+                        .build());
             } catch (final RuntimeException | Error failure) {
                 this.reader = null;
                 throw failure;
@@ -1084,7 +1087,7 @@ public final class AeronClusterReplicationTransportProvider {
 
                 /// Returns the newest writer fencing token this reader has accepted.
         private long currentFencingToken() {
-            final StorageBinaryDataClientAeronArchive current = this.reader;
+            final AeronArchiveReader current = this.reader;
             return current == null ? 0L : current.fencingToken();
         }
 
@@ -1354,7 +1357,7 @@ public final class AeronClusterReplicationTransportProvider {
                  * useful diagnostics (and must not disappear silently). */
                 LOGGER.log(WARNING, "Additional Aeron transport failure", normalized);
             }
-            final StorageBinaryDataClientAeronArchive current = this.reader;
+            final AeronArchiveReader current = this.reader;
             if (current != null) {
                 current.fail(normalized);
             }
@@ -1677,7 +1680,7 @@ public final class AeronClusterReplicationTransportProvider {
 
         /// Adds the neutral message-position view to the Aeron client.
     private record ClientAdapter(
-            StorageBinaryDataClientAeronArchive delegate,
+            AeronArchiveReader delegate,
             long recordingId,
             UUID clusterId,
             UUID nodeId,
