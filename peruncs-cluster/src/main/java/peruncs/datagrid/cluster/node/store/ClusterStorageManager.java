@@ -100,11 +100,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
         return new ReadOnly<>(notNull(delegate), notNull(shutdownCallback), notNull(graphCoordinator));
     }
 
-    @Override
-    @SuppressWarnings("unchecked")
-    @Deprecated(forRemoval = true)
-    Lazy<T> root();
-
         /// Reads the current root while excluding replication materialization.
     ///
     /// The inherited [#root()] method exposes Store's live lazy reference and
@@ -379,7 +374,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
             }
             if (failure instanceof Error error) throw error;
             if (failure instanceof RuntimeException runtime) throw runtime;
-            if (failure != null) throw new IllegalStateException("failed to shut down cluster storage", failure);
             return result;
         }
 
@@ -880,7 +874,6 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
 
         @Override
-        @Deprecated(forRemoval = true)
         public Lazy<T> root() {
             /* The merger applies batches on the coordinator write side; a live
              * reference returned here would be traversed after the read lock is

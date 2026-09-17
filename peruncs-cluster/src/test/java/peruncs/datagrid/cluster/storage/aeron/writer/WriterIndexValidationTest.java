@@ -236,16 +236,7 @@ class WriterIndexValidationTest {
         return null;
     }
 
-    private static final class Article {
-        final String title;
-        final String body;
-        final float[] vector;
-
-        Article(final String title, final String body, final float[] vector) {
-            this.title = title;
-            this.body = body;
-            this.vector = vector;
-        }
+    private record Article(String title, String body, float[] vector) {
     }
 
     private static final class Root {

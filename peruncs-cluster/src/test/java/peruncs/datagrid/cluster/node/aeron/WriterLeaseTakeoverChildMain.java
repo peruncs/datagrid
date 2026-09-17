@@ -10,7 +10,7 @@ public final class WriterLeaseTakeoverChildMain {
     private WriterLeaseTakeoverChildMain() {
     }
 
-    public static void main(final String[] args) throws Exception {
+    static void main(final String[] args) throws Exception {
         final Path volume = Path.of(args[0]);
         final UUID cluster = UUID.fromString(args[1]);
         final UUID generation = UUID.fromString(args[2]);

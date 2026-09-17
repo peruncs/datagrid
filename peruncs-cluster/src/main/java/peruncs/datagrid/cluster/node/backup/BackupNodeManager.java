@@ -187,7 +187,6 @@ public interface BackupNodeManager extends ClusterNodeManager, BackupNodeControl
             }
             if (failure instanceof Error error) throw error;
             if (failure instanceof RuntimeException runtime) throw runtime;
-            if (failure != null) throw new NodeLibraryException("failed to close backup node resources", failure);
         }
 
         private boolean isStorageAvailable() {

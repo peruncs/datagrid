@@ -57,8 +57,7 @@ class StorageFormatCompatibilityTest {
                         reloaded.entries.stream().map(entry -> entry.value).toList());
                 assertEquals(new String(dictionaryBefore, StandardCharsets.UTF_8),
                         new String(typeDictionaryBytes(reopened), StandardCharsets.UTF_8));
-                System.out.println("store format fixture: dictionary=%s bytes, files:%n%s"
-                        .formatted(dictionaryBefore.length, manifestBefore));
+                System.out.printf("store format fixture: dictionary=%s bytes, files:%n%s%n", dictionaryBefore.length, manifestBefore);
             } finally {
                 reopened.shutdown();
             }

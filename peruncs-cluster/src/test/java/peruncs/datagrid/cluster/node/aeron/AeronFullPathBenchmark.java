@@ -135,9 +135,8 @@ public final class AeronFullPathBenchmark {
                             poolBytes("direct") - directBefore, poolBytes("mapped") - mappedBefore);
                 } finally {
                     client.dispose();
-                    if (receiver instanceof Disposable disposable) {
-                        disposable.dispose();
-                    }
+                    Disposable disposable = (Disposable) receiver;
+                    disposable.dispose();
                     reader.shutdown();
                     writer.shutdown();
                 }

@@ -162,9 +162,7 @@ public final class ClusterStoreIndexes {
             throw new IllegalStateException("a clustered map already has a Lucene index");
         }
         try {
-            final LuceneIndex<E> registered = map.index().register(
-                    LuceneIndex.Category(embeddedLuceneContext(documentPopulator))
-            );
+            final LuceneIndex<E> registered = map.index().register( LuceneIndex.Category(embeddedLuceneContext(documentPopulator)));
             if (registered == null) {
                 /* Upstream reports a lost registration race with a null
                  * return rather than a throw: name the duplicate when one is
@@ -428,24 +426,19 @@ public final class ClusterStoreIndexes {
                                     .formatted(MAX_VALIDATED_OBJECTS));
                 }
                 final Object current = scratch.queue.poll();
-                if (current instanceof GigaMap<?> map) {
-                    /* Index metadata only: descending into entity payload would make
-                     * every reader batch pay for the whole data set. Objects
-                     * whose class cannot reach index metadata were pruned
-                     * before enqueueing, so only relevant objects count above. */
-                    validateMap(map);
-                } else if (current instanceof LuceneIndex<?> lucene) {
-                    validateLuceneIndex(lucene);
-                } else if (current instanceof LuceneContext<?> context) {
-                    validateLuceneContext(context);
-                } else if (current instanceof VectorIndices<?> group) {
-                    validateVectorIndicesGroup(group);
-                } else if (current instanceof VectorIndex<?> index) {
-                    validateVectorConfiguration(index.configuration());
-                } else if (current instanceof VectorIndexConfiguration configuration) {
-                    validateVectorConfiguration(configuration);
-                } else {
-                    enqueueReachable(current, scratch.queue, scratch.seen);
+                switch (current) {
+                    case GigaMap<?> map ->
+                        /* Index metadata only: descending into entity payload would make
+                         * every reader batch pay for the whole data set. Objects
+                         * whose class cannot reach index metadata were pruned
+                         * before enqueueing, so only relevant objects count above. */
+                            validateMap(map);
+                    case LuceneIndex<?> lucene -> validateLuceneIndex(lucene);
+                    case LuceneContext<?> context -> validateLuceneContext(context);
+                    case VectorIndices<?> group -> validateVectorIndicesGroup(group);
+                    case VectorIndex<?> index -> validateVectorConfiguration(index.configuration());
+                    case VectorIndexConfiguration configuration -> validateVectorConfiguration(configuration);
+                    case null, default -> enqueueReachable(current, scratch.queue, scratch.seen);
                 }
             }
         } finally {
@@ -872,50 +865,64 @@ public final class ClusterStoreIndexes {
             }
             return;
         }
-        if (current instanceof Iterable<?> iterable) {
-            for (final Object element : iterable) offer(element, queue, seen);
-            return;
-        }
-        if (current instanceof Map<?, ?> map) {
-            for (final Map.Entry<?, ?> entry : map.entrySet()) {
+        switch (current) {
+            case Iterable<?> iterable -> {
+                for (final Object element : iterable) offer(element, queue, seen);
+                return;
+            }
+            case Map<?, ?> map -> {
+                for (final Map.Entry<?, ?> entry : map.entrySet()) {
+                    offer(entry.getKey(), queue, seen);
+                    offer(entry.getValue(), queue, seen);
+                }
+                return;
+            }
+            case Map.Entry<?, ?> entry -> {
                 offer(entry.getKey(), queue, seen);
                 offer(entry.getValue(), queue, seen);
+                return;
             }
-            return;
-        }
-        if (current instanceof Map.Entry<?, ?> entry) {
-            offer(entry.getKey(), queue, seen);
-            offer(entry.getValue(), queue, seen);
-            return;
-        }
-        if (current instanceof Optional<?> optional) {
-            optional.ifPresent(value -> offer(value, queue, seen));
-            return;
-        }
-        if (current instanceof AtomicReference<?> reference) {
-            offer(reference.get(), queue, seen);
-            return;
-        }
-        if (current instanceof Reference<?> reference) {
-            /* Store runtime roots keep weak/soft handles over a large live
-             * graph that is not persistence state; following every referent
-             * would blow the object bound on ordinary Stores. Only a referent
-             * that is itself index metadata can hide an external index behind
-             * one indirection, so just that case is inspected — everything else
-             * stays pruned like before. Store rejects persistent JDK references,
-             * so a holder behind one cannot enter a durable application root.
-             * `LuceneIndex` and `VectorIndices` need no explicit branch: both
-             * extend `IndexGroup`, so that disjunct already covers them. */
-            final Object referent = reference.get();
-            if (referent instanceof GigaMap<?> || referent instanceof LuceneContext<?> ||
-                referent instanceof VectorIndex<?> || referent instanceof VectorIndexConfiguration ||
-                referent instanceof IndexGroup<?>) {
-                offer(referent, queue, seen);
+            case Optional<?> optional -> {
+                optional.ifPresent(value -> offer(value, queue, seen));
+                return;
             }
-            return;
+            case AtomicReference<?> reference -> {
+                offer(reference.get(), queue, seen);
+                return;
+            }
+            case Reference<?> reference -> {
+                /* Store runtime roots keep weak/soft handles over a large live
+                 * graph that is not persistence state; following every referent
+                 * would blow the object bound on ordinary Stores. Only a referent
+                 * that is itself index metadata can hide an external index behind
+                 * one indirection, so just that case is inspected — everything else
+                 * stays pruned like before. Store rejects persistent JDK references,
+                 * so a holder behind one cannot enter a durable application root.
+                 * `LuceneIndex` and `VectorIndices` need no explicit branch: both
+                 * extend `IndexGroup`, so that disjunct already covers them. */
+                final Object referent = reference.get();
+                if (referent instanceof GigaMap<?> || referent instanceof LuceneContext<?> ||
+                    referent instanceof VectorIndex<?> || referent instanceof VectorIndexConfiguration ||
+                    referent instanceof IndexGroup<?>) {
+                    offer(referent, queue, seen);
+                }
+                return;
+            }
+            case ReferenceQueue<?> referenceQueue -> {
+                return;
+            }
+            case Thread thread -> {
+                return;
+            }
+            case ThreadGroup threadGroup -> {
+                return;
+            }
+            case ClassLoader classLoader -> {
+                return;
+            }
+            default -> {
+            }
         }
-        if (current instanceof ReferenceQueue<?>) return;
-        if (current instanceof Thread || current instanceof ThreadGroup || current instanceof ClassLoader) return;
         if (type.getPackageName().startsWith("java.")) {
             /* Only the explicit wrappers above are safe to unwrap. Pruning an
             * arbitrary JDK holder would turn an opaque reference to an

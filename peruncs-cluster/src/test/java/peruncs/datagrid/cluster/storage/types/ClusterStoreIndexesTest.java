@@ -137,7 +137,7 @@ class ClusterStoreIndexesTest {
 
         final long removedId;
         final long retainedId;
-        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+        try (EmbeddedStorageManager _ = EmbeddedStorage.start(root, this.storagePath)) {
             retainedId = root.articles.add(new Article("Eclipse", "distributed storage", new float[]{1, 0, 0}));
             removedId = root.articles.add(new Article("Obsolete", "message transport", new float[]{0, 1, 0}));
             root.articles.update(retainedId, article ->

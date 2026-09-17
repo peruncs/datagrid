@@ -159,9 +159,8 @@ class AeronStoreIntegrationIT {
                         client.stopOutcome(), "%s did not stop at a resolved transaction boundary".formatted(role));
             } finally {
                 client.dispose();
-                if (receiver instanceof Disposable disposable) {
-                    disposable.dispose();
-                }
+                Disposable disposable = (Disposable) receiver;
+                disposable.dispose();
                 reader.shutdown();
             }
             assertEquals(target.logicalSequence(), cursorManager.get().logicalSequence(),

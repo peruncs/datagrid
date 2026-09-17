@@ -251,7 +251,6 @@ class WriterFencingLeaseTest {
             assertTrue(holder.isCurrent());
             holder.close();
             assertFalse(holder.isCurrent(), "closed lease must not report current");
-            holder.close();
         }
         /* The file must survive release: deleting it would reset the series to
          * 1 and brick every reader whose persisted floor is above 1. */

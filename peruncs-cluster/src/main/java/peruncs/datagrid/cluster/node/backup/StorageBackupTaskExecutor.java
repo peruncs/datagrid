@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
 
 import java.util.concurrent.ExecutorService;
@@ -192,8 +191,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             }
             if (failure != null) {
                 if (failure instanceof Error error) throw error;
-                if (failure instanceof RuntimeException runtime) throw runtime;
-                throw new NodeLibraryException("Failed to stop storage backup", failure);
+                throw (RuntimeException) failure;
             }
         }
     }

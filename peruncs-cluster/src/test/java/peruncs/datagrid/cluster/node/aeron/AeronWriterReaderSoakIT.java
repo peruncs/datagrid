@@ -7,7 +7,9 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.*;
+import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
+import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
+import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
@@ -728,8 +730,8 @@ class AeronWriterReaderSoakIT {
             final List<String> beatNames = new ArrayList<>(this.beats.keySet());
             Collections.sort(beatNames);
             for (final String beat : beatNames) {
-                System.out.println("SOAK beat %s %ds ago".formatted(beat,
-                        (nowNanos - this.beats.get(beat).get()) / 1_000_000_000L));
+                System.out.printf("SOAK beat %s %ds ago%n", beat,
+                        (nowNanos - this.beats.get(beat).get()) / 1_000_000_000L);
             }
             dumpThreads();
         }
@@ -754,8 +756,7 @@ class AeronWriterReaderSoakIT {
         for (final Map.Entry<Thread, StackTraceElement[]> entry : traces) {
             final Thread thread = entry.getKey();
             if (thread.getName().startsWith("ForkJoinPool") && entry.getValue().length == 0) continue;
-            System.out.println("SOAK  \"%s\" state=%s daemon=%s".formatted(
-                    thread.getName(), thread.getState(), thread.isDaemon()));
+            System.out.printf("SOAK  \"%s\" state=%s daemon=%s%n", thread.getName(), thread.getState(), thread.isDaemon());
             final StackTraceElement[] stack = entry.getValue();
             for (int i = 0; i < Math.min(16, stack.length); i++) {
                 System.out.println("SOAK    at " + stack[i]);

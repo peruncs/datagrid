@@ -196,17 +196,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
     /// @throws IllegalStateException if this node is not a backup node
     BackupNodeControl backupNodeManager() throws NodeLibraryException;
 
-        /// Returns the per-Store graph coordinator for application reads.
-    ///
-    /// Replication materialization runs on the coordinator's write side, so
-    /// application code that touches the object graph directly must wrap its
-    /// access in the coordinator's read side; otherwise it may observe a
-    /// half-applied update.
-    ///
-    /// @return graph coordinator for this node's Store
-    StorageGraphCoordinator storageGraphCoordinator();
-
-        /// Closes every resource created by this foundation in reverse dependency order.
+    /// Closes every resource created by this foundation in reverse dependency order.
     @Override
     void close();
 
@@ -825,8 +815,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             return this.getBackupNodeManager();
         }
 
-        @Override
-        public StorageGraphCoordinator storageGraphCoordinator() {
+        private StorageGraphCoordinator storageGraphCoordinator() {
             return this.graphCoordinator;
         }
 
@@ -858,8 +847,8 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
                 }
                 if (failure instanceof Error error) throw error;
-                if (failure instanceof RuntimeException runtime) throw runtime;
-                throw new NodeLibraryException("Failed to start cluster node", failure);
+                RuntimeException runtime = (RuntimeException) failure;
+                throw runtime;
             }
         }
 

@@ -103,10 +103,11 @@ class BackupRestoreCompatibilityTest {
                         home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            @SuppressWarnings("unchecked")
-            final ArrayList<String> writerRoot = (ArrayList<String>) node.startStorageManager().root().get();
+            final var manager = node.startStorageManager();
+            final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("local-value");
-            node.startStorageManager().store(writerRoot);
+            manager.setRoot(writerRoot);
+            manager.storeRoot();
         }
         assertTrue(Files.isDirectory(home.resolve("storage")), "node must have created its Store directory");
 
@@ -122,8 +123,8 @@ class BackupRestoreCompatibilityTest {
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             @SuppressWarnings("unchecked")
-            final ArrayList<String> restartedRoot =
-                    (ArrayList<String>) restarted.startStorageManager().root().get();
+            final ArrayList<String> restartedRoot = restarted.startStorageManager()
+                    .readRoot(stored -> new ArrayList<>((ArrayList<String>) stored));
             assertTrue(restartedRoot.contains("local-value"),
                     "valid local storage must survive an incompatible newest backup, was: %s".formatted(restartedRoot));
         }
@@ -151,7 +152,7 @@ class BackupRestoreCompatibilityTest {
                         home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            assertNotNull(node.startStorageManager().root(),
+            assertTrue(node.startStorageManager().readRoot((Object stored) -> stored != null),
                     "the node must start from the compatible backup");
         }
 
@@ -195,10 +196,11 @@ class BackupRestoreCompatibilityTest {
                         writerHome, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            @SuppressWarnings("unchecked")
-            final ArrayList<String> writerRoot = (ArrayList<String>) writer.startStorageManager().root().get();
+            final var manager = writer.startStorageManager();
+            final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("seeded-value");
-            writer.startStorageManager().store(writerRoot);
+            manager.setRoot(writerRoot);
+            manager.storeRoot();
         }
 
         copyStorage(writerHome.resolve("storage"), readerHome.resolve("storage"));

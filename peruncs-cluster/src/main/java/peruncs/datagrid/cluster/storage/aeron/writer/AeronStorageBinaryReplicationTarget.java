@@ -138,10 +138,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                 this.delegate.write(data);
                 localAccepted = true;
                 CrashHook.invoke("AFTER_ENQUEUE_BEFORE_PREPARE", localSequence);
-            } catch (final Error failure) {
-                /* Preserve the durable ENQUEUED fence.  Error cleanup can allocate or
-                 * perform I/O and is unsafe when the JVM is already fatally failing. */
-                throw failure;
             } catch (final RuntimeException failure) {
                 try {
                     if (localAccepted) this.coordinator.markEnqueueWithoutArchive();
@@ -156,11 +152,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
             final AeronReplicationPublisher.PreparedTransaction prepared;
             try {
                 prepared = this.coordinator.prepare(data);
-            } catch (final Error failure) {
-                /* The local Store write completed before preparation failed. Leave the
-                 * durable ENQUEUED fence unresolved and avoid allocating a wrapper or
-                 * performing checkpoint I/O from a fatal Error path. */
-                throw failure;
             } catch (final RuntimeException failure) {
                 try {
                     this.coordinator.markEnqueueWithoutArchive();
@@ -181,10 +172,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
         final AeronReplicationPublisher.PreparedTransaction prepared;
         try {
             prepared = this.coordinator.prepare(data);
-        } catch (final Error failure) {
-            /* Preserve the durable ENQUEUED fence.  Error cleanup can allocate or
-             * perform I/O and is unsafe when the JVM is already fatally failing. */
-            throw failure;
         } catch (final RuntimeException failure) {
             data.iterateChannelChunks(Binary::reset);
             throw failure;

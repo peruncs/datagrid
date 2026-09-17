@@ -21,14 +21,7 @@ public final class ModulePathProbeMain {
     private ModulePathProbeMain() {
     }
 
-    private static final class ProbeArticle {
-        final String title;
-        final float[] vector;
-
-        ProbeArticle(final String title, final float[] vector) {
-            this.title = title;
-            this.vector = vector;
-        }
+    private record ProbeArticle(String title, float[] vector) {
     }
 
     private static final class ProbePopulator extends DocumentPopulator<ProbeArticle> {
@@ -45,7 +38,7 @@ public final class ModulePathProbeMain {
         }
     }
 
-    public static void main(final String[] args) {
+    static void main(final String[] args) {
         final GigaMap<ProbeArticle> map = GigaMap.New();
         ClusterStoreIndexes.registerLucene(map, new ProbePopulator());
         ClusterStoreIndexes.registerVector(map, "probe-vectors",

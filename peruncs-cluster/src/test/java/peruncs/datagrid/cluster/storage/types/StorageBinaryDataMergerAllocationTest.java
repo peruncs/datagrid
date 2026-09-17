@@ -92,8 +92,7 @@ class StorageBinaryDataMergerAllocationTest {
                     final long total = before.bytesSinceCapture();
                     assertTrue(total >= 0L, "thread allocation accounting is unavailable on this runtime");
                     final long perTransaction = total / MEASURED_TRANSACTIONS;
-                    System.out.println("merger heap allocation per transaction: %s bytes (budget %s bytes)"
-                            .formatted(perTransaction, BUDGET_BYTES_PER_TRANSACTION));
+                    System.out.printf("merger heap allocation per transaction: %s bytes (budget %s bytes)%n", perTransaction, BUDGET_BYTES_PER_TRANSACTION);
                     assertTrue(perTransaction <= BUDGET_BYTES_PER_TRANSACTION,
                             "heap allocation per transaction %s exceeds budget %s"
                                     .formatted(perTransaction, BUDGET_BYTES_PER_TRANSACTION));

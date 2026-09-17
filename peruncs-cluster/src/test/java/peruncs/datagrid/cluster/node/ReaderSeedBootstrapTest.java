@@ -103,10 +103,11 @@ class ReaderSeedBootstrapTest {
                         new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            @SuppressWarnings("unchecked")
-            final ArrayList<String> writerRoot = (ArrayList<String>) writer.startStorageManager().root().get();
+            final var manager = writer.startStorageManager();
+            final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("populated-before-reader-start");
-            writer.startStorageManager().storeRoot();
+            manager.setRoot(writerRoot);
+            manager.storeRoot();
         }
 
         try (final ClusterFoundation reader = ClusterFoundation.New()
@@ -152,10 +153,11 @@ class ReaderSeedBootstrapTest {
                         new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            @SuppressWarnings("unchecked")
-            final ArrayList<String> writerRoot = (ArrayList<String>) writer.startStorageManager().root().get();
+            final var manager = writer.startStorageManager();
+            final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("seeded-value");
-            writer.startStorageManager().store(writerRoot);
+            manager.setRoot(writerRoot);
+            manager.storeRoot();
         }
 
         assertTrue(Files.isDirectory(writerHome.resolve("storage")),
@@ -184,10 +186,11 @@ class ReaderSeedBootstrapTest {
                         new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            @SuppressWarnings("unchecked")
-            final ArrayList<String> writerRoot = (ArrayList<String>) writer.startStorageManager().root().get();
+            final var manager = writer.startStorageManager();
+            final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("seeded-value");
-            writer.startStorageManager().store(writerRoot);
+            manager.setRoot(writerRoot);
+            manager.storeRoot();
         }
 
         for (final String role : new String[]{

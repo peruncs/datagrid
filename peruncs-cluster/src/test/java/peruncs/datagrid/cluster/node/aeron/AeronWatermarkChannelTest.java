@@ -47,7 +47,7 @@ class AeronWatermarkChannelTest {
             final CountDownLatch receiverEntered = new CountDownLatch(1);
             final CountDownLatch releaseReceiver = new CountDownLatch(1);
             final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
-            final AeronWatermarkChannel writer = AeronWatermarkChannel.writer(aeron, "aeron:ipc", 79,
+            try (AeronWatermarkChannel writer = AeronWatermarkChannel.writer(aeron, "aeron:ipc", 79,
                     (value, offset, length) ->
                     {
                         receiverEntered.countDown();
@@ -56,8 +56,7 @@ class AeronWatermarkChannelTest {
                         } catch (final InterruptedException failure) {
                             Thread.currentThread().interrupt();
                         }
-                    });
-            try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 79)) {
+                    }); AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 79)) {
                 reader.publish(watermarkBytes());
                 assertTrue(receiverEntered.await(5, TimeUnit.SECONDS));
                 final Thread closer = Thread.ofVirtual().name("watermark-close-test").unstarted(() ->
@@ -75,7 +74,6 @@ class AeronWatermarkChannelTest {
                 assertNull(closeFailure.get());
             } finally {
                 releaseReceiver.countDown();
-                writer.close();
             }
         }
     }
@@ -128,7 +126,7 @@ class AeronWatermarkChannelTest {
             final CountDownLatch receiverEntered = new CountDownLatch(1);
             final CountDownLatch releaseReceiver = new CountDownLatch(1);
             final AtomicReference<Throwable> firstFailure = new AtomicReference<>();
-            final AeronWatermarkChannel writer = AeronWatermarkChannel.writer(aeron, "aeron:ipc", 80,
+            try (AeronWatermarkChannel writer = AeronWatermarkChannel.writer(aeron, "aeron:ipc", 80,
                     (value, offset, length) ->
                     {
                         receiverEntered.countDown();
@@ -137,8 +135,7 @@ class AeronWatermarkChannelTest {
                         } catch (final InterruptedException failure) {
                             Thread.currentThread().interrupt();
                         }
-                    });
-            try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 80)) {
+                    }); AeronWatermarkChannel reader = AeronWatermarkChannel.reader(aeron, "aeron:ipc", 80)) {
                 reader.publish(watermarkBytes());
                 assertTrue(receiverEntered.await(5, TimeUnit.SECONDS));
                 final Thread interruptedCloser = Thread.ofVirtual().name("interrupted-watermark-close-test").unstarted(() ->
@@ -157,7 +154,6 @@ class AeronWatermarkChannelTest {
                 writer.close();
             } finally {
                 releaseReceiver.countDown();
-                writer.close();
             }
         }
     }
@@ -197,7 +193,7 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("unconnected-driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context);
+        try (MediaDriver _ = MediaDriver.launch(context);
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
             /* No subscriber on this stream: every offer reports NOT_CONNECTED.
              * A latest-value stream drops what nobody receives — the next
@@ -226,7 +222,7 @@ class AeronWatermarkChannelTest {
                 .aeronDirectoryName(directory.resolve("late-subscriber-driver").toString())
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
-        try (MediaDriver driver = MediaDriver.launch(context);
+        try (MediaDriver _ = MediaDriver.launch(context);
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
             final UUID readerId = UUID.randomUUID();
             final UUID clusterId = UUID.randomUUID();
