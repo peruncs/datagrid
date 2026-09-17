@@ -170,6 +170,16 @@ public final class AeronArchiveReader implements Disposable {
     private final IdleStrategy idleStrategy;
     private final AtomicBoolean active = new AtomicBoolean();
     private final AtomicLong stopDeadlineNanos = new AtomicLong();
+    /* Sliding stop deadline: while a requested stop drains a replay backlog,
+     * every newly resolved transaction — or newly materialized one, when the
+     * Store receiver trails resolution under load — pushes the deadline out
+     * by another stop timeout, so a slow-but-advancing reader is never timed
+     * out. The overall cap still bounds a stop whose live tail perpetually
+     * outruns replay. */
+    private final AtomicLong stopRequestedNanos = new AtomicLong();
+    private final AtomicLong stopProgressSequence = new AtomicLong(-1L);
+    private final AtomicLong stopProgressApplied = new AtomicLong(-1L);
+    private static final long STOP_OVERALL_TIMEOUT_MULTIPLIER = 10L;
     private volatile Thread thread;
     private volatile CountDownLatch stopped = new CountDownLatch(0);
     private volatile boolean disposed;
@@ -288,6 +298,9 @@ public final class AeronArchiveReader implements Disposable {
         }
         this.stopAtLatest = false;
         this.stopDeadlineNanos.set(0L);
+        this.stopRequestedNanos.set(0L);
+        this.stopProgressSequence.set(-1L);
+        this.stopProgressApplied.set(-1L);
         this.live = false;
         /* Preserve any terminal outcome: a restart after STOPPED/RESOLVED_BOUNDARY
          * becomes RUNNING, but a failed or timed-out reader never looks healthy. */
@@ -311,6 +324,7 @@ public final class AeronArchiveReader implements Disposable {
                             return ControlledFragmentHandler.Action.CONTINUE;
                         }, 10);
                         this.live = this.subscription.isLive();
+                        if (this.stopAtLatest) extendStopDeadline();
                         return work;
                     },
                     () -> this.stopAtLatest && this.live && !this.assembler.hasIncompleteTransaction(),
@@ -393,8 +407,32 @@ public final class AeronArchiveReader implements Disposable {
          * observes the flag also observes this write: both sit in one
          * synchronized block ahead of the volatile flag publication. */
         this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
+        this.stopRequestedNanos.set(System.nanoTime());
+        this.stopProgressSequence.set(this.assembler.lastResolvedSequence());
+        this.stopProgressApplied.set(this.assembler.lastAppliedSequence());
         this.stopAtLatest = true;
         if (this.active.get()) this.updateOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
+    }
+
+        /// Pushes the stop deadline out while replay resolution or Store
+    /// materialization advances.
+    ///
+    /// Each newly resolved transaction — or newly materialized one, when the
+    /// receiver trails resolution — grants another full stop timeout, so a
+    /// slow-but-advancing drain never times out. The extension is capped at an
+    /// overall multiple of the stop timeout from the request: a stalled drain
+    /// still fails at one timeout, and a live tail that perpetually outruns
+    /// replay fails bounded instead of hanging a rolling restart.
+    private void extendStopDeadline() {
+        final long resolved = this.assembler.lastResolvedSequence();
+        final long applied = this.assembler.lastAppliedSequence();
+        final boolean resolving = resolved != this.stopProgressSequence.getAndSet(resolved);
+        final boolean applying = applied != this.stopProgressApplied.getAndSet(applied);
+        if (!resolving && !applying) return;
+        final long extended = ReplicationRetry.deadlineNanos(this.stopTimeoutNanos);
+        final long overall =
+                this.stopRequestedNanos.get() + this.stopTimeoutNanos * STOP_OVERALL_TIMEOUT_MULTIPLIER;
+        this.stopDeadlineNanos.set(Math.min(extended, overall));
     }
 
         /// Returns the last sequence delivered after commit and checksum validation.

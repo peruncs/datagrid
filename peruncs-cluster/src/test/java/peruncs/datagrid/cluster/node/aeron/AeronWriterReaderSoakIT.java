@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import org.eclipse.store.gigamap.jvector.VectorIndices;
-import org.eclipse.store.gigamap.jvector.VectorSearchResult;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
 import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
@@ -216,7 +215,7 @@ class AeronWriterReaderSoakIT {
                          * graph and both indexes. Same-JVM close/reopen is a
                          * known upstream materializer race; process-restart
                          * durability is covered by the smoke test. */
-                        assertQuiescent(startNanos, r, (IndexRoot) holders[r].rootObject(), present);
+                        assertQuiescent(startNanos, holders[r], r, present);
                         holders[r].close();
                     } finally {
                         gates[r].writeLock().unlock();
@@ -226,6 +225,10 @@ class AeronWriterReaderSoakIT {
                 if (!strictProblems.isEmpty()) {
                     throw new AssertionError("soak strict verification failed: " + strictProblems);
                 }
+                /* Live reads run joined on the coordinator's read side, so a
+                 * torn index view is a product defect, not load noise. */
+                assertEquals(0, this.tornReads.get(),
+                        "joined live reads observed torn index state");
             } finally {
                 writer.shutdown();
             }
@@ -315,7 +318,12 @@ class AeronWriterReaderSoakIT {
                     Thread.sleep(50L);
                     continue;
                 }
-                queryOnce(node, random);
+                /* Joined read: the product contract requires reads to hold the
+                 * coordinator's read side. An unjoined query can trigger a
+                 * lazy vector-graph rebuild that races the next batch's bulk
+                 * materialization — wedging the reader and reading torn
+                 * entities. */
+                node.graphCoordinator().read(() -> queryOnce(node, random));
                 this.servedQueries.incrementAndGet();
             } catch (final RuntimeException torn) {
                 /* Replication may land mid-query and tear the read view; the
@@ -487,6 +495,18 @@ class AeronWriterReaderSoakIT {
     private void assertConverged(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
                                  final int readerIndex, final List<ArticleState> present,
                                  final List<String> absent, final long visibilityDeadlineNanos) {
+        /* Joined like every other read: the product contract requires the
+         * coordinator's read side even this late — quiescence today means no
+         * batch can race these queries, but the phase argument is fragile and
+         * the 20 s visibility polls hold no coordinator protection at all. */
+        holders[readerIndex].graphCoordinator().read(() -> assertConvergedJoined(
+                startNanos, holders, gates, readerIndex, present, absent, visibilityDeadlineNanos));
+    }
+
+    private void assertConvergedJoined(final long startNanos, final ReaderNode[] holders,
+                                       final ReadWriteLock[] gates, final int readerIndex,
+                                       final List<ArticleState> present, final List<String> absent,
+                                       final long visibilityDeadlineNanos) {
         final IndexRoot root = (IndexRoot) holders[readerIndex].rootObject();
         final Set<String> titles = new HashSet<>();
         final Map<String, String> bodies = new HashMap<>();
@@ -547,25 +567,31 @@ class AeronWriterReaderSoakIT {
 
     private void seedProbe(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates) {
         for (int r = 0; r < holders.length; r++) {
-            if (holders[r] == null) continue;
-            gates[r].readLock().lock();
+            final ReaderNode node = holders[r];
+            if (node == null) continue;
+            final int reader = r;
+            gates[reader].readLock().lock();
             try {
-                final IndexRoot root = (IndexRoot) holders[r].rootObject();
-                final Set<String> graphTitles = new HashSet<>();
-                root.articles.iterate(article -> graphTitles.add(article.title));
-                int graphSeeds = 0;
-                int luceneSeeds = 0;
-                for (final ArticleState seed : this.seedStates) {
-                    if (!graphTitles.contains(seed.title())) continue;
-                    graphSeeds++;
-                    if (!luceneIndex(root.articles).query("title:" + seed.title()).isEmpty()) luceneSeeds++;
-                }
-                audit(startNanos, "seed-probe reader=%d graphSeeds=%d luceneSeeds=%d"
-                        .formatted(r, graphSeeds, luceneSeeds));
+                node.graphCoordinator().read(() -> seedProbeJoined(startNanos, node, reader));
             } finally {
                 gates[r].readLock().unlock();
             }
         }
+    }
+
+    private void seedProbeJoined(final long startNanos, final ReaderNode node, final int r) {
+        final IndexRoot root = (IndexRoot) node.rootObject();
+        final Set<String> graphTitles = new HashSet<>();
+        root.articles.iterate(article -> graphTitles.add(article.title));
+        int graphSeeds = 0;
+        int luceneSeeds = 0;
+        for (final ArticleState seed : this.seedStates) {
+            if (!graphTitles.contains(seed.title())) continue;
+            graphSeeds++;
+            if (!luceneIndex(root.articles).query("title:" + seed.title()).isEmpty()) luceneSeeds++;
+        }
+        audit(startNanos, "seed-probe reader=%d graphSeeds=%d luceneSeeds=%d"
+                .formatted(r, graphSeeds, luceneSeeds));
     }
 
     /// Compares the whole live graph against the reader Lucene index when a
@@ -574,55 +600,73 @@ class AeronWriterReaderSoakIT {
     private void indexDivergenceCensus(final long startNanos, final ReaderNode[] holders,
                                    final ReadWriteLock[] gates, final int failedReader, final String trigger) {
         for (int r = 0; r < holders.length; r++) {
-            if (holders[r] == null) {
+            final ReaderNode node = holders[r];
+            if (node == null) {
                 audit(startNanos, "index-census reader=%d reseed-pending".formatted(r));
                 continue;
             }
-            gates[r].readLock().lock();
+            final int reader = r;
+            gates[reader].readLock().lock();
             try {
-                final IndexRoot root = (IndexRoot) holders[r].rootObject();
-                final Set<String> graphTitles = new HashSet<>();
-                root.articles.iterate(article -> graphTitles.add(article.title));
-                final VectorIndices<IndexedArticle> vectors =
-                        root.articles.index().get(VectorIndices.Category());
-                int checked = 0;
-                int missing = 0;
-                int jvectorMissing = 0;
-                long newestMissingTx = -1L;
-                long newestCheckedTx = -1L;
-                final List<String> missingSample = new ArrayList<>();
-                for (final ArticleState state : this.live.values()) {
-                    if (checked >= 600) break;
-                    checked++;
-                    newestCheckedTx = Math.max(newestCheckedTx, state.modifiedTx());
-                    if (!graphTitles.contains(state.title())) continue;
-                    if (luceneIndex(root.articles).query("title:" + state.title()).isEmpty()) {
-                        missing++;
-                        newestMissingTx = Math.max(newestMissingTx, state.modifiedTx());
-                        if (r == failedReader && missingSample.size() < 8) {
-                            missingSample.add("%s@tx%d".formatted(state.title(), state.modifiedTx()));
-                        }
-                    }
-                    try {
-                        if (!jvectorHits(vectors, state)) jvectorMissing++;
-                    } catch (final RuntimeException jvector) {
-                        jvectorMissing++;
-                    }
-                }
-                audit(startNanos, "index-census reader=%d graph=%d checked=%d missing=%d jvectorMissing=%d newestMissingTx=%d newestCheckedTx=%d%s"
-                        .formatted(r, graphTitles.size(), checked, missing, jvectorMissing, newestMissingTx,
-                                newestCheckedTx,
-                                r == failedReader ? " trigger=(%s) sample=%s".formatted(trigger, missingSample) : ""));
+                node.graphCoordinator().read(() ->
+                        indexDivergenceCensusJoined(startNanos, node, reader, failedReader, trigger));
             } finally {
                 gates[r].readLock().unlock();
             }
         }
     }
 
+    private void indexDivergenceCensusJoined(final long startNanos, final ReaderNode node, final int r,
+                                            final int failedReader, final String trigger) {
+        final IndexRoot root = (IndexRoot) node.rootObject();
+        final Set<String> graphTitles = new HashSet<>();
+        root.articles.iterate(article -> graphTitles.add(article.title));
+        final VectorIndices<IndexedArticle> vectors =
+                root.articles.index().get(VectorIndices.Category());
+        int checked = 0;
+        int missing = 0;
+        int jvectorMissing = 0;
+        long newestMissingTx = -1L;
+        long newestCheckedTx = -1L;
+        final List<String> missingSample = new ArrayList<>();
+        for (final ArticleState state : this.live.values()) {
+            if (checked >= 600) break;
+            checked++;
+            newestCheckedTx = Math.max(newestCheckedTx, state.modifiedTx());
+            if (!graphTitles.contains(state.title())) continue;
+            if (luceneIndex(root.articles).query("title:" + state.title()).isEmpty()) {
+                missing++;
+                newestMissingTx = Math.max(newestMissingTx, state.modifiedTx());
+                if (r == failedReader && missingSample.size() < 8) {
+                    missingSample.add("%s@tx%d".formatted(state.title(), state.modifiedTx()));
+                }
+            }
+            try {
+                if (!jvectorHits(vectors, state)) jvectorMissing++;
+            } catch (final RuntimeException jvector) {
+                jvectorMissing++;
+            }
+        }
+        audit(startNanos, "index-census reader=%d graph=%d checked=%d missing=%d jvectorMissing=%d newestMissingTx=%d newestCheckedTx=%d%s"
+                .formatted(r, graphTitles.size(), checked, missing, jvectorMissing, newestMissingTx,
+                        newestCheckedTx,
+                        r == failedReader ? " trigger=(%s) sample=%s".formatted(trigger, missingSample) : ""));
+    }
+
     /// Verifies a quiesced reader end to end: the graph must hold recent
     /// transactions, and both indexes must answer for every live article.
-    private void assertQuiescent(final long startNanos, final int readerIndex, final IndexRoot imported,
+    private void assertQuiescent(final long startNanos, final ReaderNode node, final int readerIndex,
                                 final List<ArticleState> present) {
+        /* Joined like every other read: the reader is stopped here so no
+         * batch can race this census, but the join keeps the invariant
+         * unconditional instead of phase-dependent. */
+        node.graphCoordinator().read(() ->
+                assertQuiescentJoined(startNanos, node, readerIndex, present));
+    }
+
+    private void assertQuiescentJoined(final long startNanos, final ReaderNode node, final int readerIndex,
+                                       final List<ArticleState> present) {
+        final IndexRoot imported = (IndexRoot) node.rootObject();
         final Set<String> titles = new HashSet<>();
         final Map<String, String> bodies = new HashMap<>();
         imported.articles.iterate(article -> {
@@ -670,8 +714,12 @@ class AeronWriterReaderSoakIT {
     }
 
     private static boolean jvectorHits(final VectorIndices<IndexedArticle> vectors, final ArticleState state) {
-        final VectorSearchResult<IndexedArticle> nearest = vectors.get("articles").search(state.vector(), 1);
-        return nearest.size() == 1 && state.title().equals(nearest.toList().getFirst().entity().title);
+        /* Top-5, not top-1: dense random vectors in a small cube make near-duplicates
+         * crowd the entity itself out of rank 1, and HNSW search is approximate, so a
+         * top-1 title comparison flakes seed-dependently on a healthy index. A truly
+         * unindexed entity still scores zero title hits in the top 5. */
+        return vectors.get("articles").search(state.vector(), 5).toList().stream()
+                .anyMatch(hit -> state.title().equals(hit.entity().title));
     }
 
     private static float[] randomVector(final Random random) {
@@ -726,6 +774,17 @@ class AeronWriterReaderSoakIT {
                 if (worker.isAlive()) alive.append(worker.getName()).append(' ');
             }
             System.out.println("SOAK alive workers: " + alive);
+            /* Parked virtual threads appear in neither getAllStackTraces nor
+             * jstack/jcmd output, so dump the watched workers directly: the
+             * test holds their references and getStackTrace works while parked. */
+            for (final Thread worker : workers) {
+                if (!worker.isAlive()) continue;
+                System.out.printf("SOAK worker-stack \"%s\" state=%s%n", worker.getName(), worker.getState());
+                final StackTraceElement[] stack = worker.getStackTrace();
+                for (int i = 0; i < Math.min(24, stack.length); i++) {
+                    System.out.println("SOAK    at " + stack[i]);
+                }
+            }
             final long nowNanos = System.nanoTime();
             final List<String> beatNames = new ArrayList<>(this.beats.keySet());
             Collections.sort(beatNames);
@@ -738,8 +797,9 @@ class AeronWriterReaderSoakIT {
     }
 
     private static void dumpThreads() {
-        /* Thread.getAllStackTraces covers parked virtual threads, which the
-         * MXBean dump omits; the MXBean is only used for deadlock detection. */
+        /* getAllStackTraces omits parked virtual threads (verified on JDK 26),
+         * so alive soak workers are dumped separately in the watchdog via
+         * getStackTrace; the MXBean dump here is only for deadlock detection. */
         final java.lang.management.ThreadMXBean beans = ManagementFactory.getThreadMXBean();
         try {
             final long[] deadlocked = beans.findDeadlockedThreads();

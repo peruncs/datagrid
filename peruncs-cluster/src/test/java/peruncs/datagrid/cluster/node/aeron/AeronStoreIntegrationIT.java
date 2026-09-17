@@ -26,6 +26,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1051,23 +1052,53 @@ class AeronStoreIntegrationIT {
             this.client.start();
         }
 
-        void awaitLive() {
-            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L);
-            while (!this.client.isLive() && this.client.failure() == null && System.nanoTime() < deadline) {
+        /* A lagging reader still converges: replaying a deep backlog at a few
+         * transactions per second is healthy, just slow. Fixed second bounds
+         * flake on loaded machines, so the waits below use an overall
+         * deadline plus a stall detector: the applied sequence must keep
+         * advancing, and a reader that stops making progress fails fast
+         * instead of hanging the test's joins. */
+        private static final long WAIT_OVERALL_NANOS = TimeUnit.SECONDS.toNanos(120L);
+        private static final long WAIT_STALL_NANOS = TimeUnit.SECONDS.toNanos(20L);
+
+        /// Parks until `done` holds, requiring applied-sequence progress at
+        /// least every stall window; fails fast on a stall or overall timeout.
+        ///
+        /// @param done condition to wait for
+        /// @param what wait description for failure messages
+        private void awaitProgress(final BooleanSupplier done, final String what) {
+            final long deadline = System.nanoTime() + WAIT_OVERALL_NANOS;
+            long lastApplied = this.client.cursor().logicalSequence();
+            long lastProgressNanos = System.nanoTime();
+            while (!done.getAsBoolean()) {
+                if (this.client.failure() != null) throw this.client.failure();
+                final long nowNanos = System.nanoTime();
+                final long applied = this.client.cursor().logicalSequence();
+                if (applied != lastApplied) {
+                    lastApplied = applied;
+                    lastProgressNanos = nowNanos;
+                }
+                if (nowNanos - lastProgressNanos > WAIT_STALL_NANOS) {
+                    throw new AssertionError(
+                            "reader stalled while %s (applied sequence unchanged)".formatted(what));
+                }
+                if (nowNanos >= deadline) {
+                    throw new AssertionError("reader timed out while %s".formatted(what));
+                }
                 Thread.onSpinWait();
                 java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
             }
+        }
+
+        void awaitLive() {
+            awaitProgress(this.client::isLive, "awaiting the live image");
             if (this.client.failure() != null) throw this.client.failure();
             assertTrue(this.client.isLive(), "reader did not join the writer's live publication");
         }
 
         void await(final ReplicationCursor target) {
-            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L);
-            while (this.client.cursor().logicalSequence() < target.logicalSequence() &&
-                   this.client.failure() == null && System.nanoTime() < deadline) {
-                Thread.onSpinWait();
-                java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
-            }
+            awaitProgress(() -> this.client.cursor().logicalSequence() >= target.logicalSequence(),
+                    "awaiting transaction " + target.logicalSequence());
             if (this.client.failure() != null) throw this.client.failure();
             assertEquals(target.logicalSequence(), this.client.cursor().logicalSequence(),
                     "reader did not resolve the writer transaction");
@@ -1090,10 +1121,7 @@ class AeronStoreIntegrationIT {
 
         void stopAtLatest() {
             this.client.stopAtLatestMessage();
-            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
-            while (this.client.isRunning() && System.nanoTime() < deadline) {
-                java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
-            }
+            awaitProgress(() -> !this.client.isRunning(), "stopping at the latest boundary");
             if (this.client.failure() != null) {
                 throw new AssertionError("reader failed while stopping", this.client.failure());
             }

@@ -113,6 +113,63 @@ public final class ClusterStoreIndexes {
     private static final ThreadLocal<ValidationScratch> SCRATCH =
             ThreadLocal.withInitial(ValidationScratch::new);
 
+        /* Resolved upstream vector-graph internals, cached per index class.
+         * `ClassValue` like [#INDEX_RELEVANT] so index classes unload with
+         * their Store class loader. Resolution runs once per class, not once
+         * per index per batch; an unrecognized layout throws instead of
+         * caching, so the next batch fails closed again. */
+    private record VectorGraphFields(Field builder, Field graph, Field rebuilt, Field deferred) {
+    }
+
+    private static final ClassValue<VectorGraphFields> VECTOR_GRAPH_FIELDS = new ClassValue<>() {
+        @Override
+        protected VectorGraphFields computeValue(final Class<?> type) {
+            Field builderField = null;
+            Field graphField = null;
+            Field rebuiltField = null;
+            Field deferredField = null;
+            for (Class<?> current = type; current != null && current != Object.class;
+                 current = current.getSuperclass()) {
+                for (final Field field : current.getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers())) continue;
+                    switch (field.getName()) {
+                        case "builder" -> {
+                            if (builderField == null && GraphIndexBuilder.class.isAssignableFrom(field.getType())) {
+                                builderField = field;
+                            }
+                        }
+                        case "index" -> {
+                            if (graphField == null && OnHeapGraphIndex.class.isAssignableFrom(field.getType())) {
+                                graphField = field;
+                            }
+                        }
+                        case "graphRebuilt" -> {
+                            if (rebuiltField == null && field.getType() == boolean.class) {
+                                rebuiltField = field;
+                            }
+                        }
+                        case "deferredBuilderOps" -> {
+                            if (deferredField == null
+                                    && ConcurrentLinkedQueue.class.isAssignableFrom(field.getType())) {
+                                deferredField = field;
+                            }
+                        }
+                        default -> {
+                        }
+                    }
+                }
+                if (builderField != null && graphField != null
+                        && rebuiltField != null && deferredField != null) break;
+            }
+            if (builderField == null || graphField == null || rebuiltField == null || deferredField == null) {
+                throw new IllegalStateException(
+                        "cannot reset vector search graph on %s; unsupported Store version"
+                                .formatted(type.getName()));
+            }
+            return new VectorGraphFields(builderField, graphField, rebuiltField, deferredField);
+        }
+    };
+
     private static final class ValidationScratch {
         final IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
         final ArrayDeque<Object> queue = new ArrayDeque<>();
@@ -498,10 +555,11 @@ public final class ClusterStoreIndexes {
     /// (repaired neighbor lists, warmed builder state) that do not hold for a
     /// just-materialized graph, and bisecting a native allocator abort in the
     /// reader soak isolated the crash to those calls. The reset uses only the
-    /// lifecycle the index already exercises on every load and close, so an
-    /// unqueried stream of small batches pays a few field writes per batch
-    /// and rebuilds once when finally queried, instead of rebuilding — or
-    /// re-vectorizing — every entity per batch.
+    /// lifecycle the index already exercises on every load and close. The
+    /// merger rebuilds the graphs eagerly after each batch (see
+    /// [#rebuildVectorSearchGraphs(StorageConnection)]): leaving the cleared
+    /// guard for the next query would race a full store-scan rebuild against
+    /// the following batch's materialization.
     ///
     /// Everything runs under the map monitor, the same lock queries use, and
     /// the merger holds one coordinator write section across retirement,
@@ -615,45 +673,11 @@ public final class ClusterStoreIndexes {
 
     private static void resetVectorSearchGraph(final VectorIndex<?> index) {
         final Object target = Objects.requireNonNull(index, "index");
-        Field builderField = null;
-        Field graphField = null;
-        Field rebuiltField = null;
-        Field deferredField = null;
-        for (Class<?> type = target.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
-            for (final Field field : type.getDeclaredFields()) {
-                if (Modifier.isStatic(field.getModifiers())) continue;
-                switch (field.getName()) {
-                    case "builder" -> {
-                        if (builderField == null && GraphIndexBuilder.class.isAssignableFrom(field.getType())) {
-                            builderField = field;
-                        }
-                    }
-                    case "index" -> {
-                        if (graphField == null && OnHeapGraphIndex.class.isAssignableFrom(field.getType())) {
-                            graphField = field;
-                        }
-                    }
-                    case "graphRebuilt" -> {
-                        if (rebuiltField == null && field.getType() == boolean.class) {
-                            rebuiltField = field;
-                        }
-                    }
-                    case "deferredBuilderOps" -> {
-                        if (deferredField == null && ConcurrentLinkedQueue.class.isAssignableFrom(field.getType())) {
-                            deferredField = field;
-                        }
-                    }
-                    default -> {
-                    }
-                }
-            }
-            if (builderField != null && graphField != null && rebuiltField != null && deferredField != null) break;
-        }
-        if (builderField == null || graphField == null || rebuiltField == null || deferredField == null) {
-            throw new IllegalStateException(
-                    "cannot reset vector search graph on %s; unsupported Store version"
-                            .formatted(target.getClass().getName()));
-        }
+        final VectorGraphFields fields = VECTOR_GRAPH_FIELDS.get(target.getClass());
+        final Field builderField = fields.builder();
+        final Field graphField = fields.graph();
+        final Field rebuiltField = fields.rebuilt();
+        final Field deferredField = fields.deferred();
         final GraphIndexBuilder builder =
                 (GraphIndexBuilder) XMemory.getObject(target, XMemory.objectFieldOffset(builderField));
         final OnHeapGraphIndex graph =
@@ -681,6 +705,76 @@ public final class ClusterStoreIndexes {
             XMemory.setObject(target, XMemory.objectFieldOffset(graphField), null);
         }
         XMemory.set_byte(target, XMemory.objectFieldOffset(rebuiltField), (byte) 0);
+    }
+
+        /// Rebuilds every vector search graph eagerly after an import batch.
+    ///
+    /// The rebuild runs here — inside the merger's coordinator write section
+    /// and under the map monitor — instead of lazily on the next query. A
+    /// lazy rebuild scans the whole store while holding the map monitor and
+    /// performs storage reads; racing it with the next batch's bulk
+    /// materialization deadlocks the two (map monitor against the object
+    /// registry) and reads torn entities (zeroed vectors, duplicated nodes).
+    /// Rebuilding eagerly over the just-materialized boundary keeps every
+    /// query on an already-built graph, so queries never rebuild and observe
+    /// at most ordinary torn reads, never wedge the reader.
+    ///
+    /// The trigger is a trivial top-1 search: a search always initializes the
+    /// index first, which rebuilds exactly when the refresh cleared the guard.
+    /// The probe vector is all-ones so its norm can never be zero. The guard
+    /// is read back after every probe, so an upstream version that decouples
+    /// search from initialization fails this merger loudly instead of
+    /// silently leaving the rebuild to the next query.
+    ///
+    /// @param storage storage connection owning the materialized graph
+    @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter") // map is the shared GigaMap monitor, not a local lock
+    static void rebuildVectorSearchGraphs(final StorageConnection storage) {
+        Objects.requireNonNull(storage, "storage");
+        final ValidationScratch scratch = SCRATCH.get();
+        collectMaps(storage, scratch);
+        try {
+            for (final GigaMap<?> map : scratch.maps) {
+                synchronized (map) {
+                    collectIndexGroups(map, scratch.groups);
+                    try {
+                        for (final IndexGroup<?> group : scratch.groups) {
+                            if (group instanceof VectorIndices<?> vectors) {
+                                ensureVectorSearchGraphs(vectors);
+                            }
+                        }
+                    } finally {
+                        scratch.groups.clear();
+                    }
+                }
+            }
+        } finally {
+            scratch.maps.clear();
+        }
+    }
+
+    private static void ensureVectorSearchGraphs(final VectorIndices<?> vectors) {
+        final ArrayList<VectorIndex<?>> found = new ArrayList<>();
+        vectors.accessIndices(indices -> indices.values().iterate(found::add));
+        for (final VectorIndex<?> index : found) {
+            final float[] probe = new float[index.configuration().dimension()];
+            Arrays.fill(probe, 1.0f);
+            index.search(probe, 1);
+            /* Prove the probe rebuilt: if a future Store version decouples
+             * search from lazy initialization, the cleared guard survives
+             * this call and the next query would wedge against a batch again.
+             * Failing here keeps that regression loud — a failed merger —
+             * instead of a silent return of the deadlock. On-disk
+             * configurations, whose rebuild upstream skips, are rejected by
+             * validation, so the guard must be set for every index seen here,
+             * including an empty store (the flag is set even when the rebuild
+             * finds no entries). */
+            final Field rebuilt = VECTOR_GRAPH_FIELDS.get(index.getClass()).rebuilt();
+            if (XMemory.get_byte(index, XMemory.objectFieldOffset(rebuilt)) == 0) {
+                throw new IllegalStateException(
+                        "vector search graph rebuild did not run on %s; unsupported Store version"
+                                .formatted(index.getClass().getName()));
+            }
+        }
     }
 
         /// Retires a reader's cached Lucene handles without committing, so the

@@ -371,7 +371,10 @@ class ProviderCrashMatrixIT {
                 try {
                     final Path evidence = DiagnosticCollector.collect(base, failure.toString());
                     throw new AssertionError("double-crash evidence: %s".formatted(evidence), failure);
-                } catch (final IOException evidenceFailure) {
+                } catch (final Throwable evidenceFailure) {
+                    /* Evidence collection must never mask the crash-cell
+                     * failure it was meant to document: a collector outage
+                     * (missing class, IO) suppresses into the original. */
                     failure.addSuppressed(evidenceFailure);
                     throw failure;
                 }
@@ -473,7 +476,10 @@ class ProviderCrashMatrixIT {
                 try {
                     final Path evidence = DiagnosticCollector.collect(base, failure.toString());
                     throw new AssertionError("crash cell evidence: %s".formatted(evidence), failure);
-                } catch (final IOException evidenceFailure) {
+                } catch (final Throwable evidenceFailure) {
+                    /* Evidence collection must never mask the crash-cell
+                     * failure it was meant to document: a collector outage
+                     * (missing class, IO) suppresses into the original. */
                     failure.addSuppressed(evidenceFailure);
                     throw failure;
                 }

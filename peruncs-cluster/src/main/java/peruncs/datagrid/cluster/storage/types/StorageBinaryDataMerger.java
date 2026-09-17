@@ -11,11 +11,7 @@ import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
@@ -583,6 +579,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * wait and reports the pinned buffers instead of freeing them
                  * underneath the Store. */
                 final long startedNanos = System.nanoTime();
+                /* Set inside the batch after validation, before the vector
+                 * rebuild: the overrun budget bounds materialization, whose
+                 * cost is batch-proportional, not the rebuild, which scans
+                 * the whole store and grows with data size. */
+                final long[] materializedAtNanos = new long[1];
                 try {
                     this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
                     {
@@ -613,6 +614,22 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                          * closed instead of diverging it. The scan visits
                          * index metadata only, never entity payload. */
                         ClusterStoreIndexes.validateStorageRoots(this.storage);
+                        materializedAtNanos[0] = System.nanoTime();
+                        /* Rebuild the vector graphs now, inside this write
+                         * section: leaving the cleared guard for the next
+                         * query races a full store-scan rebuild against the
+                         * following batch's materialization, which wedges the
+                         * reader and reads torn entities. The overrun check
+                         * below measures only up to the end of validation,
+                         * so a large but healthy store's rebuild cannot trip
+                         * the materialization budget: any rebuild failure
+                         * still fails this merger through the catch outside. */
+                        try {
+                            ClusterStoreIndexes.rebuildVectorSearchGraphs(this.storage);
+                        } catch (final RuntimeException | Error rebuildFailure) {
+                            throw new IllegalStateException(
+                                    "Store graph vector-index rebuild failed", rebuildFailure);
+                        }
                     });
                 } catch (final RuntimeException | Error failure) {
                     /* A genuine failure says failed; only an overrun says timed
@@ -625,7 +642,15 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     StorageBinaryDataImporter.release(this.drainBuffers, pending);
                     Arrays.fill(this.drainBuffers, 0, pending, null);
                 }
-                final long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+                /* Bounds materialization only: the vector rebuild above scans
+                 * the whole store, so including it would fail a healthy
+                 * large import. A batch that threw before stamping its
+                 * boundary already failed through the catch above. */
+                final long materializedAt = materializedAtNanos[0] == 0L
+                        ? System.nanoTime()
+                        : materializedAtNanos[0];
+                final long elapsedMs =
+                        TimeUnit.NANOSECONDS.toMillis(materializedAt - startedNanos);
                 if (elapsedMs > this.materializationBudgetMs) {
                     final IllegalStateException terminal = new IllegalStateException(
                             "Timed out while applying Store data: batch took %s ms with a budget of %s ms"
