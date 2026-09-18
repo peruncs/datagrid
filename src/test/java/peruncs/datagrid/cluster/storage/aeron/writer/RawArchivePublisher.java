@@ -8,6 +8,10 @@ public final class RawArchivePublisher {
     }
 
         /// Publishes a fixture transaction without exposing the raw path in production APIs.
+    ///
+    /// @param publisher target writer publisher
+    /// @param dictionary optional type dictionary bytes, or `null`
+    /// @param data Store binary payload buffers
     public static void publish(
             final AeronArchiveReplicationPublisher publisher,
             final byte[] dictionary,

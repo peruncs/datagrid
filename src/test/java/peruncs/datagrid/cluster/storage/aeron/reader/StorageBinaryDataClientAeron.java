@@ -24,6 +24,14 @@ public final class StorageBinaryDataClientAeron implements Disposable {
     private volatile CountDownLatch stopped = new CountDownLatch(0);
     private volatile boolean disposed;
 
+    /// Attaches a live reader to one subscription without starting polling.
+    ///
+    /// @param subscription live Aeron subscription to poll
+    /// @param configuration framing and timeout limits
+    /// @param clusterId expected cluster identity
+    /// @param epoch expected writer epoch
+    /// @param initialSequence last sequence already applied
+    /// @param receiver destination for complete Store binaries
     public StorageBinaryDataClientAeron(
             final Subscription subscription,
             final AeronReplicationConfiguration configuration,
@@ -46,6 +54,7 @@ public final class StorageBinaryDataClientAeron implements Disposable {
         }
     }
 
+    /// Starts the polling thread; repeated calls are ignored once running.
     public synchronized void start() {
         if (this.disposed) throw new IllegalStateException("Aeron reader is disposed");
         if (this.active.getAndSet(true)) return;
@@ -76,12 +85,20 @@ public final class StorageBinaryDataClientAeron implements Disposable {
         }
     }
 
+    /// Returns the last fully resolved transaction sequence.
+    ///
+    /// @return last resolved sequence, or `-1` before the first commit
     public long lastResolvedSequence() {
         return this.assembler.lastResolvedSequence();
     }
 
     /// Snapshots the current replay boundary. The fencing token is fixed at
     /// one because low-level UDP tests run a single unfenced writer.
+    ///
+    /// @param nodeId reader node identity for the cursor
+    /// @param storeGeneration Store generation for the cursor
+    /// @param recordingId Archive recording the position refers to
+    /// @return cursor at the last resolved sequence and position
     public AeronReplicationCursor cursor(final UUID nodeId, final UUID storeGeneration, final long recordingId) {
         final CursorSnapshot snapshot = this.assembler.cursorSnapshot();
         return new AeronReplicationCursor(
@@ -89,6 +106,9 @@ public final class StorageBinaryDataClientAeron implements Disposable {
                 snapshot.position(), snapshot.sequence());
     }
 
+    /// Returns the latched terminal failure, if the reader failed.
+    ///
+    /// @return terminal failure, or `null` while healthy
     public RuntimeException failure() {
         return this.assembler.failure();
     }

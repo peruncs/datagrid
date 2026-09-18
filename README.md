@@ -63,8 +63,6 @@ checkpoint paths must not be children of `ECLIPSE_DATAGRID_AERON_DIRECTORY`.
 Production deployments must replace the loopback channel defaults with
 routable node/Service addresses; the provider rejects loopback and wildcard
 endpoints when production mode is enabled.
-The provider owns its embedded MediaDriver/Archive lifecycle and closes those
-resources from the DataGrid storage-manager shutdown callback.
 
 Every node setting uses the `ECLIPSE_DATAGRID_` prefix. The earlier bare names
 (`IS_BACKUP_NODE`, `GC_INTERVAL_MINUTES`, ...) and the `MSCNL_*` names are
@@ -77,16 +75,11 @@ recording. Reader identity/checkpoint persistence is supplied by the
 node deployment; this provider does not invent an identity from the
 network address.
 
-A reader owns no authoritative Store image: replication ships deltas that
-reference object ids the writer created, so a reader started against an empty
-directory cannot reproduce pre-existing state and fails with
-`ReseedRequiredException` instead of inventing a root. Before a reader (or a
-backup node without a user upload) starts, seed it with a matching Store
-directory plus its durable replication cursor — either restore a compatible
-backup on the shared volume or copy the writer's Store directory and offset
-file while the writer is stopped. The writer is the only role that may
-manufacture a fresh root; the backup node may do so only for a user-uploaded
-Store it then publishes as the starter backup.
+Before a reader (or a backup node without a user upload) starts, seed it
+with a matching Store directory plus its durable replication cursor — either
+restore a compatible backup on the shared volume or copy the writer's Store
+directory and offset file while the writer is stopped. (Why a seed is
+required at all is a design invariant; see the module documentation.)
 One provider instance owns one configured replication stream; use separate
 provider instances/channels for multiple streams.
 
@@ -95,20 +88,11 @@ provider instances/channels for multiple streams.
 Clusters may share a VPN or other routed network, but each cluster must have
 its own Aeron traffic namespace. Configure distinct live-channel control
 endpoints, distinct replay and watermark endpoints when those channels are
-shared, and distinct stream IDs for every cluster. Do not rely on the cluster
-UUID to separate Aeron traffic: it is carried inside each frame and checked
-only after a subscriber receives that frame.
+shared, and distinct stream IDs for every cluster. Every cluster must also use
+a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`. (Why namespaces can't be shared
+is a design constraint; see the module documentation.)
 
-Every cluster must also use a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`.
-Readers reject frames, cursors, checkpoints, and watermarks whose cluster ID,
-Store generation, or epoch does not match their configuration. If two clusters
-accidentally subscribe to the same live channel and stream, the wrong
-cluster's frame is rejected and the subscriber fails closed; separate channels
-and stream IDs prevent that cross-talk and avoid turning a configuration error
-into a cluster outage.
-
-The cluster ID and CRC32C checks are identity and corruption checks, not
-authentication. Network policy must still restrict which nodes can publish to
+Network policy must still restrict which nodes can publish to
 each cluster's live and watermark endpoints. Archive control authentication is
 separate and does not isolate live replication traffic.
 
@@ -129,8 +113,7 @@ recorded-position, and stop waits are independently configurable with
 `ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS`, and
 `ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS`; reader shutdown uses
 `ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
-Replication integrity comes from header and payload CRC32C checks on every
-frame; there is no per-frame key. Replication must run on an isolated network
+Replication must run on an isolated network
 (VPN, firewall rules, or Kubernetes NetworkPolicies): any host that can reach
 the live channel can publish well-formed frames. Every writer and reader must
 use the same cluster id, epoch, and fencing lineage; a mismatch fails closed
@@ -160,11 +143,9 @@ and the writer records only quorum members, rejecting any other reader's
 watermark. The writer records those
 acknowledgements automatically; call `deleteThrough` with the ordinary durable
 backup cursor naming the desired sequence. The configured reader quorum,
-rather than the maintenance request itself, authorizes deletion.
-The provider computes the least advanced reader position, pauses coordinator
-admission, stops the recording, purges only complete segments, and extends the
-same recording at its exact stop position before admitting another write. An
-active replay defers maintenance without deleting data. External Archives and
+rather than the maintenance request itself, authorizes deletion. (How the
+quorum gates deletion is a design decision; see the module documentation.)
+An active replay defers maintenance without deleting data. External Archives and
 incomplete reader quorums remain unsupported for deletion. Without a
 configured reader list, retention is reported as
 unsupported and history is preserved. Operators must monitor Archive capacity
@@ -197,14 +178,10 @@ the writer's recording permissions.
 
 ## Network boundary
 
-Each control proves something different; none of them replaces the network
-boundary:
+Fencing tokens and CRC32C are correctness checks, not security: what each
+control does and does not prove is a design decision recorded in the module
+documentation. Operationally, none of them replaces the network boundary:
 
-- The writer fencing lease and fencing token are correctness, not security:
-  they keep exactly one writer's history linear.
-- CRC32C detects accidental corruption, never forgery. Any host that can reach
-  the live channel can publish well-formed frames, and a staging cluster on
-  the same network must use a different cluster id or its frames cross-talk.
 - Aeron Archive authentication gates control-plane commands (recording,
   retention, replay). It is defense in depth behind firewall rules and
   NetworkPolicies, which remain the primary boundary and the only per-node
@@ -214,24 +191,13 @@ Run replication on a VPN-contained network: the isolated network is the only
 traffic boundary for replication frames and reader watermarks. Archive
 control authentication is a separate protection domain and always needs its
 own acknowledgement (`ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE`) when
-disabled. Running without it never disables fencing or CRC32C — those are
-correctness checks, not network security.
+disabled. Running without it never disables fencing or CRC32C.
 
 Archive control credentials have no overlap mechanism: rotate those with a
 coordinated restart.
 
-Fixed-writer/no-consensus operation is intentional. The strict one-writer
-invariant is enforced by a renewable writer lease in the shared backup volume:
-a writer acquires `writer-lease-<cluster>-<generation>.lease` in
-`ECLIPSE_DATAGRID_BACKUP_PATH`, renews its heartbeat, and publishes the lease's
-monotonically increasing fencing token with every envelope, checkpoint, and
-cursor. A different writer for the same cluster/generation fails acquisition while
-the first heartbeat is fresh, and readers reject a lower token so a deposed
-writer cannot interleave history. The same writer (the same stable node id)
-restarting after a clean stop or a crash mints the next token immediately;
-a live clone with a copied node id is deposed instead, when its next renewal
-fails the holder check. A writer therefore requires a shared
-`ECLIPSE_DATAGRID_BACKUP_PATH`; manual promotion and automated failover remain
+A writer requires a shared `ECLIPSE_DATAGRID_BACKUP_PATH` for its fencing
+lease; manual promotion and automated failover remain
 deployment responsibilities, and the lease directory must not sit inside the
 Aeron driver, archive, or checkpoint tree.
 
@@ -253,10 +219,9 @@ backup HTTP transport or hosted backup target is configured by the node.
 
 ## Programmatic control boundary
 
-The node ships no HTTP server and no HTTP types. The embedding application
-owns the entire boundary — HTTP/OpenAPI routes, MCP tools, a web UI,
-Prometheus rendering, authentication, and authorization — and drives the node
-through the control views borrowed from `ClusterFoundation`:
+The Boundary–Control–Entity separation itself is an architectural decision
+recorded in the module documentation. What remains here is the operator
+contract for driving the node through its control views:
 
 - `storageNodeManager()` on a storage node returns a `StorageNodeControl`:
   role (`isDistributor`), liveness (`isHealthy`), readiness (`isReady`),
@@ -268,14 +233,10 @@ through the control views borrowed from `ClusterFoundation`:
   backup triggers (`createStorageBackup`, `isBackupRunning`) and reader
   pause/resume (`stopReadingAtLatestMessage`, `resumeReading`, `isReading`).
 
-The views carry no `close()`: the foundation owns both managers and closes
-them exactly once, and both closes are idempotent, so a stray borrower call
-stays harmless. The role is validated before anything starts, so probing the
-wrong role never starts Store, Aeron, recovery, or background threads. Roles
-are fixed at startup — a writer serves the distributor, a reader or
-backup-reader serves the reader, and there is deliberately no
-reader-to-distributor promotion: a role change is a restart with a new role,
-never a runtime transition.
+The views carry no `close()`, and both closes are idempotent, so a stray
+borrower call stays harmless. The role is validated before anything starts,
+so probing the wrong role never starts Store, Aeron, recovery, or background
+threads.
 The mutating operations (backups, storage checks, pausing and resuming
 replication) carry no authentication of their own: the embedding application
 MUST authenticate and authorize them before delegating. Only the health,
@@ -286,26 +247,18 @@ other failure to an internal error.
 
 ## Store binary transport
 
-The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque and
-adds a 76-byte version-4 envelope for cluster identity, fencing token,
-sequence, chunking,
-CRC32C, and commit/abort markers. A writer should use
+The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque
+inside a versioned envelope. (Envelope framing and the Archive-first write
+ordering are design decisions; see the module documentation.) A writer should use
 `AeronStorageBinaryReplicationTarget` with an
-`AeronReplicationWriteCoordinator` so the ordering is:
-
-```text
-Archive prepare chunks -> local Store enqueue -> Archive commit
-```
+`AeronReplicationWriteCoordinator`.
 
 Readers use `AeronArchiveReader.New(...)` for replay, live
 join, and reconnect. Persist the DataGrid cursor/checkpoint after each
 completed commit. `AeronReplicationCheckpointStore` is provided for
 deployments that persist the Aeron-specific identity and replay boundary.
 
-The envelope is deliberately not an SBE-generated second payload format:
-Eclipse Serializer's `Binary` bytes remain the authoritative Store payload,
-while the fixed header supplies only framing and validation. Chunk size must
-remain below `min(termLength / 8, 16 MiB) - 76`. Aeron fragments each envelope
+Chunk size must remain below `min(termLength / 8, 16 MiB) - 76`. Aeron fragments each envelope
 as needed for the selected MTU.
 
 CRC32C detects accidental corruption; it does not authenticate a sender. Bind
@@ -349,5 +302,7 @@ after calibrating budgets from nightly baselines).
 ## Design
 
 The architectural decisions — Archive-first replication, fixed roles,
-durable cursors and checkpoints, quorum-gated retention, in-graph indexes —
-are recorded in the [module documentation](src/main/java/module-info.java).
+durable cursors and checkpoints, seeding and reseed, quorum-gated retention,
+in-graph indexes, and the boundary–control–entity separation — are recorded
+in the module documentation:
+[`src/main/java/module-info.java`](src/main/java/module-info.java).

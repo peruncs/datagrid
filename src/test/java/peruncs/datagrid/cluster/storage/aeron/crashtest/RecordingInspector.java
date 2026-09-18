@@ -26,6 +26,13 @@ public final class RecordingInspector {
 
     /// Inspects a stopped recording through to the Archive stop position.
     ///
+    /// @param archive Archive client serving the replay
+    /// @param recordingId Archive recording to inspect
+    /// @param replayChannel replay channel for the inspection subscription
+    /// @param streamId replay stream id
+    /// @param clusterId expected cluster identity of every envelope
+    /// @param epoch expected writer epoch of every envelope
+    /// @param timeoutMillis maximum replay wait in milliseconds
     /// @return evidence for the complete recording
     public static RecordingEvidence inspect(
             final AeronArchive archive,
@@ -45,6 +52,13 @@ public final class RecordingInspector {
     /// after a writer crash, when the Archive has not yet marked the recording
     /// stopped but its committed prefix must still be checked.
     ///
+    /// @param archive Archive client serving the replay
+    /// @param recordingId Archive recording to inspect
+    /// @param replayChannel replay channel for the inspection subscription
+    /// @param streamId replay stream id
+    /// @param clusterId expected cluster identity of every envelope
+    /// @param epoch expected writer epoch of every envelope
+    /// @param timeoutMillis maximum replay wait in milliseconds
     /// @param stopPosition prefix end returned by the caller, or a negative value
     ///                     to read the Archive stop position
     /// @return evidence for the inspected prefix
@@ -65,6 +79,17 @@ public final class RecordingInspector {
         /// Inspects a recording prefix with a caller-selected fragment limit. A limit
     /// of one is useful for proving that a fragmented data frame and its terminal
     /// marker are validated across separate poll calls.
+    ///
+    /// @param archive Archive client serving the replay
+    /// @param recordingId Archive recording to inspect
+    /// @param replayChannel replay channel for the inspection subscription
+    /// @param streamId replay stream id
+    /// @param clusterId expected cluster identity of every envelope
+    /// @param epoch expected writer epoch of every envelope
+    /// @param timeoutMillis maximum replay wait in milliseconds
+    /// @param stopPosition prefix end, or a negative value to read the Archive stop position
+    /// @param fragmentLimit maximum fragments per poll, must be positive
+    /// @return evidence for the inspected prefix
     public static RecordingEvidence inspect(
             final AeronArchive archive,
             final long recordingId,
@@ -286,6 +311,16 @@ public final class RecordingInspector {
         }
     }
 
+    /// Validated per-sequence recording evidence: terminal markers keyed by
+    /// sequence, payload CRCs for committed transactions, and the byte length
+    /// of any uncommitted trailing tail.
+    ///
+    /// @param recordingId inspected Archive recording
+    /// @param startPosition replay start position of the inspected prefix
+    /// @param stopPosition replay end position of the inspected prefix
+    /// @param terminalBySequence terminal marker kind per sequence
+    /// @param payloadCrcBySequence reassembled payload CRC per committed sequence
+    /// @param orphanTailLength uncommitted trailing bytes without a terminal
     public record RecordingEvidence(
             long recordingId,
             long startPosition,
@@ -294,6 +329,8 @@ public final class RecordingInspector {
             Map<Long, Integer> payloadCrcBySequence,
             long orphanTailLength
     ) {
+        /// Copies the evidence maps defensively so later mutation cannot
+        /// rewrite inspected history.
         public RecordingEvidence(
                 final long recordingId,
                 final long startPosition,

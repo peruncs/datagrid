@@ -23,6 +23,11 @@ public final class ArchiveArtifactMutator {
     }
 
         /// Returns all recording segments in physical order.
+    ///
+    /// @param archiveDirectory Archive directory holding the segment files
+    /// @param recordingId Archive recording to list segments for
+    /// @return recording segments ordered by base position
+    /// @throws IOException when the directory cannot be listed or holds no matching segments
     public static java.util.List<Path> segments(final Path archiveDirectory, final long recordingId)
             throws IOException {
         try (var files = Files.list(archiveDirectory)) {
@@ -45,6 +50,9 @@ public final class ArchiveArtifactMutator {
     }
 
         /// Flips one byte in the first envelope payload and forces the segment.
+    ///
+    /// @param segment recording segment file to corrupt
+    /// @throws IOException when the segment cannot be read, mutated, or forced
     public static void corruptFirstEnvelopePayload(final Path segment) throws IOException {
         if (Files.size(segment) > MAX_MUTATION_BYTES) {
             throw new UnsupportedArtifactLayoutException("segment exceeds mutation bound: %s".formatted(segment));
@@ -95,6 +103,11 @@ public final class ArchiveArtifactMutator {
 
         /// Shortens the final Aeron frame by one byte, leaving its replication envelope
     /// incomplete while preserving the segment's preallocated physical length.
+    ///
+    /// @param segment recording segment file holding the recording tail
+    /// @param recordingStartPosition Archive position where the recording starts
+    /// @param recordingStopPosition Archive position where the recording stops
+    /// @throws IOException when the boundary is unreadable or outside the segment
     public static void truncateFinalFrame(
             final Path segment,
             final long recordingStartPosition,
@@ -163,6 +176,9 @@ public final class ArchiveArtifactMutator {
     }
 
         /// Truncates the catalog only when it has a recognizable preallocation.
+    ///
+    /// @param archiveDirectory Archive directory holding `archive.catalog`
+    /// @throws IOException when the catalog is missing, too small, or cannot be forced
     public static void truncateCatalog(final Path archiveDirectory) throws IOException {
         final Path catalog = archiveDirectory.resolve("archive.catalog");
         final long size = Files.size(catalog);
@@ -173,7 +189,11 @@ public final class ArchiveArtifactMutator {
         }
     }
 
+    /// Thrown when an Archive layout does not match what this mutator understands.
     public static final class UnsupportedArtifactLayoutException extends IOException {
+        /// Reports an Archive layout this mutator does not understand.
+        ///
+        /// @param message what was unexpected
         public UnsupportedArtifactLayoutException(final String message) {
             super(message);
         }

@@ -13,7 +13,8 @@
 /// `...cluster.storage.aeron.*`, which also carries the embedded
 /// Lucene/JVector index policy. The exported packages
 /// contain the public contracts and errors used at those boundaries.
-/// Aeron is the only transport.
+/// Aeron is the only transport. Each provider owns its embedded MediaDriver
+/// and Archive lifecycle, closed from the storage-manager shutdown callback.
 ///
 /// # Archive-first replication
 ///
@@ -61,6 +62,15 @@
 /// atomic, and torn files are rejected. The checkpoint and cursor files are
 /// checksum-protected, not authenticated: their trust boundary is the
 /// filesystem, so the metadata directory must stay owner-only and local.
+///
+/// # Seeding and reseed
+///
+/// Replication ships deltas that reference object ids the writer created, so
+/// a reader owns no authoritative Store image: a reader started against an
+/// empty directory cannot reproduce pre-existing state and fails with
+/// `ReseedRequiredException` instead of inventing a root. The writer is the
+/// only role that may manufacture a fresh root; the backup node may do so
+/// only for a user-uploaded Store it then publishes as the starter backup.
 ///
 /// # Upgrade reseeds
 ///
@@ -119,6 +129,19 @@
 /// embedded GraphDirectory, and vector data in the persisted in-graph
 /// vector store; external directories and on-disk indexes are rejected at
 /// the registration boundary.
+///
+/// # Boundary, control, and entity
+///
+/// The node ships no HTTP server and no HTTP types. The embedding application
+/// owns the entire boundary — HTTP and OpenAPI routes, MCP tools, a web UI,
+/// Prometheus rendering, authentication, and authorization — and drives the
+/// node through the control views (`StorageNodeControl`, `BackupNodeControl`)
+/// borrowed from `ClusterFoundation`; the Store object graph beneath them is
+/// the entity layer. The foundation owns both managers and closes them
+/// exactly once, and both closes are idempotent. Roles stay fixed at startup
+/// as described above, so there is deliberately no reader-to-distributor
+/// promotion: a role change is a restart with a new role, never a runtime
+/// transition.
 ///
 /// @since 1.0
 module peruncs.datagrid.cluster

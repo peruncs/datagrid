@@ -106,55 +106,93 @@ public final class AeronArchiveReader implements Disposable {
             };
             private ReaderDeliveryListener deliveryListener;
 
+            /// Creates an empty reader configuration builder.
+            public Builder() {
+            }
+
+            /// Sets the shared Aeron client.
+            ///
             /// @param value shared Aeron client
             /// @return this builder
             public Builder aeron(final Aeron value) { this.aeron = value; return this; }
+            /// Sets the Archive connection settings.
+            ///
             /// @param value Archive connection settings
             /// @return this builder
             public Builder archiveContext(final AeronArchive.Context value) { this.archiveContext = value; return this; }
+            /// Sets the Archive recording id.
+            ///
             /// @param value Archive recording id
             /// @return this builder
             public Builder recordingId(final long value) { this.recordingId = value; return this; }
+            /// Sets the first replay position.
+            ///
             /// @param value first replay position
             /// @return this builder
             public Builder startPosition(final long value) { this.startPosition = value; return this; }
+            /// Sets the live channel.
+            ///
             /// @param value live channel
             /// @return this builder
             public Builder liveChannel(final String value) { this.liveChannel = value; return this; }
+            /// Sets the live stream id.
+            ///
             /// @param value live stream id
             /// @return this builder
             public Builder liveStreamId(final int value) { this.liveStreamId = value; return this; }
+            /// Sets the replay channel.
+            ///
             /// @param value replay channel
             /// @return this builder
             public Builder replayChannel(final String value) { this.replayChannel = value; return this; }
+            /// Sets the replay stream id.
+            ///
             /// @param value replay stream id
             /// @return this builder
             public Builder replayStreamId(final int value) { this.replayStreamId = value; return this; }
+            /// Sets the replication framing and timeout configuration.
+            ///
             /// @param value replication framing and timeout configuration
             /// @return this builder
             public Builder replicationConfiguration(final AeronReplicationConfiguration value) { this.replicationConfiguration = value; return this; }
+            /// Sets the cluster identity.
+            ///
             /// @param value cluster identity
             /// @return this builder
             public Builder clusterId(final UUID value) { this.clusterId = value; return this; }
+            /// Sets the writer epoch.
+            ///
             /// @param value writer epoch
             /// @return this builder
             public Builder epoch(final long value) { this.epoch = value; return this; }
+            /// Sets the already applied sequence.
+            ///
             /// @param value already applied sequence
             /// @return this builder
             public Builder initialSequence(final long value) { this.initialSequence = value; return this; }
+            /// Sets the already resolved Archive position.
+            ///
             /// @param value already resolved Archive position
             /// @return this builder
             public Builder initialPosition(final long value) { this.initialPosition = value; return this; }
+            /// Sets the Store binary receiver.
+            ///
             /// @param value Store binary receiver
             /// @return this builder
             public Builder receiver(final StorageBinaryDataReceiver value) { this.receiver = value; return this; }
+            /// Sets the post-transaction callback.
+            ///
             /// @param value post-transaction callback
             /// @return this builder
             public Builder transactionResolved(final Runnable value) { this.transactionResolved = value; return this; }
+            /// Sets the Store materialisation callback, or `null`.
+            ///
             /// @param value Store materialisation callback, or `null`
             /// @return this builder
             public Builder deliveryListener(final ReaderDeliveryListener value) { this.deliveryListener = value; return this; }
 
+            /// Builds the immutable reader configuration.
+            ///
             /// @return immutable reader configuration
             public Configuration build() {
                 return new Configuration(aeron, archiveContext, recordingId, startPosition, liveChannel,

@@ -150,14 +150,26 @@ public final class AeronStoreProcessChildMain {
         };
     }
 
+    /// Fixture Store root holding the ordinary and retry entity collections.
     public static final class Root {
+        /// Creates an empty fixture root.
+        public Root() {
+        }
+
+        /// Ordinary replicated entities.
         public final List<StoreType> objects = new ArrayList<>();
+        /// Entities introduced only by the rejection/retry phase.
         public final List<RetryType> retryObjects = new ArrayList<>();
     }
 
+    /// Ordinary fixture entity carrying one value.
     public static final class StoreType {
+        /// Entity payload.
         public String value;
 
+        /// Creates a fixture entity.
+        ///
+        /// @param value entity payload
         StoreType(final String value) {
             this.value = value;
         }
@@ -165,8 +177,10 @@ public final class AeronStoreProcessChildMain {
 
         /// Entity introduced only by the rejection/retry phase of the process fixture.
     public static final class RetryType {
+        /// Fixed retry marker payload.
         public final String value;
 
+        /// Creates the retry marker entity.
         public RetryType() {
             this.value = "dictionary-retry";
         }

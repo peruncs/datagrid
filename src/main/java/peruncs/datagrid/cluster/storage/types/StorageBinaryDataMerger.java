@@ -89,6 +89,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             private long applyTimeoutMs;
             private StorageGraphCoordinator graphCoordinator;
 
+            /// Creates an empty merger configuration builder.
+            public Builder() {
+            }
+
+            /// Sets the persistence foundation.
+            ///
             /// @param value persistence foundation
             /// @return this builder
             public Builder foundation(final BinaryPersistenceFoundation<?> value) {
@@ -96,6 +102,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 return this;
             }
 
+            /// Sets the Store connection.
+            ///
             /// @param value Store connection
             /// @return this builder
             public Builder storage(final StorageConnection value) {
@@ -103,6 +111,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 return this;
             }
 
+            /// Sets the graph update handler.
+            ///
             /// @param value graph update handler
             /// @return this builder
             public Builder objectGraphUpdateHandler(final ObjectGraphUpdateHandler value) {
@@ -110,6 +120,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 return this;
             }
 
+            /// Sets the maximum cache wait in milliseconds.
+            ///
             /// @param value maximum cache wait in milliseconds
             /// @return this builder
             public Builder cachingTimeoutMs(final long value) {
@@ -117,6 +129,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 return this;
             }
 
+            /// Sets the maximum cached binary count.
+            ///
             /// @param value maximum cached binary count
             /// @return this builder
             public Builder cachedBinaryLimit(final long value) {
@@ -124,6 +138,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 return this;
             }
 
+            /// Sets the maximum materialization wait in milliseconds.
+            ///
             /// @param value maximum materialization wait in milliseconds
             /// @return this builder
             public Builder applyTimeoutMs(final long value) {
@@ -131,6 +147,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 return this;
             }
 
+            /// Sets the optional Store graph coordinator.
+            ///
             /// @param value optional Store graph coordinator
             /// @return this builder
             public Builder graphCoordinator(final StorageGraphCoordinator value) {
@@ -138,6 +156,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 return this;
             }
 
+            /// Builds the immutable merger configuration.
+            ///
             /// @return immutable merger configuration
             public Configuration build() {
                 return new Configuration(foundation, storage, objectGraphUpdateHandler,

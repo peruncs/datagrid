@@ -7,7 +7,9 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.*;
+import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
+import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
+import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
@@ -17,9 +19,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Deterministic regression for live-reader index freshness.
 ///

@@ -10,6 +10,8 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 /// Replaces the deleted generic replication target, whose
 /// local-commit-then-distribute semantics were the uncoordinated durability
 /// path; every production wiring now uses the transport's coordinated factory.
+///
+/// @param distributor downstream distributor receiving committed binaries
 public record ReplicatingTargetFactory(StorageBinaryDataDistributor distributor)
         implements java.util.function.UnaryOperator<PersistenceTarget<Binary>> {
 

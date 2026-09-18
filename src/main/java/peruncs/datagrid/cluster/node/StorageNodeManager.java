@@ -85,6 +85,12 @@ public interface StorageNodeManager extends ClusterNodeManager {
             private String replicationTransport;
             private Role role;
 
+            /// Creates an empty storage node manager configuration builder.
+            public Builder() {
+            }
+
+            /// Sets the binary distributor.
+            ///
             /// @param value binary distributor
             /// @return this builder
             public Builder dataDistributor(final StorageBinaryDataDistributor value) {
@@ -92,6 +98,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Sets the storage task executor.
+            ///
             /// @param value storage task executor
             /// @return this builder
             public Builder storageTaskExecutor(final StorageTaskExecutor value) {
@@ -99,6 +107,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Sets the replication client.
+            ///
             /// @param value replication client
             /// @return this builder
             public Builder dataClient(final StorageBinaryDataClient value) {
@@ -106,6 +116,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Sets the health check.
+            ///
             /// @param value health check
             /// @return this builder
             public Builder healthCheck(final StorageNodeHealthCheck value) {
@@ -113,6 +125,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Sets the disk-space reader.
+            ///
             /// @param value disk-space reader
             /// @return this builder
             public Builder storageDiskSpaceReader(final StorageDiskSpaceReader value) {
@@ -120,6 +134,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Sets the latest-position provider.
+            ///
             /// @param value latest-position provider
             /// @return this builder
             public Builder positionProvider(final ReplicationPositionProvider value) {
@@ -127,6 +143,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Sets the transport id.
+            ///
             /// @param value transport id
             /// @return this builder
             public Builder replicationTransport(final String value) {
@@ -134,6 +152,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Sets the fixed replication role.
+            ///
             /// @param value fixed replication role
             /// @return this builder
             public Builder role(final Role value) {
@@ -141,6 +161,8 @@ public interface StorageNodeManager extends ClusterNodeManager {
                 return this;
             }
 
+            /// Builds the validated immutable manager configuration.
+            ///
             /// @return validated immutable manager configuration
             public Configuration build() {
                 return new Configuration(dataDistributor, storageTaskExecutor, dataClient, healthCheck,
