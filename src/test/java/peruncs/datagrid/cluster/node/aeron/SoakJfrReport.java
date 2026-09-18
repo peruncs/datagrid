@@ -16,7 +16,7 @@ import java.util.*;
 /// dumponexit=true,filename=target/soak.jfr`, which nobody read until now.
 /// This pass aggregates the recording in deterministic code (top-N tables,
 /// never raw events, per the project's JFR guidance) and reports GC pauses,
-/// monitor-block time, and allocation spikes.
+/// monitor-block time, virtual-thread pinning, and allocation spikes.
 ///
 /// Warn-first by design: CI hardware varies too much to fail on absolute
 /// budgets from day one. The report always prints; it fails only with
@@ -41,7 +41,9 @@ final class SoakJfrReport {
             String topBlockedMonitor,
             List<Map.Entry<String, Long>> topAllocated,
             long unknownDurations,
-            long unknownMetadata) {
+            long unknownMetadata,
+            long virtualThreadPinnedEvents,
+            long maxVirtualThreadPinnedMs) {
     }
 
     /// Pure budget verdict, unit-testable without a recording.
@@ -82,6 +84,8 @@ final class SoakJfrReport {
         long totalMonitorBlockMs = 0L;
         long unknownDurations = 0L;
         long unknownMetadata = 0L;
+        long virtualThreadPinnedEvents = 0L;
+        long maxVirtualThreadPinnedMs = 0L;
         final Map<String, Long> blockedByMonitor = new HashMap<>();
         final Map<String, Long> allocatedByClass = new HashMap<>();
         try (RecordingFile file = new RecordingFile(recording)) {
@@ -114,6 +118,15 @@ final class SoakJfrReport {
                             else blockedByMonitor.merge(monitor, blockedMs, Long::sum);
                         }
                     }
+                    case "jdk.VirtualThreadPinned" -> {
+                        virtualThreadPinnedEvents++;
+                        final Duration pinned = durationOf(event);
+                        if (pinned == null) {
+                            unknownDurations++;
+                        } else {
+                            maxVirtualThreadPinnedMs = Math.max(maxVirtualThreadPinnedMs, pinned.toMillis());
+                        }
+                    }
                     case "jdk.ObjectAllocationInNewTLAB", "jdk.ObjectAllocationOutsideTLAB" -> {
                         try {
                             final RecordedClass klass = event.getClass("objectClass");
@@ -135,7 +148,7 @@ final class SoakJfrReport {
                 .limit(5).toList();
         return new Signals(typeCounts.size(), totalEvents, maxGcPauseMs, gcPausesOver100Ms,
                 maxMonitorBlockMs, totalMonitorBlockMs, topBlocked, topAllocated,
-                unknownDurations, unknownMetadata);
+                unknownDurations, unknownMetadata, virtualThreadPinnedEvents, maxVirtualThreadPinnedMs);
     }
 
     /// Reads an event duration, returning null (instead of a fake zero) when
@@ -167,6 +180,8 @@ final class SoakJfrReport {
                 signals.maxMonitorBlockMs(), signals.totalMonitorBlockMs(), signals.topBlockedMonitor()));
         report.append("SOAK-JFR unknownDurations=%d%n".formatted(signals.unknownDurations()));
         report.append("SOAK-JFR unknownMetadata=%d%n".formatted(signals.unknownMetadata()));
+        report.append("SOAK-JFR virtualThreadPinnedEvents=%d maxVirtualThreadPinnedMs=%d%n".formatted(
+                signals.virtualThreadPinnedEvents(), signals.maxVirtualThreadPinnedMs()));
         report.append("SOAK-JFR top-allocated classes:%n".formatted());
         for (final Map.Entry<String, Long> entry : signals.topAllocated()) {
             report.append("SOAK-JFR   %s bytes=%d%n".formatted(entry.getKey(), entry.getValue()));

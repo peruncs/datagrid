@@ -4,7 +4,11 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -320,5 +324,52 @@ class AeronReplicationEnvelopeTest {
                                 AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0,
                                 new UnsafeBuffer(new byte[]{1, 2, 3}), 0, 3)));
         assertArrayEquals(before, target, "a rejected frame must not partially overwrite its destination");
+    }
+
+    /// Verifies a fixed one-field header corruption corpus fails closed even
+    /// when the header CRC is repaired after each mutation.
+    @Test
+    void rejectsHeaderFieldMutations() {
+        final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
+                CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                1, 0, 1, 0, 0, new byte[]{7});
+        final List<Consumer<byte[]>> mutations = List.of(
+                bytes -> bytes[0] ^= 0x01,
+                bytes -> bytes[5] ^= 0x01,
+                bytes -> bytes[6] = (byte) 0xff,
+                bytes -> bytes[7] = 1,
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putLong(8, -1L),
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putLong(16, -1L),
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+                        .putInt(24, AeronReplicationEnvelope.MAX_TRANSACTION_PAYLOAD_BYTES + 1),
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putInt(28, 1),
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putInt(32, 0),
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putInt(36, 2),
+                bytes -> bytes[40] ^= 0x01,
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putLong(64, 0L),
+                bytes -> ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putLong(72, 0L));
+
+        for (final Consumer<byte[]> mutation : mutations) {
+            final byte[] damaged = encoded.clone();
+            mutation.accept(damaged);
+            rewriteHeaderCrc(damaged);
+            assertThrows(ReplicationWireException.class,
+                    () -> AeronReplicationEnvelope.decode(new UnsafeBuffer(damaged), 0, damaged.length));
+        }
+
+        final byte[] zeroed = new byte[encoded.length];
+        assertThrows(ReplicationWireException.class,
+                () -> AeronReplicationEnvelope.decode(new UnsafeBuffer(zeroed), 0, zeroed.length));
+        final byte[] sticky = new byte[encoded.length];
+        Arrays.fill(sticky, (byte) 0xff);
+        assertThrows(ReplicationWireException.class,
+                () -> AeronReplicationEnvelope.decode(new UnsafeBuffer(sticky), 0, sticky.length));
+    }
+
+    private static void rewriteHeaderCrc(final byte[] encoded) {
+        final int crc = AeronReplicationEnvelope.withChecksumContext(
+                new AeronReplicationEnvelope.ChecksumContext(),
+                () -> AeronReplicationEnvelope.crc32c(new UnsafeBuffer(encoded), 0, 80));
+        ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN).putInt(80, crc);
     }
 }

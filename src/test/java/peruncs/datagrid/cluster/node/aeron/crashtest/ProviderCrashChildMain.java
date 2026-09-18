@@ -639,9 +639,11 @@ public final class ProviderCrashChildMain {
                 case "ECLIPSE_DATAGRID_AERON_CONTROL_CHANNEL" -> "aeron:udp?endpoint=localhost:%s".formatted(Integer.getInteger("dg.crash.controlPort", 40124));
                 case "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
                      "ECLIPSE_DATAGRID_AERON_CONTROL_RESPONSE_CHANNEL" -> "aeron:udp?endpoint=localhost:0";
-                case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH" -> "1048576";
+                case "ECLIPSE_DATAGRID_AERON_TERM_LENGTH" -> Integer.toString(
+                        Integer.getInteger("dg.crash.termLength", 1048576));
                 case "ECLIPSE_DATAGRID_AERON_MTU_LENGTH" -> "1024";
-                case "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE" -> "16384";
+                case "ECLIPSE_DATAGRID_AERON_CHUNK_SIZE" -> Integer.toString(
+                        Integer.getInteger("dg.crash.chunkSize", 16384));
                 case "ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES" -> "262144";
                 case "ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS" -> "5000000000";
                 case "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE",

@@ -20,7 +20,7 @@ class SoakJfrReportTest {
     @Test
     void verdictPassesWithinBudget() {
         final SoakJfrReport.Signals signals = new SoakJfrReport.Signals(
-                10L, 1_000L, 120L, 1L, 300L, 900L, "com.example.Monitor", List.of(), 0L, 0L);
+                10L, 1_000L, 120L, 1L, 300L, 900L, "com.example.Monitor", List.of(), 0L, 0L, 0L, 0L);
         assertTrue(SoakJfrReport.verdict(signals, 1_000L, 2_000L).isEmpty());
     }
 
@@ -28,7 +28,7 @@ class SoakJfrReportTest {
     @Test
     void verdictFailsBothBudgets() {
         final SoakJfrReport.Signals signals = new SoakJfrReport.Signals(
-                10L, 1_000L, 5_000L, 4L, 9_000L, 12_000L, "com.example.Monitor", List.of(), 0L, 0L);
+                10L, 1_000L, 5_000L, 4L, 9_000L, 12_000L, "com.example.Monitor", List.of(), 0L, 0L, 0L, 0L);
         final List<String> failures = SoakJfrReport.verdict(signals, 1_000L, 2_000L);
         assertEquals(2, failures.size());
     }
@@ -38,7 +38,7 @@ class SoakJfrReportTest {
     @Test
     void verdictFailsOnUndecodableDurations() {
         final SoakJfrReport.Signals signals = new SoakJfrReport.Signals(
-                10L, 1_000L, 0L, 0L, 0L, 0L, "<none>", List.of(), 3L, 0L);
+                10L, 1_000L, 0L, 0L, 0L, 0L, "<none>", List.of(), 3L, 0L, 0L, 0L);
         final List<String> failures = SoakJfrReport.verdict(signals, 1_000L, 2_000L);
         assertEquals(1, failures.size());
         assertTrue(failures.getFirst().contains("undecodable"));
@@ -48,7 +48,7 @@ class SoakJfrReportTest {
     @Test
     void verdictFailsOnUnknownMetadata() {
         final SoakJfrReport.Signals signals = new SoakJfrReport.Signals(
-                10L, 1_000L, 0L, 0L, 0L, 0L, "<none>", List.of(), 0L, 2L);
+                10L, 1_000L, 0L, 0L, 0L, 0L, "<none>", List.of(), 0L, 2L, 0L, 0L);
         final List<String> failures = SoakJfrReport.verdict(signals, 1_000L, 2_000L);
         assertEquals(1, failures.size());
         assertTrue(failures.getFirst().contains("metadata"));
@@ -81,7 +81,16 @@ class SoakJfrReportTest {
     @Test
     void topAllocatedOrderingIsDescending() {
         final SoakJfrReport.Signals signals = new SoakJfrReport.Signals(3L, 30L, 0L, 0L, 0L, 0L, "<none>",
-                List.of(Map.entry("a.A", 300L), Map.entry("b.B", 100L)), 0L, 0L);
+                List.of(Map.entry("a.A", 300L), Map.entry("b.B", 100L)), 0L, 0L, 0L, 0L);
         assertEquals("a.A", signals.topAllocated().getFirst().getKey());
+    }
+
+    /// Verifies virtual-thread pinning is included in the rendered report.
+    @Test
+    void formatIncludesVirtualThreadPinning() {
+        final SoakJfrReport.Signals signals = new SoakJfrReport.Signals(
+                1L, 2L, 0L, 0L, 0L, 0L, "<none>", List.of(), 0L, 0L, 3L, 17L);
+        assertTrue(SoakJfrReport.format(signals).contains(
+                "virtualThreadPinnedEvents=3 maxVirtualThreadPinnedMs=17"));
     }
 }

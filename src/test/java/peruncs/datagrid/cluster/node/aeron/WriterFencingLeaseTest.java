@@ -56,6 +56,42 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies a killed writer process leaves a stale lease that a successor can take over.
+    @Test
+    void killedForkedWriterCanBeTakenOver(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final Process child = new ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "-Ddg.lease.suspendHeartbeat=false",
+                "-cp", ChildJava.classpath(), WriterLeaseTakeoverChildMain.class.getName(),
+                volume.toString(), cluster.toString(), generation.toString())
+                .redirectErrorStream(true).start();
+        try {
+            final long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (!Files.exists(volume.resolve("child-ready")) && System.nanoTime() < deadline) {
+                if (!child.isAlive()) fail("lease child exited: " + new String(child.getInputStream().readAllBytes()));
+                Thread.sleep(5);
+            }
+            assertTrue(Files.exists(volume.resolve("child-ready")), "lease child did not acquire the lease");
+            child.destroyForcibly();
+            assertTrue(child.waitFor(10, TimeUnit.SECONDS), "killed lease child did not exit");
+            Thread.sleep(STALENESS.toMillis() * 2L);
+            try (WriterFencingLease successor = WriterFencingLease.acquire(
+                    volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+                assertEquals(2L, successor.fencingToken(),
+                        "a successor after process death must mint a higher fencing token");
+                assertTrue(successor.isCurrent());
+            }
+        } finally {
+            if (child.isAlive()) {
+                child.destroyForcibly();
+                child.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     /// Verifies a second writer fails to acquire while the first holder stays current.
     @Test
     void secondWriterFailsWhileFirstHoldsTheLease(@TempDir final Path volume) {

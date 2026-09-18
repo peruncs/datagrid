@@ -5,6 +5,7 @@ import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpo
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPayloads;
+import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.test.ChildJava;
 
@@ -19,9 +20,46 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/// Child-process tests for the provider's writer and embedded Archive restart
-/// boundary. The parent kills the child only after the requested milestone is
-/// written to the control file.
+/// Child-process crash matrix for the writer, embedded Archive, checkpoint,
+/// and recovery boundaries. The parent kills a forked child only after the
+/// requested milestone is written to the control file, so each cell proves
+/// the crash happened at the intended boundary rather than timing out during
+/// setup.
+///
+/// A normal provider cell uses this protocol:
+///
+/// 1. Create an isolated directory layout with fresh Aeron live/control ports.
+/// 2. Launch [ProviderCrashChildMain] in phase 1. It writes the requested
+///    transaction payloads and emits `control/ready` followed by the exact
+///    `control/milestone.reached` marker.
+/// 3. Validate the phase-1 Store prefix and kill the child. The expected prefix
+///    is derived from the crash point, so a cell cannot pass merely because the
+///    process died somewhere in the setup path.
+/// 4. Relaunch the same directory in phase 2, retrying only transient
+///    "active driver" startup failures. Parse `control/outcome` and require
+///    the declared safe policy, health, checkpoint identity, CRC, and exact
+///    Store contents.
+///
+/// `CONTINUE` means the checkpoint and Archive boundary are unambiguous: the
+/// node must be `LIVE` and replay must append the missing transaction exactly
+/// once. `RESEED_REQUIRED` means recovery cannot prove the boundary: the node
+/// must fail closed, report an error, and never silently apply the ambiguous
+/// tail. Harness errors, missing milestones, invalid child outcomes, mutated
+/// Store prefixes, and unexpected recovery policies are test failures.
+///
+/// The deterministic cells cover publication, prepare/local-write/commit
+/// seams, Archive-first and enqueue-then-Archive ordering, prepare rejection,
+/// backpressure with no subscriber, checkpoint temp-write/rename/directory-sync
+/// seams, payload sizes from one byte through 200 KiB, chunk boundaries,
+/// checkpoint and Archive-tail corruption, reader-side corruption, deleted
+/// cursors, and double/triple recovery crashes. The seeded budget and process
+/// kill cells sample those same decision points between named milestones.
+///
+/// Each cell appends selection, milestone, mutation, and outcome records to
+/// `control/events.jsonl`. On failure [DiagnosticCollector] preserves the
+/// control files and child logs, plus a reason and directory listing covering
+/// the Store, checkpoint, and Archive fixture. The matrix tests fail closed;
+/// they do not treat a crash before the requested milestone as a valid result.
 class ProviderCrashMatrixIT {
     private static boolean isActiveDriverRetry(final String outcome) {
         final String normalized = outcome.toLowerCase(java.util.Locale.ROOT);
@@ -323,6 +361,22 @@ class ProviderCrashMatrixIT {
                     throw failure;
                 }
             }
+        }
+    }
+
+    /// Verifies a recorded commit crossing a deliberately tiny term
+    /// boundary still fails closed after a writer crash.
+    @Test
+    void recordedCommitAcrossTinyTermBoundaryRequiresReseed() throws Exception {
+        final String previous = System.getProperty("crash.matrix.termLength");
+        System.setProperty("crash.matrix.termLength", "65536");
+        try {
+            this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                    false, false, "RESEED_REQUIRED", "tiny-term-boundary", 2, 1,
+                    65536, "digest", 0);
+        } finally {
+            if (previous == null) System.clearProperty("crash.matrix.termLength");
+            else System.setProperty("crash.matrix.termLength", previous);
         }
     }
 
@@ -902,6 +956,10 @@ class ProviderCrashMatrixIT {
         final Path stdout = control.resolve("%s-stdout.log".formatted(mode));
         final Path stderr = control.resolve("%s-stderr.log".formatted(mode));
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        final int crashTermLength = Integer.getInteger("crash.matrix.termLength", 1048576);
+        final int maxChunkSize = Math.max(1, crashTermLength / 8 - AeronReplicationEnvelope.HEADER_LENGTH);
+        final int crashChunkSize = Integer.getInteger(
+                "crash.matrix.chunkSize", Math.min(16384, maxChunkSize));
         final ProcessBuilder builder = new ProcessBuilder(javaExecutable,
                 "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
@@ -917,6 +975,8 @@ class ProviderCrashMatrixIT {
                 "-Ddg.crash.payloadSize=%s".formatted(payloadSize),
                 "-Ddg.crash.payloadKind=%s".formatted(payloadKind),
                 "-Ddg.crash.budgetChunks=%s".formatted(budgetChunks),
+                "-Ddg.crash.termLength=%s".formatted(crashTermLength),
+                "-Ddg.crash.chunkSize=%s".formatted(crashChunkSize),
                 "-Ddg.crash.subscriber=%s".formatted(System.getProperty("crash.matrix.subscriber", "true")),
                 "-Ddg.crash.livePort=%s".formatted(livePort),
                 "-Ddg.crash.controlPort=%s".formatted(controlPort),

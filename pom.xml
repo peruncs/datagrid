@@ -594,6 +594,7 @@
 									<soak.pollDelayMs>${soak.pollDelayMs}</soak.pollDelayMs>
 									<soak.pollStallMs>${soak.pollStallMs}</soak.pollStallMs>
 									<soak.fsyncDelayMs>${soak.fsyncDelayMs}</soak.fsyncDelayMs>
+									<soak.maxTornReads>${soak.maxTornReads}</soak.maxTornReads>
 									<soak.corrupt>${soak.corrupt}</soak.corrupt>
 									<soak.jfr.fail>${soak.jfr.fail}</soak.jfr.fail>
 							</systemPropertyVariables>
@@ -620,6 +621,7 @@
 				<soak.pollDelayMs>2</soak.pollDelayMs>
 				<soak.pollStallMs>800</soak.pollStallMs>
 				<soak.fsyncDelayMs>3</soak.fsyncDelayMs>
+				<soak.maxTornReads>64</soak.maxTornReads>
 				<soak.corrupt>true</soak.corrupt>
 				<soak.jfr.fail>false</soak.jfr.fail>
 			</properties>

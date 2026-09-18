@@ -5,7 +5,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.UUID;
 
-/// Holds a live lease across a forked takeover test's offer boundary.
+/// Holds a lease across forked takeover tests for both offer fencing and
+/// process-death takeover. Heartbeats stay live unless the offer-boundary
+/// test explicitly leaves the default suspension enabled.
 public final class WriterLeaseTakeoverChildMain {
     private WriterLeaseTakeoverChildMain() {
     }
@@ -19,7 +21,9 @@ public final class WriterLeaseTakeoverChildMain {
         final Path result = volume.resolve("child-result");
         try (WriterFencingLease lease = WriterFencingLease.acquire(
                 volume, cluster, generation, UUID.randomUUID(), Duration.ofMillis(300))) {
-            lease.suspendHeartbeatForTest();
+            if (Boolean.parseBoolean(System.getProperty("dg.lease.suspendHeartbeat", "true"))) {
+                lease.suspendHeartbeatForTest();
+            }
             Files.writeString(ready, "ready");
             final long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
             while (!Files.exists(release) && System.nanoTime() < deadline) {

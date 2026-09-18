@@ -283,31 +283,162 @@ mvn verify
 ```
 
 The threaded writer/reader soak and the forked crash matrix live outside the
-default gate. The soak asserts every served query against the transaction
-model, restarts readers (including overlapping dual restarts), injects
-slow-reader/fsync/CPU chaos plus cursor and Archive-tail corruption, and
-requires every reader to reach a planned outcome (converged or fail-closed
-parked). Coverage scales with independent seeds, not duration — prefer sweeps:
+default gate. They are intentionally separate: the soak explores concurrent
+load and recovery over time, while the crash matrix kills isolated child
+processes at named durability boundaries and checks exact recovery outcomes.
+
+### Writer/reader soak
+
+`AeronWriterReaderSoakIT` runs one writer Store with three reader Stores. The
+writer performs adds, updates, and removals while reader query threads access
+the graph, Lucene, and JVector indexes. The test keeps a transaction model of
+the expected title, body, vector, and title/body checksum. A reader is only
+checked against entities whose own persisted cursor proves that the entity was
+applied; this separates replication lag from data loss. Positive index checks
+use a short refresh retry because graph materialization and searcher refresh
+are not the same event.
+
+The run is divided into setup, concurrent soak, convergence, and quiescent
+verification:
+
+1. Seed the writer with ordinary entities and three vector sentinels, copy the
+   seed Store to each reader, and record the baseline writer sequence.
+2. Run writer, query, audit, and chaos workers. The audit worker performs
+   bounded-lag checks and mini-censuses; query workers verify ghost-title
+   absence, graph bodies/checksums, Lucene hits, and non-sentinel JVector hits.
+3. Run a seeded fixed rotation of single restart, dual restart, slow-reader,
+   CPU/GC burst, cursor corruption, rollback cursor, and live Archive-tail
+   corruption. The first chaos operation is always an abrupt restart. Every
+   operation is logged as selected, effective, or skipped with a reason.
+4. Stop writers, converge or explicitly park every reader, then run strict
+   samples and an uncapped graph/Lucene/JVector census. A reader may be
+   converged, reseed-parked, or corruption-parked; it may not disappear
+   silently.
+
+The soak fails on worker failures, lost event-log writes, phantom index hits,
+bad checksums, unexpected exceptions, torn-boundary convergence, excessive
+classified torn-read retries, lag-SLO violations, missing chaos coverage, or a
+reader without a recorded fate. `target/soak-events.jsonl` is the authoritative
+per-run schedule: each line has a run id and sequence number. The seed repeats
+workload values and chaos distribution, but timing-dependent skips and reader
+states can change the exact operation schedule. The fork also writes
+`target/soak.jfr`; use `jfr summary` or the `SoakJfrReport` aggregation for
+compact GC, monitor, allocation, and virtual-thread-pinning signals. JFR is
+warn-first unless `-Dsoak.jfr.fail=true` is enabled after baseline calibration.
+
+Run a single soak or a seed sweep:
 
 ```text
 mvn verify -Psoak -Dsoak.seconds=30 -Dsoak.restarts=10
 for seed in 1 2 3 4 5 6 7 8 9 10; do
   mvn failsafe:verify -Psoak -Dsoak.seconds=15 -Dsoak.seed=$seed
 done
-mvn verify -Pcrashmatrix
 ```
 
-Soak knobs: `-Dsoak.seed=`, `-Dsoak.seconds=`, `-Dsoak.writer.threads=`,
-`-Dsoak.query.threads=`, `-Dsoak.restarts=`, `-Dsoak.lagSlots=` (bounded-lag
-SLO), `-Dsoak.miniCensus=`, `-Dsoak.pollDelayMs=`/`-Dsoak.pollStallMs=`
-(slow-reader injection), `-Dsoak.fsyncDelayMs=`, `-Dsoak.corrupt=` (disable all
-corruption chaos). The sub-timeout stall only probes the sliding reader stop
-deadline when `-Dsoak.pollStallMs=` is set near the configured
-`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`; at the small default it is
-purely a backlog widener. Key transitions are appended to
-`target/soak-events.jsonl` for replay. The soak fork also dumps `target/soak.jfr`; analyze it offline
-with `SoakJfrReportTest` (warn-first; gate with `-Dsoak.jfr.fail=true` only
-after calibrating budgets from nightly baselines).
+Soak controls are:
+
+| Property | Default | Purpose |
+| --- | ---: | --- |
+| `soak.seed` | `1` | Workload values and chaos-rotation start offset |
+| `soak.seconds` | `30` | Concurrent workload duration before convergence |
+| `soak.writer.threads` | `3` | Writer workload threads, serialized by the one-writer test lock |
+| `soak.query.threads` | `2` | Query threads per reader |
+| `soak.restarts` | `10` | Effective chaos-work budget; heavy operations may count as two |
+| `soak.lagSlots` | `100` | Reader lag-SLO allowance in replication slots |
+| `soak.miniCensus` | `20` | Entities checked by each mid-soak mini-census |
+| `soak.pollDelayMs` | `2` | Applied delay used by slow-reader chaos |
+| `soak.pollStallMs` | `800` | Slow-reader burst duration; near the configured reader-stop timeout it also probes the sliding deadline |
+| `soak.fsyncDelayMs` | `3` | Delay injected through the AtomicFileStore fsync hook |
+| `soak.maxTornReads` | `64` | Maximum classified benign query retries; set to `0` for strict mode |
+| `soak.corrupt` | `true` | Enable cursor, rollback, and Archive-tail corruption operations |
+| `soak.events` | `target/soak-events.jsonl` | JSONL event-log destination |
+| `soak.jfr.fail` | `false` | Turn calibrated JFR budget warnings into failures |
+
+At the small default, `soak.pollStallMs` is primarily a backlog widener. The
+sliding reader-stop deadline is probed only when it is configured near
+`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
+
+`-Dsoak.corrupt=false` removes cursor, rollback, and Archive-tail corruption
+from the rotation; it does not turn off restart or load chaos. A short run may
+waive a chaos type only when parked readers caused the skip and that causal
+reason is present in the event log. Use independent seeds rather than one very
+long run: duration increases load, while seeds increase schedule coverage.
+
+### Forked crash matrix
+
+`-Pcrashmatrix` runs the provider crash matrix together with the external
+Archive, Aeron transport, Store integration, and reader crash suites configured
+in the Maven profile. The central `ProviderCrashMatrixIT` uses an isolated
+temporary directory and a forked `ProviderCrashChildMain`:
+
+1. Phase 1 starts the writer/Archive fixture, writes the requested payloads,
+   and records `control/ready` and the exact `control/milestone.reached`.
+2. The parent validates the phase-1 Store prefix expected at that boundary and
+   forcibly kills the child.
+3. Phase 2 restarts the same directory, retrying only transient active-driver
+   startup failures while the Archive finishes stopping.
+4. The parent parses `control/outcome` and checks the recovery policy, health,
+   checkpoint identity/CRC, and exact Store records.
+
+The oracle is deliberately two-valued. `CONTINUE` is allowed only when the
+checkpoint and Archive position prove an unambiguous boundary; recovery must
+be `LIVE` and append each missing transaction exactly once.
+`RESEED_REQUIRED` is required when a prepare, data tail, commit offer, local
+write, uncertain checkpoint, or corrupted artifact makes the boundary
+ambiguous; recovery must fail closed and must not reuse the tail. Missing
+milestones, harness errors, invalid outcomes, wrong Store prefixes, and an
+unexpected policy are failures rather than acceptable crash variation.
+
+Deterministic cells cover:
+
+- publication, prepare, local-write, commit-offer, recorded-commit, abort,
+  enqueue-then-Archive, and prepare-failure seams;
+- checkpoint temp-write, rename, directory-sync, and committed-sequence seams;
+- one-byte, chunk-minus-one, chunk-plus-one, multi-chunk, random, tiny-term,
+  and 200 KiB payloads;
+- randomized per-chunk budget kills between named milestones;
+- checkpoint-byte-flip and Archive-tail corruption;
+- reader inflight corruption and deleted cursors; and
+- double- and triple-crash recovery chains.
+
+Each cell appends `selection`, `milestone`, mutation, recovery, and `outcome`
+records to `control/events.jsonl`. When a cell fails, the diagnostic collector
+creates a sibling `*.evidence` directory containing the reason, control files,
+child stdout/stderr, and a directory listing of the Store/checkpoint/Archive
+fixture. This is the first place to look when a crash barrier or recovery
+policy assertion fails.
+
+Crash-matrix controls are:
+
+| Property | Default | Purpose |
+| --- | ---: | --- |
+| `crash.matrix.seed` | `1` | Seed for randomized budget/scenario selection |
+| `crash.matrix.random.iterations` | `10` in `-Pcrashmatrix` | Seeded process-kill iterations; `0` disables that test |
+| `crash.matrix.random.seeds` | `1` | Number of consecutive seed values |
+| `crash.matrix.budget.iterations` | `3` | Randomized chunk-budget cells |
+| `crash.matrix.subscriber` | `true` | Disable for the no-subscriber backpressure variant |
+| `crash.matrix.termLength` | `1048576` | Child Aeron term length in bytes |
+| `crash.matrix.chunkSize` | derived | Overrides the child chunk size; default is bounded by term size |
+| `crash.budget.startup` | `120000` ms | Child startup/outcome wait |
+| `crash.budget.milestone` | `60000` ms | Barrier wait |
+| `crash.budget.archiveStop` | `30000` ms | Active-Archive retry window |
+| `crash.budget.cell` | `600000` ms | Overall cell wait ceiling |
+
+Run the full profile, or a focused provider cell when investigating one
+boundary:
+
+```text
+mvn verify -Pcrashmatrix
+mvn -q -Pcrashmatrix -DskipTests \
+  -Dit.test=ProviderCrashMatrixIT#recordedCommitAcrossTinyTermBoundaryRequiresReseed \
+  org.apache.maven.plugins:maven-failsafe-plugin:3.6.0:integration-test \
+  org.apache.maven.plugins:maven-failsafe-plugin:3.6.0:verify
+```
+
+The crash matrix intentionally does not claim to model arbitrary UDP loss or
+duplication, disk-full ENOSPC, SIGSTOP, or network authentication. Those need
+separate fault-injection mechanisms; these tests focus on durable ordering,
+checkpoint truth, process death, and fail-closed recovery.
 
 ## Design
 
