@@ -38,7 +38,7 @@ public final class AeronReplicationEnvelopeTestSupport {
             final byte[] payload
     ) {
         Objects.requireNonNull(payload, "payload");
-        if (payload.length > AeronReplicationEnvelope.MAX_MESSAGE_LENGTH) {
+        if (payload.length > AeronReplicationEnvelope.MAX_TRANSACTION_PAYLOAD_BYTES) {
             throw new IllegalArgumentException("envelope payload exceeds replication message limit");
         }
         final byte[] encoded = new byte[Math.addExact(AeronReplicationEnvelope.HEADER_LENGTH, payload.length)];

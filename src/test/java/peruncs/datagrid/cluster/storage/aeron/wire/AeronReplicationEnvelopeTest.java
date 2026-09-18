@@ -75,7 +75,7 @@ class AeronReplicationEnvelopeTest {
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 0, 0, 1, 0, 0, new byte[0]
         );
-        encoded[5] = 5;
+        encoded[5] = 6;
         assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length
         ));
@@ -257,12 +257,12 @@ class AeronReplicationEnvelopeTest {
                 1, 0, 1, 1, 0, new byte[]{7, 8}));
     }
 
-        /// Verifies the fixed layout: a 76-byte header plus the chunk payload,
-    /// with no authentication trailer, identified as version 4.
+        /// Verifies the fixed layout: an 84-byte header plus the chunk payload,
+    /// with a cross-wiring nonce and no authentication trailer, identified as version 5.
     @Test
     void frameLayoutIsFixedHeaderPlusPayload() {
-        assertEquals(4, AeronReplicationEnvelope.VERSION);
-        assertEquals(76, AeronReplicationEnvelope.HEADER_LENGTH);
+        assertEquals(5, AeronReplicationEnvelope.VERSION);
+        assertEquals(84, AeronReplicationEnvelope.HEADER_LENGTH);
         final byte[] payload = new byte[]{1, 2, 3};
         final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length + 8];
         java.util.Arrays.fill(encoded, (byte) 0x5a);
@@ -277,6 +277,21 @@ class AeronReplicationEnvelopeTest {
         for (int i = length; i < encoded.length; i++) {
             assertEquals((byte) 0x5a, encoded[i], "encoding must not write past header plus payload");
         }
+    }
+
+    @Test
+    void rejectsAFrameFromAnotherWireNonce() {
+        final long nonce = AeronReplicationEnvelope.defaultWireNonce(CLUSTER);
+        final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 1];
+        AeronReplicationEnvelope.withChecksumContext(new AeronReplicationEnvelope.ChecksumContext(), () ->
+                AeronReplicationEnvelope.encode(new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, nonce + 2,
+                        7, AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0, 0,
+                        new UnsafeBuffer(new byte[]{1}), 0, 1,
+                        AeronReplicationEnvelope.crc32c(new UnsafeBuffer(new byte[]{1}), 0, 1)));
+        final AeronReplicationEnvelope.EnvelopeView view = AeronReplicationEnvelope.decodeView(
+                new UnsafeBuffer(encoded), 0, encoded.length);
+        assertFalse(view.matches(CLUSTER, nonce));
+        assertTrue(view.matches(CLUSTER, nonce + 2));
     }
 
         /// Verifies encode-time rejection of negative sequence, epoch, and fencing values.

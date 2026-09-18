@@ -22,7 +22,8 @@
 /// record. Every write therefore follows Archive prepare chunks, then the
 /// local Store enqueue, then the Archive commit. The transport keeps
 /// Eclipse Serializer `Binary` bytes opaque behind a versioned envelope
-/// carrying only cluster identity, sequence, chunking, CRC32C, and
+/// carrying only cluster identity, a shared accidental-cross-wiring nonce,
+/// sequence, chunking, CRC32C, and
 /// commit/abort markers — framing only, no second object-graph encoding.
 /// Readers replay from the Archive, join the live stream, and reconnect
 /// from a durable cursor.
@@ -75,7 +76,7 @@
 /// # Upgrade reseeds
 ///
 /// The wire and restart formats are versioned and fail closed on mismatch:
-/// envelopes require version 4 with a fixed 76-byte header plus the chunk
+/// envelopes require version 5 with a fixed 84-byte header plus the chunk
 /// payload, and checkpoints and
 /// cursors require version 2. A node upgraded from an older format must be
 /// reseeded from a compatible backup or Store image with its cursor; old
@@ -103,12 +104,14 @@
 /// Multiple clusters may share a routed network only when their Aeron traffic
 /// namespaces are separate. Give each cluster distinct live, replay, and
 /// watermark channel endpoints (or otherwise distinct channel destinations)
-/// and distinct stream IDs. Also assign a unique cluster ID to every cluster.
+/// and distinct stream IDs. Also assign a unique cluster ID to every cluster;
+/// an explicitly configured wire nonce must match every participant.
 /// The cluster ID is checked inside received envelopes, cursors, checkpoints,
 /// and watermarks; it does not prevent a subscriber from receiving another
 /// cluster's frame. Accidentally sharing a channel and stream therefore causes
 /// a mismatch and fail-closed subscriber, while separate channels and streams
-/// prevent cross-talk. CRC32C and cluster IDs do not authenticate publishers;
+/// prevent cross-talk. CRC32C, cluster IDs, and the wire nonce do not
+/// authenticate publishers;
 /// firewall, VPN, or network-policy rules remain the live-channel trust
 /// boundary.
 ///
@@ -146,22 +149,23 @@
 /// @since 1.0
 module peruncs.datagrid.cluster
 {
-    requires org.eclipse.store.storage.embedded;
+    requires transitive org.eclipse.store.storage.embedded;
     requires org.eclipse.serializer.base;
-    requires org.eclipse.serializer.persistence;
-    requires org.eclipse.serializer.persistence.binary;
-    requires org.eclipse.store.storage;
+    requires transitive org.eclipse.serializer.persistence;
+    requires transitive org.eclipse.serializer.persistence.binary;
+    requires transitive org.eclipse.store.storage;
     requires org.eclipse.serializer.afs;
     requires org.eclipse.store.afs.nio;
     requires io.aeron.client;
     requires io.aeron.archive;
     requires io.aeron.driver;
     requires org.agrona;
-    requires org.eclipse.store.gigamap;
-    requires org.eclipse.store.gigamap.lucene;
+    requires transitive org.eclipse.store.gigamap;
+    requires transitive org.eclipse.store.gigamap.lucene;
     // The upstream module name is misspelled; keep the dependency aligned with
     // the published module descriptor.
-    requires org.eclipes.store.gigamap.jvector;
+    requires transitive org.eclipes.store.gigamap.jvector;
+    requires jvector;
     requires org.apache.lucene.core;
     // Test-only offline analysis of the soak flight recording; no production
     // code touches JFR APIs. Static (compile-only): production consumers never
@@ -176,7 +180,4 @@ module peruncs.datagrid.cluster
     exports peruncs.datagrid.cluster.node.aeron;
     exports peruncs.datagrid.cluster.storage.types;
     exports peruncs.datagrid.cluster.storage.aeron.config;
-    exports peruncs.datagrid.cluster.storage.aeron.checkpoint;
-    exports peruncs.datagrid.cluster.storage.aeron.reader;
-    exports peruncs.datagrid.cluster.storage.aeron.writer;
 }

@@ -540,7 +540,8 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     this.getClusterReplicationTransport().health(
                             () -> this.clusterStorageManager.isRunning() && !this.clusterStorageManager.isStartingUp(),
                             this.getStorageBinaryDataClient()
-                    )
+                    ),
+                    () -> this.getNodeHousekeeper().failure() == null
             );
         }
 
@@ -780,6 +781,11 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         @Override
         public synchronized ClusterStorageManager<?> startStorageManager() throws NodeLibraryException {
             this.ensureOpen();
+            /* This is the generic lifecycle entry used by development nodes and
+             * tests as well as production roles. Role-specific public handles
+             * enforce their production-mode and role guards below; applying
+             * those guards here would make the supported non-production Store
+             * lifecycle unreachable. */
             if (this.clusterStorageManager == null) {
                 this.start();
             }
@@ -847,7 +853,8 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
                 }
                 if (failure instanceof Error error) throw error;
-                throw (RuntimeException) failure;
+                if (failure instanceof RuntimeException runtime) throw runtime;
+                throw new NodeLibraryException("Cannot start cluster foundation", failure);
             }
         }
 
@@ -1530,6 +1537,20 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             this.closing = true;
             Throwable failure = null;
             final boolean storageManagerOwnsNodeResources = this.clusterStorageManager != null;
+            /* Stop asynchronous Store users before closing the Store itself. The
+             * manager closes these collaborators idempotently later, but doing it
+             * here establishes the lifecycle boundary even during partial startup. */
+            failure = closeInitialized(
+                    failure, this.storageBackupTaskExecutor,
+                    () -> this.storageBackupTaskExecutor.get().close());
+            final StorageTaskExecutor backupTaskExecutor = this.storageBackupTaskExecutor.isInitialized()
+                    ? this.storageBackupTaskExecutor.get() : null;
+            if (this.storageTaskExecutor.isInitialized()
+                    && this.storageTaskExecutor.get() != backupTaskExecutor) {
+                failure = closeInitialized(
+                        failure, this.storageTaskExecutor,
+                        () -> this.storageTaskExecutor.get().close());
+            }
             if (this.clusterStorageManager != null) {
                 failure = closeResource(failure, this.clusterStorageManager::close);
             }
@@ -1558,17 +1579,6 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             }
             if (!storageManagerClosed && !backupManagerClosed) {
                 failure = closeInitialized(failure, this.dataClient, () -> this.dataClient.get().dispose());
-            }
-            if (!backupManagerClosed) {
-                failure = closeInitialized(
-                        failure, this.storageBackupTaskExecutor, () -> this.storageBackupTaskExecutor.get().close());
-            }
-            final StorageTaskExecutor backupTaskExecutor = this.storageBackupTaskExecutor.isInitialized()
-                    ? this.storageBackupTaskExecutor.get() : null;
-            if (this.storageTaskExecutor.isInitialized()
-                    && this.storageTaskExecutor.get() != backupTaskExecutor) {
-                failure = closeInitialized(
-                        failure, this.storageTaskExecutor, () -> this.storageTaskExecutor.get().close());
             }
             failure = closeInitialized(failure, this.dataMerger, () -> this.dataMerger.get().dispose());
             failure = closeInitialized(

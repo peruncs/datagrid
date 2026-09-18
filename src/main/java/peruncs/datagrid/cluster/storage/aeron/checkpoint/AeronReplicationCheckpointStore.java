@@ -20,14 +20,16 @@ import java.util.UUID;
 /// A new record is forced to a temporary file before it replaces the old
 /// one. Reads validate the complete record and its checksum. A failed write
 /// therefore leaves the previous restart boundary available.
-public interface AeronReplicationCheckpointStore {
+public final class AeronReplicationCheckpointStore {
+    private AeronReplicationCheckpointStore() {
+    }
 
     /// Replaces `path` only after the complete record is on disk.
     ///
     /// @param path       checkpoint file
     /// @param checkpoint record to persist
     /// @throws IOException if the record cannot be written or forced to disk
-    static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException {
+    public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(checkpoint, "checkpoint");
         /* The encoded bytes are intentionally owned by this invocation. A callback
@@ -36,7 +38,7 @@ public interface AeronReplicationCheckpointStore {
          * infrequent and the fixed-size allocation is preferable to an escaping,
          * re-entrancy-sensitive mutable buffer. */
         final byte[] bytes = encode(checkpoint);
-        final String phase = checkpoint.recordType() == AeronReplicationCheckpoint.RecordType.READER_CURSOR
+        final AtomicFileStore.Phase phase = checkpoint.recordType() == AeronReplicationCheckpoint.RecordType.READER_CURSOR
                 ? AtomicFileStore.PHASE_CURSOR
                 : AtomicFileStore.PHASE_CHECKPOINT;
         AtomicFileStore.write(path, channel ->
@@ -75,7 +77,7 @@ public interface AeronReplicationCheckpointStore {
     /// @param path checkpoint file
     /// @return validated checkpoint
     /// @throws IOException if the file is missing, truncated, or invalid
-    static AeronReplicationCheckpoint read(final Path path) throws IOException {
+    public static AeronReplicationCheckpoint read(final Path path) throws IOException {
         final byte[] bytes = readFixedRecord(path);
         final int expected = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
                 .getInt(AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES);

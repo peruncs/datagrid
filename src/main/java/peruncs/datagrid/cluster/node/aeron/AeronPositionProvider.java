@@ -67,7 +67,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
             throw unavailable;
         } catch (final RuntimeException failure) {
             throw new ReplicationPositionUnavailableException(
-                    "Aeron writer fencing lease is not held; no writer position can be established");
+                    "Aeron writer fencing lease is not held; no writer position can be established", failure);
         }
         if (fencingToken <= 0) {
             throw new ReplicationPositionUnavailableException(

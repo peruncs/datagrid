@@ -8,4 +8,9 @@ public final class ReplicationPositionUnavailableException extends NodeLibraryEx
     public ReplicationPositionUnavailableException(final String message) {
         super(message);
     }
+
+    /// Creates a position failure retaining the underlying cause.
+    public ReplicationPositionUnavailableException(final String message, final Throwable cause) {
+        super(message, cause);
+    }
 }

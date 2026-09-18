@@ -24,7 +24,7 @@ public final class AeronReplicationConfiguration {
         /// Default largest accepted transaction in bytes.
     public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
         /// Hard upper bound for the largest accepted transaction in bytes.
-    public static final int MAX_SUPPORTED_TRANSACTION_BYTES = AeronReplicationEnvelope.MAX_MESSAGE_LENGTH;
+    public static final int MAX_SUPPORTED_TRANSACTION_BYTES = AeronReplicationEnvelope.MAX_TRANSACTION_PAYLOAD_BYTES;
     private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_START_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;

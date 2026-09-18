@@ -462,7 +462,6 @@ public final class AeronClusterReplicationTransportProvider {
                 previous.dispose();
                 this.reader = null;
             }
-            this.readerRecordingId.set(recordingId);
             final AeronArchiveReader replacement;
             try {
                 replacement = AeronArchiveReader.New(
@@ -478,6 +477,7 @@ public final class AeronClusterReplicationTransportProvider {
                         .replayStreamId(this.settings.streamId() + 1)
                         .replicationConfiguration(this.settings.replication())
                         .clusterId(this.settings.clusterId())
+                        .wireNonce(this.settings.wireNonce())
                         .epoch(this.settings.epoch())
                         .initialSequence(aeronCursor ? cursor.logicalSequence() : -1)
                         .initialPosition(aeronCursor ? cursorPosition : -1)
@@ -513,6 +513,7 @@ public final class AeronClusterReplicationTransportProvider {
                 this.reader = null;
                 throw failure;
             }
+            this.readerRecordingId.set(recordingId);
             /* Seed the stale-token floor from the validated cursor before the
              * reader accepts any frame, so a restart never re-accepts history
              * from a writer its persisted cursor already moved past. The token
@@ -692,6 +693,16 @@ public final class AeronClusterReplicationTransportProvider {
 
                 @Override
                 public long offerUnderOwnership(final java.util.function.LongSupplier offer) {
+                    final WriterFencingLease lease = writerLease;
+                    if (lease == null) {
+                        throw new IllegalStateException(
+                                "writer fencing lease lost before commit; restart required");
+                    }
+                    return lease.executeUnderOwnership(ignored -> offer.getAsLong());
+                }
+
+                @Override
+                public long offerUnderOwnership(final peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate.OwnedOffer offer) {
                     final WriterFencingLease lease = writerLease;
                     if (lease == null) {
                         throw new IllegalStateException(
@@ -979,10 +990,10 @@ public final class AeronClusterReplicationTransportProvider {
                         this.writer = (this.settings.externalArchive()
                                 ? AeronArchiveReplicationPublisher.ExtendRemote(this.archive(), recordingId,
                                 this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
-                                this.settings.epoch(), initialSequence)
+                                this.settings.epoch(), initialSequence, this.settings.wireNonce())
                                 : AeronArchiveReplicationPublisher.Extend(this.archive(), recordingId,
                                 this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
-                                this.settings.epoch(), initialSequence));
+                                this.settings.epoch(), initialSequence, this.settings.wireNonce()));
                     } catch (final RuntimeException failure) {
                         throw reseedRequired("cannot extend configured recording %s after restart; the Archive recording is not safely reusable".formatted(recordingId), failure);
                     }
@@ -993,10 +1004,10 @@ public final class AeronClusterReplicationTransportProvider {
                     this.writer = (this.settings.externalArchive()
                             ? AeronArchiveReplicationPublisher.NewRemote(this.archive(), this.settings.liveChannel(),
                             this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
-                            this.settings.epoch(), initialSequence)
+                            this.settings.epoch(), initialSequence, this.settings.wireNonce())
                             : AeronArchiveReplicationPublisher.New(this.archive(), this.settings.liveChannel(),
                             this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
-                            this.settings.epoch(), initialSequence));
+                            this.settings.epoch(), initialSequence, this.settings.wireNonce()));
                 }
                 final long discoveredRecordingId = this.writer.recordingId();
                 this.writerRecordingId.set(discoveredRecordingId >= 0 ? discoveredRecordingId : recordingId);

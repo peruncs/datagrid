@@ -151,10 +151,10 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
 
         /// Stops the backup executor, cancelling a running backup first.
         ///
-        /// A repeated call retries an incomplete shutdown. An overrunning
-        /// backup is interrupted after a bounded wait, and any failure is
-        /// aggregated with the inherited storage-check shutdown instead of
-        /// masking it.
+        /// A repeated call retries an incomplete shutdown. A running export is
+        /// never interrupted: Eclipse Store may swallow interruption and leave
+        /// a partial image that looks complete. The executor is allowed to
+        /// drain the export, then storage checks are stopped.
         @Override
         public void close() {
             final Future<?> task;
@@ -166,8 +166,8 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             }
             Throwable failure = null;
             if (closeBackup) {
-                if (task != null) task.cancel(true);
-                this.backupExecutor.shutdownNow();
+                if (task != null) task.cancel(false);
+                this.backupExecutor.shutdown();
                 try {
                     if (!this.backupExecutor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                         failure = new IllegalStateException("Storage backup did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
@@ -191,7 +191,8 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             }
             if (failure != null) {
                 if (failure instanceof Error error) throw error;
-                throw (RuntimeException) failure;
+                if (failure instanceof RuntimeException runtime) throw runtime;
+                throw new IllegalStateException("failed to close storage backup executor", failure);
             }
         }
     }

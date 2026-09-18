@@ -13,7 +13,11 @@ documented in the cluster section below.
 
 ## Build
 
-Requires Java 26 and Maven 3.9+.
+Requires an exact Java 26 runtime and Maven 3.9+. This artifact uses Java 26
+preview APIs, so both compilation and every consumer JVM must enable preview:
+`--enable-preview`. It is intentionally a pre-release build and is not ready
+for Maven Central publication until the preview dependency is removed or the
+release policy explicitly supports it.
 
 ```bash
 mvn test
@@ -25,8 +29,9 @@ for the writer/reader soak and `mvn verify -Pcrashmatrix` for the forked crash
 matrix.
 
 The checkout is aligned with the locally installed Eclipse Store/Serializer
-`5.0.0-SNAPSHOT` artifacts; the snapshot should still be treated as
-pre-release.
+`5.0.0-SNAPSHOT` artifacts; use one dated snapshot repository state for a
+deployment and treat the snapshot as pre-release. Do not mix daily snapshot
+metadata across nodes.
 
 ## Use
 
@@ -89,7 +94,8 @@ Clusters may share a VPN or other routed network, but each cluster must have
 its own Aeron traffic namespace. Configure distinct live-channel control
 endpoints, distinct replay and watermark endpoints when those channels are
 shared, and distinct stream IDs for every cluster. Every cluster must also use
-a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`. (Why namespaces can't be shared
+a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID` and, when explicitly configured,
+the same `ECLIPSE_DATAGRID_AERON_WIRE_NONCE` on every participant. (Why namespaces can't be shared
 is a design constraint; see the module documentation.)
 
 Network policy must still restrict which nodes can publish to
@@ -115,16 +121,20 @@ recorded-position, and stop waits are independently configurable with
 `ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
 Replication must run on an isolated network
 (VPN, firewall rules, or Kubernetes NetworkPolicies): any host that can reach
-the live channel can publish well-formed frames. Every writer and reader must
+the live channel can publish well-formed frames; the nonce only rejects
+accidental cross-wiring and is not authentication. Every writer and reader must
 use the same cluster id, epoch, and fencing lineage; a mismatch fails closed
-before Store data is applied.
+before Store data is applied. Writer lease freshness uses shared wall-clock
+timestamps, so all writer hosts must run synchronized NTP/chrony clocks. A
+heartbeat far in the future is rejected as clock skew instead of being treated
+as an indefinitely fresh lease.
 Archive runtime tuning is controlled by
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL`,
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH`,
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD`, and
 `ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS`. The provider maps the
 configured threading mode to matching MediaDriver and Archive threading.
-`CHUNK_SIZE + 76` must fit Aeron's publication maximum (`term-length / 8`,
+`CHUNK_SIZE + 84` must fit Aeron's publication maximum (`term-length / 8`,
 capped at 16 MiB). Store bytes are sent directly inside the fixed replication
 envelope; no SBE or second serialization pass is required.
 
@@ -258,7 +268,7 @@ join, and reconnect. Persist the DataGrid cursor/checkpoint after each
 completed commit. `AeronReplicationCheckpointStore` is provided for
 deployments that persist the Aeron-specific identity and replay boundary.
 
-Chunk size must remain below `min(termLength / 8, 16 MiB) - 76`. Aeron fragments each envelope
+Chunk size must remain below `min(termLength / 8, 16 MiB) - 84`. Aeron fragments each envelope
 as needed for the selected MTU.
 
 CRC32C detects accidental corruption; it does not authenticate a sender. Bind

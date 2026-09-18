@@ -256,7 +256,27 @@ public interface NodeLibraryPropertiesProvider {
 
         @Override
         public boolean isProdMode() {
-            return this.envBoolean(EnvKeys.IS_PROD_MODE);
+            final String configured = this.envString(EnvKeys.IS_PROD_MODE);
+            if (configured == null || configured.isBlank()) {
+                if (this.hasProductionOnlySetting()) {
+                    throw new IllegalStateException(
+                            "%s must be explicitly set when production-only settings are configured"
+                                    .formatted(EnvKeys.IS_PROD_MODE));
+                }
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "%s is unset; using development mode".formatted(EnvKeys.IS_PROD_MODE));
+                return false;
+            }
+            if ("true".equalsIgnoreCase(configured.trim())) return true;
+            if ("false".equalsIgnoreCase(configured.trim())) return false;
+            throw new IllegalArgumentException("Invalid %s value: %s".formatted(EnvKeys.IS_PROD_MODE, configured));
+        }
+
+        private boolean hasProductionOnlySetting() {
+            return this.envString(EnvKeys.AERON_AUTH_ENABLED) != null
+                    || this.envString(EnvKeys.AERON_CHECKPOINT_PATH) != null
+                    || this.envString(EnvKeys.AERON_ARCHIVE_DIRECTORY) != null
+                    || this.envString(EnvKeys.AERON_LEASE_PATH) != null;
         }
 
         @Override
@@ -400,6 +420,14 @@ public interface NodeLibraryPropertiesProvider {
             public static final String DATA_MERGER_APPLY_TIMEOUT = "ECLIPSE_DATAGRID_DATA_MERGER_APPLY_TIMEOUT";
                         /// Writer lease staleness environment variable.
             public static final String WRITER_LEASE_STALENESS_MILLIS = "ECLIPSE_DATAGRID_AERON_LEASE_STALENESS_MILLIS";
+                        /// Live-channel authentication setting.
+            public static final String AERON_AUTH_ENABLED = "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED";
+                        /// Durable checkpoint path.
+            public static final String AERON_CHECKPOINT_PATH = "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH";
+                        /// Archive directory.
+            public static final String AERON_ARCHIVE_DIRECTORY = "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY";
+                        /// Shared writer lease path.
+            public static final String AERON_LEASE_PATH = "ECLIPSE_DATAGRID_AERON_LEASE_PATH";
 
             private EnvKeys() {
             }

@@ -7,6 +7,7 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
+import peruncs.datagrid.cluster.storage.types.Crc32c;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
@@ -29,6 +30,7 @@ final class TransactionAssembler {
     private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0);
     private final AeronReplicationConfiguration configuration;
     private final UUID clusterId;
+    private final long wireNonce;
     private final long epoch;
     private final StorageBinaryDataReceiver receiver;
     private final Runnable transactionResolved;
@@ -53,7 +55,6 @@ final class TransactionAssembler {
      * copy scratch across transactions instead of allocating both for every
      * transaction, including duplicate replay validation. */
     private final CRC32C dataCrc = new CRC32C();
-    private final byte[] crcScratch = new byte[16 * 1024];
     /* Dictionaries repeat nearly verbatim across transactions. Decode the
      * assembled direct range with one reused decoder instead of copying it
      * through a per-transaction heap array first. Only the API-required
@@ -118,7 +119,7 @@ final class TransactionAssembler {
             final ReaderDeliveryListener deliveryListener
     ) {
         this(configuration, clusterId, epoch, initialSequence, -1L, receiver, transactionResolved,
-                deliveryListener);
+                deliveryListener, AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 
     TransactionAssembler(
@@ -131,8 +132,25 @@ final class TransactionAssembler {
             final Runnable transactionResolved,
             final ReaderDeliveryListener deliveryListener
     ) {
+        this(configuration, clusterId, epoch, initialSequence, initialPosition, receiver, transactionResolved,
+                deliveryListener, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+    }
+
+    TransactionAssembler(
+            final AeronReplicationConfiguration configuration,
+            final UUID clusterId,
+            final long epoch,
+            final long initialSequence,
+            final long initialPosition,
+            final StorageBinaryDataReceiver receiver,
+            final Runnable transactionResolved,
+            final ReaderDeliveryListener deliveryListener,
+            final long wireNonce
+    ) {
         this.configuration = configuration;
         this.clusterId = clusterId;
+        if (wireNonce == 0L) throw new IllegalArgumentException("wireNonce must not be zero");
+        this.wireNonce = wireNonce;
         this.epoch = epoch;
         this.receiver = receiver;
         this.transactionResolved = transactionResolved;
@@ -173,7 +191,7 @@ final class TransactionAssembler {
     }
 
     private boolean accept(final AeronReplicationEnvelope.EnvelopeView envelope, final long position) {
-        if (!envelope.matches(this.clusterId) || this.epoch != envelope.epoch()) {
+        if (!envelope.matches(this.clusterId, this.wireNonce) || this.epoch != envelope.epoch()) {
             throw new IllegalArgumentException("cluster or epoch mismatch");
         }
         /* Reject stale tokens on every frame, but raise the floor only after a
@@ -207,7 +225,7 @@ final class TransactionAssembler {
                 if (this.transaction == null) {
                     this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
                             this.configuration.maxTransactionBytes(), true,
-                            this.dataCrc, this.crcScratch);
+                            this.dataCrc);
                 }
                 if (this.transaction.sequence != envelope.sequence() || !this.transaction.duplicate)
                     throw new IllegalStateException("interleaved replayed transaction");
@@ -273,7 +291,7 @@ final class TransactionAssembler {
         if (this.transaction == null) {
             this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
                     this.configuration.maxTransactionBytes(), false,
-                    this.dataCrc, this.crcScratch);
+                    this.dataCrc);
         }
         if (this.transaction.sequence != envelope.sequence()) {
             throw new IllegalStateException("interleaved replication transaction");
@@ -448,7 +466,6 @@ final class TransactionAssembler {
         private final int maxBytes;
         private final boolean duplicate;
         private final CRC32C dataCrc;
-        private final byte[] crcScratch;
         private UnsafeBuffer dictionary;
         private ByteBuffer dictionaryStorage;
         private UnsafeBuffer data;
@@ -463,13 +480,12 @@ final class TransactionAssembler {
         private int dataLength;
 
         Transaction(final long sequence, final long fencingToken, final int maxBytes, final boolean duplicate,
-                    final CRC32C dataCrc, final byte[] crcScratch) {
+                    final CRC32C dataCrc) {
             this.sequence = sequence;
             this.fencingToken = fencingToken;
             this.maxBytes = maxBytes;
             this.duplicate = duplicate;
             this.dataCrc = dataCrc;
-            this.crcScratch = crcScratch;
             this.dataCrc.reset();
         }
 
@@ -500,13 +516,13 @@ final class TransactionAssembler {
                 if (this.dictionary == null) {
                     this.dictionaryLength = payloadLength;
                     if (payloadLength != 0) {
-                        this.dictionaryStorage = XMemory.allocateDirectNative(payloadLength);
-                        this.dictionary = new UnsafeBuffer(this.dictionaryStorage);
+                        this.ensureCapacity(true, wireLength);
                     }
                 }
                 if (this.dictionaryLength != payloadLength) throw new IllegalArgumentException("dictionary length changed within transaction");
                 if (wireLength != 0) {
                     if (this.dictionary == null) throw new IllegalStateException("dictionary storage is unavailable");
+                    this.ensureCapacity(true, this.dictionaryOffset + wireLength);
                     this.dictionary.putBytes(offset, envelope.source(), envelope.payloadOffset(), wireLength);
                 }
                 this.dictionaryOffset += wireLength;
@@ -514,13 +530,13 @@ final class TransactionAssembler {
                 this.dictionaryChunkCount = envelope.chunkCount();
             } else {
                 if (this.data == null && payloadLength != 0) {
-                    this.dataStorage = XMemory.allocateDirectNative(payloadLength);
-                    this.data = new UnsafeBuffer(this.dataStorage);
+                    this.ensureCapacity(false, wireLength);
                 }
                 if (this.dataLength != 0 && this.dataLength != payloadLength) throw new IllegalArgumentException("Store binary length changed within transaction");
                 this.dataLength = payloadLength;
                 if (wireLength != 0) {
                     if (this.data == null) throw new IllegalStateException("Store data storage is unavailable");
+                    this.ensureCapacity(false, this.dataOffset + wireLength);
                     this.data.putBytes(offset, envelope.source(), envelope.payloadOffset(), wireLength);
                     this.updateDataCrc(envelope.source(), envelope.payloadOffset(), wireLength);
                 }
@@ -531,12 +547,35 @@ final class TransactionAssembler {
         }
 
         private void updateDataCrc(final DirectBuffer source, final int offset, final int length) {
-            for (int copied = 0; copied < length; ) {
-                final int amount = Math.min(this.crcScratch.length, length - copied);
-                source.getBytes(offset + copied, this.crcScratch, 0, amount);
-                this.dataCrc.update(this.crcScratch, 0, amount);
-                copied += amount;
+            Crc32c.update(this.dataCrc, source, offset, length);
+        }
+
+        private void ensureCapacity(final boolean dictionary, final int required) {
+            if (required <= 0) return;
+            final ByteBuffer current = dictionary ? this.dictionaryStorage : this.dataStorage;
+            if (current != null && current.capacity() >= required) return;
+            final int oldCapacity = current == null ? 0 : current.capacity();
+            final long doubled = oldCapacity == 0 ? Math.min(required, 64 * 1024L) : (long) oldCapacity * 2L;
+            final int capacity = (int) Math.min(this.maxBytes, Math.max(required, doubled));
+            final ByteBuffer replacementStorage = XMemory.allocateDirectNative(capacity);
+            try {
+                final UnsafeBuffer replacement = new UnsafeBuffer(replacementStorage);
+                final int copied = dictionary ? this.dictionaryOffset : this.dataOffset;
+                if (current != null && copied != 0) {
+                    replacement.putBytes(0, dictionary ? this.dictionary : this.data, 0, copied);
+                }
+                if (dictionary) {
+                    this.dictionaryStorage = replacementStorage;
+                    this.dictionary = replacement;
+                } else {
+                    this.dataStorage = replacementStorage;
+                    this.data = replacement;
+                }
+            } catch (final RuntimeException | Error failure) {
+                XMemory.deallocateDirectByteBuffer(replacementStorage);
+                throw failure;
             }
+            if (current != null) XMemory.deallocateDirectByteBuffer(current);
         }
 
         int dataCrc32c() {

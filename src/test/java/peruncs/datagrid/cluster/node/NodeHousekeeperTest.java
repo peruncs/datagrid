@@ -167,6 +167,22 @@ class NodeHousekeeperTest {
         }
     }
 
+        /// An Error is recorded for health and does not cancel its fixed-delay task.
+    @Test
+    void fatalTaskFailureDoesNotCancelMaintenanceSchedule() throws InterruptedException {
+        final AtomicBoolean first = new AtomicBoolean(true);
+        final AtomicInteger runs = new AtomicInteger();
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+            housekeeper.schedule("fatal", () -> {
+                runs.incrementAndGet();
+                if (first.getAndSet(false)) throw new AssertionError("fatal maintenance failure");
+            }, Duration.ofMillis(50));
+            housekeeper.start();
+            awaitCondition(() -> runs.get() >= 2, 5_000L, "fatal task was cancelled after Error");
+            assertNotNull(housekeeper.failure());
+        }
+    }
+
         /// A slow run postpones its own next run instead of overlapping it.
     @Test
     void slowRunDoesNotOverlapItself() throws InterruptedException {

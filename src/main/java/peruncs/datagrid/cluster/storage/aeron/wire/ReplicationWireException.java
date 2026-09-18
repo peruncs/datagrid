@@ -8,4 +8,9 @@ public final class ReplicationWireException extends StorageBinaryDataException {
     public ReplicationWireException(final String message) {
         super(message);
     }
+
+    /// Creates a wire failure retaining the decoding cause.
+    public ReplicationWireException(final String message, final Throwable cause) {
+        super(message, cause);
+    }
 }

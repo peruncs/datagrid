@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
+import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
@@ -8,10 +9,11 @@ import java.util.function.LongSupplier;
 /// Admission checks use [#isValid()], but a deposed writer can lose the lease
 /// between that check and the Aeron offer when the offer retries under back
 /// pressure. Commit and abort markers must therefore run their bounded offer
-/// through [#offerUnderOwnership(LongSupplier)]: ownership is verified while
-/// holding the same interprocess lock used for acquisition, the offer runs,
-/// and the heartbeat is refreshed before the lock is released. The slow
-/// Archive acknowledgement wait always runs outside that lock.
+/// through [#offerUnderOwnership(OwnedOffer)]: ownership is verified while
+/// holding the same interprocess lock used for acquisition, and the retry loop
+/// receives a callback that is evaluated before every publication attempt. The
+/// heartbeat is refreshed before the lock is released. The slow Archive
+/// acknowledgement wait always runs outside that lock.
 public interface WriterLeaseGate {
     /// Reports whether the writer lease is still current.
     ///
@@ -24,6 +26,26 @@ public interface WriterLeaseGate {
     /// @return Aeron position returned by the offer
     /// @throws IllegalStateException when the lease was lost before the offer
     long offerUnderOwnership(LongSupplier offer);
+
+    /// Offers a terminal marker while passing the current ownership check into
+    /// each bounded publication attempt.
+    ///
+    /// The legacy zero-argument overload remains the compatibility seam for
+    /// simple test gates. Production gates override this overload so retries
+    /// cannot continue after fencing.
+    ///
+    /// @param offer offer operation receiving the per-attempt ownership check
+    /// @return Aeron position returned by the offer
+    default long offerUnderOwnership(final OwnedOffer offer) {
+        Objects.requireNonNull(offer, "offer");
+        return this.offerUnderOwnership(() -> offer.offer(() -> true));
+    }
+
+    /// Supplies a publication operation and its per-attempt ownership check.
+    @FunctionalInterface
+    interface OwnedOffer {
+        long offer(BooleanSupplier stillOwner);
+    }
 
     /// Creates a gate that always reports valid and offers directly.
     ///
@@ -38,6 +60,11 @@ public interface WriterLeaseGate {
             @Override
             public long offerUnderOwnership(final LongSupplier offer) {
                 return offer.getAsLong();
+            }
+
+            @Override
+            public long offerUnderOwnership(final OwnedOffer offer) {
+                return offer.offer(() -> true);
             }
         };
     }
@@ -59,6 +86,14 @@ public interface WriterLeaseGate {
                     throw new IllegalStateException("writer fencing lease lost before commit; restart required");
                 }
                 return offer.getAsLong();
+            }
+
+            @Override
+            public long offerUnderOwnership(final OwnedOffer offer) {
+                if (!valid.getAsBoolean()) {
+                    throw new IllegalStateException("writer fencing lease lost before commit; restart required");
+                }
+                return offer.offer(valid);
             }
         };
     }

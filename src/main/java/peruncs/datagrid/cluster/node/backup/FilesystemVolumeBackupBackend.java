@@ -50,7 +50,11 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
          * with another. The in-JVM mutex covers threads of this process; the
          * file lock covers separate processes sharing the volume. */
         private static final String PUBLISH_LOCK_FILE_NAME = ".publish.lock";
-        private static final ConcurrentHashMap<Path, Object> PUBLISH_MUTEXES = new ConcurrentHashMap<>();
+        private static final ConcurrentHashMap<Path, PublicationMutex> PUBLISH_MUTEXES = new ConcurrentHashMap<>();
+
+        private static final class PublicationMutex {
+            private int users;
+        }
 
         private final Path backupVolumePath;
         private final Path userUploadedStorageArchivePath;
@@ -126,6 +130,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
             try {
                 final var fs = Storage.DefaultFileSystem();
                 connection.issueFullBackup(fs.ensureDirectory(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY)));
+                ensureNotInterrupted();
                 final byte[] manifestBytes;
                 try {
                     Files.createDirectories(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY));
@@ -149,6 +154,7 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                         exportDirectory.resolve(BackupArchive.BACKUP_IDENTITY_ENTRY), stamped);
                 final Path temporaryArchive = exportDirectory.resolve(BackupArchive.toArchiveFileName(stamped));
                 BackupArchive.compressStorage(exportDirectory, temporaryArchive);
+                ensureNotInterrupted();
                 this.publishArchive(temporaryArchive, this.toArchivePath(backup), manifestBytes, stamped.digest());
             } catch (final RuntimeException | Error failure) {
                 primaryFailure = failure;
@@ -160,6 +166,12 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
                     LOGGER.log(System.Logger.Level.WARNING,
                             "Failed to clean up backup export workspace %s".formatted(exportDirectory), cleanupFailure);
                 }
+            }
+        }
+
+        private static void ensureNotInterrupted() {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new NodeLibraryException("Storage backup interrupted before publication");
             }
         }
 
@@ -243,21 +255,32 @@ public interface FilesystemVolumeBackupBackend extends StorageBackupBackend {
              * touching the destination: the check, the comparison, and the
              * rename below are one atomic publication step only while the
              * volume lock is held. */
-            final Object mutex = PUBLISH_MUTEXES.computeIfAbsent(this.backupVolumePath, ignored -> new Object());
-            synchronized (mutex) {
-                this.ensureVolumeDirectory();
-                final Path lockFile = this.backupVolumePath.resolve(PUBLISH_LOCK_FILE_NAME);
-                try (FileChannel lockChannel = FileChannel.open(lockFile,
-                        StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                     FileLock ignored = lockChannel.lock()) {
-                    this.publishArchiveLocked(temporaryArchive, destination, manifestBytes, digest);
-                } catch (final OverlappingFileLockException overlapped) {
-                    throw new NodeLibraryException(
-                            "Backup volume publication lock is already held at %s".formatted(lockFile), overlapped);
-                } catch (final IOException failure) {
-                    throw new NodeLibraryException(
-                            "Failed to lock backup volume for publication at %s".formatted(lockFile), failure);
+            final PublicationMutex mutex = PUBLISH_MUTEXES.compute(this.backupVolumePath, (ignored, current) -> {
+                final PublicationMutex retained = current == null ? new PublicationMutex() : current;
+                retained.users++;
+                return retained;
+            });
+            try {
+                synchronized (mutex) {
+                    this.ensureVolumeDirectory();
+                    final Path lockFile = this.backupVolumePath.resolve(PUBLISH_LOCK_FILE_NAME);
+                    try (FileChannel lockChannel = FileChannel.open(lockFile,
+                            StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                         FileLock ignored = lockChannel.lock()) {
+                        this.publishArchiveLocked(temporaryArchive, destination, manifestBytes, digest);
+                    } catch (final OverlappingFileLockException overlapped) {
+                        throw new NodeLibraryException(
+                                "Backup volume publication lock is already held at %s".formatted(lockFile), overlapped);
+                    } catch (final IOException failure) {
+                        throw new NodeLibraryException(
+                                "Failed to lock backup volume for publication at %s".formatted(lockFile), failure);
+                    }
                 }
+            } finally {
+                PUBLISH_MUTEXES.computeIfPresent(this.backupVolumePath, (ignored, current) -> {
+                    current.users--;
+                    return current.users == 0 ? null : current;
+                });
             }
         }
 

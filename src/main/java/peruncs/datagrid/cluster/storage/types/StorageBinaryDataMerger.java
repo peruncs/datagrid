@@ -74,9 +74,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
 
         /// Starts a builder for a merger configuration.
         ///
-        /// @return empty configuration builder
+        /// @return configuration builder initialized with safe timing defaults
         public static Builder builder() {
-            return new Builder();
+            return new Builder()
+                    .cachingTimeoutMs(Defaults.CACHING_TIMEOUT_MS)
+                    .cachedBinaryLimit(Defaults.CACHING_LIMIT)
+                    .applyTimeoutMs(Defaults.APPLY_TIMEOUT_MS);
         }
 
         /// Builds a merger configuration without a positional parameter list.
@@ -89,8 +92,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             private long applyTimeoutMs;
             private StorageGraphCoordinator graphCoordinator;
 
-            /// Creates an empty merger configuration builder.
+            /// Creates a merger configuration builder with safe timing defaults.
             public Builder() {
+                this.cachingTimeoutMs = Defaults.CACHING_TIMEOUT_MS;
+                this.cachedBinaryLimit = Defaults.CACHING_LIMIT;
+                this.applyTimeoutMs = Defaults.APPLY_TIMEOUT_MS;
             }
 
             /// Sets the persistence foundation.

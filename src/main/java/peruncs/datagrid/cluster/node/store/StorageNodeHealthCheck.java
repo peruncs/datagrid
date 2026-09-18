@@ -4,6 +4,8 @@ import org.eclipse.store.storage.types.StorageController;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 
+import java.util.function.BooleanSupplier;
+
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Neutral storage + replication readiness gate.
@@ -17,7 +19,21 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
             final StorageController storageController,
             final ReplicationHealth replicationHealth
     ) {
-        return new Default(notNull(storageController), notNull(replicationHealth));
+        return New(storageController, replicationHealth, () -> true);
+    }
+
+        /// Creates a health check that also observes node maintenance health.
+    ///
+    /// @param storageController Store controller
+    /// @param replicationHealth replication health
+    /// @param maintenanceHealthy maintenance-health predicate
+    /// @return health check
+    static StorageNodeHealthCheck New(
+            final StorageController storageController,
+            final ReplicationHealth replicationHealth,
+            final BooleanSupplier maintenanceHealthy
+    ) {
+        return new Default(notNull(storageController), notNull(replicationHealth), notNull(maintenanceHealthy));
     }
 
         /// Reports whether Store and replication are ready.
@@ -73,19 +89,23 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
     final class Default implements StorageNodeHealthCheck {
         private final StorageController storageController;
         private final ReplicationHealth replicationHealth;
+        private final BooleanSupplier maintenanceHealthy;
         private volatile boolean active = true;
 
         private Default(
                 final StorageController storageController,
-                final ReplicationHealth replicationHealth
+                final ReplicationHealth replicationHealth,
+                final BooleanSupplier maintenanceHealthy
         ) {
             this.storageController = storageController;
             this.replicationHealth = replicationHealth;
+            this.maintenanceHealthy = maintenanceHealthy;
         }
 
         @Override
         public boolean isHealthy() {
-            return this.active && this.storageReady() && this.replicationHealth.isHealthy();
+            return this.active && this.maintenanceHealthy.getAsBoolean()
+                    && this.storageReady() && this.replicationHealth.isHealthy();
         }
 
         @Override
@@ -115,7 +135,8 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
 
         @Override
         public boolean isReady() throws NodeLibraryException {
-            return this.active && this.storageReady() && this.replicationHealth.isReady();
+            return this.active && this.maintenanceHealthy.getAsBoolean()
+                    && this.storageReady() && this.replicationHealth.isReady();
         }
 
         private boolean storageReady() {

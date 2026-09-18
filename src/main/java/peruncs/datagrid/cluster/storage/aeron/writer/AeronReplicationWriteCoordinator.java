@@ -22,6 +22,12 @@ import java.util.function.LongSupplier;
 /// its write path. It reports state changes to the checkpoint writer so
 /// restart can distinguish a committed transaction from an uncertain one.
 ///
+/// Lock order is strict: coordinator {@code writeLock} → publisher state
+/// monitor → publisher {@code offerLock}. Slow Aeron offers, Archive waits, and
+/// retention callbacks run after releasing {@code writeLock}; only the
+/// bounded state transitions reacquire it. No callback may acquire the
+/// coordinator lock while holding the publisher offer lock.
+///
 /// This is an Aeron-only write coordinator. Store integration must use
 /// [AeronStorageBinaryReplicationTarget]; exposing this object as the
 /// distributor would allow publication without local Store
@@ -647,7 +653,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             CrashHook.invoke("BEFORE_COMMIT_GATE", prepared.sequence());
             try {
                 commitPosition = this.leaseGate.offerUnderOwnership(
-                        () -> this.publisher.offerCommitMarker(prepared));
+                        stillOwner -> this.publisher.offerCommitMarker(prepared, stillOwner));
             } catch (final IllegalStateException fenced) {
                 this.publisher.failLeaseLost();
                 throw new IllegalStateException(
@@ -703,14 +709,15 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     void abort(final AeronReplicationPublisher.PreparedTransaction prepared) {
         this.writeLock.lock();
         try {
-            this.abortLocked(prepared);
+            this.ensureNotCommitting();
+            /* Reserve the coordinator state, then release the lock before the
+             * retrying Aeron offer and recorded-position wait. Other writers are
+             * rejected by the existing terminal-operation guard, while health,
+             * backup, and dispose paths are not blocked behind Archive progress. */
+            this.commitInProgress = true;
         } finally {
             this.writeLock.unlock();
         }
-    }
-
-    private void abortLocked(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        this.ensureNotCommitting();
         try {
             /* prepare() registers the rejection callback on the token. The publisher
              * invokes it for every successful abort path, including direct publisher
@@ -720,9 +727,17 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         } catch (final RuntimeException | Error failure) {
             this.publisher.failClosed();
             throw failure;
+        } finally {
+            this.writeLock.lock();
+            try {
+                this.localAcceptanceFence = null;
+                this.clearBufferScratch();
+                this.commitInProgress = false;
+                this.commitDone.signalAll();
+            } finally {
+                this.writeLock.unlock();
+            }
         }
-        this.localAcceptanceFence = null;
-        this.clearBufferScratch();
     }
 
         /// Collects channel buffers into the reusable writer-owned array.

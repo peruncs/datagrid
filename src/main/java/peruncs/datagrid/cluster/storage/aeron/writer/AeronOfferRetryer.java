@@ -7,7 +7,7 @@ import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfigurati
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.Objects;
-import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 /// The bounded retry policy used by the writer's Aeron publications.
@@ -54,13 +54,22 @@ final class AeronOfferRetryer {
     /// @throws IllegalStateException    if the publication closes, exceeds its
     ///                                  maximum position, or does not accept the frame before timeout
     long offer(final DirectBuffer source, final int length) {
+        return this.offer(source, length, () -> true);
+    }
+
+    /// Offers until Aeron accepts the frame, the deadline expires, or ownership is lost.
+    ///
+    /// The ownership callback is evaluated before every publication attempt. It is
+    /// intentionally part of this loop rather than a one-time caller check: a
+    /// terminal marker must not be retried after its writer lease has been fenced.
+    long offer(final DirectBuffer source, final int length, final BooleanSupplier stillOwner) {
         if (source == null || length < 0 || length > source.capacity()) {
             throw new IllegalArgumentException("invalid Aeron offer length");
         }
-        return this.offerLoop(source, length);
+        return this.offerLoop(source, length, Objects.requireNonNull(stillOwner, "stillOwner"));
     }
 
-    private long offerLoop(final DirectBuffer source, final int length) {
+    private long offerLoop(final DirectBuffer source, final int length, final BooleanSupplier stillOwner) {
         this.idle.reset();
         final long deadline = ReplicationRetry.deadlineNanos(this.configuration.offerTimeoutNanos(), this.clock);
         long backPressured = 0;
@@ -68,6 +77,9 @@ final class AeronOfferRetryer {
         long adminActions = 0;
         long attempt = 0L;
         while (true) {
+            if (!stillOwner.getAsBoolean()) {
+                throw new IllegalStateException("writer fencing lease lost during Aeron offer retry");
+            }
             if (Thread.currentThread().isInterrupted()) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("interrupted while offering Aeron replication frame");
@@ -96,14 +108,10 @@ final class AeronOfferRetryer {
                 }
                 throw new IllegalStateException("Aeron offer timed out: %s, connected=%s".formatted(reason, this.offerer.isConnected()));
             }
-            /* Full-jitter spacing between attempts keeps concurrent writers from
-             * retrying in lockstep after a shared back-pressure wave. The idle
-             * strategy still governs the tight spin; this park only desynchronizes
-             * successive attempts within the per-operation deadline above. */
+            /* BackoffIdleStrategy is the single pacing mechanism. A second
+             * explicit park compounded latency on every retry and made the
+             * configured offer deadline much less predictable. */
             attempt++;
-            final var policy = this.configuration.retryPolicy();
-            LockSupport.parkNanos(
-                    ReplicationRetry.fullJitterDelayNanos(attempt, policy.jitterBaseNanos(), policy.jitterCapNanos()));
             this.idle.idle();
         }
     }

@@ -175,15 +175,21 @@ public interface BackupNodeManager extends ClusterNodeManager, BackupNodeControl
             LOGGER.log(INFO, "Closing BackupNodeManager.");
             Throwable failure = null;
             try {
-                this.dataClient.dispose();
-            } catch (final Throwable closeFailure) {
-                failure = closeFailure;
-            }
-            try {
                 this.tasks.close();
             } catch (final Throwable closeFailure) {
                 if (failure == null) failure = closeFailure;
                 else if (failure != closeFailure) failure.addSuppressed(closeFailure);
+            }
+            if (failure == null || !this.tasks.isRunningBackup()) {
+                try {
+                    this.dataClient.dispose();
+                } catch (final Throwable closeFailure) {
+                    if (failure == null) failure = closeFailure;
+                    else if (failure != closeFailure) failure.addSuppressed(closeFailure);
+                }
+            } else {
+                failure.addSuppressed(new IllegalStateException(
+                        "backup reader remains active; data client was intentionally left open"));
             }
             if (failure instanceof Error error) throw error;
             if (failure instanceof RuntimeException runtime) throw runtime;

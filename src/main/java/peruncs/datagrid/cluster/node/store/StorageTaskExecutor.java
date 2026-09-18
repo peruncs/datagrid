@@ -61,27 +61,22 @@ public interface StorageTaskExecutor extends AutoCloseable {
         }
 
         @Override
-        public void runChecks() {
+        public synchronized void runChecks() {
             if (this.closed || this.closing) {
                 throw new IllegalStateException("Storage task executor is closed");
             }
-            while (true) {
-                final Future<?> current = this.checksTask.get();
-                if (current != null && !current.isDone()) return;
-                LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage checks");
-                final Future<?> next;
-                try {
-                    next = this.executor.submit(this::runChecksTask);
-                } catch (final RejectedExecutionException rejected) {
-                    /* Close won the race after the state check above and shut the
-                     * executor down. Report closed instead of leaking the rejection. */
-                    if (this.closed || this.closing) {
-                        throw new IllegalStateException("Storage task executor is closed", rejected);
-                    }
-                    throw rejected;
+            final Future<?> current = this.checksTask.get();
+            if (current != null && !current.isDone()) return;
+            LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage checks");
+            try {
+                this.checksTask.set(this.executor.submit(this::runChecksTask));
+            } catch (final RejectedExecutionException rejected) {
+                /* Close won the race after the state check above and shut the
+                 * executor down. Report closed instead of leaking the rejection. */
+                if (this.closed || this.closing) {
+                    throw new IllegalStateException("Storage task executor is closed", rejected);
                 }
-                if (this.checksTask.compareAndSet(current, next)) return;
-                next.cancel(false);
+                throw rejected;
             }
         }
 

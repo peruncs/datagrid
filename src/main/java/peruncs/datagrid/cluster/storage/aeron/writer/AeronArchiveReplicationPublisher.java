@@ -12,6 +12,7 @@ import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
@@ -78,7 +79,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long initialSequence
     ) {
         return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.LOCAL);
+                SourceLocation.LOCAL, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+    }
+
+    public static AeronArchiveReplicationPublisher New(
+            final AeronArchive archive, final String channel, final int streamId,
+            final AeronReplicationConfiguration configuration, final UUID clusterId,
+            final long epoch, final long initialSequence, final long wireNonce) {
+        return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+                SourceLocation.LOCAL, wireNonce);
     }
 
         /// Creates a recording for a publication recorded by a separate Archive.
@@ -103,7 +112,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long initialSequence
     ) {
         return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.REMOTE);
+                SourceLocation.REMOTE, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+    }
+
+    public static AeronArchiveReplicationPublisher NewRemote(
+            final AeronArchive archive, final String channel, final int streamId,
+            final AeronReplicationConfiguration configuration, final UUID clusterId,
+            final long epoch, final long initialSequence, final long wireNonce) {
+        return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+                SourceLocation.REMOTE, wireNonce);
     }
 
     private static AeronArchiveReplicationPublisher New(
@@ -114,7 +131,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final UUID clusterId,
             final long epoch,
             final long initialSequence,
-            final SourceLocation sourceLocation
+            final SourceLocation sourceLocation,
+            final long wireNonce
     ) {
         ExclusivePublication publication = null;
         try {
@@ -133,7 +151,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                     ownedPublication,
                     new AeronReplicationPublisher(
                             ownedPublication, configuration, clusterId, epoch, initialSequence,
-                            position -> awaitRecorded(archive, ownedPublication, recordingId, configuration, position)
+                            position -> awaitRecorded(archive, ownedPublication, recordingId, configuration, position),
+                            wireNonce
                     ),
                     recordingId,
                     configuration,
@@ -179,7 +198,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long initialSequence
     ) {
         return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.LOCAL);
+                SourceLocation.LOCAL, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+    }
+
+    public static AeronArchiveReplicationPublisher Extend(
+            final AeronArchive archive, final long recordingId, final int streamId,
+            final AeronReplicationConfiguration configuration, final UUID clusterId,
+            final long epoch, final long initialSequence, final long wireNonce) {
+        return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+                SourceLocation.LOCAL, wireNonce);
     }
 
         /// Reopens a stopped recording whose source publication uses another driver.
@@ -202,7 +229,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long initialSequence
     ) {
         return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.REMOTE);
+                SourceLocation.REMOTE, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+    }
+
+    public static AeronArchiveReplicationPublisher ExtendRemote(
+            final AeronArchive archive, final long recordingId, final int streamId,
+            final AeronReplicationConfiguration configuration, final UUID clusterId,
+            final long epoch, final long initialSequence, final long wireNonce) {
+        return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+                SourceLocation.REMOTE, wireNonce);
     }
 
     private static AeronArchiveReplicationPublisher Extend(
@@ -213,7 +248,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final UUID clusterId,
             final long epoch,
             final long initialSequence,
-            final SourceLocation sourceLocation
+            final SourceLocation sourceLocation,
+            final long wireNonce
     ) {
         final String[] channel = new String[1];
         final long[] position = new long[1];
@@ -255,7 +291,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             awaitRecordingStarted(archive, publication, recordingId, configuration);
             return new AeronArchiveReplicationPublisher(archive, publication,
                     new AeronReplicationPublisher(publication, configuration, clusterId, epoch, initialSequence,
-                            positionValue -> awaitRecorded(archive, publication, recordingId, configuration, positionValue)), recordingId,
+                            positionValue -> awaitRecorded(archive, publication, recordingId, configuration, positionValue),
+                            wireNonce), recordingId,
                     configuration, sourceLocation);
         } catch (final RuntimeException | Error failure) {
             final Throwable stopFailure = tryStopRecording(

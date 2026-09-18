@@ -11,6 +11,7 @@ import org.agrona.SystemUtil;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.NodeRole;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
@@ -27,6 +28,7 @@ import java.util.*;
 ///
 /// @param replication                     validated publication framing and timeout settings
 /// @param clusterId                       stable cluster identity shared by all members
+/// @param wireNonce                       shared non-authenticating nonce that rejects accidental cross-wiring
 /// @param epoch                           writer epoch used to reject stale frames
 /// @param streamId                        data stream id; replay and watermark ids are derived from it
 /// @param recordingId                     configured or discovered Archive recording id
@@ -64,6 +66,7 @@ import java.util.*;
 record AeronSettings(
         AeronReplicationConfiguration replication,
         UUID clusterId,
+        long wireNonce,
         long epoch,
         int streamId,
         long recordingId,
@@ -173,6 +176,12 @@ record AeronSettings(
         final AeronReplicationConfiguration replication = replicationBuilder.build();
         final String cluster = value(properties, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", null);
         if (cluster == null) throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_CLUSTER_ID is required");
+        final UUID clusterId = parseUuid(cluster, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID");
+        final long wireNonce = parseLong(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE",
+                Long.toString(AeronReplicationEnvelope.defaultWireNonce(clusterId)));
+        if (wireNonce == 0L) {
+            throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_WIRE_NONCE must not be zero");
+        }
         final long epoch = parseLong(properties, "ECLIPSE_DATAGRID_AERON_EPOCH", "1");
         final int streamId = parseInt(properties, "ECLIPSE_DATAGRID_AERON_STREAM_ID", "1001");
         final long recordingId = parseLong(properties, "ECLIPSE_DATAGRID_AERON_RECORDING_ID", "-1");
@@ -371,7 +380,8 @@ record AeronSettings(
         }
         final AeronSettings settings = new AeronSettings(
                 replication,
-                parseUuid(cluster, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID"),
+                clusterId,
+                wireNonce,
                 epoch,
                 streamId,
                 recordingId,

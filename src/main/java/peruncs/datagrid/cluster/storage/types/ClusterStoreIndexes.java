@@ -4,6 +4,7 @@ import io.github.jbellis.jvector.graph.GraphIndexBuilder;
 import io.github.jbellis.jvector.graph.OnHeapGraphIndex;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.Directory;
 import org.eclipse.serializer.concurrency.LockedExecutor;
@@ -167,6 +168,44 @@ public final class ClusterStoreIndexes {
                                 .formatted(type.getName()));
             }
             return new VectorGraphFields(builderField, graphField, rebuiltField, deferredField);
+        }
+    };
+
+    private record LuceneFields(Field directory, Field writer, Field reader, Field searcher,
+                                Field analyzer, Field readerStale, Field context) {
+    }
+
+    private static final ClassValue<LuceneFields> LUCENE_FIELDS = new ClassValue<>() {
+        @Override
+        protected LuceneFields computeValue(final Class<?> type) {
+            Field directory = null;
+            Field writer = null;
+            Field reader = null;
+            Field searcher = null;
+            Field analyzer = null;
+            Field readerStale = null;
+            Field context = null;
+            for (Class<?> current = type; current != null && current != Object.class;
+                 current = current.getSuperclass()) {
+                for (final Field field : current.getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers())) continue;
+                    switch (field.getName()) {
+                        case "directory" -> { if (directory == null && Directory.class.isAssignableFrom(field.getType())) directory = field; }
+                        case "writer" -> { if (writer == null && Closeable.class.isAssignableFrom(field.getType())) writer = field; }
+                        case "reader" -> { if (reader == null && DirectoryReader.class.isAssignableFrom(field.getType())) reader = field; }
+                        case "searcher" -> { if (searcher == null && IndexSearcher.class.isAssignableFrom(field.getType())) searcher = field; }
+                        case "analyzer" -> { if (analyzer == null && Analyzer.class.isAssignableFrom(field.getType())) analyzer = field; }
+                        case "readerStale" -> { if (readerStale == null && field.getType() == boolean.class) readerStale = field; }
+                        default -> { }
+                    }
+                    if (context == null && LuceneContext.class.isAssignableFrom(field.getType())) context = field;
+                }
+                if (directory != null && writer != null && reader != null && searcher != null && analyzer != null) break;
+            }
+            if (directory == null || writer == null || reader == null || searcher == null || analyzer == null || context == null) {
+                throw new IllegalStateException("cannot invalidate Lucene view on %s; unsupported Store version".formatted(type.getName()));
+            }
+            return new LuceneFields(directory, writer, reader, searcher, analyzer, readerStale, context);
         }
     };
 
@@ -412,7 +451,8 @@ public final class ClusterStoreIndexes {
         final GigaIndices<?> indices = map.index();
         for (Class<?> type = indices.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
             for (final Field field : type.getDeclaredFields()) {
-                if (!"indexGroups".equals(field.getName()) || !Iterable.class.isAssignableFrom(field.getType())) {
+                if (Modifier.isStatic(field.getModifiers()) ||
+                        !"indexGroups".equals(field.getName()) || !Iterable.class.isAssignableFrom(field.getType())) {
                     continue;
                 }
                 try {
@@ -516,12 +556,7 @@ public final class ClusterStoreIndexes {
     /// @throws IllegalArgumentException if any root violates the index policy
     /// @throws IllegalStateException    if a root cannot be inspected completely
     public static void validateStorageRoots(final StorageConnection storage) {
-        Objects.requireNonNull(storage, "storage")
-                .persistenceManager()
-                .viewRoots()
-                .iterateEntries((identifier, value) -> {
-                    if (value != null) validateGraph(value);
-                });
+        validateForPublication(storage);
     }
 
         /// Reader-side maintenance entry: refreshes every replicated search view
@@ -802,55 +837,13 @@ public final class ClusterStoreIndexes {
     /// @throws IllegalStateException if the upstream field layout changed
     private static void invalidateLuceneView(final LuceneIndex<?> lucene) {
         final Object target = Objects.requireNonNull(lucene, "lucene");
-        Field directoryField = null;
-        Field writerField = null;
-        Field readerField = null;
-        Field searcherField = null;
-        Field analyzerField = null;
-        Field readerStaleField = null;
-        for (Class<?> type = target.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
-            for (final Field field : type.getDeclaredFields()) {
-                if (Modifier.isStatic(field.getModifiers())) continue;
-                switch (field.getName()) {
-                    case "directory" -> {
-                        if (directoryField == null) directoryField = field;
-                    }
-                    case "writer" -> {
-                        if (writerField == null) writerField = field;
-                    }
-                    case "reader" -> {
-                        if (readerField == null) readerField = field;
-                    }
-                    case "searcher" -> {
-                        if (searcherField == null) searcherField = field;
-                    }
-                    case "analyzer" -> {
-                        if (analyzerField == null) analyzerField = field;
-                    }
-                    case "readerStale" -> {
-                        if (readerStaleField == null && field.getType() == boolean.class) {
-                            readerStaleField = field;
-                        }
-                    }
-                    default -> {
-                    }
-                }
-            }
-            if (directoryField != null && writerField != null && readerField != null &&
-                searcherField != null && analyzerField != null) break;
-        }
-        if (directoryField == null || writerField == null || readerField == null ||
-            searcherField == null || analyzerField == null) {
-            throw new IllegalStateException(
-                    "cannot invalidate Lucene view on %s; unsupported Store version"
-                            .formatted(target.getClass().getName()));
-        }
-        final Analyzer analyzer = (Analyzer) XMemory.getObject(target, XMemory.objectFieldOffset(analyzerField));
-        final Closeable writer = (Closeable) XMemory.getObject(target, XMemory.objectFieldOffset(writerField));
+        final LuceneFields fields = LUCENE_FIELDS.get(target.getClass());
+        final Analyzer analyzer = (Analyzer) XMemory.getObject(target, XMemory.objectFieldOffset(fields.analyzer()));
+        final Closeable writer = (Closeable) XMemory.getObject(target, XMemory.objectFieldOffset(fields.writer()));
         final DirectoryReader reader =
-                (DirectoryReader) XMemory.getObject(target, XMemory.objectFieldOffset(readerField));
+                (DirectoryReader) XMemory.getObject(target, XMemory.objectFieldOffset(fields.reader()));
         final Directory directory =
-                (Directory) XMemory.getObject(target, XMemory.objectFieldOffset(directoryField));
+                (Directory) XMemory.getObject(target, XMemory.objectFieldOffset(fields.directory()));
         /* Same order as the upstream close: analyzer, writer, reader,
          * directory. The writer is closed — never rolled back: rollback
          * deletes every directory file the writer did not create, which on a
@@ -860,13 +853,13 @@ public final class ClusterStoreIndexes {
          * releases the writer so the next query reopens over the current
          * replicated files. The writer is never kept open across batches, so
          * no file deleter ever spans an import swap. */
-        closeQuietly(target, analyzer, analyzerField);
-        closeQuietly(target, writer, writerField);
-        closeQuietly(target, reader, readerField);
-        closeQuietly(target, directory, directoryField);
-        XMemory.setObject(target, XMemory.objectFieldOffset(searcherField), null);
-        if (readerStaleField != null) {
-            XMemory.set_byte(target, XMemory.objectFieldOffset(readerStaleField), (byte) 0);
+        closeQuietly(target, analyzer, fields.analyzer());
+        closeQuietly(target, writer, fields.writer());
+        closeQuietly(target, reader, fields.reader());
+        closeQuietly(target, directory, fields.directory());
+        XMemory.setObject(target, XMemory.objectFieldOffset(fields.searcher()), null);
+        if (fields.readerStale() != null) {
+            XMemory.set_byte(target, XMemory.objectFieldOffset(fields.readerStale()), (byte) 0);
         }
     }
 
@@ -931,21 +924,14 @@ public final class ClusterStoreIndexes {
     }
 
     private static LuceneContext<?> luceneContext(final LuceneIndex<?> index) {
-        for (Class<?> type = index.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
-            for (final Field field : type.getDeclaredFields()) {
-                if (!LuceneContext.class.isAssignableFrom(field.getType())) continue;
-                try {
-                    return (LuceneContext<?>) XMemory.getObject(index, XMemory.objectFieldOffset(field));
-                } catch (final RuntimeException denied) {
-                    throw new IllegalStateException(
-                            "cannot inspect Lucene context on %s"
-                                    .formatted(index.getClass().getName()), denied);
-                }
-            }
+        final Field field = LUCENE_FIELDS.get(index.getClass()).context();
+        try {
+            return (LuceneContext<?>) XMemory.getObject(index, XMemory.objectFieldOffset(field));
+        } catch (final RuntimeException denied) {
+            throw new IllegalStateException(
+                    "cannot inspect Lucene context on %s"
+                            .formatted(index.getClass().getName()), denied);
         }
-        throw new IllegalStateException(
-                "cannot inspect Lucene context on %s; unsupported Store version"
-                        .formatted(index.getClass().getName()));
     }
 
     private static void enqueueReachable(final Object current, final ArrayDeque<Object> queue,

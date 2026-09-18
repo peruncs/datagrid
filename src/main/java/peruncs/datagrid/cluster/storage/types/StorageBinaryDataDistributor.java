@@ -148,7 +148,9 @@ public interface StorageBinaryDataDistributor extends Disposable {
         @Override
         public void distributeTypeDictionary(final String typeDictionaryData) {
             if (typeDictionaryData == null) {
-                this.pending.set(null);
+                /* Null is an incremental-clear signal, not permission to erase
+                 * an authoritative restart snapshot waiting for its transaction. */
+                this.pending.updateAndGet(current -> current != null && current.snapshot() ? current : null);
                 return;
             }
             /* Do not let a later incremental export overwrite an authoritative

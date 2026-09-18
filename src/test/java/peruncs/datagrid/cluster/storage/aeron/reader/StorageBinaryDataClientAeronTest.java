@@ -11,6 +11,7 @@ import peruncs.datagrid.cluster.storage.aeron.wire.ReplicationWireException;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -655,6 +656,33 @@ class StorageBinaryDataClientAeronTest {
         accept(assembler, later);
         assertEquals(0, receiver.dataCalls);
         assertEquals(-1, assembler.lastResolvedSequence());
+    }
+
+    /// A declared 3 KiB payload must grow from the first wire chunk rather than
+    /// allocating the full hostile declaration up front.
+    @Test
+    void assemblerGrowsNativeStorageAcrossChunks() {
+        final RecordingReceiver receiver = new RecordingReceiver();
+        final TransactionAssembler assembler = assembler(receiver, 4096);
+        final byte[] data = new byte[3073];
+        for (int index = 0; index < data.length; index++) data[index] = (byte) index;
+        final int chunkSize = 256;
+        final int chunks = (data.length + chunkSize - 1) / chunkSize;
+        try {
+            for (int index = 0; index < chunks; index++) {
+                final int offset = index * chunkSize;
+                final byte[] chunk = Arrays.copyOfRange(data, offset,
+                        Math.min(data.length, offset + chunkSize));
+                accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, index, chunks,
+                        offset, chunk, data.length));
+            }
+            accept(assembler, AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 0,
+                    AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, chunks, 0,
+                    AeronReplicationEnvelope.crc32c(data), new byte[0]));
+            assertArrayEquals(data, receiver.data);
+        } finally {
+            assembler.dispose();
+        }
     }
 
         /// Verifies frames from a deposed writer fail closed instead of interleaving history.

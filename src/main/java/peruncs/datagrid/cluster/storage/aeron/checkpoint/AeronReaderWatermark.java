@@ -4,6 +4,7 @@ import org.agrona.DirectBuffer;
 import org.eclipse.serializer.concurrency.LockedExecutor;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
+import java.nio.ByteOrder;
 import java.util.*;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
@@ -138,9 +139,21 @@ public record AeronReaderWatermark(
             offset > encoded.capacity() - length) {
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
         }
-        final byte[] frame = new byte[ENCODED_LENGTH];
-        encoded.getBytes(offset, frame);
-        return decode(frame);
+        return decodeFrame(
+                encoded.getInt(offset, ByteOrder.BIG_ENDIAN),
+                encoded.getInt(offset + Integer.BYTES, ByteOrder.BIG_ENDIAN),
+                new UUID(encoded.getLong(offset + 8, ByteOrder.BIG_ENDIAN),
+                        encoded.getLong(offset + 16, ByteOrder.BIG_ENDIAN)),
+                new UUID(encoded.getLong(offset + 24, ByteOrder.BIG_ENDIAN),
+                        encoded.getLong(offset + 32, ByteOrder.BIG_ENDIAN)),
+                new UUID(encoded.getLong(offset + 40, ByteOrder.BIG_ENDIAN),
+                        encoded.getLong(offset + 48, ByteOrder.BIG_ENDIAN)),
+                encoded.getLong(offset + 56, ByteOrder.BIG_ENDIAN),
+                encoded.getLong(offset + 64, ByteOrder.BIG_ENDIAN),
+                encoded.getLong(offset + 72, ByteOrder.BIG_ENDIAN),
+                encoded.getLong(offset + 80, ByteOrder.BIG_ENDIAN),
+                encoded.getInt(offset + CRC_OFFSET, ByteOrder.BIG_ENDIAN),
+                Crc32c.compute(encoded, offset, CRC_OFFSET));
     }
 
     private static AeronReaderWatermark decodeFrame(
@@ -523,7 +536,7 @@ public record AeronReaderWatermark(
             return this.state.read(() ->
             {
                 this.validator.ensureOpen();
-                return Map.copyOf(this.validator.snapshot());
+                return this.validator.snapshot();
             });
         }
 

@@ -8,6 +8,7 @@ import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
@@ -27,6 +28,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /// The subscription belongs to this reader; the caller remains responsible for
 /// the shared Aeron and Archive clients.
 public final class AeronArchiveReader implements Disposable {
+    private static final int FRAGMENTS_PER_POLL = 10;
     /// Immutable setup for one Archive replay and live reader.
     ///
     /// The builder groups subscription wiring, recovered cursor, and delivery
@@ -42,6 +44,7 @@ public final class AeronArchiveReader implements Disposable {
     /// @param replayStreamId           replay stream
     /// @param replicationConfiguration framing and timeout limits
     /// @param clusterId                expected cluster identity
+    /// @param wireNonce                expected accidental-cross-wiring nonce
     /// @param epoch                    expected writer epoch
     /// @param initialSequence          last sequence already applied
     /// @param initialPosition          last resolved Archive position
@@ -59,6 +62,7 @@ public final class AeronArchiveReader implements Disposable {
             int replayStreamId,
             AeronReplicationConfiguration replicationConfiguration,
             UUID clusterId,
+            long wireNonce,
             long epoch,
             long initialSequence,
             long initialPosition,
@@ -72,6 +76,7 @@ public final class AeronArchiveReader implements Disposable {
             Objects.requireNonNull(archiveContext, "archiveContext");
             Objects.requireNonNull(replicationConfiguration, "replicationConfiguration");
             Objects.requireNonNull(clusterId, "clusterId");
+            if (wireNonce == 0L) wireNonce = AeronReplicationEnvelope.defaultWireNonce(clusterId);
             Objects.requireNonNull(receiver, "receiver");
             Objects.requireNonNull(transactionResolved, "transactionResolved");
             if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
@@ -98,6 +103,7 @@ public final class AeronArchiveReader implements Disposable {
             private int replayStreamId;
             private AeronReplicationConfiguration replicationConfiguration;
             private UUID clusterId;
+            private long wireNonce;
             private long epoch;
             private long initialSequence = -1L;
             private long initialPosition = -1L;
@@ -160,6 +166,8 @@ public final class AeronArchiveReader implements Disposable {
             /// @param value cluster identity
             /// @return this builder
             public Builder clusterId(final UUID value) { this.clusterId = value; return this; }
+            /// Sets the accidental-cross-wiring nonce shared with the writer.
+            public Builder wireNonce(final long value) { this.wireNonce = value; return this; }
             /// Sets the writer epoch.
             ///
             /// @param value writer epoch
@@ -197,13 +205,14 @@ public final class AeronArchiveReader implements Disposable {
             public Configuration build() {
                 return new Configuration(aeron, archiveContext, recordingId, startPosition, liveChannel,
                         liveStreamId, replayChannel, replayStreamId, replicationConfiguration, clusterId,
-                        epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
+                        wireNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
             }
         }
     }
 
     private final PersistentSubscription subscription;
     private final TransactionAssembler assembler;
+    private final ControlledFragmentHandler fragmentHandler;
     private final long stopTimeoutNanos;
     private final IdleStrategy idleStrategy;
     private final AtomicBoolean active = new AtomicBoolean();
@@ -250,8 +259,12 @@ public final class AeronArchiveReader implements Disposable {
             this.assembler = new TransactionAssembler(
                     requiredConfiguration, required.clusterId(), required.epoch(), required.initialSequence(),
                     required.initialPosition(), required.receiver(), required.transactionResolved(),
-                    required.deliveryListener()
+                    required.deliveryListener(), required.wireNonce()
             );
+            this.fragmentHandler = (buffer, offset, length, header) -> {
+                this.assembler.onFragment(buffer, offset, length, header);
+                return ControlledFragmentHandler.Action.CONTINUE;
+            };
         } catch (final RuntimeException | Error failure) {
             try {
                 subscription.close();
@@ -356,11 +369,7 @@ public final class AeronArchiveReader implements Disposable {
                     () -> this.subscription.hasFailed() || this.assembler.failure() != null,
                     () ->
                     {
-                        final int work = this.subscription.controlledPoll((buffer, offset, length, header) ->
-                        {
-                            this.assembler.onFragment(buffer, offset, length, header);
-                            return ControlledFragmentHandler.Action.CONTINUE;
-                        }, 10);
+                        final int work = this.subscription.controlledPoll(this.fragmentHandler, FRAGMENTS_PER_POLL);
                         this.live = this.subscription.isLive();
                         if (this.stopAtLatest) extendStopDeadline();
                         return work;

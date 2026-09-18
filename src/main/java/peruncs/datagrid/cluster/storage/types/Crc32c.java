@@ -1,5 +1,8 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import org.agrona.DirectBuffer;
+
+import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.zip.CRC32C;
 
@@ -55,6 +58,36 @@ public final class Crc32c {
     public static int compute(final byte[] bytes) {
         Objects.requireNonNull(bytes, "bytes");
         return compute(bytes, 0, bytes.length);
+    }
+
+    /// Updates a caller-owned accumulator directly from an Agrona buffer.
+    /// Native/direct buffers use the JDK zero-copy path; heap buffers use their
+    /// existing backing array. No temporary heap scratch is allocated.
+    public static void update(final CRC32C reuse, final DirectBuffer source,
+                              final int offset, final int length) {
+        Objects.requireNonNull(reuse, "reuse");
+        Objects.requireNonNull(source, "source");
+        if (offset < 0 || length < 0 || offset > source.capacity() - length) {
+            throw new IllegalArgumentException("invalid CRC32C range");
+        }
+        final byte[] array = source.byteArray();
+        if (array != null) {
+            reuse.update(array, source.wrapAdjustment() + offset, length);
+            return;
+        }
+        final ByteBuffer buffer = source.byteBuffer();
+        if (buffer == null) throw new IllegalArgumentException("Agrona buffer has no accessible backing storage");
+        final int start = source.wrapAdjustment() + offset;
+        final ByteBuffer view = buffer.duplicate();
+        view.position(start).limit(start + length);
+        reuse.update(view);
+    }
+
+    /// Returns the CRC32C of an Agrona buffer range.
+    public static int compute(final DirectBuffer source, final int offset, final int length) {
+        final CRC32C reuse = accumulator();
+        update(reuse, source, offset, length);
+        return (int) reuse.getValue();
     }
 
 }

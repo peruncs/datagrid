@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -22,6 +23,7 @@ final class NodeHousekeeper implements AutoCloseable {
     private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
 
     private final ScheduledThreadPoolExecutor scheduler;
+    private final AtomicReference<Error> fatalFailure = new AtomicReference<>();
     private final List<ScheduledTask> pending = new ArrayList<>();
     private boolean started;
     private boolean closing;
@@ -44,7 +46,7 @@ final class NodeHousekeeper implements AutoCloseable {
         return new NodeHousekeeper();
     }
 
-    private static void runGuarded(final ScheduledTask scheduled) {
+    private void runGuarded(final ScheduledTask scheduled) {
         LOGGER.log(System.Logger.Level.DEBUG, "Running housekeeper task '%s'".formatted(scheduled.name()));
         try {
             scheduled.task().run();
@@ -52,12 +54,18 @@ final class NodeHousekeeper implements AutoCloseable {
         } catch (final RuntimeException failure) {
             LOGGER.log(System.Logger.Level.ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
         } catch (final Error failure) {
-            /* Do not rethrow into the scheduled executor: an escaping Error
-             * silently cancels that periodic task forever, so a transient
-             * maintenance failure would disable the schedule. The failure is
-             * logged and the next run proceeds. */
+            /* Never let an Error escape scheduleWithFixedDelay: ScheduledExecutorService
+             * cancels that task permanently when its runnable throws. Record the fatal
+             * condition so the node health boundary fails closed while later tasks and
+             * diagnostics remain schedulable. */
+            this.fatalFailure.compareAndSet(null, failure);
             LOGGER.log(System.Logger.Level.ERROR, "Fatal housekeeper task '%s' failure".formatted(scheduled.name()), failure);
         }
+    }
+
+        /// Returns the first fatal maintenance failure, or {@code null}.
+    Error failure() {
+        return this.fatalFailure.get();
     }
 
         /// Registers one periodic task. Tasks must be scheduled before start.

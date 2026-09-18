@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.io.IOException;
@@ -124,16 +125,11 @@ final class WriterFencingLease implements AutoCloseable {
             if (existing == null) {
                 token = 1L;
                 writeAtomically(path, new LeaseFile(token, nodeId, PROCESS_HOLDER_ID, now));
-            } else if (now >= existing.heartbeatMillis() &&
-                    now - existing.heartbeatMillis() > maxStaleness.toMillis()) {
-                try {
-                    token = Math.addExact(existing.token(), 1L);
-                } catch (final ArithmeticException overflow) {
-                    throw new IllegalStateException(
-                            "writer fencing token space is exhausted for cluster %s generation %s; manual intervention is required".formatted(
-                                    clusterId, storeGeneration),
-                            overflow);
-                }
+            } else if (futureSkewed(now, existing.heartbeatMillis(), maxStaleness.toMillis())) {
+                throw new IllegalStateException(
+                        "writer lease heartbeat is in the future beyond the configured clock-skew bound; synchronize writer clocks");
+            } else if (now - existing.heartbeatMillis() > maxStaleness.toMillis()) {
+                token = nextToken(existing.token(), clusterId, storeGeneration);
                 writeAtomically(path, new LeaseFile(token, nodeId, PROCESS_HOLDER_ID, now));
             } else if (existing.nodeId().equals(nodeId)) {
                 /* The same writer restarting — cleanly or after a crash, in
@@ -145,14 +141,7 @@ final class WriterFencingLease implements AutoCloseable {
                  * indistinguishable from the new holder. A live clone with a
                  * copied node id is deposed instead: the bump makes its frames
                  * stale, and its next renewal fails the holder check. */
-                try {
-                    token = Math.addExact(existing.token(), 1L);
-                } catch (final ArithmeticException overflow) {
-                    throw new IllegalStateException(
-                            "writer fencing token space is exhausted for cluster %s generation %s; manual intervention is required".formatted(
-                                    clusterId, storeGeneration),
-                            overflow);
-                }
+                token = nextToken(existing.token(), clusterId, storeGeneration);
                 writeAtomically(path, new LeaseFile(token, nodeId, PROCESS_HOLDER_ID, now));
             } else {
                 throw new IllegalStateException(
@@ -171,6 +160,17 @@ final class WriterFencingLease implements AutoCloseable {
         ACTIVE.put(path, lease);
         lease.startHeartbeat();
         return lease;
+    }
+
+    private static long nextToken(final long current, final UUID clusterId, final UUID storeGeneration) {
+        try {
+            return Math.addExact(current, 1L);
+        } catch (final ArithmeticException overflow) {
+            throw new IllegalStateException(
+                    "writer fencing token space is exhausted for cluster %s generation %s; manual intervention is required".formatted(
+                            clusterId, storeGeneration),
+                    overflow);
+        }
     }
 
         /// Returns the lease file for one cluster/generation.
@@ -279,9 +279,7 @@ final class WriterFencingLease implements AutoCloseable {
         }
         final long checkedAt = System.currentTimeMillis();
         final LeaseFile current = readQuietly(this.path);
-        final boolean fresh = current != null &&
-                (checkedAt < current.heartbeatMillis() ||
-                        checkedAt - current.heartbeatMillis() <= this.maxStalenessMillis);
+        final boolean fresh = current != null && isFresh(checkedAt, current.heartbeatMillis(), this.maxStalenessMillis);
         final boolean result = current != null && current.token() == this.token &&
                 current.nodeId().equals(this.nodeId) && current.holderId().equals(this.holderId) && fresh;
         synchronized (this.stateLock) {
@@ -291,6 +289,15 @@ final class WriterFencingLease implements AutoCloseable {
             this.lastCheckResult = result;
             return result;
         }
+    }
+
+    private static boolean futureSkewed(final long now, final long heartbeat, final long boundMillis) {
+        return heartbeat > now && heartbeat - now > boundMillis;
+    }
+
+    private static boolean isFresh(final long now, final long heartbeat, final long boundMillis) {
+        return !futureSkewed(now, heartbeat, boundMillis) && now >= heartbeat
+                && now - heartbeat <= boundMillis;
     }
 
     private void renew() {
@@ -318,6 +325,13 @@ final class WriterFencingLease implements AutoCloseable {
                     }
                     writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
                             System.currentTimeMillis()));
+                    synchronized (this.stateLock) {
+                        if (!this.closed) {
+                            this.hasCheck = true;
+                            this.lastCheckMillis = System.currentTimeMillis();
+                            this.lastCheckResult = true;
+                        }
+                    }
                 }
             } catch (final IOException | RuntimeException failure) {
                 synchronized (this.stateLock) {
@@ -345,6 +359,16 @@ final class WriterFencingLease implements AutoCloseable {
     /// @throws IllegalStateException when this holder no longer owns a fresh lease
     public long executeUnderOwnership(final java.util.function.LongSupplier offer) {
         Objects.requireNonNull(offer, "offer");
+        return this.executeUnderOwnership(ignored -> offer.getAsLong());
+    }
+
+    /// Offers one terminal marker with a per-attempt ownership callback.
+    ///
+    /// @param offer offer operation receiving the per-attempt ownership check
+    /// @return Aeron position returned by the offer
+    /// @throws IllegalStateException when this holder no longer owns a fresh lease
+    public long executeUnderOwnership(final peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate.OwnedOffer offer) {
+        Objects.requireNonNull(offer, "offer");
         synchronized (ACQUIRE_LOCK) {
             synchronized (this.stateLock) {
                 if (this.closed) {
@@ -357,8 +381,7 @@ final class WriterFencingLease implements AutoCloseable {
                  final FileLock ignored = lockChannel.lock()) {
                 final LeaseFile current = readForAcquire(this.path);
                 final long now = System.currentTimeMillis();
-                final boolean fresh = now < current.heartbeatMillis() ||
-                        now - current.heartbeatMillis() <= this.maxStalenessMillis;
+                final boolean fresh = isFresh(now, current.heartbeatMillis(), this.maxStalenessMillis);
                 if (current.token() != this.token || !current.nodeId().equals(this.nodeId) ||
                     !current.holderId().equals(this.holderId) || !fresh) {
                     synchronized (this.stateLock) {
@@ -369,9 +392,16 @@ final class WriterFencingLease implements AutoCloseable {
                     throw new IllegalStateException(
                             "writer fencing lease lost before commit; this writer is fenced");
                 }
-                final long position = offer.getAsLong();
+                final long position = offer.offer(this::isCurrentUncached);
                 writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
                         System.currentTimeMillis()));
+                synchronized (this.stateLock) {
+                    if (!this.closed) {
+                        this.hasCheck = true;
+                        this.lastCheckMillis = System.currentTimeMillis();
+                        this.lastCheckResult = true;
+                    }
+                }
                 return position;
             } catch (final IOException failure) {
                 synchronized (this.stateLock) {
@@ -531,6 +561,7 @@ final class WriterFencingLease implements AutoCloseable {
                      * than resetting the token series. */
                     Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
                 }
+                StorageFileOperations.forceDirectory(path.toAbsolutePath().getParent());
             } finally {
                 Files.deleteIfExists(temporary);
             }

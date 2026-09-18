@@ -3,6 +3,7 @@ package peruncs.datagrid.cluster.storage.types;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -19,10 +20,16 @@ import java.util.function.BiConsumer;
 /// directory synchronization; callers must choose a filesystem with those
 /// durability primitives for replication metadata.
 public final class AtomicFileStore {
+        /// Selects the metadata family whose crash-test hook names are emitted.
+    public enum Phase {
+        CHECKPOINT,
+        CURSOR
+    }
+
         /// Selects checkpoint-specific crash-test phases.
-    public static final String PHASE_CHECKPOINT = "CHECKPOINT";
+    public static final Phase PHASE_CHECKPOINT = Phase.CHECKPOINT;
         /// Selects cursor-specific crash-test phases.
-    public static final String PHASE_CURSOR = "CURSOR";
+    public static final Phase PHASE_CURSOR = Phase.CURSOR;
     private static final System.Logger LOGGER = System.getLogger(AtomicFileStore.class.getName());
     private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
     private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY = PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
@@ -68,19 +75,17 @@ public final class AtomicFileStore {
     ///
     /// @param path    destination path
     /// @param encoder callback that writes the complete encoded contents
-    /// @param phase   crash-test hook phase name, or `null` for generic names
+    /// @param phase   metadata family, or `null` for generic names
     /// @throws IOException if writing or replacement fails
-    public static void write(final Path path, final Encoder encoder, final String phase) throws IOException {
-        if (phase != null && !PHASE_CHECKPOINT.equals(phase) && !PHASE_CURSOR.equals(phase)) {
-            throw new IllegalArgumentException("unsupported AtomicFileStore phase: %s".formatted(phase));
-        }
-        final String beforePhase = phase != null ? "BEFORE_%s_TEMP_WRITE".formatted(phase) : "BEFORE_TEMP_WRITE";
-        final String duringPhase = phase != null ? "DURING_%s_FILE_WRITE".formatted(phase) : "DURING_FILE_WRITE";
-        final String afterTempPhase = phase != null
-                ? "AFTER_%s_TEMP_WRITE_BEFORE_RENAME".formatted(phase)
+    public static void write(final Path path, final Encoder encoder, final Phase phase) throws IOException {
+        final String phaseName = phase == null ? null : phase.name();
+        final String beforePhase = phaseName != null ? "BEFORE_%s_TEMP_WRITE".formatted(phaseName) : "BEFORE_TEMP_WRITE";
+        final String duringPhase = phaseName != null ? "DURING_%s_FILE_WRITE".formatted(phaseName) : "DURING_FILE_WRITE";
+        final String afterTempPhase = phaseName != null
+                ? "AFTER_%s_TEMP_WRITE_BEFORE_RENAME".formatted(phaseName)
                 : "AFTER_TEMP_WRITE_BEFORE_RENAME";
-        final String afterRenamePhase = phase != null
-                ? "AFTER_%s_RENAME_BEFORE_DIRECTORY_SYNC".formatted(phase)
+        final String afterRenamePhase = phaseName != null
+                ? "AFTER_%s_RENAME_BEFORE_DIRECTORY_SYNC".formatted(phaseName)
                 : "AFTER_RENAME_BEFORE_DIRECTORY_SYNC";
         write(path, encoder, beforePhase, duringPhase, afterTempPhase, afterRenamePhase);
     }
@@ -149,7 +154,7 @@ public final class AtomicFileStore {
     /// @throws IOException if writing or replacement fails
     public static void writeBytes(final Path path, final byte[] bytes) throws IOException {
         Objects.requireNonNull(bytes, "bytes");
-        write(path, channel -> writeFully(channel, java.nio.ByteBuffer.wrap(bytes)));
+        write(path, channel -> writeFully(channel, ByteBuffer.wrap(bytes)));
     }
 
         /// Verifies that the directory containing `path` supports the complete
@@ -167,7 +172,7 @@ public final class AtomicFileStore {
         Files.createDirectories(parent);
         final Path probe = parent.resolve("%s.probe-%s".formatted(absolute.getFileName(), UUID.randomUUID()));
         try {
-            write(probe, channel -> writeFully(channel, java.nio.ByteBuffer.wrap(new byte[]{1})));
+            write(probe, channel -> writeFully(channel, ByteBuffer.wrap(new byte[]{1})));
         } catch (final IOException | RuntimeException | Error failure) {
             /* Preserve the capability failure itself. Cleanup is best effort and must
              * not replace an informative atomic-move/fsync exception with a secondary
@@ -237,7 +242,7 @@ public final class AtomicFileStore {
         }
     }
 
-    private static void writeFully(final FileChannel channel, final java.nio.ByteBuffer buffer) throws IOException {
+    private static void writeFully(final FileChannel channel, final ByteBuffer buffer) throws IOException {
         while (buffer.hasRemaining()) {
             if (channel.write(buffer) == 0) throw new IOException("Atomic metadata write made no progress");
         }

@@ -84,4 +84,28 @@ class ModuleDescriptorConsistencyTest {
         assertFalse(required.contains("org.eclipse.store.gigamap.jvector"),
                 "upstream has not published the corrected spelling yet: " + required);
     }
+
+        /// Public method signatures expose these upstream contracts, so their
+    /// modules must be readable by consumers without repeating every dependency.
+    @Test
+    void publicUpstreamContractsAreTransitive() {
+        /* Keep this list synchronized with public exported signatures. A new
+         * upstream type in an exported method must add its module here, or the
+         * consumer-facing JPMS contract is no longer checked. */
+        final Set<ModuleDescriptor.Requires> required = descriptor().requires();
+        final Set<String> transitive = required.stream()
+                .filter(requirement -> requirement.modifiers().contains(ModuleDescriptor.Requires.Modifier.TRANSITIVE))
+                .map(ModuleDescriptor.Requires::name)
+                .collect(Collectors.toSet());
+
+        assertTrue(transitive.containsAll(Set.of(
+                        "org.eclipse.store.storage.embedded",
+                        "org.eclipse.serializer.persistence",
+                        "org.eclipse.serializer.persistence.binary",
+                        "org.eclipse.store.storage",
+                        "org.eclipse.store.gigamap",
+                        "org.eclipse.store.gigamap.lucene",
+                        "org.eclipes.store.gigamap.jvector")),
+                () -> "public upstream contracts require transitive modules: " + transitive);
+    }
 }

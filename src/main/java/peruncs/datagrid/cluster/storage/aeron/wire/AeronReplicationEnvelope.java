@@ -18,43 +18,45 @@ import java.util.zip.CRC32C;
 /// binary through Aeron. A transaction is visible only after its commit marker
 /// and full-binary checksum pass validation.
 ///
-/// The header and payload CRC32C checksums detect accidental corruption.
-/// Forgery resistance comes from the deployment boundary: replication runs on
-/// an isolated network, and Archive control sessions authenticate separately.
+/// The header and payload CRC32C checksums detect accidental corruption. The
+/// cluster wire nonce rejects accidental cross-wiring between otherwise valid
+/// replication streams; it is not authentication and must not replace network
+/// isolation or Archive control-session authentication.
 public final class AeronReplicationEnvelope {
     public static final int MAGIC = 0x44474152; // DGAR
         /// Wire version with a checksum covering every decision-bearing header field.
-    public static final short VERSION = 4;
-        /// Header bytes, including the final header CRC32C at offset 64.
-    public static final int HEADER_LENGTH = 76;
+    public static final short VERSION = 5;
+        /// Header bytes, including the wire nonce and final header CRC32C.
+    public static final int HEADER_LENGTH = 84;
         /// Largest logical transaction payload accepted on the wire.
-    public static final int MAX_MESSAGE_LENGTH = 64 * 1024 * 1024;
+    public static final int MAX_TRANSACTION_PAYLOAD_BYTES = 64 * 1024 * 1024;
         /// Largest chunk count accepted for one logical payload.
     public static final int MAX_PACKET_COUNT = 1_000_000;
-    private static final int CRC_SCRATCH_BYTES = 16 * 1024;
     /* A checksum context is explicitly owned by a decode or encode operation and
      * is carried through nested codec calls with ScopedValue. It is never retained
      * by a platform or virtual thread. */
     private static final ScopedValue<ChecksumContext> CHECKSUM_CONTEXT = ScopedValue.newInstance();
-    private static final int HEADER_CRC_OFFSET = 72;
+    private static final int WIRE_NONCE_OFFSET = 72;
+    private static final int HEADER_CRC_OFFSET = 80;
 
     private AeronReplicationEnvelope() {
+    }
+
+    /// Derives the stable default used by standalone codec fixtures. Production
+    /// nodes should pass the configured nonce explicitly to both writer and reader.
+    public static long defaultWireNonce(final UUID clusterId) {
+        Objects.requireNonNull(clusterId, "clusterId");
+        return clusterId.getLeastSignificantBits() | 1L;
     }
 
         /// Reusable checksum state owned by one codec operation.
     public static final class ChecksumContext {
         private final CRC32C crc = new CRC32C();
-        private final byte[] scratch = new byte[CRC_SCRATCH_BYTES];
 
         private int compute(final DirectBuffer payload, final int offset, final int length) {
             final CRC32C checksum = this.crc;
             checksum.reset();
-            for (int copied = 0; copied < length; ) {
-                final int amount = Math.min(this.scratch.length, length - copied);
-                payload.getBytes(offset + copied, this.scratch, 0, amount);
-                checksum.update(this.scratch, 0, amount);
-                copied += amount;
-            }
+            Crc32c.update(checksum, payload, offset, length);
             return (int) checksum.getValue();
         }
     }
@@ -108,9 +110,33 @@ public final class AeronReplicationEnvelope {
             final int payloadOffset,
             final int chunkLength
     ) {
-        return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, fencingToken, sequence, kind,
+        return encode(target, targetOffset, clusterId, epoch, fencingToken, defaultWireNonce(clusterId), sequence, kind,
                 payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset,
                 chunkLength, crc32c(payload, payloadOffset, chunkLength));
+    }
+
+    /// Encodes an envelope with an explicit deployment nonce.
+    public static int encode(
+            final MutableDirectBuffer target,
+            final int targetOffset,
+            final UUID clusterId,
+            final long epoch,
+            final long fencingToken,
+            final long wireNonce,
+            final long sequence,
+            final Kind kind,
+            final int payloadLength,
+            final int chunkIndex,
+            final int chunkCount,
+            final int chunkOffset,
+            final int commitCrc32c,
+            final DirectBuffer payload,
+            final int payloadOffset,
+            final int chunkLength,
+            final int payloadCrc32c) {
+        return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, fencingToken, wireNonce, sequence,
+                kind, payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset,
+                chunkLength, payloadCrc32c);
     }
 
         /// Encodes an envelope when the caller already computed the payload checksum
@@ -152,8 +178,32 @@ public final class AeronReplicationEnvelope {
             final int payloadOffset,
             final int chunkLength,
             final int payloadCrc32c) {
+        return encodeWithPayloadCrc(target, targetOffset, clusterId, epoch, fencingToken,
+                defaultWireNonce(clusterId), sequence, kind, payloadLength, chunkIndex, chunkCount,
+                chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength, payloadCrc32c);
+    }
+
+    /// Encodes an envelope with the deployment's accidental-cross-wiring nonce.
+    public static int encodeWithPayloadCrc(
+            final MutableDirectBuffer target,
+            final int targetOffset,
+            final UUID clusterId,
+            final long epoch,
+            final long fencingToken,
+            final long wireNonce,
+            final long sequence,
+            final Kind kind,
+            final int payloadLength,
+            final int chunkIndex,
+            final int chunkCount,
+            final int chunkOffset,
+            final int commitCrc32c,
+            final DirectBuffer payload,
+            final int payloadOffset,
+            final int chunkLength,
+            final int payloadCrc32c) {
         final ChecksumContext context = checksumContext();
-        return encodeWithPayloadCrcInternal(target, targetOffset, clusterId, epoch, fencingToken, sequence, kind,
+        return encodeWithPayloadCrcInternal(target, targetOffset, clusterId, epoch, fencingToken, wireNonce, sequence, kind,
                 payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload, payloadOffset,
                 chunkLength, payloadCrc32c, context);
     }
@@ -164,6 +214,7 @@ public final class AeronReplicationEnvelope {
             final UUID clusterId,
             final long epoch,
             final long fencingToken,
+            final long wireNonce,
             final long sequence,
             final Kind kind,
             final int payloadLength,
@@ -177,7 +228,7 @@ public final class AeronReplicationEnvelope {
             final int payloadCrc32c,
             final ChecksumContext context
     ) {
-        validate(clusterId, epoch, fencingToken, sequence, kind, payloadLength, chunkIndex, chunkCount,
+        validate(clusterId, epoch, fencingToken, wireNonce, sequence, kind, payloadLength, chunkIndex, chunkCount,
                 chunkOffset, commitCrc32c, payload, payloadOffset, chunkLength);
         final int encodedLength = Math.addExact(HEADER_LENGTH, chunkLength);
         if (target == null || targetOffset < 0 || targetOffset > target.capacity() - encodedLength) {
@@ -198,8 +249,8 @@ public final class AeronReplicationEnvelope {
         target.putLong(targetOffset + 48, clusterId.getMostSignificantBits(), ByteOrder.BIG_ENDIAN);
         target.putLong(targetOffset + 56, clusterId.getLeastSignificantBits(), ByteOrder.BIG_ENDIAN);
         target.putLong(targetOffset + 64, fencingToken, ByteOrder.BIG_ENDIAN);
-        target.putInt(targetOffset + HEADER_CRC_OFFSET,
-                context.compute(target, targetOffset, HEADER_CRC_OFFSET), ByteOrder.BIG_ENDIAN);
+        target.putLong(targetOffset + WIRE_NONCE_OFFSET, wireNonce, ByteOrder.BIG_ENDIAN);
+        target.putInt(targetOffset + HEADER_CRC_OFFSET, context.compute(target, targetOffset, HEADER_CRC_OFFSET), ByteOrder.BIG_ENDIAN);
         // The publisher can stage a multi-buffer chunk directly in the destination
         // payload area. Avoid copying that already-staged range a second time.
         if (payload != target || payloadOffset != targetOffset + HEADER_LENGTH) {
@@ -212,6 +263,7 @@ public final class AeronReplicationEnvelope {
             final UUID clusterId,
             final long epoch,
             final long fencingToken,
+            final long wireNonce,
             final long sequence,
             final Kind kind,
             final int payloadLength,
@@ -226,8 +278,8 @@ public final class AeronReplicationEnvelope {
         Objects.requireNonNull(clusterId, "clusterId");
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(payload, "payload");
-        if (epoch < 0 || fencingToken <= 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
-            payloadLength > MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
+        if (epoch < 0 || fencingToken <= 0 || wireNonce == 0L || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
+            payloadLength > MAX_TRANSACTION_PAYLOAD_BYTES || chunkIndex < 0 ||
             chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 || payloadOffset < 0 || chunkLength < 0 ||
             payloadOffset > payload.capacity() - chunkLength) {
@@ -271,7 +323,7 @@ public final class AeronReplicationEnvelope {
     private static Envelope copyToOwned(final DirectBuffer source, final EnvelopeView view) {
         final byte[] payload = new byte[view.payloadLengthOnWire];
         source.getBytes(view.payloadOffset, payload);
-        return new Envelope(view.clusterId(), view.epoch, view.fencingToken, view.sequence, view.kind,
+        return new Envelope(view.clusterId(), view.wireNonce, view.epoch, view.fencingToken, view.sequence, view.kind,
                 view.payloadLength, view.chunkIndex, view.chunkCount, view.chunkOffset, view.commitCrc32c, payload);
     }
 
@@ -328,8 +380,12 @@ public final class AeronReplicationEnvelope {
         final Kind kind = Kind.fromCode(kindCode);
         final long epoch = source.getLong(offset + 8, ByteOrder.BIG_ENDIAN);
         final long fencingToken = source.getLong(offset + 64, ByteOrder.BIG_ENDIAN);
+        final long wireNonce = source.getLong(offset + WIRE_NONCE_OFFSET, ByteOrder.BIG_ENDIAN);
         if (fencingToken <= 0) {
             throw new ReplicationWireException("envelope carries no writer fencing token");
+        }
+        if (wireNonce == 0L) {
+            throw new ReplicationWireException("envelope carries no wire nonce");
         }
         final long sequence = source.getLong(offset + 16, ByteOrder.BIG_ENDIAN);
         final int payloadLength = source.getInt(offset + 24, ByteOrder.BIG_ENDIAN);
@@ -338,7 +394,7 @@ public final class AeronReplicationEnvelope {
         final int chunkOffset = source.getInt(offset + 36, ByteOrder.BIG_ENDIAN);
         final int payloadOnWire = length - HEADER_LENGTH;
         if (epoch < 0 || sequence < 0 || sequence == Long.MAX_VALUE || payloadLength < 0 ||
-            payloadLength > MAX_MESSAGE_LENGTH || chunkIndex < 0 ||
+            payloadLength > MAX_TRANSACTION_PAYLOAD_BYTES || chunkIndex < 0 ||
             chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
             chunkIndex >= chunkCount || chunkOffset < 0 ||
             (kind != Kind.COMMIT && kind != Kind.ABORT &&
@@ -372,7 +428,7 @@ public final class AeronReplicationEnvelope {
         }
         view.set(source, offset + HEADER_LENGTH, payloadOnWire,
                 source.getLong(offset + 48, ByteOrder.BIG_ENDIAN),
-                source.getLong(offset + 56, ByteOrder.BIG_ENDIAN), epoch, fencingToken, sequence, kind,
+                source.getLong(offset + 56, ByteOrder.BIG_ENDIAN), wireNonce, epoch, fencingToken, sequence, kind,
                 payloadLength, chunkIndex, chunkCount, chunkOffset, source.getInt(offset + 44, ByteOrder.BIG_ENDIAN));
         return view;
     }
@@ -439,6 +495,7 @@ public final class AeronReplicationEnvelope {
         private int payloadLengthOnWire;
         private long clusterMostSignificantBits;
         private long clusterLeastSignificantBits;
+        private long wireNonce;
         private long epoch;
         private long fencingToken;
         private long sequence;
@@ -458,6 +515,7 @@ public final class AeronReplicationEnvelope {
             this.payloadLengthOnWire = 0;
             this.clusterMostSignificantBits = 0L;
             this.clusterLeastSignificantBits = 0L;
+            this.wireNonce = 0L;
             this.epoch = 0L;
             this.fencingToken = 0L;
             this.sequence = 0L;
@@ -471,6 +529,7 @@ public final class AeronReplicationEnvelope {
 
         void set(final DirectBuffer source, final int payloadOffset, final int payloadLengthOnWire,
                  final long clusterMostSignificantBits, final long clusterLeastSignificantBits,
+                 final long wireNonce,
                  final long epoch, final long fencingToken, final long sequence, final Kind kind,
                  final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
                  final int commitCrc32c) {
@@ -479,6 +538,7 @@ public final class AeronReplicationEnvelope {
             this.payloadLengthOnWire = payloadLengthOnWire;
             this.clusterMostSignificantBits = clusterMostSignificantBits;
             this.clusterLeastSignificantBits = clusterLeastSignificantBits;
+            this.wireNonce = wireNonce;
             this.epoch = epoch;
             this.fencingToken = fencingToken;
             this.sequence = sequence;
@@ -497,6 +557,15 @@ public final class AeronReplicationEnvelope {
         public boolean matches(final UUID clusterId) {
             return clusterId.getMostSignificantBits() == this.clusterMostSignificantBits &&
                    clusterId.getLeastSignificantBits() == this.clusterLeastSignificantBits;
+        }
+
+        /// Returns whether this frame belongs to the expected cluster and nonce.
+        public boolean matches(final UUID clusterId, final long wireNonce) {
+            return matches(clusterId) && this.wireNonce == wireNonce;
+        }
+
+        public long wireNonce() {
+            return this.wireNonce;
         }
 
         public long epoch() {
@@ -566,6 +635,7 @@ public final class AeronReplicationEnvelope {
     /// @param payload owned payload bytes
     public record Envelope(
             UUID clusterId,
+            long wireNonce,
             long epoch,
             long fencingToken,
             long sequence,
@@ -582,7 +652,7 @@ public final class AeronReplicationEnvelope {
             Objects.requireNonNull(kind, "kind");
             Objects.requireNonNull(payload, "payload");
             payload = payload.clone();
-            if (payloadLength < 0 || payloadLength > MAX_MESSAGE_LENGTH ||
+            if (wireNonce == 0L || payloadLength < 0 || payloadLength > MAX_TRANSACTION_PAYLOAD_BYTES ||
                 chunkIndex < 0 || chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
                 chunkIndex >= chunkCount || chunkOffset < 0) {
                 throw new ReplicationWireException("invalid owned envelope bounds");
@@ -601,6 +671,13 @@ public final class AeronReplicationEnvelope {
             }
         }
 
+        public Envelope(final UUID clusterId, final long epoch, final long fencingToken, final long sequence,
+                        final Kind kind, final int payloadLength, final int chunkIndex, final int chunkCount,
+                        final int chunkOffset, final int commitCrc32c, final byte[] payload) {
+            this(clusterId, defaultWireNonce(clusterId), epoch, fencingToken, sequence, kind, payloadLength,
+                    chunkIndex, chunkCount, chunkOffset, commitCrc32c, payload);
+        }
+
                 /// Returns a defensive copy so callers cannot mutate the decoded envelope.
         @Override
         public byte[] payload() {
@@ -614,6 +691,7 @@ public final class AeronReplicationEnvelope {
             return this.epoch == envelope.epoch
                     && this.fencingToken == envelope.fencingToken
                     && this.sequence == envelope.sequence
+                    && this.wireNonce == envelope.wireNonce
                     && this.payloadLength == envelope.payloadLength
                     && this.chunkIndex == envelope.chunkIndex
                     && this.chunkCount == envelope.chunkCount
@@ -626,7 +704,7 @@ public final class AeronReplicationEnvelope {
 
         @Override
         public int hashCode() {
-            int result = Objects.hash(this.clusterId, this.epoch, this.fencingToken, this.sequence, this.kind,
+            int result = Objects.hash(this.clusterId, this.wireNonce, this.epoch, this.fencingToken, this.sequence, this.kind,
                     this.payloadLength, this.chunkIndex, this.chunkCount, this.chunkOffset,
                     this.commitCrc32c);
             return 31 * result + Arrays.hashCode(this.payload);
