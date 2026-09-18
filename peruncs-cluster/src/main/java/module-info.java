@@ -140,6 +140,10 @@ module peruncs.datagrid.cluster
     // the published module descriptor.
     requires org.eclipes.store.gigamap.jvector;
     requires org.apache.lucene.core;
+    // Test-only offline analysis of the soak flight recording; no production
+    // code touches JFR APIs. Static (compile-only): production consumers never
+    // need jdk.jfr on their module path at runtime.
+    requires static jdk.jfr;
 
     exports peruncs.datagrid.cluster.node.exceptions;
     exports peruncs.datagrid.cluster.node.backup;

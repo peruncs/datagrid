@@ -39,6 +39,7 @@ class ColdVectorUpdateProbeTest {
         }
     }
 
+    /// Verifies a cold-reopened store survives repeated vector mutations with index refreshes without throwing.
     @Test
     void repeatedRemoveAddChurn() {
         final CountingVectorizer vectorizer = new CountingVectorizer();

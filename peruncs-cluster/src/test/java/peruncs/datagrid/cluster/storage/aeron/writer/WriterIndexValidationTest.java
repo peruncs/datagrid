@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// the Aeron publication. The file lives with the storage-types tests because
 /// it covers the writer hook owned by those contracts.
 class WriterIndexValidationTest {
+    /// Verifies a directly registered external Lucene index fails validation before reaching the local target or publication.
     @Test
     void directExternalLuceneRegistrationFailsBeforePublication(@TempDir final Path directory) {
         final Root root = new Root();
@@ -67,6 +68,7 @@ class WriterIndexValidationTest {
         }
     }
 
+    /// Verifies a directly registered external vector index fails validation before reaching the local target or publication.
     @Test
     void directExternalVectorRegistrationFailsBeforePublication(@TempDir final Path directory) {
         final Root root = new Root();
@@ -89,6 +91,7 @@ class WriterIndexValidationTest {
         }
     }
 
+    /// Verifies embedded cluster indexes pass writer validation and reach the local target with a committed sequence.
     @Test
     void embeddedIndexesPassWriterValidation(@TempDir final Path directory) {
         final Root root = new Root();
@@ -108,6 +111,7 @@ class WriterIndexValidationTest {
         }
     }
 
+    /// Verifies a target without a validation hook skips writer validation and writes locally.
     @Test
     void unwiredTargetSkipsWriterValidation() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()

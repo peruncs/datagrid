@@ -69,6 +69,7 @@ class AeronReplicationMonitoringTest {
         };
     }
 
+    /// Verifies the provider creates a transport that identifies itself as aeron.
     @Test
     void aeronProviderCreatesAeronTransport() {
         try (final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
@@ -146,6 +147,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
+    /// Verifies a reader-side gate rejects writer sequence synchronization and keeps its index unset.
     @Test
     void readerCannotChangeWriterMessageIndex() {
         final AeronDistributionGate distributor = new AeronDistributionGate(() -> false,

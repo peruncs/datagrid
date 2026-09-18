@@ -24,6 +24,9 @@ public final class RecordingInspector {
     private RecordingInspector() {
     }
 
+    /// Inspects a stopped recording through to the Archive stop position.
+    ///
+    /// @return evidence for the complete recording
     public static RecordingEvidence inspect(
             final AeronArchive archive,
             final long recordingId,

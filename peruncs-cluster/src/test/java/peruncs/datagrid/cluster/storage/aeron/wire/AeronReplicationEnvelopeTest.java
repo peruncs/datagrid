@@ -291,6 +291,7 @@ class AeronReplicationEnvelopeTest {
                 CLUSTER, 1, -1, 7, AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0, payload));
     }
 
+    /// Verifies encoding checks target capacity before writing and leaves the destination untouched on rejection.
     @Test
     void encodingChecksTargetCapacityBeforeWriting() {
         final byte[] target = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 2];

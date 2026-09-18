@@ -52,6 +52,7 @@ class AeronReplicationCheckpointStoreTest {
         Files.deleteIfExists(path);
     }
 
+    /// Verifies reading rejects unsupported reserved fields even when the checksum is valid.
     @Test
     void rejectsUnsupportedReservedFieldsEvenWithValidChecksum() throws Exception {
         final Path path = Files.createTempFile("datagrid-checkpoint-reserved", ".bin");
@@ -135,6 +136,7 @@ class AeronReplicationCheckpointStoreTest {
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 0, 7, 4096, 0, 0, 0));
     }
 
+    /// Verifies a symbolic-link checkpoint is rejected instead of being followed.
     @Test
     void rejectsSymbolicLinkCheckpoint() throws Exception {
         final Path directory = Files.createTempDirectory("datagrid-checkpoint-symlink");

@@ -399,6 +399,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
+    /// Verifies a writer replicates embedded Lucene and JVector state so a reader can search it after restart.
     @Test
     void aeronReplicatesEmbeddedLuceneAndVectorStateToAReader() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-index-readers-");
@@ -457,6 +458,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
+    /// Verifies ordinary and backup readers import real Store data, resume from atomic cursors, and assemble a purgeable retention quorum.
     @Test
     void ordinaryAndBackupReadersImportRealStoreDataAndResumeFromAtomicCursors() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-store-readers-");
@@ -824,6 +826,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
+    /// Verifies a four-channel Store transaction crosses every channel and the restarted provider publishes a later sequence.
     @Test
     void fourChannelStoreTransactionSurvivesProviderRestart() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-store-");
@@ -888,6 +891,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
+    /// Verifies a locally rejected Store write republishes its type dictionary on retry.
     @Test
     void realStoreRetryRepublishesDictionaryAfterLocalRejection() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-dictionary-");
@@ -937,6 +941,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
+    /// Verifies a forked real-Store writer restarts across processes with rising sequences and dictionary retry.
     @Test
     void forkedRealStoreWriterRestartsAndRetriesAcrossFourChannels() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-store-process-");
@@ -960,6 +965,7 @@ class AeronStoreIntegrationIT {
 
     static final class ReaderNode implements AutoCloseable {
         private final ClusterReplicationTransport transport;
+        private final Path cursorPath;
         private final StoredReplicationCursorManager cursorManager;
         private final EmbeddedStorageFoundation<?> foundation;
         private final EmbeddedStorageManager storage;
@@ -985,7 +991,8 @@ class AeronStoreIntegrationIT {
                     nodeRoot, clusterId, nodeId, generation, role, -1L, controlPort, livePort, watermarkPort));
             this.role = role;
             try {
-                this.cursorManager = StoredReplicationCursorManager.NewAtomic(nodeRoot.resolve("cursor"));
+                this.cursorPath = nodeRoot.resolve("cursor");
+                this.cursorManager = StoredReplicationCursorManager.NewAtomic(this.cursorPath);
                 this.foundation = foundation(storePath);
                 this.storage = this.foundation.start();
                 this.receiver = this.newReceiver();
@@ -1012,10 +1019,29 @@ class AeronStoreIntegrationIT {
             return this.coordinator;
         }
 
+        /// Test-only applied-path latency injection, in milliseconds. The soak
+        /// sets this to model a slow-but-advancing reader: cursor persistence
+        /// lags, the backlog window widens, and lag SLOs must observe it
+        /// instead of hanging. Zero disables the delay.
+        private volatile long applyDelayMs;
+
+        void setApplyDelayMs(final long delayMs) {
+            this.applyDelayMs = Math.max(0L, delayMs);
+        }
+
         private StorageBinaryDataClient newClient(final ReplicationCursor startingCursor) {
             return this.transport.client(this.receiver, "store", new AfterDataMessageConsumedListener() {
                 @Override
                 public void onApplied(final ReplicationCursor cursor) {
+                    final long delay = ReaderNode.this.applyDelayMs;
+                    if (delay > 0) {
+                        try {
+                            Thread.sleep(delay);
+                        } catch (final InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException("soak apply-delay interrupted", interrupted);
+                        }
+                    }
                     ReaderNode.this.cursorManager.set(cursor);
                 }
 
@@ -1023,6 +1049,27 @@ class AeronStoreIntegrationIT {
                 public void close() {
                 }
             }, startingCursor, "backup-reader".equals(this.role));
+        }
+
+        /// Test-only cursor overwrite used by soak rollback chaos: persists an
+        /// older boundary so the next transport restart must fail closed
+        /// (reseed) instead of silently replaying history.
+        void overwritePersistedCursor(final ReplicationCursor cursor) {
+            this.cursorManager.set(cursor);
+        }
+
+        /// Test-only fresh cursor read that bypasses the cached manager state,
+        /// so cursor-file corruption injected by soak chaos is observed instead
+        /// of masked. A corrupted file throws here (bounded failure), which the
+        /// caller must count as a parked reader, never as convergence.
+        ReplicationCursor readPersistedCursorFresh() {
+            try (StoredReplicationCursorManager fresh = StoredReplicationCursorManager.NewAtomic(this.cursorPath)) {
+                return fresh.get();
+            }
+        }
+
+        Path cursorPath() {
+            return this.cursorPath;
         }
 
         static ReaderNode open(
@@ -1162,6 +1209,16 @@ class AeronStoreIntegrationIT {
 
         ReplicationCursor persistedCursor() {
             return this.cursorManager.get();
+        }
+
+        /// Test-only live views used by soak bounded waits: the in-memory
+        /// applied cursor and the terminal reader failure, without throwing.
+        ReplicationCursor liveCursor() {
+            return this.client.cursor();
+        }
+
+        RuntimeException clientFailure() {
+            return this.client.failure();
         }
 
         private void disposeReceiver() {

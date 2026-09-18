@@ -35,6 +35,7 @@ class BackupNodeManagerTest {
         return BackupNodeManager.New(tasks, client, controller, () -> 1L, "test");
     }
 
+    /// Verifies a backup node with a running replication reader reports healthy and ready.
     @Test
     void healthyWhileTheReaderIsRunning() {
         final FakeClient client = new FakeClient();
@@ -46,6 +47,7 @@ class BackupNodeManagerTest {
         assertTrue(manager.isReady());
     }
 
+    /// Verifies a backup node with a stopped reader reports neither healthy nor ready.
     @Test
     void unhealthyWhenTheReaderHasStopped() {
         final FakeClient client = new FakeClient();
@@ -56,6 +58,7 @@ class BackupNodeManagerTest {
         assertFalse(manager.isReady());
     }
 
+    /// Verifies a backup node with a failed replication reader reports unhealthy.
     @Test
     void unhealthyAfterAReaderFailure() {
         final FakeClient client = new FakeClient();
@@ -67,6 +70,7 @@ class BackupNodeManagerTest {
         assertFalse(manager.isHealthy());
     }
 
+    /// Verifies a backup node stays healthy but not ready while an intentional backup holds the single-flight lock and stops the reader.
     @Test
     void healthyDuringAnIntentionalBackupStop() {
         final FakeClient client = new FakeClient();

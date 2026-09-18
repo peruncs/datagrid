@@ -14,6 +14,7 @@ class AeronReaderWatermarkTest {
     private static final UUID READER_ONE = UUID.randomUUID();
     private static final UUID READER_TWO = UUID.randomUUID();
 
+    /// Verifies a watermark always encodes to one fixed 92-byte frame.
     @Test
     void watermarkUsesOneFixed92ByteFrame() {
         assertEquals(92, AeronReaderWatermark.ENCODED_LENGTH);
@@ -22,6 +23,7 @@ class AeronReaderWatermarkTest {
         assertEquals(92, watermark.encode().length);
     }
 
+    /// Verifies an encoded watermark round-trips and that tampering with any byte is rejected.
     @Test
     void encodedWatermarkRoundTripsAndRejectsTampering() {
         final AeronReaderWatermark watermark = AeronReaderWatermark.of(
@@ -36,6 +38,7 @@ class AeronReaderWatermarkTest {
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.decode(encoded));
     }
 
+    /// Verifies direct encoding into a reusable buffer matches allocated encoding and rejects an undersized target.
     @Test
     void directEncodingIntoReusableBufferMatchesAllocatedEncoding() {
         final byte[] expected = AeronReaderWatermark.of(
@@ -47,6 +50,7 @@ class AeronReaderWatermarkTest {
                 new byte[91], READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096));
     }
 
+    /// Verifies buffer decoding at an offset preserves every identity field.
     @Test
     void directBufferDecodePreservesEveryIdentityField() {
         final byte[] encoded = AeronReaderWatermark.of(
@@ -65,6 +69,7 @@ class AeronReaderWatermarkTest {
         assertEquals(AeronReaderWatermark.decode(encoded), decoded);
     }
 
+    /// Verifies decoding rejects truncated frames and frames with the wrong magic or version.
     @Test
     void decodeRejectsTruncatedFramesAndWrongMagicOrVersion() {
         final byte[] encoded = AeronReaderWatermark.of(
@@ -79,6 +84,7 @@ class AeronReaderWatermarkTest {
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.decode(badVersion));
     }
 
+    /// Verifies the validator accepts forward progress while rejecting rollbacks and identity confusion.
     @Test
     void validatorRejectsRollbackAndIdentityConfusion() {
         try (final AeronReaderWatermark.Validator validator = new AeronReaderWatermark.Validator()) {
@@ -103,6 +109,7 @@ class AeronReaderWatermarkTest {
                 READER_ONE, CLUSTER, GENERATION, 3, 17, Long.MAX_VALUE, 100));
     }
 
+    /// Verifies construction and direct encoding reject negative epoch, recording, sequence, and position values.
     @Test
     void rejectsInvalidProgressBeforeEncoding() {
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.of(
@@ -117,6 +124,7 @@ class AeronReaderWatermarkTest {
                 new byte[AeronReaderWatermark.ENCODED_LENGTH], READER_ONE, CLUSTER, GENERATION, 3, 17, -2, 100));
     }
 
+    /// Verifies a quorum requires every reader and aggregates to the least advanced sequence and position.
     @Test
     void quorumRequiresEveryReaderAndAggregatesLeastProgress() {
         try (final AeronReaderWatermark.Quorum quorum =
@@ -134,6 +142,7 @@ class AeronReaderWatermarkTest {
         }
     }
 
+    /// Verifies static aggregation rejects duplicate reader identities.
     @Test
     void aggregateRejectsDuplicateReaderIdentity() {
         final AeronReaderWatermark first = AeronReaderWatermark.of(
@@ -144,6 +153,7 @@ class AeronReaderWatermarkTest {
                 () -> AeronReaderWatermark.aggregate(java.util.List.of(first, second)));
     }
 
+    /// Verifies static aggregation reports the least advanced sequence and position boundary.
     @Test
     void aggregateReportsLeastAdvancedBoundary() {
         final AeronReaderWatermark advanced = AeronReaderWatermark.of(
@@ -158,6 +168,7 @@ class AeronReaderWatermarkTest {
         assertEquals(aggregate, AeronReaderWatermark.decode(aggregate.encode()));
     }
 
+    /// Verifies the validator rejects restoring a token that belongs to a different reader.
     @Test
     void validatorRejectsRestoringAnIdentityMismatchedToken() {
         try (final AeronReaderWatermark.Validator validator = new AeronReaderWatermark.Validator()) {
@@ -167,6 +178,7 @@ class AeronReaderWatermarkTest {
         }
     }
 
+    /// Verifies the quorum rejects restoring unknown or retired readers while allowing a null clear.
     @Test
     void quorumRejectsRestoringUnknownOrRetiredReaders() {
         try (final AeronReaderWatermark.Quorum quorum =
@@ -181,6 +193,7 @@ class AeronReaderWatermarkTest {
         }
     }
 
+    /// Verifies closed validators and quorums reject further operations.
     @Test
     void closedValidatorAndQuorumRejectFurtherOperations() {
         final AeronReaderWatermark.Validator validator = new AeronReaderWatermark.Validator();

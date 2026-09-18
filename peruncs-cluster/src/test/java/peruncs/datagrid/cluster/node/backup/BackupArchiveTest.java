@@ -34,6 +34,7 @@ class BackupArchiveTest {
         }
     }
 
+    /// Verifies an archive with a path-traversal entry is rejected before installing storage and writes nothing outside the destination.
     @Test
     void rejectsTraversalBeforeInstallingStorage(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("unsafe.zip");
@@ -45,6 +46,7 @@ class BackupArchiveTest {
         assertFalse(Files.exists(root.resolve("escaped")));
     }
 
+    /// Verifies a valid backup archive extracts and its stored payload reads back intact.
     @Test
     void extractsValidArchive(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("valid.zip");
@@ -60,6 +62,7 @@ class BackupArchiveTest {
         assertEquals("payload", Files.readString(root.resolve("extracted").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
+    /// Verifies the cursor manifest reads directly from the archive without extracting the Store payload.
     @Test
     void readsCursorManifestWithoutExtractingStorage(@TempDir final Path root) throws Exception {
         final ReplicationCursor expected = new ReplicationCursor("test", null, 9L, "0405");
@@ -74,6 +77,7 @@ class BackupArchiveTest {
         assertFalse(Files.exists(root.resolve("extracted")));
     }
 
+    /// Verifies an archive with duplicate entries is rejected and leaves no Store payload behind.
     @Test
     void rejectsDuplicateArchiveEntries(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("duplicate.zip");
@@ -87,6 +91,7 @@ class BackupArchiveTest {
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
+    /// Verifies an archive missing its manifest is rejected when reading the cursor.
     @Test
     void rejectsMissingManifest(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("missing-manifest.zip");
@@ -96,6 +101,7 @@ class BackupArchiveTest {
                 archive, BackupArchiveLimits.defaults().maxExtractedBytes()));
     }
 
+    /// Verifies a manifest larger than the extraction budget is rejected.
     @Test
     void rejectsManifestLargerThanLimit(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("large-manifest.zip");
@@ -105,6 +111,7 @@ class BackupArchiveTest {
                 archive, BackupArchiveLimits.defaults().maxExtractedBytes()));
     }
 
+    /// Verifies a malformed backup file name is not recognized and its metadata parsing fails.
     @Test
     void rejectsMalformedBackupFilename() {
         assertFalse(BackupArchive.isBackupFileName("123.evil.zip"));
@@ -112,12 +119,14 @@ class BackupArchiveTest {
                 () -> BackupArchive.parseMetadata("123.evil.zip", Path.of("backups")));
     }
 
+    /// Verifies backup file-name recognition accepts uppercase archive suffixes.
     @Test
     void acceptsCaseInsensitiveBackupFilename() {
         assertTrue(BackupArchive.isBackupFileName(
                 "123.MANUAL.38F5081FA27C4682AC01943D9DB25170.C5537F6F32824C38BAC12D2BC4D76659.5.42.B9A38329F6904FCC9B825E6908C30D9F.ZIP"));
     }
 
+    /// Verifies an archive declaring more bytes than the extraction budget is rejected for both extraction and manifest reads.
     @Test
     void rejectsArchiveDeclaringMoreThanBudget(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("lying.zip");
@@ -133,6 +142,7 @@ class BackupArchiveTest {
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
+    /// Verifies an entry writing more data than its declared size is rejected during extraction.
     @Test
     void rejectsEntryDataBeyondDeclaredSize(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("overrun.zip");
@@ -145,6 +155,7 @@ class BackupArchiveTest {
                 root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults()));
     }
 
+    /// Verifies extraction enforces the configured byte budget, rejecting a tight limit while the default limit succeeds.
     @Test
     void extractionBudgetComesFromLimits(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("budgeted.zip");
@@ -163,6 +174,7 @@ class BackupArchiveTest {
                 root.resolve("roomy").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
+    /// Verifies the content digest of a Store directory matches the digest of its compressed archive.
     @Test
     void directoryAndArchiveDigestsAgree(@TempDir final Path root) throws Exception {
         final Path export = root.resolve("export");
@@ -180,6 +192,7 @@ class BackupArchiveTest {
                 "identical content must digest identically before and after archiving");
     }
 
+    /// Verifies storage-payload detection distinguishes full backups from manifest-only archives.
     @Test
     void reportsStoragePayloadPresence(@TempDir final Path root) throws Exception {
         final Path full = root.resolve("full.zip");

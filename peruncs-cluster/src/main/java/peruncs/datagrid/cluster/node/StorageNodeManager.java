@@ -208,13 +208,7 @@ public interface StorageNodeManager extends ClusterNodeManager {
 
                 /// Creates a manager with the selected transport label.
         ///
-        /// @param dataDistributor        binary distributor
-        /// @param storageTaskExecutor    storage task executor
-        /// @param dataClient             replication client
-        /// @param healthCheck            health check
-        /// @param storageDiskSpaceReader disk-space reader
-        /// @param positionProvider       position provider
-        /// @param replicationTransport   transport id
+        /// @param configuration collaborators selected for this manager
         protected Base(final Configuration configuration) {
             this.dataDistributor = configuration.dataDistributor();
             this.dataClient = configuration.dataClient();

@@ -117,6 +117,49 @@ class ExternalArchiveCrashIT {
         }
     }
 
+        /// Verifies concurrent death of the Archive and the writer still fails
+    /// closed: neither party can confirm the commit boundary, so recovery
+    /// must demand a reseed instead of continuing on a half-recorded tail.
+    @Test
+    void concurrentArchiveAndWriterDeathRequiresReseed() throws Exception {
+        try (DirectoryLayout layout = DirectoryLayout.create()) {
+            final Path base = layout.root();
+            Process archive = null;
+            Process writer = null;
+            Process recoveryArchive = null;
+            Process recoveryWriter = null;
+            try {
+                archive = launchArchive(base, layout.controlPort());
+                await(base.resolve("control/archive-ready"), archive, 30_000L);
+                writer = launchWriter(base, "phase1", "AFTER_COMMIT_OFFER",
+                        layout.livePort(), layout.controlPort());
+                await(base.resolve("control/ready"), writer, 30_000L);
+                await(base.resolve("control/milestone.reached"), writer, 60_000L);
+                /* Two-party death: the recording, the commit wait, and the
+                 * checkpoint race each other with no survivor to arbitrate. */
+                archive.destroyForcibly();
+                writer.destroyForcibly();
+                assertTrue(archive.waitFor(10, TimeUnit.SECONDS), "Archive process did not exit");
+                assertTrue(writer.waitFor(10, TimeUnit.SECONDS), "writer did not exit after concurrent death");
+                recoveryArchive = launchArchive(base, layout.controlPort(), true);
+                await(base.resolve("control/archive-ready"), recoveryArchive, 30_000L);
+                recoveryWriter = launchWriter(base, "phase2", "NONE",
+                        layout.livePort(), layout.controlPort());
+                await(base.resolve("control/outcome"), recoveryWriter, 30_000L);
+                assertTrue(recoveryWriter.waitFor(30, TimeUnit.SECONDS), "recovery writer did not exit");
+                final String outcome = Files.readString(base.resolve("control/outcome"));
+                final CrashOutcome parsed = CrashOutcome.parse(outcome);
+                assertEquals(RecoveryPolicy.RESEED_REQUIRED, parsed.policy(), outcome);
+                assertEquals("RESEED_REQUIRED", parsed.health(), outcome);
+                assertTrue(parsed.error() != null && parsed.error().startsWith("RESEED_REQUIRED:"), outcome);
+            } finally {
+                for (final Process process : new Process[]{writer, recoveryWriter, archive, recoveryArchive}) {
+                    if (process != null && process.isAlive()) process.destroyForcibly();
+                }
+            }
+        }
+    }
+
         /// Verifies stale archive catalog is never extended silently.
     @Test
     void staleArchiveCatalogIsNeverExtendedSilently() throws Exception {

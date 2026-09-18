@@ -3,6 +3,8 @@ package peruncs.datagrid.cluster.node.aeron.crashtest;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
+import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPayloads;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.test.ChildJava;
 
@@ -56,16 +58,13 @@ class ProviderCrashMatrixIT {
     }
 
     private static byte[] payload(final int sequence) {
-        final byte[] digest;
-        try {
-            digest = java.security.MessageDigest.getInstance("SHA-256")
-                    .digest(("dg-crash:%s".formatted(sequence)).getBytes(StandardCharsets.UTF_8));
-        } catch (final java.security.NoSuchAlgorithmException impossible) {
-            throw new AssertionError(impossible);
-        }
-        final byte[] result = new byte[64];
-        for (int i = 0; i < result.length; i++) result[i] = digest[i % digest.length];
-        return result;
+        return CrashPayloads.sized(sequence, CrashPayloads.DEFAULT_SIZE, CrashPayloads.DEFAULT_KIND);
+    }
+
+    /// Mirrors the forked child's generator byte-for-byte: the parent and the
+    /// child agree on expected Store contents without sharing heap state.
+    private static byte[] payload(final int sequence, final int size, final String kind) {
+        return CrashPayloads.sized(sequence, size, kind);
     }
 
     private static long budget(final String property, final long fallback) {
@@ -215,6 +214,284 @@ class ProviderCrashMatrixIT {
     void firstTransactionOrphanRequiresReseed() throws Exception {
         this.assertOutcome("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST,
                 false, false, "RESEED_REQUIRED", null, 1, 0);
+    }
+
+        /// Verifies a first-transaction orphan under publication backpressure
+    /// (no live subscriber) still fails closed instead of reusing the orphan.
+    @Test
+    void writerCrashDuringBackpressureFirstTxRequiresReseed() throws Exception {
+        final String previous = System.getProperty("crash.matrix.subscriber");
+        System.setProperty("crash.matrix.subscriber", "false");
+        try {
+            this.assertOutcome("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                    false, false, "RESEED_REQUIRED", "backpressure-first-tx", 1, 0);
+        } finally {
+            if (previous == null) System.clearProperty("crash.matrix.subscriber");
+            else System.setProperty("crash.matrix.subscriber", previous);
+        }
+    }
+
+        /// Verifies a minimum-size payload still fails closed on a recorded
+    /// commit that never reached the coordinator.
+    @Test
+    void minPayloadRecordedCommitRequiresReseed() throws Exception {
+        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                false, false, "RESEED_REQUIRED", "payload=1", 2, 1, 1, "digest", 0);
+    }
+
+        /// Verifies a chunk-size-minus-one payload fails closed like any other tail.
+    @Test
+    void chunkMinusOneRecordedCommitRequiresReseed() throws Exception {
+        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                false, false, "RESEED_REQUIRED", "payload=16383", 2, 1, 16383, "digest", 0);
+    }
+
+        /// Verifies a chunk-size-plus-one payload (two chunks) fails closed.
+    @Test
+    void chunkPlusOneRecordedCommitRequiresReseed() throws Exception {
+        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                false, false, "RESEED_REQUIRED", "payload=16385", 2, 1, 16385, "digest", 0);
+    }
+
+        /// Verifies a multi-chunk payload fails closed on the recorded tail.
+    @Test
+    void multiChunkRecordedCommitRequiresReseed() throws Exception {
+        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                false, false, "RESEED_REQUIRED", "payload=65536", 2, 1, 65536, "digest", 0);
+    }
+
+        /// Verifies incompressible bytes fail closed exactly like digests.
+    @Test
+    void randomBytesRecordedCommitRequiresReseed() throws Exception {
+        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                false, false, "RESEED_REQUIRED", "payload=random", 2, 1, 4096, "random", 0);
+    }
+
+        /// Verifies a large multi-chunk transaction recovers end to end: no
+    /// barrier fires, both phases continue, and the Store holds every byte.
+    @Test
+    void largePayloadFullRecoveryContinues() throws Exception {
+        final int size = 200_000;
+        try (DirectoryLayout layout = DirectoryLayout.create()) {
+            final Path base = layout.root();
+            final int livePort = layout.livePort();
+            final int controlPort = layout.controlPort();
+            CrashEventLog.append(base.resolve("control"), "selection",
+                    "large-recovery payload=%d".formatted(size));
+            Process child = null;
+            try {
+                child = this.launch(base, "phase1", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                        false, false, livePort, controlPort, 2, 1, size, "digest", 0);
+                this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
+                this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
+                assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit");
+                final CrashOutcome first = CrashOutcome.parse(
+                        Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8));
+                assertEquals(RecoveryPolicy.CONTINUE, first.policy(), "large payload phase1 must continue");
+                StoreFixture.assertRecords(base.resolve("store.records"),
+                        List.of(payload(0, size, "digest"), payload(1, size, "digest")));
+                String outcome;
+                final long restartDeadline = System.nanoTime() +
+                        TimeUnit.MILLISECONDS.toNanos(budget("crash.budget.archiveStop", 30_000L));
+                int restartAttempts = 0;
+                do {
+                    restartAttempts++;
+                    child = this.launch(base, "phase2", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                            false, false, livePort, controlPort, 2, 1, size, "digest", 0);
+                    this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
+                    assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
+                    outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
+                    if (!isActiveDriverRetry(outcome)) break;
+                    Thread.sleep(1_000L);
+                }
+                while (System.nanoTime() < restartDeadline);
+                assertFalse(isActiveDriverRetry(outcome),
+                        "recording never became stopped; attempts=%s outcome=%s".formatted(restartAttempts, outcome));
+                final CrashOutcome result = CrashOutcome.parse(outcome);
+                assertEquals(RecoveryPolicy.CONTINUE, result.policy(), outcome);
+                assertEquals("LIVE", result.health(), outcome);
+                StoreFixture.assertRecords(base.resolve("store.records"),
+                        List.of(payload(0, size, "digest"), payload(1, size, "digest"), payload(2, size, "digest")));
+                CrashEventLog.append(base.resolve("control"), "outcome", "large-recovery CONTINUE");
+            } catch (final Throwable failure) {
+                if (child != null && child.isAlive()) child.destroyForcibly();
+                try {
+                    final Path evidence = DiagnosticCollector.collect(base, failure.toString());
+                    throw new AssertionError("crash cell evidence: %s".formatted(evidence), failure);
+                } catch (final Throwable evidenceFailure) {
+                    failure.addSuppressed(evidenceFailure);
+                    throw failure;
+                }
+            }
+        }
+    }
+
+        /// Verifies a corrupted durable checkpoint fails closed (reseed or
+    /// fail-closed) instead of continuing on torn recovery state. The
+    /// checkpoint used here survived a CONTINUE cell unmodified; only the
+    /// injected byte flip may change the outcome.
+    @Test
+    void checkpointByteFlipFailsClosed() throws Exception {
+        this.assertSafeOutcomeAfterMutation("AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
+                ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+                    final Path checkpoint = base.resolve("checkpoint/writer.checkpoint");
+                    assertTrue(Files.exists(checkpoint), "expected a durable checkpoint to corrupt");
+                    final byte[] bytes = Files.readAllBytes(checkpoint);
+                    assertTrue(bytes.length > 0, "checkpoint file is empty");
+                    bytes[bytes.length / 2] ^= 0x01;
+                    Files.write(checkpoint, bytes);
+                });
+    }
+
+        /// Verifies a corrupted Archive tail fails closed instead of replaying
+    /// torn frames as committed history.
+    @Test
+    void archiveTailCorruptionFailsClosed() throws Exception {
+        this.assertSafeOutcomeAfterMutation("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT",
+                ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+                    final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
+                            base.resolve("checkpoint/writer.checkpoint"));
+                    final List<Path> segments = ArchiveArtifactMutator.segments(
+                            base.resolve("archive"), checkpoint.recordingId());
+                    ArchiveArtifactMutator.corruptFirstEnvelopePayload(segments.getLast());
+                });
+    }
+
+        /// Seeded chunk-budget kills: the child dies after a randomized number
+    /// of published data chunks rather than at an enumerated milestone,
+    /// covering intra-transaction interleavings the milestone list misses.
+    /// Every budget kill lands mid-transaction, so the safe outcome is always
+    /// a demanded reseed — never silent continuation.
+    @Test
+    void seededBudgetKillPreservesTheSafeOutcomeInvariant() throws Exception {
+        final int iterations = Integer.getInteger("crash.matrix.budget.iterations", 3);
+        final long baseSeed = Long.getLong("crash.matrix.seed", 1L);
+        final int[] sizes = {64, 4096, 20000};
+        final Random random = new Random(baseSeed ^ 0xB17C4L);
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            final int size = sizes[random.nextInt(sizes.length)];
+            /* The child uses 16 KiB chunks: bound the budget by the chunks
+             * two transactions actually publish, or the barrier never fires. */
+            final int totalChunks = 2 * Math.max(1, (size + 16383) / 16384);
+            final int chunksBudget = 1 + random.nextInt(totalChunks);
+            this.assertOutcome("NONE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                    "RESEED_REQUIRED", "budget=%d,size=%d,iter=%d".formatted(chunksBudget, size, iteration),
+                    2, 1, size, "digest", chunksBudget);
+        }
+    }
+
+        /// Runs one crash cell to a safe (non-continue) outcome after mutating
+    /// durable state between the kill and the recovery. The Store fixture must
+    /// be byte-identical to the pre-mutation evidence: recovery may refuse to
+    /// continue, but it must never silently extend history.
+    private void assertSafeOutcomeAfterMutation(final String point, final ReplicationDurabilityMode durability,
+                                                final ThrowingConsumer<Path> mutator) throws Exception {
+        try (DirectoryLayout layout = DirectoryLayout.create()) {
+            final Path base = layout.root();
+            final int livePort = layout.livePort();
+            final int controlPort = layout.controlPort();
+            CrashEventLog.append(base.resolve("control"), "selection", "mutation point=%s".formatted(point));
+            Process child = null;
+            try {
+                child = this.launch(base, "phase1", point, durability, livePort, controlPort);
+                this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
+                final Path milestone = base.resolve("control/milestone.reached");
+                this.await(milestone, child, budget("crash.budget.milestone", 60_000L));
+                final ChildMilestone marker = ChildMilestone.read(milestone);
+                assertEquals(point, marker.point(), "unexpected milestone point");
+                child.destroyForcibly();
+                assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit after kill");
+                final StoreFixture.Evidence phase1Store = StoreFixture.inspect(base.resolve("store.records"));
+                assertTrue(phase1Store.valid(), "phase1 Store fixture is not a complete record");
+                assertPhase1Prefix(point, 1, 0, CrashPayloads.DEFAULT_SIZE, false, phase1Store);
+                mutator.accept(base);
+                CrashEventLog.append(base.resolve("control"), "mutation", "applied");
+                String outcome;
+                final long restartDeadline = System.nanoTime() +
+                        TimeUnit.MILLISECONDS.toNanos(budget("crash.budget.archiveStop", 30_000L));
+                int restartAttempts = 0;
+                do {
+                    restartAttempts++;
+                    child = this.launch(base, "phase2", "NONE", durability, livePort, controlPort);
+                    this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
+                    assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
+                    outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
+                    if (!isActiveDriverRetry(outcome)) break;
+                    Thread.sleep(1_000L);
+                }
+                while (System.nanoTime() < restartDeadline);
+                assertFalse(isActiveDriverRetry(outcome),
+                        "recording never became stopped; attempts=%s outcome=%s".formatted(restartAttempts, outcome));
+                final CrashOutcome result = CrashOutcome.parse(outcome);
+                assertNotHarnessError(result, outcome);
+                assertTrue(result.policy() == RecoveryPolicy.RESEED_REQUIRED
+                                || result.policy() == RecoveryPolicy.FAIL_CLOSED,
+                        "corrupted durable state must fail closed, got %s\n%s".formatted(result.policy(), outcome));
+                assertTrue(result.error() != null && !result.error().isBlank(), outcome);
+                assertTrue(result.storeValid(), outcome);
+                CrashEventLog.append(base.resolve("control"), "outcome",
+                        "mutation policy=%s".formatted(result.policy()));
+                StoreFixture.assertRecords(base.resolve("store.records"), phase1Store.records());
+            } catch (final Throwable failure) {
+                if (child != null && child.isAlive()) child.destroyForcibly();
+                try {
+                    final Path evidence = DiagnosticCollector.collect(base, failure.toString());
+                    throw new AssertionError("crash cell evidence: %s".formatted(evidence), failure);
+                } catch (final Throwable evidenceFailure) {
+                    failure.addSuppressed(evidenceFailure);
+                    throw failure;
+                }
+            }
+        }
+    }
+
+    /// Asserts the exact committed Store prefix a crash point must leave behind.
+    ///
+    /// Content equality alone cannot catch a cell that crashed before writing
+    /// anything: an empty-but-valid fixture would pass. Transactions before the
+    /// target are fully committed, so their records must exist; the target
+    /// transaction itself is the ambiguous tail. Points at or after the local
+    /// Store write additionally guarantee the target record — the pipeline
+    /// order is Archive prepare chunks, then the local Store enqueue, then the
+    /// Archive commit, so anything commit-side or later has a durable target.
+    private static void assertPhase1Prefix(final String point, final int targetSequence,
+                                           final int budgetChunks, final int payloadSize,
+                                           final boolean targetRejected,
+                                           final StoreFixture.Evidence phase1Store) {
+        final int minimum = expectedMinimumRecords(point, targetSequence, budgetChunks, payloadSize, targetRejected);
+        assertTrue(phase1Store.records().size() >= minimum,
+                "phase1 Store is missing committed records for %s: have=%d need>=%d".formatted(
+                        point, phase1Store.records().size(), minimum));
+    }
+
+    private static int expectedMinimumRecords(final String point, final int targetSequence,
+                                              final int budgetChunks, final int payloadSize,
+                                              final boolean targetRejected) {
+        if (budgetChunks > 0) {
+            /* The child publishes with 16 KiB chunks: transactions before the
+             * budget chunk's own are complete. */
+            final int chunksPerTx = Math.max(1, (payloadSize + 16383) / 16384);
+            return Math.max(0, (budgetChunks - 1) / chunksPerTx);
+        }
+        if ("BEFORE_PUBLICATION_CONNECTED".equals(point) || targetSequence <= 0) return 0;
+        /* A locally rejected target never appends, but every transaction
+         * before it is still fully committed. */
+        if (targetRejected) return targetSequence;
+        return switch (point) {
+            /* The target transaction never reached the local Store: it is
+             * still chunking or preparing when the child dies. */
+            case "BEFORE_PREPARE",
+                 "AFTER_DICTIONARY_CHUNKS",
+                 "AFTER_DATA_CHUNKS",
+                 "AFTER_PREPARE",
+                 "AFTER_PREPARE_BEFORE_LOCAL_WRITE" -> targetSequence;
+            default -> targetSequence + 1;
+        };
+    }
+
+    @FunctionalInterface
+    private interface ThrowingConsumer<T> {
+        void accept(T value) throws Exception;
     }
 
         /// Verifies the writer remains deterministic when no live subscriber is connected.
@@ -382,6 +659,89 @@ class ProviderCrashMatrixIT {
         }
     }
 
+        /// Verifies two consecutive crashes during recovery still leave a
+    /// restartable checkpoint: crash, crash again while reading the recovery
+    /// checkpoint, crash a third time the same way, then recover cleanly.
+    /// Recovery-of-recovery must converge, not compound.
+    @Test
+    void tripleCrashDuringRecoveryPreservesCheckpointContinuation() throws Exception {
+        try (DirectoryLayout layout = DirectoryLayout.create()) {
+            final Path base = layout.root();
+            final int livePort = layout.livePort();
+            final int controlPort = layout.controlPort();
+            CrashEventLog.append(base.resolve("control"), "selection", "triple-recovery-chain");
+            Process child = null;
+            try {
+                child = this.launch(base, "phase1", "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
+                        ReplicationDurabilityMode.ARCHIVE_FIRST, livePort, controlPort);
+                this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
+                this.await(base.resolve("control/milestone.reached"), child, budget("crash.budget.milestone", 60_000L));
+                child.destroyForcibly();
+                assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit");
+
+                final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
+                        base.resolve("checkpoint/writer.checkpoint"));
+                assertEquals(AeronReplicationCheckpoint.State.COMMITTED, checkpoint.state(),
+                        "phase 1 must leave a valid terminal checkpoint before the recovery crashes");
+                for (int crash = 1; crash <= 2; crash++) {
+                    child = this.launch(base, "phase2", "AFTER_RECOVERY_CHECKPOINT_READ",
+                            ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, livePort, controlPort, 2,
+                            (int) checkpoint.transactionSequence());
+                    this.await(base.resolve("control/milestone.reached"), child,
+                            budget("crash.budget.milestone", 60_000L));
+                    final ChildMilestone recoveryMarker = ChildMilestone.read(base.resolve("control/milestone.reached"));
+                    assertEquals("AFTER_RECOVERY_CHECKPOINT_READ", recoveryMarker.point());
+                    assertEquals(checkpoint.transactionSequence(), recoveryMarker.sequence(),
+                            "recovery barrier must report the checkpoint sequence it loaded");
+                    child.destroyForcibly();
+                    assertTrue(child.waitFor(10, TimeUnit.SECONDS),
+                            "recovery crash %d child did not exit".formatted(crash));
+                    CrashEventLog.append(base.resolve("control"), "recovery-crash", "crash=%d".formatted(crash));
+                }
+
+                String outcome;
+                final long restartDeadline = System.nanoTime() +
+                        TimeUnit.MILLISECONDS.toNanos(budget("crash.budget.archiveStop", 30_000L));
+                int restartAttempts = 0;
+                do {
+                    final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
+                    restartAttempts++;
+                    child = this.launch(base, "phase2", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                            livePort, controlPort);
+                    this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
+                    if (!child.waitFor(10, TimeUnit.SECONDS)) {
+                        child.destroyForcibly();
+                        assertTrue(child.waitFor(10, TimeUnit.SECONDS), "final recovery child did not exit");
+                    }
+                    outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
+                    if (!isActiveDriverRetry(outcome)) break;
+                    assertEquals(storeSizeBeforeRetry, fileSize(base.resolve("store.records")),
+                            "recovery retry changed the Store fixture before startup %s".formatted(restartAttempts));
+                    Thread.sleep(1_000L);
+                }
+                while (System.nanoTime() < restartDeadline);
+                assertFalse(isActiveDriverRetry(outcome),
+                        "recording never became stopped before recovery retry deadline; attempts=%s outcome=%s\n%s".formatted(restartAttempts, outcome, diagnostics(base.resolve("control"))));
+                final CrashOutcome result = CrashOutcome.parse(outcome);
+                assertNotHarnessError(result, outcome);
+                assertEquals(RecoveryPolicy.CONTINUE, result.policy(), outcome);
+                assertEquals("LIVE", result.health(), outcome);
+                CrashEventLog.append(base.resolve("control"), "outcome", "triple-chain CONTINUE");
+                StoreFixture.assertRecords(base.resolve("store.records"),
+                        List.of(payload(0), payload(1), payload(2)));
+            } catch (final Throwable failure) {
+                if (child != null && child.isAlive()) child.destroyForcibly();
+                try {
+                    final Path evidence = DiagnosticCollector.collect(base, failure.toString());
+                    throw new AssertionError("triple-crash evidence: %s".formatted(evidence), failure);
+                } catch (final Throwable evidenceFailure) {
+                    failure.addSuppressed(evidenceFailure);
+                    throw failure;
+                }
+            }
+        }
+    }
+
     private void assertReseed(final String point, final ReplicationDurabilityMode durability,
                               final boolean injectPrepareFailure) throws Exception {
         this.assertOutcome(point, durability, injectPrepareFailure, false, "RESEED_REQUIRED");
@@ -395,6 +755,15 @@ class ProviderCrashMatrixIT {
     private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
                                final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome,
                                final String runLabel, final int writes, final int targetSequence) throws Exception {
+        this.assertOutcome(point, durability, injectPrepareFailure, rejectLocal, expectedOutcome,
+                runLabel, writes, targetSequence,
+                CrashPayloads.DEFAULT_SIZE, CrashPayloads.DEFAULT_KIND, 0);
+    }
+
+    private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
+                               final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome,
+                               final String runLabel, final int writes, final int targetSequence,
+                               final int payloadSize, final String payloadKind, final int budgetChunks) throws Exception {
         try (DirectoryLayout layout = DirectoryLayout.create()) {
             final Path base = layout.root();
             if (runLabel != null) {
@@ -402,25 +771,38 @@ class ProviderCrashMatrixIT {
                 Files.writeString(base.resolve("control/selection"), "%s,point=%s%s".formatted(runLabel, point, '\n'),
                         StandardCharsets.UTF_8);
             }
+            CrashEventLog.append(base.resolve("control"), "selection",
+                    "point=%s durability=%s writes=%d target=%d payload=%d/%s budget=%d label=%s".formatted(
+                            point, durability, writes, targetSequence, payloadSize, payloadKind, budgetChunks, runLabel));
             final int livePort = layout.livePort();
             final int controlPort = layout.controlPort();
             Process child = null;
             try {
                 child = this.launch(base, "phase1", point, durability, injectPrepareFailure, rejectLocal,
-                        livePort, controlPort, writes, targetSequence);
+                        livePort, controlPort, writes, targetSequence, payloadSize, payloadKind, budgetChunks);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 final Path milestone = base.resolve("control/milestone.reached");
                 this.await(milestone, child, budget("crash.budget.milestone", 60_000L));
                 final ChildMilestone marker = ChildMilestone.read(milestone);
-                assertEquals(point, marker.point(), "unexpected milestone point");
-                assertEquals("BEFORE_PUBLICATION_CONNECTED".equals(point) ? -1L : targetSequence,
-                        marker.sequence(), "unexpected milestone sequence");
+                if (budgetChunks > 0) {
+                    /* A chunk budget lands after data chunks by construction,
+                     * just not at the enumerated milestone: the fuzz point is
+                     * the randomized chunk count, recorded in the event log. */
+                    assertEquals("AFTER_DATA_CHUNKS", marker.point(), "budget kill landed off the data path");
+                } else {
+                    assertEquals(point, marker.point(), "unexpected milestone point");
+                    assertEquals("BEFORE_PUBLICATION_CONNECTED".equals(point) ? -1L : targetSequence,
+                            marker.sequence(), "unexpected milestone sequence");
+                }
+                CrashEventLog.append(base.resolve("control"), "milestone",
+                        "point=%s sequence=%d".formatted(marker.point(), marker.sequence()));
                 child.destroyForcibly();
                 assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit after kill");
                 final StoreFixture.Evidence phase1Store = StoreFixture.inspect(base.resolve("store.records"));
                 assertTrue(phase1Store.valid(), "phase1 Store fixture is not a complete record");
+                assertPhase1Prefix(point, targetSequence, budgetChunks, payloadSize, rejectLocal, phase1Store);
                 for (int i = 0; i < phase1Store.records().size(); i++) {
-                    assertArrayEquals(payload(i), phase1Store.records().get(i),
+                    assertArrayEquals(payload(i, payloadSize, payloadKind), phase1Store.records().get(i),
                             "unexpected phase1 Store payload at record %s".formatted(i));
                 }
                 String outcome;
@@ -430,7 +812,8 @@ class ProviderCrashMatrixIT {
                 do {
                     final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
                     restartAttempts++;
-                    child = this.launch(base, "phase2", "NONE", durability, livePort, controlPort);
+                    child = this.launch(base, "phase2", "NONE", durability, false, false,
+                            livePort, controlPort, 2, 1, payloadSize, payloadKind, 0);
                     this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                     assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
                     outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
@@ -453,12 +836,14 @@ class ProviderCrashMatrixIT {
                 assertEquals("CONTINUE".equals(expectedOutcome) ? "LIVE" : "RESEED_REQUIRED",
                         result.health(), outcome);
                 assertTrue(result.storeValid(), outcome);
+                CrashEventLog.append(base.resolve("control"), "outcome",
+                        "policy=%s health=%s attempts=%d".formatted(result.policy(), result.health(), restartAttempts));
                 if (result.crc32c() != null &&
                     ("COMMITTED".equals(result.checkpointState()) || "COMMITTING_UNCERTAIN".equals(result.checkpointState()))) {
                     final long checkpointCrc = Integer.toUnsignedLong(result.crc32c());
-                    assertTrue(checkpointCrc == Integer.toUnsignedLong(crc(payload(0))) ||
-                               checkpointCrc == Integer.toUnsignedLong(crc(payload(1))) ||
-                               checkpointCrc == Integer.toUnsignedLong(crc(payload(2))),
+                    assertTrue(checkpointCrc == Integer.toUnsignedLong(crc(payload(0, payloadSize, payloadKind))) ||
+                               checkpointCrc == Integer.toUnsignedLong(crc(payload(1, payloadSize, payloadKind))) ||
+                               checkpointCrc == Integer.toUnsignedLong(crc(payload(2, payloadSize, payloadKind))),
                             "checkpoint CRC is not one of the test transaction payloads\n%s".formatted(outcome));
                 }
                 if (result.policy() == RecoveryPolicy.CONTINUE && result.recordingId() != null && result.recordingId() >= 0) {
@@ -469,7 +854,7 @@ class ProviderCrashMatrixIT {
                     assertTrue(result.error() != null && !result.error().isBlank(), outcome);
                 }
                 final List<byte[]> expectedStore = new java.util.ArrayList<>(phase1Store.records());
-                if ("CONTINUE".equals(expectedOutcome)) expectedStore.add(payload(2));
+                if ("CONTINUE".equals(expectedOutcome)) expectedStore.add(payload(2, payloadSize, payloadKind));
                 StoreFixture.assertRecords(base.resolve("store.records"), expectedStore);
             } catch (final Throwable failure) {
                 if (child != null && child.isAlive()) child.destroyForcibly();
@@ -489,13 +874,24 @@ class ProviderCrashMatrixIT {
 
     private Process launch(final Path base, final String mode, final String point,
                            final ReplicationDurabilityMode durability, final int livePort, final int controlPort) throws IOException {
-        return this.launch(base, mode, point, durability, false, false, livePort, controlPort, 2, 1);
+        return this.launch(base, mode, point, durability, false, false, livePort, controlPort, 2, 1,
+                CrashPayloads.DEFAULT_SIZE, CrashPayloads.DEFAULT_KIND, 0);
     }
 
     private Process launch(final Path base, final String mode, final String point,
                            final ReplicationDurabilityMode durability, final boolean injectPrepareFailure,
                            final boolean rejectLocal, final int livePort, final int controlPort,
                            final int writes, final int targetSequence) throws IOException {
+        return this.launch(base, mode, point, durability, injectPrepareFailure, rejectLocal,
+                livePort, controlPort, writes, targetSequence,
+                CrashPayloads.DEFAULT_SIZE, CrashPayloads.DEFAULT_KIND, 0);
+    }
+
+    private Process launch(final Path base, final String mode, final String point,
+                           final ReplicationDurabilityMode durability, final boolean injectPrepareFailure,
+                           final boolean rejectLocal, final int livePort, final int controlPort,
+                           final int writes, final int targetSequence,
+                           final int payloadSize, final String payloadKind, final int budgetChunks) throws IOException {
         final Path control = base.resolve("control");
         Files.createDirectories(control);
         Files.deleteIfExists(control.resolve("ready"));
@@ -518,6 +914,9 @@ class ProviderCrashMatrixIT {
                 "-Ddg.crash.injectPrepareFailure=%s".formatted(injectPrepareFailure),
                 "-Ddg.crash.rejectLocal=%s".formatted(rejectLocal),
                 "-Ddg.crash.rejectSequence=%s".formatted((rejectLocal ? 1 : -1)),
+                "-Ddg.crash.payloadSize=%s".formatted(payloadSize),
+                "-Ddg.crash.payloadKind=%s".formatted(payloadKind),
+                "-Ddg.crash.budgetChunks=%s".formatted(budgetChunks),
                 "-Ddg.crash.subscriber=%s".formatted(System.getProperty("crash.matrix.subscriber", "true")),
                 "-Ddg.crash.livePort=%s".formatted(livePort),
                 "-Ddg.crash.controlPort=%s".formatted(controlPort),

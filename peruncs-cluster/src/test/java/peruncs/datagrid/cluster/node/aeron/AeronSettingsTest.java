@@ -68,11 +68,13 @@ class AeronSettingsTest {
         };
     }
 
+    /// Verifies the validated embedded writer defaults parse without error.
     @Test
     void acceptsTheValidatedEmbeddedWriterDefaults() {
         assertDoesNotThrow(() -> AeronSettings.fromEnvironment(properties(Map.of())));
     }
 
+    /// Verifies an external archive writer accepts retention readers as unsupported configuration with one reader parsed.
     @Test
     void externalArchiveWriterAcceptsRetentionReadersAsUnsupported() {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
@@ -82,6 +84,7 @@ class AeronSettingsTest {
         assertEquals(1, settings.retentionReaders().size());
     }
 
+    /// Verifies an external archive writer accepts its point-to-point recording channel.
     @Test
     void externalArchiveWriterAcceptsItsPointToPointRecordingChannel() {
         assertDoesNotThrow(() -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -90,6 +93,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies removed replication, retention, and network-profile secrets are ignored without failing parsing.
     @Test
     void removedSecretSettingsAreIgnored() {
         /* A stale deployment environment may still export the removed
@@ -110,6 +114,7 @@ class AeronSettingsTest {
         assertTrue(settings.retentionReaders().isEmpty());
     }
 
+    /// Verifies a recording id below the Aeron null value is rejected.
     @Test
     void rejectsRecordingIdsBelowAeronNullValue() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -117,6 +122,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies a data stream id with no room left for derived streams is rejected.
     @Test
     void rejectsADataStreamWithoutSpaceForDerivedStreams() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -124,6 +130,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies a watermark stream id conflicting with derived streams is rejected.
     @Test
     void rejectsAConflictingWatermarkStream() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -131,6 +138,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies a duplicated retention reader entry is rejected.
     @Test
     void rejectsDuplicateRetentionReaders() {
         final String reader = UUID.randomUUID().toString();
@@ -139,6 +147,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies the unsupported local-durable-first durability mode is rejected.
     @Test
     void rejectsUnsupportedLocalDurableFirstMode() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -146,12 +155,14 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies unsafe filesystem sync is rejected in production mode.
     @Test
     void rejectsUnsafeFilesystemSyncInProduction() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
                 "ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL", "0"), true)));
     }
 
+    /// Verifies IPv6 wildcard channels are rejected in production mode.
     @Test
     void rejectsIpv6WildcardInProduction() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -160,6 +171,7 @@ class AeronSettingsTest {
         ), true)));
     }
 
+    /// Verifies expanded-form IPv6 wildcard channels are rejected in production mode.
     @Test
     void rejectsExpandedIpv6WildcardInProduction() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -170,6 +182,7 @@ class AeronSettingsTest {
         ), true)));
     }
 
+    /// Verifies a channel framing override disagreeing with replication settings is rejected.
     @Test
     void rejectsFramingOverrideThatDisagreesWithReplication() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -178,11 +191,13 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies loopback endpoints are rejected in production mode.
     @Test
     void rejectsLoopbackEndpointsInProduction() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(), true)));
     }
 
+    /// Verifies Aeron auth is disabled by default with no principal, credentials, or suppliers.
     @Test
     void aeronAuthIsDisabledByDefault() {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
@@ -194,6 +209,7 @@ class AeronSettingsTest {
         assertNull(settings.credentialsSupplier());
     }
 
+    /// Verifies enabled Aeron auth parses its principal and credentials and wires authenticator and credential suppliers.
     @Test
     void aeronAuthEnabledParsesPrincipalAndCredentials() {
         final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
@@ -217,6 +233,7 @@ class AeronSettingsTest {
         assertArrayEquals(credentials, credentialsSupplier.onChallenge(new byte[0]));
     }
 
+    /// Verifies the authorisation service grants recording control to the node and replay only to the reader.
     @Test
     void aeronAuthAuthorisesAnAuthenticatedPrincipal() {
         final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
@@ -244,6 +261,7 @@ class AeronSettingsTest {
                         "datagrid-reader".getBytes(StandardCharsets.US_ASCII)));
     }
 
+    /// Verifies a reader principal may replay the Archive but cannot truncate or otherwise mutate it.
     @Test
     void readerPrincipalCannotMutateArchive() {
         final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
@@ -260,6 +278,7 @@ class AeronSettingsTest {
                 TruncateRecordingRequestDecoder.TEMPLATE_ID, null, principal));
     }
 
+    /// Verifies a non-printable auth principal is rejected.
     @Test
     void aeronAuthRejectsNonPrintablePrincipal() {
         final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
@@ -271,6 +290,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies auth credentials load from an owner-only credentials file with matching supplier output.
     @Test
     void aeronAuthReadsCredentialsFromOwnerOnlyFile(@TempDir final Path temporaryDirectory) throws Exception {
         final byte[] credentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
@@ -291,6 +311,7 @@ class AeronSettingsTest {
         assertArrayEquals(credentials, credentialsSupplier.encodedCredentials());
     }
 
+    /// Verifies enabled auth without a principal is rejected.
     @Test
     void aeronAuthRequiresPrincipalWhenEnabled() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -300,6 +321,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies enabled auth without credentials is rejected.
     @Test
     void aeronAuthRequiresCredentialsWhenEnabled() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -308,6 +330,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies auth principal and credentials without the enabled flag are rejected.
     @Test
     void aeronAuthRejectsCredentialsWithoutEnabled() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -317,6 +340,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies specifying both inline credentials and a credentials file is rejected.
     @Test
     void aeronAuthRejectsBothCredentialsAndCredentialsFile(@TempDir final Path temporaryDirectory) throws Exception {
         final Path file = temporaryDirectory.resolve("aeron-auth.credentials");
@@ -331,6 +355,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies undersized auth credentials are rejected.
     @Test
     void aeronAuthRejectsShortCredentials() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
@@ -340,6 +365,7 @@ class AeronSettingsTest {
         ))));
     }
 
+    /// Verifies a non-boolean auth enabled value is rejected.
     @Test
     void aeronAuthRejectsNonBooleanEnabled() {
         assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(

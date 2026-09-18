@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Smoke-tests the reproducible end-to-end allocation benchmark without machine-dependent limits.
 class AeronEndToEndBenchmarkTest {
+    /// Verifies the benchmark assembles every payload byte and reports positive throughput timing.
     @Test
     void assemblesEveryByteAndReportsThroughput() {
         final AeronEndToEndBenchmark.Result result = AeronEndToEndBenchmark.measure(256 * 1024, 8 * 1024, 10, 40);

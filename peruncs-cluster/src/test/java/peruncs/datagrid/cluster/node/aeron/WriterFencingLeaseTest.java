@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class WriterFencingLeaseTest {
     private static final Duration STALENESS = Duration.ofMillis(300);
 
+    /// Verifies a forked deposed writer reports fenced and never runs its offer after a successor takes over.
     @Test
     void forkedDeposedWriterCannotOfferAfterTakeover(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();
@@ -55,6 +56,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies a second writer fails to acquire while the first holder stays current.
     @Test
     void secondWriterFailsWhileFirstHoldsTheLease(@TempDir final Path volume) {
         final UUID cluster = UUID.randomUUID();
@@ -68,6 +70,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies a clean restart mints the next fencing token immediately without waiting for staleness.
     @Test
     void cleanRestartKeepsTheFencingTokenSeries(@TempDir final Path volume) {
         final UUID cluster = UUID.randomUUID();
@@ -89,6 +92,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies a released lease admits takeover with a monotonic token only after the staleness bound.
     @Test
     void releasedLeaseIsTakenOverWithAMonotonicTokenAfterStaleness(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();
@@ -110,6 +114,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies a lease whose heartbeat stopped is stolen with a strictly greater token.
     @Test
     void staleLeaseIsStolenWithAMonotonicToken(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();
@@ -130,6 +135,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies heartbeat renewal keeps a live holder current and blocks takeover across the staleness bound.
     @Test
     void heartbeatKeepsTheLeaseCurrent(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();
@@ -143,6 +149,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies leases for different clusters and generations are held independently.
     @Test
     void leasesAreScopedPerClusterAndGeneration(@TempDir final Path volume) {
         try (final WriterFencingLease first =
@@ -154,6 +161,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies racing acquires serialize so exactly one winner mints the starting token and the rest fail.
     @Test
     void concurrentAcquiresSerializeToOneWinner(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();
@@ -197,6 +205,7 @@ class WriterFencingLeaseTest {
         assertEquals(racers - 1, rejections.get(), "every loser must fail instead of minting a duplicate token");
     }
 
+    /// Verifies a corrupt lease file fails closed instead of resetting the fencing token series.
     @Test
     void corruptLeaseFailsClosedInsteadOfResetting(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();
@@ -211,6 +220,7 @@ class WriterFencingLeaseTest {
                 "corrupt lease must fail closed, was: %s".formatted(failure.getMessage()));
     }
 
+    /// Verifies a deposed owner never runs its offer after a same-node takeover fences it.
     @Test
     void offerUnderOwnershipFailsAfterTakeoverWithoutOffering(@TempDir final Path volume) {
         final UUID cluster = UUID.randomUUID();
@@ -238,6 +248,7 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies close is idempotent and preserves the lease file so the token series survives restarts.
     @Test
     void closeIsIdempotentAndTheLeaseFileSurvives(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();

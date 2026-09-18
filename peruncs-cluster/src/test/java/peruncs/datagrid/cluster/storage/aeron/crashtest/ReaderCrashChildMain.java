@@ -255,6 +255,8 @@ public final class ReaderCrashChildMain {
 
     private record Listener(ReaderFixture fixture, Path uncertainty, String point, long recordingId)
             implements ReaderDeliveryListener {
+        /// Persists the uncertainty marker before every import, then parks on
+        /// the armed barrier for pre-import crash points so the parent can kill.
         @Override
         public void beforeStoreImport(final long sequence, final long position, final int dataLength,
                                       final int dataChunkCount, final int crc32c) {
@@ -277,6 +279,8 @@ public final class ReaderCrashChildMain {
             }
         }
 
+        /// Clears the uncertainty marker once the import is durable; a surviving
+        /// marker is what forces the recovery child to demand a reseed.
         @Override
         public void afterStoreImport() {
             try {
@@ -289,6 +293,9 @@ public final class ReaderCrashChildMain {
 
     private record ReaderFixture(Path base, String point, AtomicReference<ImportBoundary> importBoundary)
             implements StorageBinaryDataReceiver {
+        /// Appends the assembled transaction to the fixture Store, injects the
+        /// import failure for its crash point, and parks on the post-import
+        /// barrier so the parent can kill mid-boundary.
         @Override
         public void receiveData(final Binary value) {
             if ("DURING_STORE_IMPORT_FAILURE".equals(this.point)) {

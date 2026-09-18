@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// checkpoints, and archives across the restarts.
 @Timeout(300)
 class AeronStoreSmokeTest {
+    /// Verifies writer, reader, and index state survive a restart across the three forked smoke phases.
     @Test
     void writerReaderAndIndexStateSurviveARestart(@TempDir final Path root) throws Exception {
         final String clusterId = UUID.randomUUID().toString();

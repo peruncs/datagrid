@@ -91,6 +91,7 @@ class AeronArchiveRetentionTest {
                 reader, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode());
     }
 
+    /// Verifies retention without watermark delivery stays unsupported and rejects retirement without starting the writer.
     @Test
     void retentionIsUnsupportedWhenWatermarkDeliveryIsNotAvailable() {
         final AeronArchiveRetention retention = retention(
@@ -102,6 +103,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies disabled retention ignores dormant state on disk and rejects watermarks without starting the writer.
     @Test
     void disabledRetentionDoesNotReadDormantState() {
         final Path state = Path.of(System.getProperty("java.io.tmpdir"),
@@ -121,6 +123,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a malformed watermark is rejected before lazy writer startup runs.
     @Test
     void malformedWatermarkIsRejectedBeforeStartingTheWriter() {
         final AtomicBoolean started = new AtomicBoolean();
@@ -131,6 +134,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies an unresolved watermark is rejected before lazy writer recovery starts.
     @Test
     void unresolvedWatermarkIsRejectedBeforeStartingTheWriter() {
         final AtomicBoolean started = new AtomicBoolean();
@@ -142,6 +146,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies a configured reader watermark completes the retention quorum.
     @Test
     void configuredWatermarkCompletesTheQuorum() {
         final AeronArchiveRetention retention = retention(() -> {
@@ -153,6 +158,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies a decoded control watermark completes the quorum without cursor re-encoding.
     @Test
     void decodedControlWatermarkCompletesTheQuorumWithoutCursorReencoding() {
         final AeronArchiveRetention retention = retention(() -> {
@@ -163,6 +169,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies a writer startup failure propagates and leaves the quorum uncompleted.
     @Test
     void writerStartupFailureDoesNotAdvanceTheQuorum() {
         final AeronArchiveRetention retention = retention(
@@ -177,6 +184,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies a deletion request after quorum reaches the Archive and surfaces its unavailability.
     @Test
     void ordinaryBackupCursorCanRequestDeletionAfterQuorum() {
         final AeronArchiveRetention retention = retention(() -> {
@@ -192,6 +200,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies an active replay defers segment deletion while preserving the assembled quorum.
     @Test
     void activeReplayDefersSegmentDeletionWithoutLosingTheQuorum() {
         final long acknowledgedPosition = 9L * 1_024 * 1_024;
@@ -208,6 +217,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies an unrelated Archive failure propagates with its cause instead of deferring as an active replay.
     @Test
     void unrelatedArchiveFailureIsNotMisclassifiedAsAnActiveReplay() {
         final long acknowledgedPosition = 9L * 1_024 * 1_024;
@@ -223,6 +233,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies a watermark ahead of the durable writer boundary is rejected and leaves the quorum incomplete.
     @Test
     void watermarkAheadOfDurableWriterBoundaryIsRejected() {
         final AeronArchiveRetention retention = retention(() -> {
@@ -235,6 +246,7 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// Verifies recorded reader progress survives a controller restart through persisted state.
     @Test
     void readerProgressSurvivesControllerRestart() throws Exception {
         final Path state = Files.createTempFile("aeron-retention-", ".state");
@@ -256,6 +268,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies an obsolete development retention state version is rejected with an informative cause.
     @Test
     void rejectsDevelopmentRetentionStateFormats() throws Exception {
         final Path state = Files.createTempFile("aeron-retention-obsolete-", ".state");
@@ -274,6 +287,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a symlinked retention state file is rejected instead of being followed.
     @Test
     void rejectsSymbolicLinkRetentionState() throws Exception {
         final Path directory = Files.createTempDirectory("aeron-retention-symlink-");
@@ -300,6 +314,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a retired reader stays removed from the quorum across a restart and its watermarks are rejected.
     @Test
     void retiredReaderIsPersistentlyRemovedFromTheQuorum() throws Exception {
         final UUID secondReader = UUID.randomUUID();
@@ -332,6 +347,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a reported reader can be retired and the retirement survives a state reload.
     @Test
     void reportedReaderCanBeRetiredAndStateReloaded() throws Exception {
         final UUID retiredReader = UUID.randomUUID();
@@ -356,6 +372,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a persisted watermark for a reader outside the current configuration fails reload with an actionable error.
     @Test
     void rejectsPersistedWatermarkForReaderOutsideCurrentConfiguration() throws Exception {
         final Path state = Files.createTempFile("aeron-retention-unconfigured-", ".state");
@@ -376,6 +393,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a malformed retention state load is atomic and leaves the in-memory quorum unmutated for retry.
     @Test
     void malformedRetentionStateDoesNotPartiallyMutateQuorum() throws Exception {
         final UUID secondReader = UUID.randomUUID();
@@ -402,6 +420,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a watermark persistence failure rolls back the quorum until the retry succeeds.
     @Test
     void watermarkPersistenceFailureRollsBackTheQuorum() throws Exception {
         final Path directory = Files.createTempDirectory("aeron-retention-rollback-");
@@ -422,6 +441,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies a queued command wait stays bounded with a timeout when the agent thread is stuck.
     @Test
     void queuedCommandWaitIsBoundedWhenTheAgentIsStuck() throws Exception {
         final CountDownLatch entered = new CountDownLatch(1);
@@ -481,6 +501,7 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// Verifies an interrupted close stays retryable until agent termination and quorum cleanup complete.
     @Test
     void interruptedCloseStaysRetryableUntilQuorumCleanup() throws Exception {
         final CountDownLatch entered = new CountDownLatch(1);
@@ -550,6 +571,7 @@ class AeronArchiveRetentionTest {
         return (java.util.concurrent.ExecutorService) agent.get(retention);
     }
 
+    /// Verifies a retirement persistence failure reinstates the reader so the quorum still requires it.
     @Test
     void retirementPersistenceFailureReinstatesTheReader() throws Exception {
         final UUID secondReader = UUID.randomUUID();

@@ -4,13 +4,17 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/// Covers the replication retry deadline arithmetic: budget validation,
+/// saturating deadline math, and expiry against both wall-clock and manual clocks.
 class ReplicationRetryTest {
+    /// Verifies zero and negative retry budgets are rejected with an illegal-argument failure.
     @Test
     void rejectsUnboundedOrEmptyBudgets() {
         assertThrows(IllegalArgumentException.class, () -> ReplicationRetry.deadlineNanos(0L));
         assertThrows(IllegalArgumentException.class, () -> ReplicationRetry.deadlineNanos(-1L));
     }
 
+    /// Verifies deadline arithmetic saturates at the maximum value and remaining time never goes negative while past deadlines read expired.
     @Test
     void saturatesAndNeverReturnsNegativeRemainingTime() {
         assertEquals(Long.MAX_VALUE, ReplicationRetry.deadlineNanos(Long.MAX_VALUE));

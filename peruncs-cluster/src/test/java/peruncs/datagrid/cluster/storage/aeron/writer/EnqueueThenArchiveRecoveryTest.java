@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// recovery uses to refuse the sequence until the node is reseeded from a
 /// healthy peer or a backup.
 class EnqueueThenArchiveRecoveryTest {
+    /// Verifies preparation failure after local acceptance leaves uncertain recovery evidence and requires a reseed.
     @Test
     void preparationFailureAfterLocalAcceptanceRequiresReseed() {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();

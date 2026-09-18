@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// The offer retry loop honors its deadline on a manual clock and the policy
 /// defaults preserve the historical pacing.
 class AeronOfferRetryerTest {
+    /// Verifies persistent back pressure fails with an offer timeout once the deadline expires.
     @Test
     void timesOutOnPersistentBackPressure() {
         final var now = new AtomicLong(1_000_000L);
@@ -27,6 +28,7 @@ class AeronOfferRetryerTest {
                 () -> "unexpected failure: " + failure.getMessage());
     }
 
+    /// Verifies an immediately accepted offer returns its position without parking.
     @Test
     void succeedsWithoutParkingWhenAccepted() {
         final AeronOfferRetryer retryer = new AeronOfferRetryer(
@@ -36,6 +38,7 @@ class AeronOfferRetryerTest {
         assertEquals(42L, retryer.offer(new UnsafeBuffer(new byte[64]), 64));
     }
 
+    /// Verifies the default retry policy preserves the historical idle, jitter, and probe pacing.
     @Test
     void policyDefaultsPreserveHistoricalPacing() {
         final AeronRetryPolicy policy = AeronRetryPolicy.Default();
@@ -51,6 +54,7 @@ class AeronOfferRetryerTest {
         assertEquals(100_000_000L, policy.catalogProbeMaxDelayNanos());
     }
 
+    /// Verifies the retry policy rejects non-positive bounds and inverted park limits.
     @Test
     void policyRejectsNonPositiveBounds() {
         assertThrows(IllegalArgumentException.class, () -> new AeronRetryPolicy(

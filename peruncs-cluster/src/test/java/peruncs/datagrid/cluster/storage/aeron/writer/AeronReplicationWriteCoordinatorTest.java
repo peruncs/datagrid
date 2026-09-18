@@ -74,6 +74,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
+    /// Verifies capacity admission receives the combined dictionary and payload bytes before preparation.
     @Test
     void capacityAdmissionReceivesPayloadAndDictionaryBytes() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -526,6 +527,7 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
+    /// Verifies a lost lease prevents the abort marker from being offered, even during shutdown.
     @Test
     void lostLeasePreventsAbortMarkerEvenDuringShutdown() {
         final AtomicInteger abortMarkers = new AtomicInteger();

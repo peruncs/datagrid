@@ -47,6 +47,7 @@ class ClusterStoreIndexesTest {
                 .build();
     }
 
+    /// Verifies Lucene contexts and vector configurations with external directories are rejected.
     @Test
     void externalDirectoriesAreRejected() {
         final LuceneContext<Article> externalLucene = LuceneContext.New(
@@ -66,6 +67,7 @@ class ClusterStoreIndexesTest {
                 () -> ClusterStoreIndexes.validateVectorConfiguration(externalVector));
     }
 
+    /// Verifies eventual indexing is rejected for replicated vectors, even when smuggled past registration and reloaded from the Store.
     @Test
     void eventualIndexingIsRejectedForReplicatedVectors() {
         final VectorIndexConfiguration eventual = VectorIndexConfiguration.builder()
@@ -96,6 +98,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies background optimization is rejected for replicated vectors, even when smuggled past registration and reloaded from the Store.
     @Test
     void backgroundOptimizationIsRejectedForReplicatedVectors() {
         final VectorIndexConfiguration optimized = VectorIndexConfiguration.builder()
@@ -125,6 +128,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies embedded indexes follow add, update, delete, and reload while serving text and vector queries from Store state.
     @Test
     void embeddedIndexesFollowAddUpdateDeleteAndReload() {
         final Root root = new Root();
@@ -175,6 +179,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies refresh resets imported vector graphs without eager vectorization while keeping Lucene and vector search current.
     @Test
     void refreshResetsGraphsWithoutEagerVectorization() {
         final Root root = new Root();
@@ -227,6 +232,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies repeated refresh retires and reopens Lucene views without leaking resources or changing results.
     @Test
     void repeatedRefreshRetiresAndReopensLuceneViews() {
         final Root root = new Root();
@@ -260,6 +266,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies a directly registered external Lucene index is rejected by graph validation.
     @Test
     void directExternalLuceneRegistrationIsRejectedByGraphValidation() {
         final Root root = new Root();
@@ -270,6 +277,7 @@ class ClusterStoreIndexesTest {
         assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
     }
 
+    /// Verifies a directly registered external vector index is rejected by graph validation.
     @Test
     void directExternalVectorRegistrationIsRejectedByGraphValidation() {
         final Root root = new Root();
@@ -285,6 +293,7 @@ class ClusterStoreIndexesTest {
         assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
     }
 
+    /// Verifies unregistered external Lucene and vector configurations are rejected by graph validation.
     @Test
     void unregisteredExternalConfigurationsAreRejectedByGraphValidation() {
         assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
@@ -298,6 +307,7 @@ class ClusterStoreIndexesTest {
                         .build()));
     }
 
+    /// Verifies an external configuration hidden behind an AtomicReference is still rejected.
     @Test
     void externalConfigurationBehindAtomicReferenceIsRejected() {
         final AtomicReference<Object> reference = new AtomicReference<>(
@@ -305,6 +315,7 @@ class ClusterStoreIndexesTest {
         assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(reference));
     }
 
+    /// Verifies an opaque JDK holder is rejected instead of being silently pruned.
     @Test
     void opaqueJdkHolderIsRejectedInsteadOfBeingPruned() {
         final AtomicMarkableReference<Object> holder = new AtomicMarkableReference<>(
@@ -312,6 +323,7 @@ class ClusterStoreIndexesTest {
         assertThrows(IllegalStateException.class, () -> ClusterStoreIndexes.validateGraph(holder));
     }
 
+    /// Verifies an external configuration hidden behind a WeakReference is still inspected and rejected.
     @Test
     void externalConfigurationBehindReferenceIsInspected() {
         final java.lang.ref.WeakReference<Object> reference = new java.lang.ref.WeakReference<>(
@@ -320,6 +332,7 @@ class ClusterStoreIndexesTest {
                 "a Reference wrapper must not hide an external index from validation");
     }
 
+    /// Verifies an external configuration hidden behind a SoftReference is still inspected and rejected.
     @Test
     void externalConfigurationBehindSoftReferenceIsInspected() {
         final java.lang.ref.SoftReference<Object> reference = new java.lang.ref.SoftReference<>(
@@ -333,6 +346,7 @@ class ClusterStoreIndexesTest {
                 "a SoftReference wrapper must not hide an external index from validation");
     }
 
+    /// Verifies index groups behind references stay visible so wrapped external indexes cannot hide.
     @Test
     void indexGroupsBehindReferenceAreInspectedThroughIndexGroup() {
         final GigaMap<Article> map = GigaMap.New();
@@ -354,6 +368,7 @@ class ClusterStoreIndexesTest {
     }
 
 
+    /// Verifies embedded in-graph indexes pass graph and map validation.
     @Test
     void embeddedInGraphIndexesPassGraphValidation() {
         final Root root = new Root();
@@ -365,6 +380,7 @@ class ClusterStoreIndexesTest {
         assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(root.articles));
     }
 
+    /// Verifies materialized storage roots with embedded indexes pass validation.
     @Test
     void materializedStorageRootsPassGraphValidation() {
         final Root root = new Root();
@@ -378,6 +394,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies duplicate Lucene registration fails explicitly as a duplicate.
     @Test
     void duplicateLuceneRegistrationFailsExplicitly() {
         final GigaMap<Article> map = GigaMap.New();
@@ -388,6 +405,7 @@ class ClusterStoreIndexesTest {
                 "a duplicate must be named as a duplicate: " + failure.getMessage());
     }
 
+    /// Verifies concurrent duplicate Lucene registrations leave exactly one index with the rest rejected.
     @Test
     void concurrentDuplicateLuceneRegistrationLeavesASingleIndex() throws Exception {
         final GigaMap<Article> map = GigaMap.New();
@@ -415,6 +433,7 @@ class ClusterStoreIndexesTest {
         assertNotNull(map.index().get(LuceneIndex.class));
     }
 
+    /// Verifies a bitmap-only map with no custom indexes passes map validation.
     @Test
     void bitmapOnlyMapPassesMapValidation() {
         /* The core bitmap group is in-graph by construction: enumerating it
@@ -422,6 +441,7 @@ class ClusterStoreIndexesTest {
         assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(GigaMap.New()));
     }
 
+    /// Verifies an unknown index category fails map validation as an unsupported index group.
     @Test
     @SuppressWarnings("unchecked") // The proxy stands in for an unsupported third-party index group.
     void unknownIndexCategoryIsRejectedByMapValidation() {
@@ -461,6 +481,7 @@ class ClusterStoreIndexesTest {
                 "an unknown category must fail closed: " + failure.getMessage());
     }
 
+    /// Verifies the writer entry rejects stores holding directly registered external indexes.
     @Test
     void writerEntryRejectsDirectExternalRegistrations() {
         final Root luceneRoot = new Root();
@@ -487,6 +508,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies a large ordinary graph without index metadata passes validation by pruning application data.
     @Test
     void largeOrdinaryGraphPassesValidation() {
         final Root root = new Root();
@@ -504,6 +526,7 @@ class ClusterStoreIndexesTest {
         assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(root.articles));
     }
 
+    /// Verifies an external index hidden among a large ordinary graph is still rejected.
     @Test
     void externalIndexHiddenInLargeGraphIsStillRejected() {
         final Root root = new Root();
@@ -520,6 +543,7 @@ class ClusterStoreIndexesTest {
         assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
     }
 
+    /// Verifies writer validation is scoped to the store being written so another store's violation does not block a clean writer.
     @Test
     void writerEntryScopesValidationToTheStoreBeingWritten() {
         /* Store A holds a directly registered external Lucene index. */
@@ -545,6 +569,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies the writer entry accepts a large ordinary graph without walking the data set per transaction.
     @Test
     void writerEntryAcceptsLargeOrdinaryGraph() {
         final Root root = new Root();
@@ -561,6 +586,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies the writer entry accepts a store holding embedded Lucene and vector indexes.
     @Test
     void writerEntryAcceptsEmbeddedIndexes() {
         final Root root = new Root();
@@ -577,6 +603,7 @@ class ClusterStoreIndexesTest {
     private interface CustomGroup<E> extends IndexGroup.Internal<E> {
     }
 
+    /// Verifies concurrent vector registrations with distinct names all survive.
     @Test
     void concurrentVectorRegistrationsAllSurvive() throws Exception {
         final GigaMap<Article> map = GigaMap.New();
@@ -600,6 +627,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    /// Verifies concurrent duplicate vector registrations leave exactly one index with the rest rejected.
     @Test
     void concurrentDuplicateVectorRegistrationLeavesASingleIndex() throws Exception {
         final GigaMap<Article> map = GigaMap.New();

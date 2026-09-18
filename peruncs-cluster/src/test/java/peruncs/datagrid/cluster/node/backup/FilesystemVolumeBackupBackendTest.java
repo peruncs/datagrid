@@ -102,6 +102,7 @@ class FilesystemVolumeBackupBackendTest {
         }
     }
 
+    /// Verifies listing returns only valid backup archives in order while ignoring directories, temp files, and legacy or malformed names.
     @Test
     void listsArchiveFilesAndIgnoresDirectoriesAndMalformedNames(@TempDir final Path backupVolume) throws Exception {
         final BackupMetadata first = backup(100L, false, null, null,
@@ -124,6 +125,7 @@ class FilesystemVolumeBackupBackendTest {
         assertNull(backend.getLastBackup(2));
     }
 
+    /// Verifies the manifest cursor reads back and restore installs the Store payload while refusing an occupied destination.
     @Test
     void readsManifestAndRestoresStorage(@TempDir final Path backupVolume, @TempDir final Path root)
             throws Exception {
@@ -144,6 +146,7 @@ class FilesystemVolumeBackupBackendTest {
                 () -> backend.restoreBackup(destination, backend.getLastBackup(0)));
     }
 
+    /// Verifies publishing a generation archive persists its identity and digest and its manifest decodes to the original cursor.
     @Test
     void publishesAGenerationArchiveWithIdentityAndDigest(@TempDir final Path backupVolume) throws Exception {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
@@ -174,6 +177,7 @@ class FilesystemVolumeBackupBackendTest {
                 BackupArchive.readManifest(archive, BackupArchiveLimits.defaults().maxExtractedBytes())));
     }
 
+    /// Verifies generation-filtered lookup selects each generation's own latest backup even when the newest overall belongs elsewhere.
     @Test
     void mixedGenerationsSelectOnlyTheCompatibleBackup(@TempDir final Path backupVolume) {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
@@ -207,6 +211,7 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(selectedTwo, backend.findLatestCompatibleBackup(BackupMetadata.Identity.unknown()));
     }
 
+    /// Verifies concurrent publications in the same millisecond yield distinct archives instead of clobbering one name.
     @Test
     void concurrentPublicationYieldsDistinctArchives(@TempDir final Path backupVolume) throws Exception {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
@@ -232,6 +237,7 @@ class FilesystemVolumeBackupBackendTest {
         }
     }
 
+    /// Verifies retrying the same publication is idempotent while reusing its id with different content fails without touching the durable archive.
     @Test
     void sameNamePublicationIsIdempotentOnlyForIdenticalContent(@TempDir final Path backupVolume) {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
@@ -252,6 +258,7 @@ class FilesystemVolumeBackupBackendTest {
                 "a conflicting publication must leave the durable archive untouched");
     }
 
+    /// Verifies concurrent same-name publications with different content elect exactly one winner while every loser fails without overwriting.
     @Test
     void concurrentSameNamePublicationsElectOneWinnerWithoutSilentOverwrite(@TempDir final Path backupVolume)
             throws Exception {
@@ -308,6 +315,7 @@ class FilesystemVolumeBackupBackendTest {
         }
     }
 
+    /// Verifies restore rejects an archive whose content digest mismatches its declared identity and installs nothing.
     @Test
     void restoreRejectsADigestMismatch(@TempDir final Path backupVolume, @TempDir final Path root)
             throws Exception {
@@ -332,6 +340,7 @@ class FilesystemVolumeBackupBackendTest {
         assertFalse(Files.exists(root.resolve("destination").resolve(StorageBackupBackend.STORAGE_ENTRY)));
     }
 
+    /// Verifies Store payload and cursor round-trip through a volume archive to a fresh destination.
     @Test
     void roundTripsStorageAndCursorThroughTheVolumeArchive(
             @TempDir final Path backupVolume,
@@ -349,6 +358,7 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(CURSOR, backend.getCursorForBackup(backend.getLastBackup(0)));
     }
 
+    /// Verifies deleting a backup is idempotent and leaves the remaining archives listed.
     @Test
     void deletesArchivesIdempotently(@TempDir final Path backupVolume) throws Exception {
         final BackupMetadata first = backup(9L, false, null, null,
@@ -365,6 +375,7 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(List.of(first), backend.listBackups());
     }
 
+    /// Verifies a user-uploaded Store archive restores and deletes cleanly.
     @Test
     void restoresAndDeletesUserUploadedArchive(@TempDir final Path backupVolume, @TempDir final Path root)
             throws Exception {
@@ -379,6 +390,7 @@ class FilesystemVolumeBackupBackendTest {
         assertFalse(backend.hasUserUploadedStorage());
     }
 
+    /// Verifies private temp-directory attributes fall back gracefully when the file system has no POSIX view.
     @Test
     void tempDirectoryAttributesFallBackWithoutAPosixView(@TempDir final Path root) throws Exception {
         assertEquals(1, FilesystemVolumeBackupBackend.Default
@@ -391,6 +403,7 @@ class FilesystemVolumeBackupBackendTest {
         }
     }
 
+    /// Verifies restore refuses an existing Store destination instead of overwriting it.
     @Test
     void rejectsExistingStorageDestination(@TempDir final Path backupVolume, @TempDir final Path root)
             throws Exception {
@@ -405,6 +418,7 @@ class FilesystemVolumeBackupBackendTest {
                 () -> backend.restoreBackup(destination, backup));
     }
 
+    /// Verifies newest-backup selection reads an immutable backend snapshot without mutating its order.
     @Test
     void lastBackupDoesNotMutateAnImmutableBackendSnapshot() {
         final BackupMetadata first = backup(10L, false, null, null,

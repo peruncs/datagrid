@@ -458,6 +458,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
         }
 
         @Override
+        @SuppressWarnings("unchecked") // fixing the inherited type variable to this Store's root type is sound for typed managers
         public Lazy<T> root() {
             /* Writers own their image and mutate it through store(); returning
              * the live reference preserves the Store write flow. Readers

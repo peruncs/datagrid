@@ -1002,16 +1002,16 @@ public final class ClusterStoreIndexes {
                 }
                 return;
             }
-            case ReferenceQueue<?> referenceQueue -> {
+            case ReferenceQueue<?> _ -> {
                 return;
             }
-            case Thread thread -> {
+            case Thread _ -> {
                 return;
             }
-            case ThreadGroup threadGroup -> {
+            case ThreadGroup _ -> {
                 return;
             }
-            case ClassLoader classLoader -> {
+            case ClassLoader _ -> {
                 return;
             }
             default -> {

@@ -21,6 +21,7 @@ class StorageBinaryDataImporterTest {
     @TempDir
     Path storagePath;
 
+    /// Verifies release tolerates nulls, empty channels, and zero-capacity buffers while rejecting an out-of-range length.
     @Test
     void releaseFreesEverySlotUnconditionally() {
         /* Empty slots are independently owned since the shared static empty
@@ -41,6 +42,7 @@ class StorageBinaryDataImporterTest {
                 () -> StorageBinaryDataImporter.release(new ByteBuffer[]{owned}, 2));
     }
 
+    /// Verifies empty heap sources each import to a distinct owned empty buffer that releases cleanly.
     @Test
     void emptySourcesGetFreshEmptiesPerSlot() {
         /* Each empty source must produce its own independently owned empty —
@@ -65,6 +67,7 @@ class StorageBinaryDataImporterTest {
         }
     }
 
+    /// Verifies a null source entry fails the owned import with a null-pointer failure before touching storage.
     @Test
     void copyFailurePropagatesWithoutMasking() {
         try (EmbeddedStorageManager manager = EmbeddedStorage.start(new Root(), this.storagePath)) {
@@ -76,6 +79,7 @@ class StorageBinaryDataImporterTest {
         }
     }
 
+    /// Verifies an import failure still frees the allocated native copies while propagating the original failure unmasked.
     @Test
     void importFailureReleasesCopiesAndPropagatesTheOriginalFailure() {
         /* Upstream import failures never surface through a real connection: the
@@ -99,6 +103,7 @@ class StorageBinaryDataImporterTest {
         assertEquals(0, boom.getSuppressed().length, "cleanup of the native copies must not fail");
     }
 
+    /// Verifies direct import validates heap, unnormalized, and null inputs without touching storage.
     @Test
     void importDirectValidatesWithoutTouchingStorage() {
         try (EmbeddedStorageManager manager = EmbeddedStorage.start(new Root(), this.storagePath)) {

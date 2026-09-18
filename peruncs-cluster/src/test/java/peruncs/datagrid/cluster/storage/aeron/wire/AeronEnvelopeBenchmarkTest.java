@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Smoke checks the benchmark's accounting without imposing machine-specific performance limits.
 class AeronEnvelopeBenchmarkTest {
+    /// Verifies the benchmark copies the expected chunked bytes and reports positive throughput timing.
     @Test
     void measuresChunkedCopyAndThroughput() {
         final AeronEnvelopeBenchmark.BenchmarkResult result = AeronEnvelopeBenchmark.measure(
@@ -19,6 +20,7 @@ class AeronEnvelopeBenchmarkTest {
         assertTrue(result.mebibytesPerSecond() > 0);
     }
 
+    /// Verifies measuring rejects invalid payload and iteration parameters.
     @Test
     void rejectsInvalidMeasurementParameters() {
         assertThrows(IllegalArgumentException.class, () -> AeronEnvelopeBenchmark.measure(

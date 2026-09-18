@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Covers environment-variable resolution: prefixed names win, pre-prefix
 /// names still resolve as a fallback, and unknown names stay `null`.
 class NodeLibraryEnvKeysTest {
+    /// Verifies a prefixed environment name wins over its legacy unprefixed fallback when both are set.
     @Test
     void prefixedNameWinsOverLegacy() {
         final Map<String, String> environment = Map.of(
@@ -19,6 +20,7 @@ class NodeLibraryEnvKeysTest {
                 environment, NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB));
     }
 
+    /// Verifies legacy unprefixed names still resolve when the prefixed name is unset.
     @Test
     void legacyNameResolvesWhenPrefixedIsUnset() {
         assertEquals("32", NodeLibraryPropertiesProvider.Env.resolve(
@@ -29,6 +31,7 @@ class NodeLibraryEnvKeysTest {
                 NodeLibraryPropertiesProvider.Env.EnvKeys.IS_PROD_MODE));
     }
 
+    /// Verifies unknown or unset names resolve to null instead of a default value.
     @Test
     void unsetNameResolvesToNull() {
         assertNull(NodeLibraryPropertiesProvider.Env.resolve(

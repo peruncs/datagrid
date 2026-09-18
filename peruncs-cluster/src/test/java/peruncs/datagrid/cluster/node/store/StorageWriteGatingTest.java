@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// disk so the node can drain, back up, or recover instead of failing every
 /// operation.
 class StorageWriteGatingTest {
+    /// Verifies core write entry points are rejected once the storage limit is reached.
     @Test
     void writesAreRejectedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
@@ -33,6 +34,7 @@ class StorageWriteGatingTest {
         }
     }
 
+    /// Verifies every fluent storer and raw-target write path is gated once the storage limit is reached.
     @Test
     void everyFluentStorerPathIsGatedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
@@ -76,6 +78,7 @@ class StorageWriteGatingTest {
         }
     }
 
+    /// Verifies a read-only manager rejects every mutation API while keeping reads, registration, and type-dictionary access working.
     @Test
     void readOnlyManagerRejectsEveryMutationApi(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
@@ -126,6 +129,7 @@ class StorageWriteGatingTest {
         }
     }
 
+    /// Verifies maintenance and object-id registration still work when the storage limit is reached.
     @Test
     void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {

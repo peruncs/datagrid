@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that partial shutdown can be retried without repeating completed work.
 class ClusterStorageManagerShutdownTest {
+    /// Verifies a failing shutdown callback can be retried without shutting the underlying Store twice.
     @Test
     void callbackFailureCanBeRetriedWithoutShuttingStoreTwice() {
         final AtomicInteger callbacks = new AtomicInteger();

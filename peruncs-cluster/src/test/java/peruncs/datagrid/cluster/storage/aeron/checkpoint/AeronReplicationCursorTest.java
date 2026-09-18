@@ -28,6 +28,7 @@ class AeronReplicationCursorTest {
         assertEquals(cursor, AeronReplicationCursor.decode(cursor.encode()));
     }
 
+    /// Verifies decoding rejects legacy position formats and unknown provider magic.
     @Test
     void rejectsLegacyAndUnknownProviderPositionFormats() {
         assertThrows(IllegalArgumentException.class,
@@ -39,6 +40,7 @@ class AeronReplicationCursorTest {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationCursor.decode(encoded));
     }
 
+    /// Verifies decoding rejects a cursor with a corrupted replay position, sequence, or checksum.
     @Test
     void rejectsCorruptedReplayPositionOrSequence() {
         final AeronReplicationCursor cursor = new AeronReplicationCursor(

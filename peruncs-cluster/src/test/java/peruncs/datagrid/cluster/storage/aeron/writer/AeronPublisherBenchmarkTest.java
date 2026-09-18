@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Smoke tests the complete publisher staging benchmark without machine-specific limits.
 class AeronPublisherBenchmarkTest {
+    /// Verifies the benchmark stages the expected copies and offers while reporting throughput and allocation.
     @Test
     void measuresCopiesOffersAndAllocation() {
         final AeronPublisherBenchmark.Result result = AeronPublisherBenchmark.measure(
@@ -34,6 +35,7 @@ class AeronPublisherBenchmarkTest {
                && bean.isThreadAllocatedMemorySupported();
     }
 
+    /// Verifies measuring rejects invalid payload, chunk, and iteration parameters.
     @Test
     void rejectsInvalidMeasurementParameters() {
         assertThrows(IllegalArgumentException.class, () -> AeronPublisherBenchmark.measure(0, 1_024, 4, 0, 1));

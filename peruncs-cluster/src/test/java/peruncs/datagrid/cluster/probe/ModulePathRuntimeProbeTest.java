@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// unnamed module while the implementation resolves through the module path.
 @Timeout(120)
 class ModulePathRuntimeProbeTest {
+    /// Verifies the Lucene and JVector index validator runs inside the real named module by forking the probe main on the module path.
     @Test
     void indexValidatorRunsInsideTheNamedModule(@TempDir final Path root) throws Exception {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();

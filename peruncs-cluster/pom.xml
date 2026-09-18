@@ -181,7 +181,7 @@
 			</build>
 			<properties>
 				<crash.matrix.seed>1</crash.matrix.seed>
-				<crash.matrix.random.iterations>3</crash.matrix.random.iterations>
+				<crash.matrix.random.iterations>10</crash.matrix.random.iterations>
 				<crash.matrix.random.seeds>1</crash.matrix.random.seeds>
 				<crash.budget.startup>120000</crash.budget.startup>
 				<crash.budget.milestone>60000</crash.budget.milestone>
@@ -216,6 +216,13 @@
 									<soak.writer.threads>${soak.writer.threads}</soak.writer.threads>
 									<soak.query.threads>${soak.query.threads}</soak.query.threads>
 									<soak.restarts>${soak.restarts}</soak.restarts>
+									<soak.lagSlots>${soak.lagSlots}</soak.lagSlots>
+									<soak.miniCensus>${soak.miniCensus}</soak.miniCensus>
+									<soak.pollDelayMs>${soak.pollDelayMs}</soak.pollDelayMs>
+									<soak.pollStallMs>${soak.pollStallMs}</soak.pollStallMs>
+									<soak.fsyncDelayMs>${soak.fsyncDelayMs}</soak.fsyncDelayMs>
+									<soak.corrupt>${soak.corrupt}</soak.corrupt>
+									<soak.jfr.fail>${soak.jfr.fail}</soak.jfr.fail>
 							</systemPropertyVariables>
 						</configuration>
 						<executions>
@@ -234,7 +241,14 @@
 				<soak.seed>1</soak.seed>
 				<soak.writer.threads>3</soak.writer.threads>
 				<soak.query.threads>2</soak.query.threads>
-				<soak.restarts>6</soak.restarts>
+				<soak.restarts>10</soak.restarts>
+				<soak.lagSlots>100</soak.lagSlots>
+				<soak.miniCensus>20</soak.miniCensus>
+				<soak.pollDelayMs>2</soak.pollDelayMs>
+				<soak.pollStallMs>800</soak.pollStallMs>
+				<soak.fsyncDelayMs>3</soak.fsyncDelayMs>
+				<soak.corrupt>true</soak.corrupt>
+				<soak.jfr.fail>false</soak.jfr.fail>
 			</properties>
 		</profile>
 	</profiles>

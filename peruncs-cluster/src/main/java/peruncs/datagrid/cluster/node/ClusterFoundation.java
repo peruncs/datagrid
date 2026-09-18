@@ -847,8 +847,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
                 }
                 if (failure instanceof Error error) throw error;
-                RuntimeException runtime = (RuntimeException) failure;
-                throw runtime;
+                throw (RuntimeException) failure;
             }
         }
 

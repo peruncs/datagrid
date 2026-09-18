@@ -15,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that one Store object implementing both extension SPIs keeps both contracts.
 class DistributedStorageConfiguratorTest {
+    /// Verifies a store implementing both target and dictionary-exporter contracts keeps both after decoration.
     @Test
     void preservesTargetAndDictionaryExporterContracts() {
         final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());

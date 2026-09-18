@@ -20,6 +20,7 @@ class AeronDriverFailureIT {
         }
     }
 
+    /// Verifies a dead Aeron driver is reported as a DriverTimeoutException without terminating the parent JVM.
     @Test
     void deadDriverIsReportedWithoutTerminatingTheParentJvm() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-driver-failure-");

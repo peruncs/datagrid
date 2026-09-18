@@ -92,6 +92,7 @@ class BackupRestoreCompatibilityTest {
         return new ReaderSeedBootstrapTest.TestProperties(storagePath, backupPath, role);
     }
 
+    /// Verifies valid local storage survives a restart when the volume's newest backup belongs to an unrelated generation, keeping the local root and replication offset untouched.
     @Test
     void incompatibleNewestKeepsValidLocalStorage(@TempDir final Path root) {
         final Path home = root.resolve("node-home");
@@ -135,6 +136,7 @@ class BackupRestoreCompatibilityTest {
                 "the unrelated backup must be left alone on the volume");
     }
 
+    /// Verifies a node with no local Store image restores the older compatible backup when the volume's newest backup belongs to another generation.
     @Test
     void mixedGenerationsRestoreTheCompatibleBackup(@TempDir final Path root) {
         final Path home = root.resolve("node-home");
@@ -161,6 +163,7 @@ class BackupRestoreCompatibilityTest {
         assertEquals(2, FilesystemVolumeBackupBackend.New(volume).listBackups().size());
     }
 
+    /// Verifies a fresh node with only incompatible backups fails fast with a compatibility error and installs no Store image.
     @Test
     void freshNodeWithOnlyIncompatibleBackupsRefusesToInstall(@TempDir final Path root) {
         final Path home = root.resolve("node-home");
@@ -184,6 +187,7 @@ class BackupRestoreCompatibilityTest {
                 "no unrelated image may be installed when nothing compatible exists");
     }
 
+    /// Verifies a seeded reader keeps its copied Store image when the volume's newest backup belongs to an unrelated generation.
     @Test
     void readerKeepsSeededStorageWhenNewestIsIncompatible(@TempDir final Path root) throws Exception {
         final Path writerHome = root.resolve("writer-home");

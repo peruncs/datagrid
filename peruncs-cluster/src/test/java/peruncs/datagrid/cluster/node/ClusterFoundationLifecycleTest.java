@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies the foundation's single close boundary.
 class ClusterFoundationLifecycleTest {
+    /// Verifies closing an unstarted foundation is idempotent and permanently prevents starting the storage manager.
     @Test
     void closeIsIdempotentAndPreventsRestart() {
         final ClusterFoundation foundation = ClusterFoundation.New().build();
@@ -23,6 +24,7 @@ class ClusterFoundationLifecycleTest {
         assertThrows(IllegalStateException.class, foundation::startStorageManager);
     }
 
+    /// Verifies a started node closes idempotently and rejects any later storage-manager start.
     @Test
     void startedNodeClosesOnceAndPreventsRestart(@TempDir final Path storagePath) {
         final ClusterFoundation foundation = ClusterFoundation.New()
@@ -88,6 +90,7 @@ class ClusterFoundationLifecycleTest {
         }
     }
 
+    /// Verifies builder configuration carries into the built node, which then starts the storage manager cleanly on repeated starts.
     @Test
     void builderConfigurationIsCopiedIntoTheNode(@TempDir final Path storagePath) {
         final ClusterFoundation.Builder builder = ClusterFoundation.New()

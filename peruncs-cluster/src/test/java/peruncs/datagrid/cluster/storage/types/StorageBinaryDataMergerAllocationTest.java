@@ -43,6 +43,7 @@ class StorageBinaryDataMergerAllocationTest {
     private static final int WARMUP_TRANSACTIONS = 10;
     private static final int MEASURED_TRANSACTIONS = 40;
 
+    /// Verifies replaying captured transactions keeps average merger heap allocation per transaction within budget.
     @Test
     void perTransactionHeapAllocationStaysWithinBudget() throws Exception {
         final Path root = Files.createTempDirectory("datagrid-merger-allocation-");

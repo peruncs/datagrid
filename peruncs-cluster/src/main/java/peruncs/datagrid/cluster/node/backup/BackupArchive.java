@@ -169,7 +169,7 @@ final class BackupArchive {
             if (entry.getSize() > MAX_IDENTITY_BYTES) {
                 throw new NodeLibraryException("Backup identity is too large in %s".formatted(archive));
             }
-            final byte[] bytes = readBounded(zip, entry, MAX_IDENTITY_BYTES);
+            final byte[] bytes = readBoundedIdentity(zip, entry);
             return decodeIdentity(archive, bytes);
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to read backup identity from %s".formatted(archive), failure);
@@ -229,15 +229,15 @@ final class BackupArchive {
         return NIL_UUID.equals(parsed) ? null : parsed;
     }
 
-    private static byte[] readBounded(final ZipFile zip, final ZipEntry entry, final int maximum)
+    private static byte[] readBoundedIdentity(final ZipFile zip, final ZipEntry entry)
             throws IOException {
-        final ByteArrayOutputStream output = new ByteArrayOutputStream(Math.min(256, maximum));
+        final ByteArrayOutputStream output = new ByteArrayOutputStream(Math.min(256, MAX_IDENTITY_BYTES));
         final byte[] buffer = new byte[8192];
         try (InputStream data = zip.getInputStream(entry)) {
             int read;
             int total = 0;
             while ((read = data.read(buffer)) != -1) {
-                if (read > maximum - total) {
+                if (read > MAX_IDENTITY_BYTES - total) {
                     throw new IOException("Backup identity exceeds its size limit");
                 }
                 total += read;

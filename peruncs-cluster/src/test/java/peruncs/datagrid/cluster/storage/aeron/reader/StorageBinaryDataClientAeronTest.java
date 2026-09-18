@@ -76,11 +76,14 @@ class StorageBinaryDataClientAeronTest {
         assembler.onFragment(new UnsafeBuffer(bytes), 0, bytes.length, null);
     }
 
+    /// Verifies a failure racing a blocked commit delivery cannot deadlock and stays latched as the terminal failure.
     @Test
     void concurrentFailureCannotDeadlockCommittedDelivery() throws Exception {
         final CountDownLatch deliveryStarted = new CountDownLatch(1);
         final CountDownLatch releaseDelivery = new CountDownLatch(1);
         final RecordingReceiver receiver = new RecordingReceiver() {
+            /// Holds the commit delivery on latches so a concurrent failure
+            /// lands mid-delivery and proves it cannot deadlock the commit.
             @Override
             public void receiveData(final Binary value) {
                 deliveryStarted.countDown();

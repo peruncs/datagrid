@@ -22,6 +22,7 @@ class BackupMetadataTest {
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 42L, 0L, sequence).encode());
     }
 
+    /// Verifies backup identity fields derive from the Aeron cursor while the content digest stays unknown until publication.
     @Test
     void derivesGenerationFromAnAeronCursor() {
         final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
@@ -37,6 +38,7 @@ class BackupMetadataTest {
         assertEquals(BackupMetadata.UNKNOWN, backup.digest());
     }
 
+    /// Verifies missing cursors leave generation identity unknown while a corrupt Aeron position is rejected.
     @Test
     void leavesIdentityUnknownWithoutACursor() {
         final BackupMetadata missing = BackupMetadata.New(100L, true, null);
@@ -60,6 +62,7 @@ class BackupMetadataTest {
                 100L, false, new ReplicationCursor("aeron", GENERATION, 7L, "deadbeef")));
     }
 
+    /// Verifies every publication gets a distinct backup id even for the same cursor and timestamp.
     @Test
     void everyPublicationGetsADistinctBackupId() {
         final ReplicationCursor cursor = aeronCursor(7L);
@@ -68,6 +71,7 @@ class BackupMetadataTest {
                 BackupMetadata.New(100L, false, cursor).backupId());
     }
 
+    /// Verifies compatibility rejects only known identity contradictions and accepts unknown node identities.
     @Test
     void compatibilityRejectsOnlyKnownContradictions() {
         final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
@@ -87,6 +91,7 @@ class BackupMetadataTest {
                 "an unreplicated node has no identity constraint");
     }
 
+    /// Verifies provider and local cursor identities merge by filling unknown fields from the local view.
     @Test
     void identityMergesProviderAndLocalViews() {
         final BackupMetadata.Identity provider =
@@ -100,6 +105,7 @@ class BackupMetadataTest {
         assertEquals(42L, merged.recordingId());
     }
 
+    /// Verifies the archive file name round-trips all backup selection fields through formatting and parsing.
     @Test
     void fileNameRoundTripsTheSelectionFields(@TempDir final Path volume) {
         final BackupMetadata backup = BackupMetadata.New(1700000000000L, true, aeronCursor(7L));
@@ -116,6 +122,7 @@ class BackupMetadataTest {
         assertEquals(backup.backupId(), parsed.backupId());
     }
 
+    /// Verifies matching backup metadata and cursor pass the consistency check.
     @Test
     void consistentMetadataAndCursorPass() {
         final ReplicationCursor cursor = aeronCursor(7L);
@@ -123,6 +130,7 @@ class BackupMetadataTest {
         BackupMetadata.requireConsistentWithCursor(backup, cursor);
     }
 
+    /// Verifies metadata and cursor with mismatched cluster ids are rejected.
     @Test
     void rejectsClusterMismatchBetweenMetadataAndCursor() {
         final ReplicationCursor cursor = aeronCursor(7L);
@@ -133,6 +141,7 @@ class BackupMetadataTest {
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
+    /// Verifies metadata and cursor with mismatched Store generations are rejected.
     @Test
     void rejectsGenerationMismatchBetweenMetadataAndCursor() {
         final ReplicationCursor cursor = aeronCursor(7L);
@@ -144,6 +153,7 @@ class BackupMetadataTest {
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
+    /// Verifies metadata and cursor with mismatched recording ids are rejected.
     @Test
     void rejectsRecordingMismatchWhenRecordingUnconfigured() {
         final ReplicationCursor cursor = aeronCursor(7L);
@@ -154,6 +164,7 @@ class BackupMetadataTest {
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
+    /// Verifies metadata and cursor with mismatched epochs are rejected.
     @Test
     void rejectsEpochMismatchBetweenMetadataAndCursor() {
         final ReplicationCursor cursor = aeronCursor(7L);
@@ -164,6 +175,7 @@ class BackupMetadataTest {
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
+    /// Verifies a cursor whose outer sequence drifts from its encoded Aeron position is rejected.
     @Test
     void rejectsOuterSequenceMismatchWithEncodedPosition() {
         final ReplicationCursor cursor = aeronCursor(7L);
@@ -174,6 +186,7 @@ class BackupMetadataTest {
                 () -> BackupMetadata.requireConsistentWithCursor(backup, drifted));
     }
 
+    /// Verifies an undecodable Aeron cursor is rejected by the consistency check.
     @Test
     void rejectsUndecodableAeronCursor() {
         final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
@@ -183,6 +196,7 @@ class BackupMetadataTest {
                 () -> BackupMetadata.requireConsistentWithCursor(backup, corrupt));
     }
 
+    /// Verifies legacy millisecond and malformed archive names are rejected as backup files.
     @Test
     void fileNameRejectsLegacyAndMalformedNames(@TempDir final Path volume) {
         assertFalse(BackupArchive.isBackupFileName("1700000000000.zip"));

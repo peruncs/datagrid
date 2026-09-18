@@ -74,6 +74,7 @@ class StorageBackupManagerTest {
         return new TestStorageConnection();
     }
 
+    /// Verifies a resolved reader stop creates one backup, prunes to the kept count, runs retention once, and resumes the reader.
     @Test
     void createsPrunesRetainsAndResumesAfterAResolvedStop() {
         final FakeClient client = new FakeClient();
@@ -100,6 +101,7 @@ class StorageBackupManagerTest {
         assertEquals(1, retention.calls);
     }
 
+    /// Verifies deferred log retention retries without repeating the Store backup until deletion succeeds.
     @Test
     void retriesDeferredRetentionWithoutRepeatingTheBackup() {
         final FakeBackend backend = new FakeBackend();
@@ -122,6 +124,7 @@ class StorageBackupManagerTest {
         assertEquals(3, retention.calls);
     }
 
+    /// Verifies an unresolved reader stop creates no backup and leaves the reader stopped for diagnosis.
     @Test
     void doesNotCreateOrResumeWhenTheReaderStopIsUnresolved() {
         final FakeClient client = new FakeClient();
@@ -137,6 +140,7 @@ class StorageBackupManagerTest {
         assertTrue(backend.created.isEmpty());
     }
 
+    /// Verifies a failed reader blocks backup creation and surfaces its failure as the cause.
     @Test
     void refusesToCreateAfterAReaderFailure() {
         final FakeClient client = new FakeClient();
@@ -152,6 +156,7 @@ class StorageBackupManagerTest {
         assertTrue(backend.created.isEmpty());
     }
 
+    /// Verifies a backup failure is preserved as the primary error when resuming the reader also fails.
     @Test
     void preservesBackupFailureWhenResumeAlsoFails() {
         final FakeClient client = new FakeClient();
@@ -169,6 +174,7 @@ class StorageBackupManagerTest {
         assertSame(client.resumeFailure, failure.getSuppressed()[0]);
     }
 
+    /// Verifies a manual backup deletes only the previous manual slot and skips log retention.
     @Test
     void manualBackupDeletesOnlyThePreviousManualSlotAndSkipsRetention() {
         final FakeBackend backend = new FakeBackend();
@@ -185,6 +191,7 @@ class StorageBackupManagerTest {
         assertEquals(0, retention.calls);
     }
 
+    /// Verifies automatic pruning spares foreign generations sharing the volume and deletes only the oldest compatible backup.
     @Test
     void pruningSparesForeignGenerations() {
         final UUID cluster = UUID.randomUUID();
@@ -208,6 +215,7 @@ class StorageBackupManagerTest {
                 "a foreign generation sharing the volume must never be pruned");
     }
 
+    /// Verifies manual pruning spares foreign manual slots and deletes only the previous local manual backup.
     @Test
     void manualPruningSparesForeignManualSlots() {
         final UUID cluster = UUID.randomUUID();
@@ -226,6 +234,7 @@ class StorageBackupManagerTest {
                 "a foreign manual backup must never be pruned");
     }
 
+    /// Verifies log retention uses the cursor of the newest compatible backup rather than the newest backup overall.
     @Test
     void retentionUsesTheNewestCompatibleCursor() {
         final UUID cluster = UUID.randomUUID();
@@ -252,6 +261,7 @@ class StorageBackupManagerTest {
         assertEquals(List.of(compatibleCursor), retention.cursors);
     }
 
+    /// Verifies the stored manifest captures the cursor read after the reader-stop boundary, not the pre-stop position.
     @Test
     void manifestCursorIsCapturedAfterTheStopBoundary() {
         final ReplicationCursor before = new ReplicationCursor("test", null, 7L, "010203");

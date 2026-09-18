@@ -10,6 +10,10 @@ import java.util.concurrent.TimeUnit;
 /// Gate mode is reserved for forked-child tests; an in-process test must use
 /// throw mode so the releasing thread cannot deadlock against a held writer
 /// monitor.
+///
+/// The seam name is the same literal the production code passes to
+/// {@code CrashHook.invoke}, so there is exactly one spelling of every
+/// boundary across the crash harness.
 public final class CrashBarrier implements AutoCloseable {
     private final CrashPoint point;
     private final boolean throwOnReach;
@@ -37,6 +41,7 @@ public final class CrashBarrier implements AutoCloseable {
         }
     }
 
+    /// Releases a gated writer so the held seam proceeds. Closing does the same.
     public void release() {
         this.release.countDown();
     }

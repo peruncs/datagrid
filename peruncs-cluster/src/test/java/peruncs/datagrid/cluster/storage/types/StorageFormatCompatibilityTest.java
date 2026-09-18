@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 /// ids, or by materializing different data — instead of silently diverging a
 /// replicated reader from its writer.
 class StorageFormatCompatibilityTest {
+    /// Verifies a store written with the current dependencies reopens with identical data and type dictionary.
     @Test
     void writtenStoreReopensWithIdenticalDictionaryAndData() throws Exception {
         final Path root = Files.createTempDirectory("datagrid-store-format-");

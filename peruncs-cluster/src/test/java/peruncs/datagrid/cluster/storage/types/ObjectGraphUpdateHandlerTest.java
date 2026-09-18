@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ObjectGraphUpdateHandlerTest {
     private static final ScopedValue<String> CONTEXT = ScopedValue.newInstance();
 
+    /// Verifies a structured graph update runs on a virtual thread inheriting the scoped context and leaving no binding behind.
     @Test
     void updateRunsInVirtualChildAndInheritsScopedContext() {
         final AtomicReference<Thread> updateThread = new AtomicReference<>();

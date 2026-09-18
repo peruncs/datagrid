@@ -30,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class StorageBinaryDataMergerReadSideTest {
     private static final long TIMEOUT_MS = 10_000L;
 
+    /// Verifies the merger batch section holds the write side so joined reads and writes wait until validation releases.
     @Test
     void batchSectionExcludesReadsAndWrites(@TempDir final Path readerRoot) throws Exception {
         final CountDownLatch validationEntered = new CountDownLatch(1);
@@ -115,6 +116,7 @@ class StorageBinaryDataMergerReadSideTest {
         }
     }
 
+    /// Verifies a merger built without a coordinator reports none so callers run scans directly.
     @Test
     void unwiredMergerExposesNoCoordinator() {
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()

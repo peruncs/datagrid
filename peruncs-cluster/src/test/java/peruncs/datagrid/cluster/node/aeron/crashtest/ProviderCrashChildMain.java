@@ -10,6 +10,7 @@ import peruncs.datagrid.cluster.node.aeron.AeronCrashHooks;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPayloads;
 import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
@@ -122,19 +123,9 @@ public final class ProviderCrashChildMain {
     }
 
     private static byte[] transactionPayload(final int sequence) {
-        final byte[] payload = ("dg-crash:%s".formatted(sequence)).getBytes(StandardCharsets.UTF_8);
-        final byte[] result = new byte[64];
-        final byte[] digest = digest(payload);
-        for (int i = 0; i < result.length; i++) result[i] = digest[i % digest.length];
-        return result;
-    }
-
-    private static byte[] digest(final byte[] value) {
-        try {
-            return java.security.MessageDigest.getInstance("SHA-256").digest(value);
-        } catch (final java.security.NoSuchAlgorithmException impossible) {
-            throw new AssertionError(impossible);
-        }
+        return CrashPayloads.sized(sequence,
+                Integer.getInteger("dg.crash.payloadSize", CrashPayloads.DEFAULT_SIZE),
+                System.getProperty("dg.crash.payloadKind", CrashPayloads.DEFAULT_KIND));
     }
 
     private static void writeOutcome(final Path control, final String outcome,
@@ -233,8 +224,22 @@ public final class ProviderCrashChildMain {
 
     private static BiConsumer<String, Long> crashHook(final Path control, final String point) {
         final long targetSequence = Long.getLong("dg.crash.sequence", 1L);
+        /* Chunk-budget fuzz: kill the child after the Nth published data
+         * chunk instead of at an exact milestone, covering interleavings the
+         * enumeration misses (including mid-transaction, between two chunks
+         * of one large payload). The milestone reuses AFTER_DATA_CHUNKS: the
+         * kill really lands after data chunks, just not at the enumerated one. */
+        final int budgetChunks = Integer.getInteger("dg.crash.budgetChunks", 0);
+        final java.util.concurrent.atomic.AtomicInteger chunkCount = new java.util.concurrent.atomic.AtomicInteger();
         return (name, sequence) ->
         {
+            if ("DATA_CHUNK".equals(name)) {
+                if (budgetChunks > 0 && chunkCount.incrementAndGet() == budgetChunks) {
+                    writeMilestone(control.resolve("milestone.reached"), "AFTER_DATA_CHUNKS", sequence);
+                    awaitParent(control.resolve("release"));
+                }
+                return;
+            }
             if (sequence != targetSequence &&
                 !(sequence == -1L && "BEFORE_PUBLICATION_CONNECTED".equals(point))) return;
             if ("AFTER_DATA_CHUNKS".equals(name) && Boolean.getBoolean("dg.crash.injectPrepareFailure")) {

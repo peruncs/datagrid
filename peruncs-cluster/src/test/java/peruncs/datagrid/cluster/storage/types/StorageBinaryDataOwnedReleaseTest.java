@@ -59,6 +59,7 @@ class StorageBinaryDataOwnedReleaseTest {
         UnsafeApi.putInt(buffer, UnsafeApi.objectFieldOffset(field), position);
     }
 
+    /// Verifies a null owned delivery is rejected without latching a terminal merger failure.
     @Test
     void nullOwnedBinaryThrowsWithoutLatchingFailure() {
         final StorageBinaryDataMerger merger = merger();
@@ -70,6 +71,7 @@ class StorageBinaryDataOwnedReleaseTest {
         }
     }
 
+    /// Verifies an owned binary smuggling a heap buffer is freed and rejected with a non-direct failure.
     @Test
     void nonDirectOwnedBufferIsReleasedAndRejected() {
         final StorageBinaryDataMerger merger = merger();
@@ -88,6 +90,7 @@ class StorageBinaryDataOwnedReleaseTest {
         }
     }
 
+    /// Verifies an owned binary with a corrupted buffer length is freed and rejected with an invalid-length failure.
     @Test
     void invalidLengthOwnedBufferIsReleasedAndRejected() throws Exception {
         final StorageBinaryDataMerger merger = merger();
@@ -107,6 +110,7 @@ class StorageBinaryDataOwnedReleaseTest {
         }
     }
 
+    /// Exercises repeated malformed owned deliveries to verify each frees native memory without latching merger failure.
     @Test
     void malformedOwnedDeliveriesNeverLeakOrPoisonTheMerger() throws Exception {
         /* Soak: every iteration allocates fresh native memory and must free it on
@@ -131,6 +135,7 @@ class StorageBinaryDataOwnedReleaseTest {
         }
     }
 
+    /// Verifies an owned delivery after disposal is refused with a disposed failure.
     @Test
     void refusedOwnedDeliveryOnDisposedMergerStaysClean() {
         final StorageBinaryDataMerger merger = merger();

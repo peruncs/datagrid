@@ -32,6 +32,7 @@ class ReaderLiveIndexFreshnessTest {
     private static final int SEED_ARTICLES = 40;
     private static final int STREAM_TRANSACTIONS = 200;
 
+    /// Verifies writer graph, Lucene, and JVector state stay queryable across a Store reopen.
     @Test
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void writerIndexesSurviveStorageAndRestart() throws Exception {
@@ -64,6 +65,7 @@ class ReaderLiveIndexFreshnessTest {
         }
     }
 
+    /// Verifies live readers keep Lucene and JVector queryable across a sustained transaction stream without restart.
     @Test
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void liveReaderIndexesStayFreshWithoutRestart() throws Exception {

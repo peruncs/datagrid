@@ -281,6 +281,33 @@ Run the transport and UDP/Archive integration tests with:
 mvn -pl peruncs-cluster -am verify
 ```
 
+The threaded writer/reader soak and the forked crash matrix live outside the
+default gate. The soak asserts every served query against the transaction
+model, restarts readers (including overlapping dual restarts), injects
+slow-reader/fsync/CPU chaos plus cursor and Archive-tail corruption, and
+requires every reader to reach a planned outcome (converged or fail-closed
+parked). Coverage scales with independent seeds, not duration — prefer sweeps:
+
+```text
+mvn -pl peruncs-cluster -am verify -Psoak -Dsoak.seconds=30 -Dsoak.restarts=10
+for seed in 1 2 3 4 5 6 7 8 9 10; do
+  mvn -pl peruncs-cluster failsafe:verify -Psoak -Dsoak.seconds=15 -Dsoak.seed=$seed
+done
+mvn -pl peruncs-cluster -am verify -Pcrashmatrix
+```
+
+Soak knobs: `-Dsoak.seed=`, `-Dsoak.seconds=`, `-Dsoak.writer.threads=`,
+`-Dsoak.query.threads=`, `-Dsoak.restarts=`, `-Dsoak.lagSlots=` (bounded-lag
+SLO), `-Dsoak.miniCensus=`, `-Dsoak.pollDelayMs=`/`-Dsoak.pollStallMs=`
+(slow-reader injection), `-Dsoak.fsyncDelayMs=`, `-Dsoak.corrupt=` (disable all
+corruption chaos). The sub-timeout stall only probes the sliding reader stop
+deadline when `-Dsoak.pollStallMs=` is set near the configured
+`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`; at the small default it is
+purely a backlog widener. Key transitions are appended to
+`target/soak-events.jsonl` for replay. The soak fork also dumps `target/soak.jfr`; analyze it offline
+with `SoakJfrReportTest` (warn-first; gate with `-Dsoak.jfr.fail=true` only
+after calibrating budgets from nightly baselines).
+
 ## Design
 
 The architectural decisions — Archive-first replication, fixed roles,

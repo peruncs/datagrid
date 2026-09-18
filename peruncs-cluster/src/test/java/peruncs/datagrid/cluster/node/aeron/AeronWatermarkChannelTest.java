@@ -25,6 +25,7 @@ class AeronWatermarkChannelTest {
         return bytes;
     }
 
+    /// Verifies the endpoint factories reject a missing Aeron instance or receiver with a null check.
     @Test
     void endpointFactoriesRejectMissingAeronOrReceiver() {
         assertThrows(NullPointerException.class,
@@ -36,6 +37,7 @@ class AeronWatermarkChannelTest {
                 () -> AeronWatermarkChannel.writer(null, "aeron:ipc", 1, null));
     }
 
+    /// Verifies close waits for an in-progress receiver to return instead of deadlocking.
     @Test
     void closeWaitsForAnInProgressReceiverWithoutDeadlocking(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()
@@ -78,6 +80,7 @@ class AeronWatermarkChannelTest {
         }
     }
 
+    /// Verifies publishing after close fails while a repeated close stays idempotent.
     @Test
     void publishAfterCloseFails(@TempDir final Path directory) {
         final MediaDriver.Context context = new MediaDriver.Context()
@@ -93,6 +96,7 @@ class AeronWatermarkChannelTest {
         }
     }
 
+    /// Verifies a closed Aeron publication surfaces as a terminal worker failure with an idempotent close.
     @Test
     void closedAeronPublicationBecomesTerminalFailure(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()
@@ -115,6 +119,7 @@ class AeronWatermarkChannelTest {
         }
     }
 
+    /// Verifies an interrupted close fails fast and the subsequent close succeeds.
     @Test
     void interruptedCloseCanBeRetried(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()
@@ -158,6 +163,7 @@ class AeronWatermarkChannelTest {
         }
     }
 
+    /// Verifies published watermark bytes reach the writer intact with no worker failure.
     @Test
     void latestReaderWatermarkReachesWriter(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()
@@ -187,6 +193,7 @@ class AeronWatermarkChannelTest {
         }
     }
 
+    /// Verifies an unconnected latest-value publication is dropped so close never waits for the flush timeout.
     @Test
     void unconnectedPublicationIsDroppedInsteadOfFailingClose(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()
@@ -216,6 +223,7 @@ class AeronWatermarkChannelTest {
         }
     }
 
+    /// Verifies a retained watermark is delivered intact when the subscriber connects after publication.
     @Test
     void publishedWatermarkArrivesWhenSubscriberConnectsLate(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()
@@ -257,6 +265,7 @@ class AeronWatermarkChannelTest {
         }
     }
 
+    /// Verifies caller-owned publish copies its input so fixed buffers stay reusable for encoded publish.
     @Test
     void callerOwnedPublishCanBeMixedWithEncodedPublish(@TempDir final Path directory) throws Exception {
         final MediaDriver.Context context = new MediaDriver.Context()

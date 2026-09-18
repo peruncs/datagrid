@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Smoke-checks that the full-path benchmark measures every production stage.
 class AeronFullPathBenchmarkTest {
+    /// Verifies the benchmark measures the store, archive, reader-import, and cursor path and reports sane percentiles.
     @Test
     void measuresStoreArchiveReaderImportAndCursorPath() throws Exception {
         final int payload = 64 * 1024;

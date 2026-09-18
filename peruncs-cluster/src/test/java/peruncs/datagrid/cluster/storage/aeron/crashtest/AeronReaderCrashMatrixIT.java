@@ -165,6 +165,114 @@ class AeronReaderCrashMatrixIT {
         this.assertReseed("AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC", true);
     }
 
+        /// Verifies a corrupted uncertainty marker still fails closed: the
+    /// reader must demand a reseed, never treat torn cursor state as durable.
+    @Test
+    void corruptedUncertaintyMarkerStillRequiresReseed() throws Exception {
+        this.assertReseedAfterInflightCorruption();
+    }
+
+        /// Verifies a missing durable cursor cannot mask the uncertainty marker:
+    /// the marker dominates recovery, so deleting the cursor file must still
+    /// demand a reseed instead of replaying from scratch over imported state.
+    @Test
+    void deletedCursorStillRequiresReseed() throws Exception {
+        this.assertReseedAfterCursorRollback();
+    }
+
+    private void assertReseedAfterInflightCorruption()
+            throws IOException, InterruptedException {
+        this.assertReseedWithMutation(base -> {
+            final Path uncertainty = base.resolve("reader.reader-inflight");
+            assertTrue(Files.exists(uncertainty), "expected an uncertainty marker to corrupt");
+            final byte[] bytes = Files.readAllBytes(uncertainty);
+            assertTrue(bytes.length > 0, "uncertainty marker is empty");
+            bytes[bytes.length / 2] ^= 0x01;
+            Files.write(uncertainty, bytes);
+        });
+    }
+
+    private void assertReseedAfterCursorRollback()
+            throws IOException, InterruptedException {
+        this.assertReseedWithMutation(base -> {
+            /* Roll the durable cursor behind the already-imported Store: the
+             * next replay starts before the import boundary and must refuse
+             * to re-apply it instead of continuing silently. */
+            final Path cursor = base.resolve("reader.cursor");
+            if (Files.exists(cursor)) Files.delete(cursor);
+        });
+    }
+
+    private void assertReseedWithMutation(final FixtureMutation mutation)
+            throws IOException, InterruptedException {
+        final String point = "AFTER_STORE_IMPORT_BEFORE_CURSOR_WRITE";
+        final Path base = Files.createTempDirectory("dg-reader-crash-");
+        final int controlPort = freePort();
+        final Path mediaDirectory = base.resolve("archive-aeron");
+        final Path archiveDirectory = base.resolve("archive");
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
+                .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
+        final MediaDriver.Context mediaContext = new MediaDriver.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+        final Archive.Context archiveContext = new Archive.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .archiveDir(archiveDirectory.toFile())
+                .deleteArchiveOnStart(true)
+                .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                .controlChannel(controlChannel)
+                .replicationChannel(REPLAY_CHANNEL);
+        Process child = null;
+        Process recovery = null;
+        try (ArchivingMediaDriver _ = ArchivingMediaDriver.launch(mediaContext, archiveContext);
+             AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
+                     .aeronDirectoryName(mediaDirectory.toString())
+                     .controlRequestChannel(controlChannel)
+                     .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
+                     .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
+                RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
+                final long recordingId = awaitRecordingId(publisher);
+                child = launch(base, "phase1", point, recordingId, controlChannel, mediaDirectory);
+                awaitFile(base.resolve("control/ready"), child);
+                final Path milestonePath = base.resolve("control/milestone.reached");
+                awaitFile(milestonePath, child);
+                final ReaderMilestone milestone = ReaderMilestone.read(milestonePath);
+                assertEquals(point, milestone.point(), "unexpected reader milestone %s".formatted(milestone));
+                child.destroyForcibly();
+                assertTrue(child.waitFor(10, TimeUnit.SECONDS), "reader child did not exit after kill");
+                mutation.apply(base);
+                recovery = launch(base, "phase2", "NONE", recordingId, controlChannel, mediaDirectory);
+                awaitFile(base.resolve("control/outcome"), recovery);
+                assertTrue(recovery.waitFor(15, TimeUnit.SECONDS), "reader recovery child did not exit");
+                final String outcome = Files.readString(base.resolve("control/outcome"));
+                /* Both fail-closed shapes are safe: an explicit reseed demand
+                 * or a terminal failure. Silent continuation is the defect. */
+                assertTrue(outcome.lines().anyMatch(line -> line.equals("OUTCOME=RESEED_REQUIRED"))
+                                || outcome.lines().anyMatch(line -> line.equals("OUTCOME=FAIL_CLOSED")),
+                        "corrupted reader state continued silently\n%s".formatted(outcome));
+                assertTrue(Files.exists(base.resolve("reader.reader-inflight")),
+                        "uncertainty marker must survive the crash");
+                assertTrue(Files.exists(base.resolve("reader.store")),
+                        "unexpected Store fixture state after mutation");
+            }
+        } finally {
+            if (child != null && child.isAlive()) child.destroyForcibly();
+            if (recovery != null && recovery.isAlive()) recovery.destroyForcibly();
+            deleteTree(base);
+        }
+    }
+
+    @FunctionalInterface
+    private interface FixtureMutation {
+        void apply(Path base) throws IOException;
+    }
+
     private void assertReseed(final String point, final boolean expectStoreRecord)
             throws IOException, InterruptedException {
         final Path base = Files.createTempDirectory("dg-reader-crash-");

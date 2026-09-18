@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies that an Aeron driver directory itself cannot be a symlink.
 class AeronRuntimeTest {
+    /// Verifies a symlinked driver directory itself is rejected instead of being trusted.
     @Test
     void rejectsSymlinkedDirectory(@TempDir final Path root) throws Exception {
         final Path real = root.resolve("real");
@@ -24,6 +25,7 @@ class AeronRuntimeTest {
         assertThrows(IllegalStateException.class, () -> AeronRuntime.ensurePrivateDirectory(link));
     }
 
+    /// Verifies a driver path beneath a symlinked parent component is rejected instead of being trusted.
     @Test
     void rejectsSymlinkedParentComponent(@TempDir final Path root) throws Exception {
         final Path real = root.resolve("real-parent");

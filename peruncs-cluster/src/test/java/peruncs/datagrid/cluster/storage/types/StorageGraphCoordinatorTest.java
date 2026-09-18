@@ -19,6 +19,7 @@ class StorageGraphCoordinatorTest {
         assertTrue(latch.await(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS), "timed out waiting for " + what);
     }
 
+    /// Verifies concurrent reads overlap instead of serializing, reaching a peak concurrency of two.
     @Test
     void readsProceedConcurrentlyWhileAWriteExcludesThem() throws Exception {
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
@@ -53,6 +54,7 @@ class StorageGraphCoordinatorTest {
         assertEquals(2, peak.get(), "read-side access must overlap instead of serializing");
     }
 
+    /// Verifies a write waits while a read holds the coordinator and runs once the read releases.
     @Test
     void writeWaitsForReadsAndReadsWaitForWrite() throws Exception {
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
@@ -84,6 +86,7 @@ class StorageGraphCoordinatorTest {
         assertTrue(writeRan.get(), "write side never ran after the read released");
     }
 
+    /// Verifies a write held on one coordinator does not block reads on another coordinator.
     @Test
     void coordinatorsAreIndependent() throws Exception {
         final StorageGraphCoordinator first = new StorageGraphCoordinator();
@@ -113,6 +116,7 @@ class StorageGraphCoordinatorTest {
         assertFalse(writer.isAlive());
     }
 
+    /// Verifies per-store graph updates run on the write side and wait while an application read is held.
     @Test
     void perStoreHandlerRunsUpdatesOnTheWriteSide() throws Exception {
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
@@ -144,6 +148,7 @@ class StorageGraphCoordinatorTest {
         assertTrue(updateRan.get(), "materialization never ran after the read released");
     }
 
+    /// Verifies creating a per-store handler with a null coordinator fails fast.
     @Test
     void perStoreHandlerRejectsANullCoordinator() {
         assertThrows(NullPointerException.class, () -> ObjectGraphUpdateHandler.PerStore(null));

@@ -93,6 +93,7 @@ class ReaderSeedBootstrapTest {
         }
     }
 
+    /// Verifies an empty reader fails fast with a reseed error instead of manufacturing a divergent root, leaving no fresh Store image behind.
     @Test
     void populatedWriterThenEmptyReaderFailsWithoutSeed(@TempDir final Path root) throws Exception {
         final Path writerHome = root.resolve("writer-home");
@@ -123,6 +124,7 @@ class ReaderSeedBootstrapTest {
         }
     }
 
+    /// Verifies an Aeron reader with Store files but no durable replication cursor fails closed with a reseed error naming the missing cursor.
     @Test
     void aeronReaderWithStoreFilesButNoCursorFailsClosed(@TempDir final Path root) throws Exception {
         final Path readerHome = root.resolve("lost-cursor-reader");
@@ -143,6 +145,7 @@ class ReaderSeedBootstrapTest {
         }
     }
 
+    /// Verifies a reader seeded with the writer's Store image starts normally and reproduces the writer's root.
     @Test
     void seededReaderStartsFromWriterImage(@TempDir final Path root) throws Exception {
         final Path writerHome = root.resolve("writer-home");
@@ -177,6 +180,7 @@ class ReaderSeedBootstrapTest {
         }
     }
 
+    /// Verifies seeded reader and backup-reader nodes reject local writes through every mutation entry point.
     @Test
     void seededReaderAndBackupReaderRejectLocalWrites(@TempDir final Path root) throws Exception {
         final Path writerHome = root.resolve("writer-home");

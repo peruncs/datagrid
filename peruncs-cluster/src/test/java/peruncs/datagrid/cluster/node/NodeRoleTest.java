@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies the single normalized role every decision point uses.
 class NodeRoleTest {
+    /// Verifies an explicitly configured role value wins and normalizes cleanly, including surrounding blanks and casing.
     @ParameterizedTest(name = "explicit={0} legacy={1} resolves {2}")
     @CsvSource({
             "writer,      false, WRITER",
@@ -23,6 +24,7 @@ class NodeRoleTest {
         assertEquals(expected, NodeRole.resolve(configured, true, legacy));
     }
 
+    /// Verifies an unconfigured role inherits the legacy backup flag while a default value still applies when the flag is clear.
     @ParameterizedTest(name = "legacy={0} default={1} resolves {2}")
     @CsvSource({
             "false, '',      WRITER",
@@ -36,6 +38,7 @@ class NodeRoleTest {
         assertEquals(expected, NodeRole.resolve(value, false, legacy));
     }
 
+    /// Verifies conflicting legacy and new role settings plus unknown or missing values are rejected with an error.
     @Test
     void conflictingLegacyAndNewValuesFail() {
         assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("writer", true, true));
@@ -56,6 +59,7 @@ class NodeRoleTest {
         assertEquals(NodeRole.BACKUP_READER, properties.nodeRole());
     }
 
+    /// Verifies the legacy backup-node flag alone still resolves to the backup-reader role without the new setting.
     @Test
     void legacyBackupNodeStillResolvesWithoutTheNewSetting() {
         final var properties = new NodeLibraryPropertiesProvider.Env(Map.of(

@@ -24,6 +24,7 @@ class DistributedStorageTest {
     @TempDir
     Path storagePath;
 
+    /// Verifies configuring writing with an explicit target factory returns the same foundation for fluent setup.
     @Test
     void explicitFactoryReturnsTheSameFoundation() {
         final CapturingDistributor distributor = new CapturingDistributor();
@@ -32,6 +33,7 @@ class DistributedStorageTest {
                 configured, distributor, new ReplicatingTargetFactory(distributor)));
     }
 
+    /// Verifies committing through the wrapped target delivers the transaction binaries to the distributor.
     @Test
     void committingThroughTheWrappedTargetDistributes() {
         final CapturingDistributor distributor = new CapturingDistributor();

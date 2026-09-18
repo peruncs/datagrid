@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Proves the production provider overrides Aeron's process-exiting timeout handler.
 class AeronProviderDriverFailureTest {
+    /// Verifies a dead owned driver fails provider health in a child JVM without exiting the process.
     @Test
     void deadOwnedDriverFailsHealthWithoutExitingTheJvm(@TempDir final Path root) throws Exception {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();

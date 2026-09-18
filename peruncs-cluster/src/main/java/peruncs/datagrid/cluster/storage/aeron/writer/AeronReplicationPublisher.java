@@ -508,6 +508,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 }
                 this.offerDataChunk(sequence, length, chunkIndex, count, logicalOffset,
                         chunkLength, (int) this.chunkCrc.getValue());
+                /* Intra-transaction seam for forked crash tests: a chunk budget
+                 * kills the child between two milestones of one large
+                 * transaction. Unbound cost is one ScopedValue check. */
+                CrashHook.invoke("DATA_CHUNK", sequence);
                 logicalOffset += chunkLength;
             }
         } finally {

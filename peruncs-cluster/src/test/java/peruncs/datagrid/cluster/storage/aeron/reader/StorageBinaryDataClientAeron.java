@@ -80,6 +80,8 @@ public final class StorageBinaryDataClientAeron implements Disposable {
         return this.assembler.lastResolvedSequence();
     }
 
+    /// Snapshots the current replay boundary. The fencing token is fixed at
+    /// one because low-level UDP tests run a single unfenced writer.
     public AeronReplicationCursor cursor(final UUID nodeId, final UUID storeGeneration, final long recordingId) {
         final CursorSnapshot snapshot = this.assembler.cursorSnapshot();
         return new AeronReplicationCursor(
