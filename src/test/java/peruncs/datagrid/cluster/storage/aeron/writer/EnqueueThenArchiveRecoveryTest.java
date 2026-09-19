@@ -34,13 +34,13 @@ class EnqueueThenArchiveRecoveryTest {
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
                 .build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
                 publisher, configuration.durabilityMode(),
                 (state, sequence, length, chunks, crc, position) -> states.add(state));
-        final AeronStorageBinaryReplicationTarget target = new AeronStorageBinaryReplicationTarget(
+        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.New(
                 recordingTarget(localWrites), coordinator);
         try {
             final Binary data = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}));

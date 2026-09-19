@@ -15,7 +15,10 @@ import java.util.function.IntSupplier;
 ///
 /// Idle pacing always comes from the configured [AeronRetryPolicy#idleStrategy()];
 /// there is no hard-coded default here, so tests and production readers share
-/// the same pacing contract.
+/// the same pacing contract. Shutdown is bounded and close-once: the
+/// subscription is closed only after the polling thread has exited, exactly
+/// once per successful close, and ownership stays with the caller after any
+/// timeout, interrupt, or failed close so it can retry.
 final class AeronReaderLifecycle {
     private AeronReaderLifecycle() {
     }
@@ -70,43 +73,37 @@ final class AeronReaderLifecycle {
         }
     }
 
-        /// Stops polling with the default five-second budget.
+        /// Stops polling and closes the subscription exactly once.
     ///
-    /// Convenience for tests and non-configurable callers; production code passes
-    /// the reader's configured stop timeout to the explicit-budget overload.
-    ///
-    /// @param active            reader running flag
-    /// @param thread            reader polling thread, or `null`
-    /// @param stopped           latch released by the polling thread on exit
-    /// @param closeSubscription callback that closes the reader subscription
-    static void stopAndClose(
-            final AtomicBoolean active,
-            final Thread thread,
-            final CountDownLatch stopped,
-            final Runnable closeSubscription) {
-        stopAndClose(active, thread, stopped, closeSubscription, TimeUnit.SECONDS.toNanos(5L));
-    }
-
-        /// Stops polling and waits up to the configured stop budget for a different
-    /// polling thread, then closes the subscription only after that thread has
-    /// exited. On timeout the subscription remains open so the caller can retry
-    /// without a use-after-close.
+    /// [closed] is read first, so a repeated call after a successful close is a
+    /// no-op. It is set only after [closeSubscription] returns normally; a
+    /// bounded-wait timeout, an interrupted wait, or a failed close leaves it
+    /// `false` and the subscription open, so the caller can retry without
+    /// closing a subscription the polling thread may still touch.
     ///
     /// @param active            reader running flag
     /// @param thread            reader polling thread, or `null`
     /// @param stopped           latch released by the polling thread on exit
+    /// @param closed            close-once guard, set after a successful close
     /// @param closeSubscription callback that closes the reader subscription
-    /// @param timeoutNanos      bounded wait budget in nanoseconds
+    /// @param timeoutNanos      bounded wait budget in nanoseconds; must be positive
+    /// @throws IllegalStateException when the polling thread does not stop within
+    ///                               the budget, the wait is interrupted, the
+    ///                               caller is the polling thread itself, or the
+    ///                               close callback fails
     static void stopAndClose(
             final AtomicBoolean active,
             final Thread thread,
             final CountDownLatch stopped,
+            final AtomicBoolean closed,
             final Runnable closeSubscription,
             final long timeoutNanos) {
         if (timeoutNanos <= 0L) throw new IllegalArgumentException("timeoutNanos must be positive");
         Objects.requireNonNull(active, "active");
+        Objects.requireNonNull(closed, "closed");
         Objects.requireNonNull(closeSubscription, "closeSubscription");
         if (thread != null) Objects.requireNonNull(stopped, "stopped latch is required for a polling thread");
+        if (closed.get()) return;
         active.set(false);
         RuntimeException failure = null;
         if (thread != null) {
@@ -147,6 +144,7 @@ final class AeronReaderLifecycle {
         if (failure == null) {
             try {
                 closeSubscription.run();
+                closed.set(true);
             } catch (final RuntimeException closeFailure) {
                 failure = closeFailure;
             }

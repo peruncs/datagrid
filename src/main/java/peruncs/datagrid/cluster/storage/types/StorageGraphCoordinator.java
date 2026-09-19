@@ -103,19 +103,4 @@ public final class StorageGraphCoordinator {
             this.lock.writeLock().unlock();
         }
     }
-
-        /// Runs a graph mutation under the exclusive write side.
-    ///
-    /// @param <T>    result type
-    /// @param update graph mutation to run
-    /// @return update result
-    public <T> T write(final Supplier<T> update) {
-        notNull(update);
-        this.lock.writeLock().lock();
-        try {
-            return update.get();
-        } finally {
-            this.lock.writeLock().unlock();
-        }
-    }
 }

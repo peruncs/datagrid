@@ -1,23 +1,23 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.OutputStream;
 import java.net.URI;
-import java.nio.file.FileSystem;
-import java.nio.file.FileSystems;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.*;
+import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -53,7 +53,7 @@ class FilesystemVolumeBackupBackendTest {
             final UUID backupId
     ) {
         return new BackupMetadata(timestamp, manualSlot, clusterId, storeGeneration,
-                epoch, recordingId, null, backupId, BackupMetadata.UNKNOWN);
+                epoch, recordingId, BackupMetadata.UNKNOWN, null, backupId, BackupMetadata.UNKNOWN);
     }
 
     private static ReplicationCursor aeronCursor(
@@ -96,6 +96,13 @@ class FilesystemVolumeBackupBackendTest {
         try (OutputStream output = Files.newOutputStream(
                 volume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
              ZipOutputStream zip = new ZipOutputStream(output)) {
+            /* The upload restore path re-validates the archive on the exact
+             * file it extracts: the fixture must look like an operator upload
+             * a valid node would accept — one readable manifest plus a
+             * non-empty storage payload. */
+            zip.putNextEntry(new ZipEntry(StorageBackupBackend.MANIFEST_ENTRY));
+            zip.write(ReplicationCursorStore.encode(CURSOR));
+            zip.closeEntry();
             zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/data"));
             zip.write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             zip.closeEntry();
@@ -174,7 +181,9 @@ class FilesystemVolumeBackupBackendTest {
         final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(stored));
         assertTrue(Files.isRegularFile(archive));
         assertEquals(cursor, ReplicationCursorStore.decode(
-                BackupArchive.readManifest(archive, BackupArchiveLimits.defaults().maxExtractedBytes())));
+                BackupArchive.readManifest(archive,
+                        BackupArchiveLimits.defaults().maxExtractedBytes(),
+                        BackupArchiveLimits.defaults().maxArchiveEntries())));
     }
 
     /// Verifies generation-filtered lookup selects each generation's own latest backup even when the newest overall belongs elsewhere.
@@ -282,8 +291,8 @@ class FilesystemVolumeBackupBackendTest {
                 futures.add(executor.submit(() ->
                 {
                     final BackupMetadata shared = new BackupMetadata(
-                            100L, false, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, NODE_ONE,
-                            sharedBackupId, BackupMetadata.UNKNOWN);
+                            100L, false, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, BackupMetadata.UNKNOWN,
+                            NODE_ONE, sharedBackupId, BackupMetadata.UNKNOWN);
                     gate.await(1, TimeUnit.MINUTES);
                     try {
                         backend.createBackup(noOpStorageConnection(), cursor, shared);
@@ -322,7 +331,7 @@ class FilesystemVolumeBackupBackendTest {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
         final UUID backupId = UUID.randomUUID();
         final BackupMetadata tampered = new BackupMetadata(50L, false, CLUSTER_ONE, GENERATION_ONE,
-                5L, 42L, NODE_ONE, backupId, 12345L);
+                5L, 42L, BackupMetadata.UNKNOWN, NODE_ONE, backupId, 12345L);
         final Path source = Files.createTempDirectory(backupVolume, ".tampered-source-");
         try {
             Files.createDirectories(source.resolve(StorageBackupBackend.STORAGE_ENTRY));
@@ -375,6 +384,159 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(List.of(first), backend.listBackups());
     }
 
+    /// Verifies constructing the backend on a volume that cannot be prepared fails fast.
+    @Test
+    void rejectsAVolumeThatCannotBePrepared(@TempDir final Path root) throws Exception {
+        final Path notADirectory = root.resolve("plain-file");
+        Files.writeString(notADirectory, "not a volume");
+
+        assertThrows(NodeLibraryException.class, () -> FilesystemVolumeBackupBackend.New(notADirectory),
+                "an unusable backup volume must fail at construction, not at publication");
+    }
+
+    /// Verifies a transient read error while checking a published archive propagates
+    /// and never deletes or replaces the complete durable backup.
+    @Test
+    void transientReadFailureKeepsThePublishedArchive(@TempDir final Path backupVolume) throws Exception {
+        Assumptions.assumeTrue(
+                Files.getFileStore(backupVolume).supportsFileAttributeView("posix")
+                        && !"root".equals(System.getProperty("user.name", "")),
+                "requires POSIX file permissions and a non-root user");
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
+        final Set<PosixFilePermission> original = Files.getPosixFilePermissions(archive);
+
+        try {
+            /* With no read permission the ZIP cannot be opened; that is a
+             * transient I/O failure, not evidence of a partial archive. */
+            Files.setPosixFilePermissions(archive, Set.of());
+            assertThrows(NodeLibraryException.class,
+                    () -> backend.createBackup(noOpStorageConnection(), cursor, backup));
+            assertTrue(Files.exists(archive, LinkOption.NOFOLLOW_LINKS),
+                    "a transient read error must not delete the durable archive");
+        } finally {
+            Files.setPosixFilePermissions(archive, original);
+        }
+
+        assertEquals(1, backend.listBackups().size());
+        assertEquals(cursor, backend.getCursorForBackup(backend.getLastBackup(0)));
+    }
+
+    /// Verifies a conclusively truncated archive is replaced by a complete retry.
+    @Test
+    void incompleteArchiveIsReplacedByARetry(@TempDir final Path backupVolume) throws Exception {
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        backend.createBackup(noOpStorageConnection(), cursor, backup);
+
+        final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
+        try (FileChannel channel = FileChannel.open(archive, StandardOpenOption.WRITE)) {
+            channel.truncate(Files.size(archive) / 2);
+        }
+
+        backend.createBackup(noOpStorageConnection(), cursor, backup);
+
+        assertEquals(1, backend.listBackups().size());
+        assertEquals(cursor, backend.getCursorForBackup(backend.getLastBackup(0)),
+                "the replacement archive must be complete and readable");
+    }
+
+    /// Verifies a sidecar whose selection fields disagree with the file name is
+    /// skipped from listing and reported as an unreadable archive.
+    @Test
+    void skipsASidecarThatDisagreesWithTheFileName(@TempDir final Path backupVolume) throws Exception {
+        final BackupMetadata published = backup(70L, false, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, UUID.randomUUID());
+        final BackupMetadata planted = backup(999L, false, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, UUID.randomUUID());
+        final Path source = Files.createTempDirectory(backupVolume, ".archive-source-");
+        try {
+            Files.createDirectories(source.resolve(StorageBackupBackend.STORAGE_ENTRY));
+            Files.writeString(source.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), "payload");
+            Files.write(source.resolve(StorageBackupBackend.MANIFEST_ENTRY), ReplicationCursorStore.encode(CURSOR));
+            Files.writeString(source.resolve(StorageBackupBackend.READY_ENTRY), "");
+            BackupArchive.writeIdentity(source.resolve(BackupArchive.BACKUP_IDENTITY_ENTRY), planted);
+            BackupArchive.compressStorage(source, backupVolume.resolve(BackupArchive.toArchiveFileName(published)));
+        } finally {
+            peruncs.datagrid.cluster.node.store.StorageFileOperations.deleteDirectory(source);
+        }
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+
+        assertTrue(backend.listBackups().isEmpty(),
+                "a sidecar that resolves a different archive must never be selectable");
+        assertNull(backend.getLastBackup(0));
+        assertEquals(List.of(BackupArchive.toArchiveFileName(published)), backend.listUnreadableArchives());
+    }
+
+    /// Verifies abandoned export workspaces older than the bound are reaped while
+    /// fresh workspaces are left for their live publisher.
+    @Test
+    void reapsAbandonedExportWorkspaces(@TempDir final Path backupVolume) throws Exception {
+        final Path abandoned = Files.createDirectory(
+                backupVolume.resolve(FilesystemVolumeBackupBackend.EXPORT_WORKSPACE_PREFIX + "old"));
+        final Path live = Files.createDirectory(
+                backupVolume.resolve(FilesystemVolumeBackupBackend.EXPORT_WORKSPACE_PREFIX + "fresh"));
+        Files.writeString(abandoned.resolve("partial"), "half-written");
+        Files.setLastModifiedTime(abandoned, FileTime.fromMillis(
+                System.currentTimeMillis()
+                        - FilesystemVolumeBackupBackend.ORPHAN_WORKSPACE_MAX_AGE.toMillis()
+                        - 60_000L));
+
+        FilesystemVolumeBackupBackend.New(backupVolume);
+
+        assertFalse(Files.exists(abandoned, LinkOption.NOFOLLOW_LINKS),
+                "an abandoned export workspace must be reaped");
+        assertTrue(Files.exists(live, LinkOption.NOFOLLOW_LINKS),
+                "a fresh export workspace may belong to a live publisher");
+    }
+
+    /// Verifies repeated listings reuse the archive metadata cache instead of
+    /// re-opening each ZIP, keyed on the file identity, time, and size.
+    @Test
+    void listBackupsUsesTheMetadataCache(@TempDir final Path backupVolume) throws Exception {
+        final BackupMetadata backup = backup(30L, false, null, null,
+                BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", CURSOR, true);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        assertEquals(List.of(backup), backend.listBackups());
+
+        final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
+        final FileTime cachedTime = Files.getLastModifiedTime(archive);
+        try (FileChannel channel = FileChannel.open(archive, StandardOpenOption.WRITE)) {
+            /* Corrupt the ZIP signature without changing size or file identity. */
+            channel.write(ByteBuffer.wrap(new byte[]{0, 0, 0, 0}), 0);
+        }
+        Files.setLastModifiedTime(archive, cachedTime);
+
+        assertEquals(List.of(backup), backend.listBackups(),
+                "an unchanged archive version must be served from the cache");
+    }
+
+    /// Verifies deleting a volume archive honors the publication lock, so a
+    /// publisher and a deleter can never race on one archive.
+    @Test
+    void deleteBackupTakesThePublicationLock(@TempDir final Path backupVolume) throws Exception {
+        final BackupMetadata backup = backup(40L, false, null, null,
+                BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", CURSOR, true);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+        final Path lockFile = backupVolume.resolve(".publish.lock");
+
+        try (FileChannel channel = FileChannel.open(lockFile,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock ignored = channel.lock()) {
+            assertThrows(NodeLibraryException.class, () -> backend.deleteBackup(backup),
+                    "a deletion must not proceed while the publication lock is held");
+            assertTrue(Files.isRegularFile(
+                    backupVolume.resolve(BackupArchive.toArchiveFileName(backup)), LinkOption.NOFOLLOW_LINKS));
+        }
+
+        backend.deleteBackup(backup);
+        assertTrue(backend.listBackups().isEmpty());
+    }
+
     /// Verifies a user-uploaded Store archive restores and deletes cleanly.
     @Test
     void restoresAndDeletesUserUploadedArchive(@TempDir final Path backupVolume, @TempDir final Path root)
@@ -384,21 +546,88 @@ class FilesystemVolumeBackupBackendTest {
         final Path destination = root.resolve("destination");
 
         assertTrue(backend.hasUserUploadedStorage());
+        /* Validation and restore enforce the same rules; both must accept a
+         * well-formed upload. */
+        backend.validateUserUploadedStorage();
         backend.restoreUserUploadedStorage(destination);
         assertEquals("user", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
         backend.deleteUserUploadedStorage();
         assertFalse(backend.hasUserUploadedStorage());
     }
 
+        /// An upload without a manifest is refused by both the pre-destroy
+    /// validation and the restore-time re-validation.
+    @Test
+    void userUploadWithoutAManifestIsRefusedEverywhere(@TempDir final Path backupVolume) throws Exception {
+        try (OutputStream output = Files.newOutputStream(
+                backupVolume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
+             ZipOutputStream zip = new ZipOutputStream(output)) {
+            zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/data"));
+            zip.write("payload without a manifest".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+
+        final NodeLibraryException validation = assertThrows(NodeLibraryException.class,
+                backend::validateUserUploadedStorage);
+        assertTrue(validation.getMessage().contains("exactly one readable manifest"),
+                "must name the missing manifest, was: %s".formatted(validation.getMessage()));
+        assertThrows(NodeLibraryException.class,
+                () -> backend.restoreUserUploadedStorage(backupVolume.resolveSibling("unused")),
+                "the restore re-validation must refuse the same upload");
+    }
+
+        /// A zero-byte storage payload does not count as an uploadable Store
+    /// image: the partial-upload refusal fires before any local storage is
+    /// destroyed.
+    @Test
+    void userUploadWithOnlyAnEmptyStoragePayloadIsRefused(@TempDir final Path backupVolume) throws Exception {
+        try (OutputStream output = Files.newOutputStream(
+                backupVolume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
+             ZipOutputStream zip = new ZipOutputStream(output)) {
+            zip.putNextEntry(new ZipEntry(StorageBackupBackend.MANIFEST_ENTRY));
+            zip.write(ReplicationCursorStore.encode(CURSOR));
+            zip.closeEntry();
+            zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/empty"));
+            zip.closeEntry();
+        }
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(backupVolume);
+
+        final NodeLibraryException refusal = assertThrows(NodeLibraryException.class,
+                backend::validateUserUploadedStorage);
+        assertTrue(refusal.getMessage().contains("non-empty storage payload"),
+                "must name the empty payload, was: %s".formatted(refusal.getMessage()));
+    }
+
+        /// The validation dry run measures the real decompressed content, so an
+    /// upload whose actual payload exceeds the operator budget is refused —
+    /// before the caller ever destroys local storage — regardless of what the
+    /// archive's central directory declares.
+    @Test
+    void userUploadInflatingBeyondTheExtractionBudgetIsRefusedBeforeRestore(
+            @TempDir final Path backupVolume, @TempDir final Path root) throws Exception {
+        createUserArchive(backupVolume, "x".repeat(64 * 1024));
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(
+                backupVolume, BackupArchiveLimits.of(16 * 1024, 8));
+
+        final NodeLibraryException refusal = assertThrows(NodeLibraryException.class,
+                backend::validateUserUploadedStorage);
+        assertTrue(refusal.getMessage().contains("extraction budget"),
+                "the dry-run refusal must name the budget, was: %s".formatted(refusal.getMessage()));
+        assertThrows(NodeLibraryException.class,
+                () -> backend.restoreUserUploadedStorage(root.resolve("destination")),
+                "the restore-time dry run must enforce the same budget");
+    }
+
     /// Verifies private temp-directory attributes fall back gracefully when the file system has no POSIX view.
     @Test
     void tempDirectoryAttributesFallBackWithoutAPosixView(@TempDir final Path root) throws Exception {
-        assertEquals(1, FilesystemVolumeBackupBackend.Default
+        assertEquals(1, FilesystemVolumeBackupBackend
                 .privateDirectoryAttributes(root).length);
         final Path zip = root.resolve("fs.zip");
         final URI uri = URI.create("jar:" + zip.toUri());
         try (final FileSystem zipfs = FileSystems.newFileSystem(uri, Map.of("create", "true"))) {
-            assertEquals(0, FilesystemVolumeBackupBackend.Default
+            assertEquals(0, FilesystemVolumeBackupBackend
                     .privateDirectoryAttributes(zipfs.getPath("/")).length);
         }
     }

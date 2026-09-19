@@ -51,7 +51,13 @@ public record AeronReplicationCheckpoint(
 ) {
     static final int MAGIC = 0x44474350; // DGCP
     static final short VERSION = 2;
-    static final int ENCODED_BYTES = 116;
+    /// Shared header, three state bytes, three UUIDs, five longs, the three
+    /// data fields, and the trailing CRC32C.
+    static final int ENCODED_BYTES = AeronCheckpointCodec.HEADER_LENGTH
+            + Byte.BYTES * 3
+            + AeronCheckpointCodec.UUID_BYTES * 3
+            + Long.BYTES * 5
+            + Integer.BYTES * 4;
 
         /// Validates the restart record and keeps its state machine closed over the
     /// writer and reader recovery domains.

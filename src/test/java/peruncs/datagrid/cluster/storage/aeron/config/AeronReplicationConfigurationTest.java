@@ -16,6 +16,32 @@ class AeronReplicationConfigurationTest {
         assertEquals(1408, configuration.mtuLength());
         assertEquals(2 * 1024 * 1024, configuration.maxMessageLength());
         assertEquals(ReplicationDurabilityMode.ARCHIVE_FIRST, configuration.durabilityMode());
+        assertEquals(256, configuration.readerFragmentsPerPoll(),
+                "a replay backlog must drain in a few polls rather than ten fragments at a time");
+    }
+
+        /// Verifies the reader fragment limit is configurable and must be positive.
+    @Test
+    void readerFragmentLimitIsConfigurableAndValidated() {
+        final AeronReplicationConfiguration tuned = AeronReplicationConfiguration.builder()
+                .readerFragmentsPerPoll(4096)
+                .build();
+        assertEquals(4096, tuned.readerFragmentsPerPoll());
+        assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
+                .readerFragmentsPerPoll(0).build());
+        assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
+                .readerFragmentsPerPoll(-1).build());
+    }
+
+        /// Verifies the validated record is value-based: equal limits are equal objects.
+    @Test
+    void equalLimitsAreEqualRecords() {
+        final AeronReplicationConfiguration first = AeronReplicationConfiguration.builder()
+                .chunkSize(32768).readerFragmentsPerPoll(512).build();
+        final AeronReplicationConfiguration second = AeronReplicationConfiguration.builder()
+                .chunkSize(32768).readerFragmentsPerPoll(512).build();
+        assertEquals(first, second);
+        assertEquals(first.hashCode(), second.hashCode());
     }
 
         /// Verifies rejection of chunk that cannot fit one aeron message.

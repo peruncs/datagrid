@@ -11,23 +11,23 @@ class ReplicationMonitoringTest {
     @Test
     void exposesAeronTransportStateLagAndReadinessAsRawValues() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {
-            public boolean isDistributor() {
+            public boolean isWriter() {
                 return false;
             }
 
-            public long getCurrentSequence() {
+            public long currentSequence() {
                 return 7;
             }
 
-            public long getLatestSequence() {
+            public long latestSequence() {
                 return 10;
             }
 
-            public String getReplicationTransport() {
+            public String replicationTransport() {
                 return "aeron";
             }
 
-            public ReplicationHealth.State getReplicationState() {
+            public ReplicationHealth.State replicationState() {
                 return ReplicationHealth.State.REPLAYING;
             }
 
@@ -69,23 +69,23 @@ class ReplicationMonitoringTest {
     @Test
     void unknownWriterBoundaryReportsUnknownLag() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {
-            public boolean isDistributor() {
+            public boolean isWriter() {
                 return false;
             }
 
-            public long getCurrentSequence() {
+            public long currentSequence() {
                 return 7;
             }
 
-            public long getLatestSequence() {
+            public long latestSequence() {
                 return -1;
             }
 
-            public String getReplicationTransport() {
+            public String replicationTransport() {
                 return "aeron";
             }
 
-            public ReplicationHealth.State getReplicationState() {
+            public ReplicationHealth.State replicationState() {
                 return ReplicationHealth.State.REPLAYING;
             }
 

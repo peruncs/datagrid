@@ -2,15 +2,16 @@ package peruncs.datagrid.cluster.storage.aeron.reader;
 
 /// Hooks around materialising one committed Store transaction.
 ///
-/// The callback runs on the reader polling thread and gives the owner a place to record an uncertain reader state
-/// before import. The state is cleared only after import and cursor handling
-/// finish. A state left by a crash is therefore evidence that recovery needs a
-/// deliberate decision, not evidence that the import succeeded or failed.
+/// The callback runs on the reader polling thread and gives the owner a place
+/// to record an uncertain reader state before import. The state is cleared only
+/// after import and cursor handling finish. A state left by a crash is
+/// therefore evidence that recovery needs a deliberate decision, not evidence
+/// that the import succeeded or failed.
 ///
 /// The callback runs inside the reader's delivery boundary. It must not call
-/// back into the owning transport or close the reader; request lifecycle changes
-/// after the callback returns. Re-entry would compete with shutdown and can
-/// deadlock a caller that is waiting for the polling thread.
+/// back into the owning transport or close the reader; request lifecycle
+/// changes after the callback returns. Re-entry would compete with shutdown and
+/// can deadlock a caller that is waiting for the polling thread.
 @FunctionalInterface
 public interface ReaderDeliveryListener {
         /// Invoked immediately before the assembled bytes enter the Store.

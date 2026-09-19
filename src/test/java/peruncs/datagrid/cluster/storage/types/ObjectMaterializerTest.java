@@ -171,14 +171,18 @@ class ObjectMaterializerTest {
         assertEquals(List.of(Set.of()), fixture.collections);
     }
 
-        /// An incomplete header cannot be processed and must be reloaded.
+        /// A truncated entity header fails the whole batch instead of silently
+    /// dropping the entities that follow it.
     @Test
-    void incompleteHeaderIsNotProcessed() {
+    void truncatedHeaderFailsTheBatch() {
         final Fixture fixture = new Fixture();
         final ObjectMaterializer materializer = fixture.materializer();
         final long address = fixture.entityAddress(7L, 42L);
 
-        assertFalse(materializer.acceptEntityData(address, address + 8));
+        final StorageBinaryDataException failure = assertThrows(StorageBinaryDataException.class,
+                () -> materializer.acceptEntityData(address, address + 8));
+        assertTrue(failure.getMessage().contains("truncated entity header"),
+                "a truncated header must be named as truncation: " + failure.getMessage());
     }
 
         /// Entities with an unknown type id fail instead of materializing blindly.

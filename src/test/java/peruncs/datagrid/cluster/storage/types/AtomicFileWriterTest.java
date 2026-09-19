@@ -7,11 +7,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Tests atomic file store behavior.
-class AtomicFileStoreTest {
+class AtomicFileWriterTest {
     private static void write(final java.nio.channels.FileChannel channel, final String value)
             throws java.io.IOException {
         final ByteBuffer buffer = StandardCharsets.UTF_8.encode(value);
@@ -39,8 +38,8 @@ class AtomicFileStoreTest {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
         final Path file = directory.resolve("checkpoint");
         try {
-            AtomicFileStore.write(file, channel -> write(channel, "old"));
-            assertThrows(java.io.IOException.class, () -> AtomicFileStore.write(file, channel ->
+            AtomicFileWriter.write(file, channel -> write(channel, "old"));
+            assertThrows(java.io.IOException.class, () -> AtomicFileWriter.write(file, channel ->
             {
                 write(channel, "new");
                 throw new java.io.IOException("injected crash before rename");
@@ -69,12 +68,12 @@ class AtomicFileStoreTest {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
         final Path file = directory.resolve("checkpoint");
         try {
-            AtomicFileStore.write(file, channel -> write(channel, "old"));
-            AtomicFileStore.runWithTestHook((phase, ignored) ->
+            AtomicFileWriter.write(file, channel -> write(channel, "old"));
+            AtomicFileWriter.runWithTestHook((phase, ignored) ->
             {
                 if ("DURING_FILE_WRITE".equals(phase)) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
-                    () -> AtomicFileStore.write(file, channel -> write(channel, "new"))));
+                    () -> AtomicFileWriter.write(file, channel -> write(channel, "new"))));
             assertEquals("old", Files.readString(file, StandardCharsets.UTF_8));
         } finally {
             delete(directory);
@@ -87,12 +86,12 @@ class AtomicFileStoreTest {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
         final Path file = directory.resolve("checkpoint");
         try {
-            AtomicFileStore.write(file, channel -> write(channel, "old"));
-            AtomicFileStore.runWithTestHook((phase, ignored) ->
+            AtomicFileWriter.write(file, channel -> write(channel, "old"));
+            AtomicFileWriter.runWithTestHook((phase, ignored) ->
             {
                 if ("AFTER_TEMP_WRITE_BEFORE_RENAME".equals(phase)) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
-                    () -> AtomicFileStore.write(file, channel -> write(channel, "new"))));
+                    () -> AtomicFileWriter.write(file, channel -> write(channel, "new"))));
             assertEquals("old", Files.readString(file, StandardCharsets.UTF_8));
         } finally {
             delete(directory);
@@ -105,12 +104,12 @@ class AtomicFileStoreTest {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
         final Path file = directory.resolve("checkpoint");
         try {
-            AtomicFileStore.write(file, channel -> write(channel, "old"));
-            AtomicFileStore.runWithTestHook((phase, ignored) ->
+            AtomicFileWriter.write(file, channel -> write(channel, "old"));
+            AtomicFileWriter.runWithTestHook((phase, ignored) ->
             {
                 if ("AFTER_RENAME_BEFORE_DIRECTORY_SYNC".equals(phase)) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
-                    () -> AtomicFileStore.write(file, channel -> write(channel, "new"))));
+                    () -> AtomicFileWriter.write(file, channel -> write(channel, "new"))));
             assertEquals("new", Files.readString(file, StandardCharsets.UTF_8));
         } finally {
             delete(directory);
@@ -126,7 +125,28 @@ class AtomicFileStoreTest {
         try {
             Files.createSymbolicLink(link, target);
             assertThrows(java.io.IOException.class,
-                    () -> AtomicFileStore.write(link.resolve("checkpoint"), channel -> write(channel, "data")));
+                    () -> AtomicFileWriter.write(link.resolve("checkpoint"), channel -> write(channel, "data")));
+        } finally {
+            delete(directory);
+            delete(target);
+        }
+    }
+
+        /// Verifies deletes cannot be redirected through a nested symlink: the
+        /// last-moment re-check rejects the link instead of removing a file in
+    /// the link target.
+    @Test
+    void deleteRejectsNestedSymbolicLink() throws Exception {
+        final Path directory = Files.createTempDirectory("atomic-file-store-delete-link-");
+        final Path target = Files.createTempDirectory("atomic-file-store-delete-target-");
+        final Path link = directory.resolve("link");
+        try {
+            Files.createSymbolicLink(link, target);
+            final Path secret = target.resolve("checkpoint");
+            Files.writeString(secret, "keep");
+            assertThrows(java.io.IOException.class,
+                    () -> AtomicFileWriter.delete(link.resolve("checkpoint")));
+            assertTrue(Files.exists(secret), "a rejected delete must leave the link target untouched");
         } finally {
             delete(directory);
             delete(target);

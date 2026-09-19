@@ -4,7 +4,6 @@ import org.eclipse.serializer.exceptions.MissingFoundationPartException;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryAssembler;
 import org.eclipse.serializer.persistence.types.Unpersistable;
 import org.eclipse.serializer.reference.Lazy;
-import org.eclipse.serializer.util.InstanceDispatcher;
 import org.eclipse.store.afs.nio.types.NioFileSystem;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
@@ -21,17 +20,11 @@ import peruncs.datagrid.cluster.node.store.*;
 import peruncs.datagrid.cluster.storage.types.*;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.Enumeration;
-import java.util.Objects;
 import java.util.function.Supplier;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 
 /// This foundation assembles the services that make one cluster node run.
 ///
@@ -40,7 +33,9 @@ import java.util.zip.ZipFile;
 ///
 /// The node is single-use: start it at most once and close it when its work is
 /// complete. Configuration cannot be changed after {@link Builder#build()}.
-public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
+///
+/// @since 1.0
+public interface ClusterFoundation extends AutoCloseable {
         /// Creates a mutable builder for one immutable node configuration.
     ///
     /// @return a new builder
@@ -55,7 +50,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         private StorageBackupTaskExecutor storageBackupTaskExecutor;
         private ClusterReplicationTransport replicationTransport;
         private StorageBinaryDataMerger dataMerger;
-        private AfterDataMessageConsumedListener afterDataMessageConsumedListener;
+        private DataMessageAppliedListener dataMessageAppliedListener;
         private StoredReplicationCursorManager storedReplicationCursorManager;
         private StorageBackupManager storageBackupManager;
         private Supplier<Object> rootSupplier;
@@ -77,28 +72,55 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         }
 
         /// Sets the root object supplier.
+        ///
         /// @param value root supplier
         /// @return this builder
-        public Builder setRootSupplier(final Supplier<Object> value) { this.rootSupplier = value; return this; }
-        /// Sets the embedded Store foundation.
+        public Builder setRootSupplier(final Supplier<Object> value) {
+            this.rootSupplier = value;
+            return this;
+        }
+
+                /// Sets the embedded Store foundation.
+        ///
+        /// The node always derives the live file provider from the configured
+        /// storage path before starting the Store, so a custom provider set on
+        /// the supplied foundation is intentionally replaced. Every other
+        /// inherited setting is preserved. Supply a foundation to change
+        /// Store tuning, not file layout.
+        ///
         /// @param value embedded Store foundation
         /// @return this builder
-        public Builder setEmbeddedStorageFoundation(final EmbeddedStorageFoundation<?> value) { this.embeddedStorageFoundation = value; return this; }
+        public Builder setEmbeddedStorageFoundation(final EmbeddedStorageFoundation<?> value) {
+            this.embeddedStorageFoundation = value;
+            return this;
+        }
+
         /// Sets the properties provider.
+        ///
         /// @param value properties provider
         /// @return this builder
-        public Builder setNodeLibraryPropertiesProvider(final NodeLibraryPropertiesProvider value) { this.propertiesProvider = value; return this; }
+        public Builder setNodeLibraryPropertiesProvider(final NodeLibraryPropertiesProvider value) {
+            this.propertiesProvider = value;
+            return this;
+        }
+
         /// Sets whether asynchronous distribution is enabled.
+        ///
         /// @param value whether asynchronous distribution is enabled
         /// @return this builder
-        public Builder setEnableAsyncDistribution(final boolean value) { this.enableAsyncDistribution = value; return this; }
+        public Builder setEnableAsyncDistribution(final boolean value) {
+            this.enableAsyncDistribution = value;
+            return this;
+        }
+
         /// Builds the immutable node foundation.
+        ///
         /// @return configured cluster foundation
         public ClusterFoundation build() {
             return new Node(new NodeConfiguration(
                     this.backupBackend, this.storageTaskExecutor, this.storageBackupTaskExecutor,
                     this.replicationTransport, this.dataMerger,
-                    this.afterDataMessageConsumedListener, this.storedReplicationCursorManager,
+                    this.dataMessageAppliedListener, this.storedReplicationCursorManager,
                     this.storageBackupManager, this.rootSupplier, this.graphUpdateHandler,
                     this.embeddedStorageFoundation, this.backupNodeManager, this.dataClient,
                     this.dataDistributor, this.healthCheck, this.propertiesProvider,
@@ -106,54 +128,6 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     this.enableAsyncDistribution, this.positionProvider, this.replicationRetention));
         }
     }
-
-        /// Immutable pre-start node configuration.
-    ///
-    /// @param backupBackend backup archive backend
-    /// @param storageTaskExecutor storage executor
-    /// @param storageBackupTaskExecutor backup executor
-    /// @param replicationTransport cluster replication transport
-    /// @param dataMerger binary data merger
-    /// @param afterDataMessageConsumedListener post-consumption listener
-    /// @param storedReplicationCursorManager persisted cursor manager
-    /// @param storageBackupManager backup manager
-    /// @param rootSupplier Store root supplier
-    /// @param graphUpdateHandler object-graph update handler
-    /// @param embeddedStorageFoundation embedded Store foundation
-    /// @param backupNodeManager backup node manager
-    /// @param dataClient binary data client
-    /// @param dataDistributor binary data distributor
-    /// @param healthCheck node health check
-    /// @param propertiesProvider node properties provider
-    /// @param storageDiskSpaceReader disk-space reader
-    /// @param storageNodeManager storage node manager
-    /// @param enableAsyncDistribution whether asynchronous distribution is enabled
-    /// @param positionProvider replication position provider
-    /// @param replicationRetention replication-log retention policy
-    record NodeConfiguration(
-            StorageBackupBackend backupBackend,
-            StorageTaskExecutor storageTaskExecutor,
-            StorageBackupTaskExecutor storageBackupTaskExecutor,
-            ClusterReplicationTransport replicationTransport,
-            StorageBinaryDataMerger dataMerger,
-            AfterDataMessageConsumedListener afterDataMessageConsumedListener,
-            StoredReplicationCursorManager storedReplicationCursorManager,
-            StorageBackupManager storageBackupManager,
-            Supplier<Object> rootSupplier,
-            ObjectGraphUpdateHandler graphUpdateHandler,
-            EmbeddedStorageFoundation<?> embeddedStorageFoundation,
-            BackupNodeManager backupNodeManager,
-            StorageBinaryDataClient dataClient,
-            StorageBinaryDataDistributor dataDistributor,
-            StorageNodeHealthCheck healthCheck,
-            NodeLibraryPropertiesProvider propertiesProvider,
-            StorageDiskSpaceReader storageDiskSpaceReader,
-            StorageNodeManager storageNodeManager,
-            boolean enableAsyncDistribution,
-            ReplicationPositionProvider positionProvider,
-            ReplicationLogRetention replicationRetention) {
-    }
-
 
         /// Starts the storage manager.
     ///
@@ -196,13 +170,12 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
     /// @throws IllegalStateException if this node is not a backup node
     BackupNodeControl backupNodeManager() throws NodeLibraryException;
 
-    /// Closes every resource created by this foundation in reverse dependency order.
+        /// Closes every resource created by this foundation in reverse dependency order.
     @Override
     void close();
 
         /// Runs the lifecycle for one immutable node configuration.
-    final class Node extends InstanceDispatcher.Default
-            implements ClusterFoundation, Unpersistable {
+    final class Node implements ClusterFoundation, Unpersistable {
         private static final System.Logger LOGGER = System.getLogger(ClusterFoundation.class.getName());
 
         private final LazyConstant<StorageBackupBackend> backupBackend;
@@ -222,8 +195,9 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         private final LazyConstant<Supplier<Object>> rootSupplier;
         private final LazyConstant<ObjectGraphUpdateHandler> graphUpdateHandler;
         private final LazyConstant<StorageBackupManager> storageBackupManager;
-        private final LazyConstant<AfterDataMessageConsumedListener> afterDataMessageConsumedListener;
+        private final LazyConstant<DataMessageAppliedListener> dataMessageAppliedListener;
         private final LazyConstant<StorageBinaryDataMerger> dataMerger;
+        private final LazyConstant<BackupRestorePolicy> backupRestorePolicy;
         private final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
         /* Intentionally not a LazyConstant: a backup restore closes and replaces
          * this manager, which a one-shot memoized holder cannot express. The
@@ -235,39 +209,43 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         private final LazyConstant<ReplicationLogRetention> replicationRetention;
 
         // cached created types
-        private ClusterStorageManager<?> clusterStorageManager;
+        /* Both managers are published to monitoring threads; the volatile
+         * fields make the cross-thread observation safe even before a
+         * synchronized access. */
+        private volatile ClusterStorageManager<?> clusterStorageManager;
         /* Keep the raw Store manager only for the internal replication merger.
          * Application code receives the guarded cluster manager, so a reader
          * cannot invoke importData/importFiles as an untracked write. */
         private volatile StorageManager embeddedStorageManager;
-        private boolean started;
-        private boolean closed;
-        private boolean closing;
+        private volatile boolean started;
+        private volatile boolean closed;
+        private volatile boolean closing;
 
         private Node(final NodeConfiguration configuration) {
-            this.backupBackend = lazy(configuration.backupBackend(), () -> this.dispatch(this.ensureBackupBackend()));
-            this.storageTaskExecutor = lazy(configuration.storageTaskExecutor(), () -> this.dispatch(this.ensureStorageTaskExecutor()));
-            this.storageBackupTaskExecutor = lazy(configuration.storageBackupTaskExecutor(), () -> this.dispatch(this.ensureStorageBackupTaskExecutor()));
-            this.housekeeper = LazyConstant.of(() -> this.dispatch(this.ensureNodeHousekeeper()));
-            this.storageLimitGate = LazyConstant.of(() -> this.dispatch(this.ensureStorageLimitGate()));
-            this.replicationTransport = lazy(configuration.replicationTransport(), () -> this.dispatch(this.ensureClusterReplicationTransport()));
-            this.dataMerger = lazy(configuration.dataMerger(), () -> this.dispatch(this.ensureStorageBinaryDataMerger()));
-            this.afterDataMessageConsumedListener = lazy(configuration.afterDataMessageConsumedListener(), () -> this.dispatch(this.ensureAfterDataMessageConsumedListener()));
+            this.backupBackend = lazy(configuration.backupBackend(), this::ensureBackupBackend);
+            this.storageTaskExecutor = lazy(configuration.storageTaskExecutor(), this::ensureStorageTaskExecutor);
+            this.storageBackupTaskExecutor = lazy(configuration.storageBackupTaskExecutor(), this::ensureStorageBackupTaskExecutor);
+            this.housekeeper = LazyConstant.of(this::ensureNodeHousekeeper);
+            this.storageLimitGate = LazyConstant.of(this::ensureStorageLimitGate);
+            this.replicationTransport = lazy(configuration.replicationTransport(), this::ensureClusterReplicationTransport);
+            this.dataMerger = lazy(configuration.dataMerger(), this::ensureStorageBinaryDataMerger);
+            this.dataMessageAppliedListener = lazy(configuration.dataMessageAppliedListener(), this::ensureDataMessageAppliedListener);
             this.storedReplicationCursorManager = configuration.storedReplicationCursorManager();
-            this.storageBackupManager = lazy(configuration.storageBackupManager(), () -> this.dispatch(this.ensureStorageBackupManager()));
-            this.rootSupplier = lazy(configuration.rootSupplier(), () -> this.dispatch(this.ensureRootSupplier()));
-            this.graphUpdateHandler = lazy(configuration.graphUpdateHandler(), () -> this.dispatch(this.ensureGraphUpdateHandler()));
-            this.embeddedStorageFoundation = lazy(configuration.embeddedStorageFoundation(), () -> this.dispatch(this.ensureEmbeddedStorageFoundation()));
-            this.backupNodeManager = lazy(configuration.backupNodeManager(), () -> this.dispatch(this.ensureBackupNodeManager()));
-            this.dataClient = lazy(configuration.dataClient(), () -> this.dispatch(this.ensureStorageBinaryDataClient()));
-            this.dataDistributor = lazy(configuration.dataDistributor(), () -> this.dispatch(this.ensureDataDistributor()));
-            this.healthCheck = lazy(configuration.healthCheck(), () -> this.dispatch(this.ensureStorageNodeHealthCheck()));
-            this.propertiesProvider = lazy(configuration.propertiesProvider(), () -> this.dispatch(this.ensureNodeLibraryPropertiesProvider()));
-            this.storageDiskSpaceReader = lazy(configuration.storageDiskSpaceReader(), () -> this.dispatch(this.ensureStorageDiskSpaceReader()));
-            this.storageNodeManager = lazy(configuration.storageNodeManager(), () -> this.dispatch(this.ensureStorageNodeManager()));
+            this.storageBackupManager = lazy(configuration.storageBackupManager(), this::ensureStorageBackupManager);
+            this.rootSupplier = lazy(configuration.rootSupplier(), this::ensureRootSupplier);
+            this.graphUpdateHandler = lazy(configuration.graphUpdateHandler(), this::ensureGraphUpdateHandler);
+            this.embeddedStorageFoundation = lazy(configuration.embeddedStorageFoundation(), this::ensureEmbeddedStorageFoundation);
+            this.backupNodeManager = lazy(configuration.backupNodeManager(), this::ensureBackupNodeManager);
+            this.dataClient = lazy(configuration.dataClient(), this::ensureStorageBinaryDataClient);
+            this.dataDistributor = lazy(configuration.dataDistributor(), this::ensureDataDistributor);
+            this.healthCheck = lazy(configuration.healthCheck(), this::ensureStorageNodeHealthCheck);
+            this.propertiesProvider = lazy(configuration.propertiesProvider(), this::ensureNodeLibraryPropertiesProvider);
+            this.storageDiskSpaceReader = lazy(configuration.storageDiskSpaceReader(), this::ensureStorageDiskSpaceReader);
+            this.storageNodeManager = lazy(configuration.storageNodeManager(), this::ensureStorageNodeManager);
             this.enableAsyncDistribution = configuration.enableAsyncDistribution();
-            this.positionProvider = lazy(configuration.positionProvider(), () -> this.dispatch(this.ensureReplicationPositionProvider()));
-            this.replicationRetention = lazy(configuration.replicationRetention(), () -> this.dispatch(this.ensureReplicationLogRetention()));
+            this.positionProvider = lazy(configuration.positionProvider(), this::ensureReplicationPositionProvider);
+            this.replicationRetention = lazy(configuration.replicationRetention(), this::ensureReplicationLogRetention);
+            this.backupRestorePolicy = LazyConstant.of(this::ensureBackupRestorePolicy);
         }
 
         private static <T> LazyConstant<T> lazy(final T configured, final Supplier<? extends T> factory) {
@@ -275,7 +253,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         }
 
         private static Path backupVolumePath(final NodeLibraryPropertiesProvider properties) {
-            final String configured = properties.replicationProperty(NodeLibraryPropertiesProvider.Env.EnvKeys.BACKUP_PATH);
+            final String configured = properties.replicationProperty(EnvKeys.BACKUP_PATH);
             return Paths.get(configured == null || configured.isBlank() ? "backups" : configured)
                     .toAbsolutePath().normalize();
         }
@@ -306,30 +284,6 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             }
             return value;
         }
-
-        private static Throwable closeResource(final Throwable current, final Runnable close) {
-            try {
-                close.run();
-                return current;
-            } catch (final Throwable closeFailure) {
-                if (current == null) {
-                    return closeFailure;
-                }
-                current.addSuppressed(closeFailure);
-                return current;
-            }
-        }
-
-        private static Throwable closeInitialized(final Throwable current, final LazyConstant<?> resource, final Runnable close) {
-            return resource.isInitialized() ? closeResource(current, close) : current;
-        }
-
-        private static void throwFailure(final Throwable failure, final String message) {
-            if (failure instanceof Error error) throw error;
-            if (failure instanceof RuntimeException runtime) throw runtime;
-            throw new NodeLibraryException(message, failure);
-        }
-
 
                 /// Creates the configured backup backend.
         ///
@@ -420,7 +374,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 /// Returns the configured storage root, defaulting to a node-local directory.
         private Path storageParentPath() {
             final String configured = this.getNodeLibraryPropertiesProvider()
-                    .replicationProperty(NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_PATH);
+                    .replicationProperty(EnvKeys.STORAGE_PATH);
             return Paths.get(configured == null || configured.isBlank() ? "storage" : configured)
                     .toAbsolutePath().normalize();
         }
@@ -428,11 +382,11 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 /// Creates the listener that persists consumed replication cursors.
         ///
         /// @return consumed-message listener
-        private AfterDataMessageConsumedListener ensureAfterDataMessageConsumedListener() {
+        private DataMessageAppliedListener ensureDataMessageAppliedListener() {
             final var props = this.getNodeLibraryPropertiesProvider();
 
-            final var storedCursorUpdater = new AfterDataMessageConsumedListener() {
-                final StoredReplicationCursorManager delegate = ClusterFoundation.Node.this
+            final var storedCursorUpdater = new DataMessageAppliedListener() {
+                final StoredReplicationCursorManager delegate = Node.this
                         .getStoredReplicationCursorManager();
 
                 @Override
@@ -448,7 +402,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     this.delegate.close();
                 }
             };
-            LOGGER.log(System.Logger.Level.TRACE, "Created AfterDataMessageConsumedListener->StoredReplicationCursorManager delegate. WillRun=%s".formatted(props.nodeRole() != NodeRole.WRITER));
+            LOGGER.log(System.Logger.Level.TRACE, "Created DataMessageAppliedListener->StoredReplicationCursorManager delegate. WillRun=%s".formatted(props.nodeRole() != NodeRole.WRITER));
             return storedCursorUpdater;
         }
 
@@ -485,8 +439,9 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         ///
         /// The handler runs every materialization on this node's graph
         /// coordinator write side. Application code that touches the object
-        /// graph directly must use [#storageGraphCoordinator()] read side;
-        /// the global synchronized default cannot protect such reads.
+        /// graph directly must join the coordinator write side around the
+        /// mutation; the global synchronized default cannot protect such
+        /// touches.
         ///
         /// @return graph update handler
         private ObjectGraphUpdateHandler ensureGraphUpdateHandler() {
@@ -525,7 +480,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             return this.getClusterReplicationTransport().client(
                     this.getStorageBinaryDataMerger(),
                     props.replicationStreamName(),
-                    this.getAfterDataMessageConsumedListener(),
+                    this.getDataMessageAppliedListener(),
                     this.getStoredReplicationCursorManager().get(),
                     commitPosition
             );
@@ -563,25 +518,24 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
 
                 /// Creates the storage node manager.
         ///
-        /// Node roles are fixed at startup: a writer gets the distributor, a
-        /// reader or backup-reader gets the reader. There is no
-        /// reader-to-distributor transition.
+        /// Node roles are fixed at startup: a writer gets the writer manager, a
+        /// reader or backup-reader gets the reader manager. There is no
+        /// reader-to-writer transition.
         ///
         /// @return storage node manager
         private StorageNodeManager ensureStorageNodeManager() {
             final String transport = this.getClusterReplicationTransport().id();
             final boolean writer =
                     this.getNodeLibraryPropertiesProvider().nodeRole() == NodeRole.WRITER;
-            return StorageNodeManager.New(StorageNodeManager.Configuration.builder()
-                    .dataDistributor(this.getStorageBinaryDataDistributor())
-                    .storageTaskExecutor(this.getStorageTaskExecutor())
-                    .dataClient(this.getStorageBinaryDataClient())
-                    .healthCheck(this.getStorageNodeHealthCheck())
-                    .storageDiskSpaceReader(this.getStorageDiskSpaceReader())
-                    .positionProvider(this.getReplicationPositionProvider())
-                    .replicationTransport(transport)
-                    .role(writer ? StorageNodeManager.Role.DISTRIBUTOR : StorageNodeManager.Role.READER)
-                    .build());
+            return StorageNodeManager.New(new StorageNodeManager.Configuration(
+                    this.getStorageBinaryDataDistributor(),
+                    this.getStorageTaskExecutor(),
+                    this.getStorageBinaryDataClient(),
+                    this.getStorageNodeHealthCheck(),
+                    this.getStorageDiskSpaceReader(),
+                    this.getReplicationPositionProvider(),
+                    transport,
+                    writer ? StorageNodeManager.Role.WRITER : StorageNodeManager.Role.READER));
         }
 
                 /// Creates the configured binary distributor.
@@ -591,7 +545,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             return StorageBinaryDataDistributor.Caching(
                     this.getClusterReplicationTransport().distributor(
                             this.getNodeLibraryPropertiesProvider().replicationStreamName(),
-                            this.getEnableAsyncDistribution()
+                            this.enableAsyncDistribution
                     )
             );
         }
@@ -600,55 +554,71 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         ///
         /// @return binary merger
         private StorageBinaryDataMerger ensureStorageBinaryDataMerger() {
-            final Long cachingTimeoutMsNullable = this.getNodeLibraryPropertiesProvider().dataMergerTimeoutMs();
-            final long cachingTimeoutMs = cachingTimeoutMsNullable == null ? StorageBinaryDataMerger.Defaults
-                    .CACHING_TIMEOUT_MS : cachingTimeoutMsNullable;
-
-            final Long cachedDataLimitNullable = this.getNodeLibraryPropertiesProvider().dataMergerCachedDataLimit();
-            final long cachedDataLimit = cachedDataLimitNullable == null ? StorageBinaryDataMerger.Defaults
-                    .CACHING_LIMIT : cachedDataLimitNullable;
-
-            final Long applyTimeoutMsNullable = this.getNodeLibraryPropertiesProvider().dataMergerApplyTimeoutMs();
-            final long applyTimeoutMs = applyTimeoutMsNullable == null ? StorageBinaryDataMerger.Defaults
-                    .APPLY_TIMEOUT_MS : applyTimeoutMsNullable;
-
             final StorageConnection replicationStorage = this.embeddedStorageManager != null
                     ? this.embeddedStorageManager
                     : this.clusterStorageManager;
             if (replicationStorage == null) {
-                throw new IllegalStateException(
+                throw new NodeLibraryException(
                         "cannot create the replication merger before embedded storage has started");
             }
-            return StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(this.getEmbeddedStorageFoundation().getConnectionFoundation())
-                    .storage(replicationStorage)
-                    .objectGraphUpdateHandler(this.getObjectGraphUpdateHandler())
-                    .cachingTimeoutMs(cachingTimeoutMs)
-                    .cachedBinaryLimit(cachedDataLimit)
-                    .applyTimeoutMs(applyTimeoutMs)
-                    .graphCoordinator(this.graphCoordinator)
-                    .build());
+            final var configuration = StorageBinaryDataMerger.Configuration.New(
+                    this.getEmbeddedStorageFoundation().getConnectionFoundation(),
+                    replicationStorage,
+                    this.getObjectGraphUpdateHandler(),
+                    this.graphCoordinator);
+
+            /* Env overrides fall back to the merger defaults for every knob the
+             * provider does not expose, so this stays the single place where a
+             * deployment tunes the merger. */
+            final Long cachingTimeoutMs = this.getNodeLibraryPropertiesProvider().dataMergerTimeoutMs();
+            final Long cachedBytesLimit = this.getNodeLibraryPropertiesProvider().dataMergerCachedDataLimit();
+            final Long applyTimeoutMs = this.getNodeLibraryPropertiesProvider().dataMergerApplyTimeoutMs();
+            if (cachingTimeoutMs == null && cachedBytesLimit == null && applyTimeoutMs == null) {
+                return StorageBinaryDataMerger.New(configuration);
+            }
+            return StorageBinaryDataMerger.New(new StorageBinaryDataMerger.Configuration(
+                    configuration.foundation(),
+                    configuration.storage(),
+                    configuration.objectGraphUpdateHandler(),
+                    cachingTimeoutMs == null ? configuration.cachingTimeoutMs() : cachingTimeoutMs,
+                    cachedBytesLimit == null ? configuration.cachedBytesLimit() : cachedBytesLimit,
+                    configuration.maxCachedBytes(),
+                    applyTimeoutMs == null ? configuration.applyTimeoutMs() : applyTimeoutMs,
+                    configuration.disposeOrderlyTimeoutMs(),
+                    configuration.disposeInterruptTimeoutMs(),
+                    configuration.maxValidatedIndexObjects(),
+                    configuration.graphCoordinator()));
+        }
+
+                /// Creates the restore policy for this node.
+        ///
+        /// @return backup restore policy
+        private BackupRestorePolicy ensureBackupRestorePolicy() {
+            return new BackupRestorePolicy(
+                    this.getClusterReplicationTransport(),
+                    this.getReplicationPositionProvider(),
+                    this::getStoredReplicationCursorManager,
+                    this::storageParentPath,
+                    this::deleteDirectory,
+                    this::closeStoredReplicationCursorManager,
+                    this::deleteOffsetFile);
         }
 
         private StorageBackupBackend getStorageBackupBackend() {
             return this.backupBackend.get();
         }
 
-
         private StorageTaskExecutor getStorageTaskExecutor() {
             return this.storageTaskExecutor.get();
         }
-
 
         private StorageBackupTaskExecutor getStorageBackupTaskExecutor() {
             return this.storageBackupTaskExecutor.get();
         }
 
-
         private NodeHousekeeper getNodeHousekeeper() {
             return this.housekeeper.get();
         }
-
 
         private StorageLimitGate getStorageLimitGate() {
             return this.storageLimitGate.get();
@@ -682,76 +652,57 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             return this.replicationTransport.get();
         }
 
-
         private StorageBackupManager getStorageBackupManager() {
             return this.storageBackupManager.get();
         }
-
 
         private ObjectGraphUpdateHandler getObjectGraphUpdateHandler() {
             return this.graphUpdateHandler.get();
         }
 
-
         private Supplier<Object> getRootSupplier() {
             return this.rootSupplier.get();
         }
-
-
-        private boolean getEnableAsyncDistribution() {
-            return this.enableAsyncDistribution;
-        }
-
 
         private EmbeddedStorageFoundation<?> getEmbeddedStorageFoundation() {
             return this.embeddedStorageFoundation.get();
         }
 
-
         private BackupNodeManager getBackupNodeManager() {
             return this.backupNodeManager.get();
         }
-
 
         private StorageBinaryDataClient getStorageBinaryDataClient() {
             return this.dataClient.get();
         }
 
-
         private StorageBinaryDataDistributor getStorageBinaryDataDistributor() {
             return this.dataDistributor.get();
         }
-
 
         private StorageNodeHealthCheck getStorageNodeHealthCheck() {
             return this.healthCheck.get();
         }
 
-
         private NodeLibraryPropertiesProvider getNodeLibraryPropertiesProvider() {
             return this.propertiesProvider.get();
         }
-
 
         private StorageDiskSpaceReader getStorageDiskSpaceReader() {
             return this.storageDiskSpaceReader.get();
         }
 
-
         private StorageNodeManager getStorageNodeManager() {
             return this.storageNodeManager.get();
         }
 
-
-        private AfterDataMessageConsumedListener getAfterDataMessageConsumedListener() {
-            return this.afterDataMessageConsumedListener.get();
+        private DataMessageAppliedListener getDataMessageAppliedListener() {
+            return this.dataMessageAppliedListener.get();
         }
-
 
         private StorageBinaryDataMerger getStorageBinaryDataMerger() {
             return this.dataMerger.get();
         }
-
 
         private StoredReplicationCursorManager getStoredReplicationCursorManager() {
             StoredReplicationCursorManager manager = this.storedReplicationCursorManager;
@@ -759,7 +710,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 synchronized (this) {
                     manager = this.storedReplicationCursorManager;
                     if (manager == null) {
-                        manager = this.dispatch(this.ensureStoredReplicationCursorManager());
+                        manager = this.ensureStoredReplicationCursorManager();
                         this.storedReplicationCursorManager = manager;
                     }
                 }
@@ -767,16 +718,17 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             return manager;
         }
 
-
         private ReplicationPositionProvider getReplicationPositionProvider() {
             return this.positionProvider.get();
         }
-
 
         private ReplicationLogRetention getReplicationLogRetention() {
             return this.replicationRetention.get();
         }
 
+        private BackupRestorePolicy getBackupRestorePolicy() {
+            return this.backupRestorePolicy.get();
+        }
 
         @Override
         public synchronized ClusterStorageManager<?> startStorageManager() throws NodeLibraryException {
@@ -789,8 +741,11 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             if (this.clusterStorageManager == null) {
                 this.start();
             }
-
-            return this.clusterStorageManager;
+            final ClusterStorageManager<?> manager = this.clusterStorageManager;
+            if (manager == null) {
+                throw new NodeLibraryException("cluster foundation did not produce a storage manager");
+            }
+            return manager;
         }
 
         @Override
@@ -821,10 +776,6 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             return this.getBackupNodeManager();
         }
 
-        private StorageGraphCoordinator storageGraphCoordinator() {
-            return this.graphCoordinator;
-        }
-
                 /// Starts the node in its configured role.
         ///
         /// @throws NodeLibraryException if startup fails
@@ -853,8 +804,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                     if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
                 }
                 if (failure instanceof Error error) throw error;
-                if (failure instanceof RuntimeException runtime) throw runtime;
-                throw new NodeLibraryException("Cannot start cluster foundation", failure);
+                throw (RuntimeException) failure;
             }
         }
 
@@ -869,36 +819,36 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             final var storageParentPath = this.storageParentPath();
             final var storageRootPath = storageParentPath.resolve("storage");
 
-            // if we use a downloaded storage, always scroll to the latest message so we don't read old messages
-            boolean useLatestCursor = false;
-            boolean requiresStorageUpload = false;
+            /* A user upload installs a different image, so the node starts from
+             * the latest writer position and must publish a starter backup;
+             * without an upload the node resumes or restores like a reader. */
+            boolean installedUserUpload = false;
+            boolean mustPublishStarterBackup = false;
 
             // don't send messages generated by starting the storage and storing the empty root
             this.getStorageBinaryDataDistributor().ignoreDistribution(true);
 
             final var backend = this.getStorageBackupBackend();
 
-            /*
-             * If there are backups already available, use those instead as a fresh cluster
-             * has none, but an upgraded cluster has the previous storage backed up
-             */
-
             // user uploaded a new storage
             if (backend.hasUserUploadedStorage()) {
                 LOGGER.log(System.Logger.Level.INFO, "Restoring user uploaded storage");
 
-                useLatestCursor = true;
+                installedUserUpload = true;
                 // since the storage is now different from before,
                 // the storage nodes also need the exact same storage
-                requiresStorageUpload = true;
+                mustPublishStarterBackup = true;
                 /* A user upload restores with backup metadata unchecked, so it
-                 * is validated before the local image is destroyed: a partial
-                 * or ambiguous upload must never replace working storage. */
-                this.requireValidUserUploadedStorage();
+                 * is validated before the local image is destroyed: a partial,
+                 * ambiguous, or over-budget upload must never replace working
+                 * storage. The backend re-validates on the archive it extracts,
+                 * closing the shared-volume window between this check and the
+                 * restore. */
+                backend.validateUserUploadedStorage();
                 this.deleteDirectory(storageRootPath);
                 backend.restoreUserUploadedStorage(storageParentPath);
                 backend.deleteUserUploadedStorage();
-            } else if (this.restoreLatestBackupIfRequired(storageRootPath, backend)) {
+            } else if (this.getBackupRestorePolicy().restoreLatestBackupIfRequired(storageRootPath, backend)) {
                 LOGGER.log(System.Logger.Level.INFO, "Restored the newest compatible storage backup");
             } else {
                 LOGGER.log(System.Logger.Level.INFO, "Starting with local storage");
@@ -911,7 +861,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
              * cluster permanently — every later delta references object ids
              * the invented image never contained. Fail closed before opening
              * storage, like a reader without a seed. */
-            if (!requiresStorageUpload && isMissingOrEmpty(storageRootPath)) {
+            if (!installedUserUpload && isMissingOrEmpty(storageRootPath)) {
                 throw new ReseedRequiredException(
                         "backup node has no local Store image at %s, no compatible backup, and no user upload; seed the Store directory with the writer's Store and its replication cursor before starting"
                                 .formatted(storageRootPath));
@@ -920,11 +870,11 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
              * files without their durable offset cursor cannot be resumed
              * safely, because the backup node can no longer address the
              * history those files represent. */
-            if (!requiresStorageUpload && this.usesAeronReplication() && !isMissingOrEmpty(storageRootPath)) {
+            if (!installedUserUpload && this.usesAeronReplication() && !isMissingOrEmpty(storageRootPath)) {
                 this.requireStoredCursorForExistingStore(storageRootPath);
             }
 
-            if (useLatestCursor) {
+            if (installedUserUpload) {
                 final ReplicationCursor cursor;
                 try {
                     cursor = this.getReplicationPositionProvider().latest();
@@ -939,7 +889,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
 
             final var embeddedStorageManager = this.prepareEmbeddedStorage(storageRootPath).start();
             this.embeddedStorageManager = embeddedStorageManager;
-            this.initializeRoot(embeddedStorageManager);
+            this.initializeRoot(embeddedStorageManager, installedUserUpload);
             /* Same one-time policy scan as storage nodes: a seeded or uploaded
              * image with an external index registration is rejected before the
              * backup node serves or publishes anything. */
@@ -957,7 +907,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             /* Eagerly create the manager so misconfiguration fails at startup.
              * The foundation owns its lifecycle; embedders borrow it through
              * backupNodeManager(). */
-            Objects.requireNonNull(this.getBackupNodeManager());
+            this.getBackupNodeManager();
 
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->
@@ -973,7 +923,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             );
 
             // storage nodes need an initial backup to start from
-            if (requiresStorageUpload) {
+            if (mustPublishStarterBackup) {
                 LOGGER.log(System.Logger.Level.INFO, "Uploading starter backup for storage nodes");
                 /* This is a bootstrap barrier.  The storage nodes must not observe the
                  * uploaded-storage state until the archive is durable. */
@@ -992,15 +942,19 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             final var storageParentPath = this.storageParentPath();
             final var storageRootPath = storageParentPath.resolve("storage");
 
+            /* The position provider is initialized before restore selection:
+             * both startup paths resolve the backup identity the same way, and
+             * an uninitialized provider would silently degrade the identity on
+             * every writer start. */
+            this.getReplicationPositionProvider().init();
+
             // don't send messages generated by starting the storage and storing the empty root
             this.getStorageBinaryDataDistributor().ignoreDistribution(true);
 
             final var backend = this.getStorageBackupBackend();
-            /*
-             * If there are backups already available, use those instead
-             */
 
-            final boolean restored = this.restoreLatestBackupIfRequired(storageRootPath, backend);
+            final boolean restored = this.getBackupRestorePolicy()
+                    .restoreLatestBackupIfRequired(storageRootPath, backend);
             if (restored) {
                 LOGGER.log(System.Logger.Level.INFO, "Restored the newest compatible storage backup");
             } else {
@@ -1026,8 +980,6 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 !isMissingOrEmpty(storageRootPath)) {
                 this.requireStoredCursorForExistingStore(storageRootPath);
             }
-
-            this.getReplicationPositionProvider().init();
 
             final var dataDistributor = this.getStorageBinaryDataDistributor();
             /* Pre-start root gate: the authoritative check in initializeRoot
@@ -1056,7 +1008,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
 
             final var embeddedStorageManager = embeddedStorageFoundation.start();
             this.embeddedStorageManager = embeddedStorageManager;
-            this.initializeRoot(embeddedStorageManager);
+            this.initializeRoot(embeddedStorageManager, this.mayCreateRoot());
             /* One-time policy scan at Store start: a freshly deserialized or
              * seeded image containing an external index is rejected before
              * the node serves or publishes anything. */
@@ -1072,8 +1024,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
              * raw Store import path and must never persist a locally originated
              * write. The application-facing read-only view rejects every write;
              * only the node-owned merger receives the raw manager. */
-            final boolean writer = NodeLibraryPropertiesProvider.WRITER_ROLE.equalsIgnoreCase(
-                    this.getNodeLibraryPropertiesProvider().nodeRole().configName());
+            final boolean writer = this.getNodeLibraryPropertiesProvider().nodeRole() == NodeRole.WRITER;
             this.clusterStorageManager = writer
                     ? ClusterStorageManager.New(
                             embeddedStorageManager,
@@ -1090,7 +1041,7 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             /* Eagerly create the manager so misconfiguration fails at startup.
              * The foundation owns its lifecycle; embedders borrow it through
              * storageNodeManager(). */
-            Objects.requireNonNull(this.getStorageNodeManager());
+            this.getStorageNodeManager();
 
             final StorageConnection gcConnection = this.clusterStorageManager;
             housekeeper.schedule("GcWorkaround", () ->
@@ -1123,6 +1074,15 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             this.getStorageBinaryDataDistributor().queueTypeDictionaryForNextTransaction(dictionary);
         }
 
+                /// Applies the node's Store configuration to the embedded foundation.
+        ///
+        /// The live file provider is always derived from the configured
+        /// storage path so backup and restore can address the Store directory;
+        /// every other setting inherited from the supplied foundation is
+        /// preserved.
+        ///
+        /// @param storageRootPath Store root directory
+        /// @return prepared embedded foundation
         private EmbeddedStorageFoundation<?> prepareEmbeddedStorage(final Path storageRootPath) {
             final var foundation = this.getEmbeddedStorageFoundation();
             final StorageConfiguration current = foundation.getConfiguration();
@@ -1153,34 +1113,36 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             return foundation;
         }
 
-        private void initializeRoot(final StorageManager storage) {
-            if (storage.root() == null) {
-                /* Only the writer and the backup seeder own an authoritative
-                 * image. A reader that reaches this point with no root has no
-                 * seed to reproduce the writer's history from; manufacturing
-                 * an independent root here would permanently diverge it. */
-                if (!this.mayCreateRoot()) {
-                    throw new ReseedRequiredException(
-                            "node role '%s' opened a Store without a root; seed the Store directory with its replication cursor before starting"
-                                    .formatted(this.getNodeLibraryPropertiesProvider().nodeRole().configName()));
-                }
-                LOGGER.log(System.Logger.Level.DEBUG, "Setting and storing new root from root supplier");
-                final Object root = this.getRootSupplier().get();
-                storage.setRoot(root instanceof Lazy ? root : Lazy.Reference(root));
-                storage.storeRoot();
+                /// Creates the root when the Store has none and this node may own one.
+        ///
+        /// @param storage     started Store
+        /// @param allowCreate whether this node owns an authoritative image
+        /// @throws ReseedRequiredException when the node may not create a root
+        private void initializeRoot(final StorageManager storage, final boolean allowCreate) {
+            if (storage.root() != null) {
+                return;
             }
+            if (!allowCreate) {
+                throw new ReseedRequiredException(
+                        "node role '%s' opened a Store without a root; seed the Store directory with its replication cursor before starting"
+                                .formatted(this.getNodeLibraryPropertiesProvider().nodeRole().configName()));
+            }
+            LOGGER.log(System.Logger.Level.DEBUG, "Setting and storing new root from root supplier");
+            final Object root = this.getRootSupplier().get();
+            storage.setRoot(root instanceof Lazy ? root : Lazy.Reference(root));
+            storage.storeRoot();
         }
 
                 /// Reports whether this node may manufacture a fresh Store root.
         ///
-        /// Only the writer and the backup seeder own an authoritative image;
-        /// readers and backup-readers must reproduce the writer's history from
-        /// a matching Store+cursor seed.
+        /// Only the writer owns an authoritative image; a backup reader may
+        /// create a root only from a user-uploaded Store, which is handled by
+        /// the backup startup path. Readers must reproduce the writer's
+        /// history from a matching Store+cursor seed.
         ///
-        /// @return `true` for the writer and backup-reader roles
+        /// @return `true` only for the writer role
         private boolean mayCreateRoot() {
-            final var properties = this.getNodeLibraryPropertiesProvider();
-            return properties.nodeRole() != NodeRole.READER;
+            return this.getNodeLibraryPropertiesProvider().nodeRole() == NodeRole.WRITER;
         }
 
                 /// Reports whether this node replicates through the Aeron transport.
@@ -1214,81 +1176,6 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             }
         }
 
-        /* Upper bound for the user-uploaded manifest probe below. Generated
-         * backups cap their manifest at the same size; anything larger is not
-         * a manifest but a damaged or hostile upload. */
-        private static final int USER_UPLOAD_MANIFEST_LIMIT_BYTES = 1 << 20;
-
-                /// Validates a user-uploaded storage archive before it may replace local state.
-        ///
-        /// Generated backups always carry `storage/`, `manifest`, and `ready`;
-        /// user uploads skip the metadata checks of the restore path, so this
-        /// pre-check requires the same essentials: exactly one readable,
-        /// non-empty `manifest` entry (ambiguity fails) and at least one Store
-        /// payload file under `storage/`. It runs before the local image is
-        /// deleted, so a partial upload never destroys working storage, and a
-        /// rejected upload is left in place for inspection instead of being
-        /// silently consumed.
-        ///
-        /// @throws NodeLibraryException when the upload is missing, ambiguous, or partial
-        private void requireValidUserUploadedStorage() {
-            final Path archive = backupVolumePath(this.getNodeLibraryPropertiesProvider())
-                    .resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE);
-            if (!Files.isRegularFile(archive, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(archive)) {
-                throw new NodeLibraryException(
-                        "User-uploaded storage archive is missing or ambiguous at %s; refusing to install".formatted(archive));
-            }
-            int manifests = 0;
-            boolean manifestDecodable = false;
-            boolean storagePayload = false;
-            try (ZipFile zip = new ZipFile(archive.toFile())) {
-                final Enumeration<? extends ZipEntry> entries = zip.entries();
-                while (entries.hasMoreElements()) {
-                    final ZipEntry entry = entries.nextElement();
-                    final String name = entry.getName();
-                    if (StorageBackupBackend.MANIFEST_ENTRY.equals(name)) {
-                        manifests++;
-                        manifestDecodable = manifestDecodable || isDecodableManifest(zip, entry);
-                    } else if (!entry.isDirectory() &&
-                               name.startsWith(StorageBackupBackend.STORAGE_ENTRY + "/")) {
-                        storagePayload = true;
-                    }
-                }
-            } catch (final IOException failure) {
-                throw new NodeLibraryException(
-                        "User-uploaded storage archive cannot be read at %s; refusing to install".formatted(archive),
-                        failure);
-            }
-            if (manifests != 1 || !manifestDecodable) {
-                throw new NodeLibraryException(
-                        "User-uploaded storage archive must contain exactly one decodable manifest at %s; refusing to install".formatted(archive));
-            }
-            if (!storagePayload) {
-                throw new NodeLibraryException(
-                        "User-uploaded storage archive contains no storage payload at %s; refusing to install a partial upload".formatted(archive));
-            }
-        }
-
-                /// Reports whether a manifest entry can be fully decoded within its budget.
-        ///
-        /// A directory entry never counts; otherwise the entry must be a
-        /// non-empty readable byte sequence that fits the manifest budget.
-        ///
-        /// @param zip   open upload archive
-        /// @param entry manifest entry
-        /// @return `true` when the entry is a non-empty readable byte sequence
-        private static boolean isDecodableManifest(final ZipFile zip, final ZipEntry entry) {
-            if (entry.isDirectory()) {
-                return false;
-            }
-            try (InputStream data = zip.getInputStream(entry)) {
-                final byte[] bytes = data.readNBytes(USER_UPLOAD_MANIFEST_LIMIT_BYTES);
-                return bytes.length != 0 && data.read() == -1;
-            } catch (final IOException unreadable) {
-                return false;
-            }
-        }
-
                 /// Reports whether a directory is missing or holds no entries.
         ///
         /// @param directory directory to inspect
@@ -1311,179 +1198,29 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
             LOGGER.log(System.Logger.Level.INFO, "Starting dev cluster node");
             final var storage = this.getEmbeddedStorageFoundation().start();
             this.embeddedStorageManager = storage;
-            if (storage.root() == null) {
-                final var root = this.getRootSupplier().get();
-                if (root instanceof Lazy) {
-                    storage.setRoot(root);
-                } else {
-                    storage.setRoot(Lazy.Reference(root));
-                }
-                storage.storeRoot();
-            }
+            this.initializeRoot(storage, true);
 
             this.clusterStorageManager = ClusterStorageManager.New(
                     storage,
-                    () -> false,
+                    ClusterStorageManager.StorageSizeValidation.notReached(),
                     this::closeReplicationTransportAndPositionProvider,
                     this.graphCoordinator
             );
         }
 
+                /// Deletes a directory tree after checking that the path is safe to delete.
+        ///
+        /// @param path root to delete
         private void deleteDirectory(final Path path) {
             if (!Files.exists(path)) {
                 return;
             }
-
-            LOGGER.log(System.Logger.Level.INFO, "Deleting files at %s".formatted(path));
             StorageFileOperations.deleteDirectory(path);
-        }
-
-                /// Selects a backup only when the local Store cannot be trusted to represent
-        /// the newest compatible image. Compatibility by cluster, store
-        /// generation, epoch, and recording is validated before anything is
-        /// deleted or installed, so a backup from an unrelated generation on
-        /// a shared volume can never overwrite valid local storage. A local
-        /// cursor from another transport or Store generation is never mixed
-        /// with local files; it is discarded together with the Store before
-        /// extraction. An equal-sequence cursor must also point at the same
-        /// provider position. A local cursor ahead of the newest compatible
-        /// backup is retained because restoring an older image would lose data.
-        private boolean restoreLatestBackupIfRequired(
-                final Path storageRootPath,
-                final StorageBackupBackend backend
-        ) throws NodeLibraryException {
-            final boolean storageExists = Files.isDirectory(storageRootPath);
-            final BackupMetadata.Identity configured = this.configuredBackupIdentity();
-            final BackupMetadata selected = backend.findLatestCompatibleBackup(configured);
-            if (selected == null) {
-                if (!storageExists && backend.containsBackups()) {
-                    throw new NodeLibraryException(
-                            "No backup on the shared volume is compatible with this node %s; refusing to install an unrelated image"
-                                    .formatted(configured));
-                }
-                if (!storageExists) {
-                    return false;
-                }
-                LOGGER.log(System.Logger.Level.WARNING,
-                        "No backup on the shared volume is compatible with this node %s; keeping local storage"
-                                .formatted(configured));
-                return false;
-            }
-            final ReplicationCursor backup = backend.getCursorForBackup(selected);
-            final BackupMetadata.Identity backupIdentity = BackupMetadata.Identity.of(backup);
-            if (!configured.matches(backupIdentity)) {
-                throw new NodeLibraryException(
-                        "Backup metadata and its stored replication cursor disagree with this node identity; refusing to modify local storage");
-            }
-            /* Verify metadata against its own cursor before any deletion: a
-             * corrupt or mixed archive can pass the configured check (for
-             * example when recording is unconfigured) yet disagree internally.
-             * A later startup check would reject the installed cursor, but only
-             * after local storage was already destroyed. */
-            try {
-                BackupMetadata.requireConsistentWithCursor(selected, backup);
-            } catch (final IllegalArgumentException inconsistent) {
-                throw new NodeLibraryException(
-                        "Backup metadata disagrees with its stored replication cursor; refusing to modify local storage",
-                        inconsistent);
-            }
-            if (!storageExists) {
-                this.deleteOffsetFile();
-                this.restoreBackupAndCursor(backend, selected, backup, storageRootPath);
-                return true;
-            }
-
-            final ReplicationCursor local = this.getStoredReplicationCursorManager().get();
-            final boolean localBoundaryUnknown = local.logicalSequence() < 0;
-            final boolean identityMismatch = !Objects.equals(local.transport(), backup.transport()) ||
-                                             !Objects.equals(local.storeGeneration(), backup.storeGeneration());
-            final boolean localBehind = local.logicalSequence() < backup.logicalSequence();
-            final boolean equalSequencePositionMismatch = local.logicalSequence() == backup.logicalSequence() &&
-                                                           !Objects.equals(local.providerPosition(), backup.providerPosition());
-            if (!localBoundaryUnknown && !identityMismatch && !localBehind && !equalSequencePositionMismatch) {
-                return false;
-            }
-
-            LOGGER.log(System.Logger.Level.WARNING, "Replacing local storage with the newest compatible backup (local cursor=%s, backup cursor=%s, identityMismatch=%s, localBehind=%s, equalSequencePositionMismatch=%s)".formatted(local.logicalSequence(), backup.logicalSequence(), identityMismatch, localBehind, equalSequencePositionMismatch));
-            this.closeStoredReplicationCursorManager();
-            this.deleteDirectory(storageRootPath);
-            this.deleteOffsetFile();
-            this.restoreBackupAndCursor(backend, selected, backup, storageRootPath);
-            return true;
-        }
-
-                /// Resolves the backup identity this node restores as.
-        ///
-        /// The transport configuration is authoritative for stable cluster and
-        /// Store-generation identity. A live position and durable local cursor
-        /// may fill an epoch or recording that was unknown during wiring, but
-        /// they never erase configured values. Aeron nodes fail closed if the
-        /// required cluster/generation identity is still unavailable.
-        ///
-        /// @return best available node backup identity
-        private BackupMetadata.Identity configuredBackupIdentity() {
-            final ClusterReplicationTransport transport = this.getClusterReplicationTransport();
-            BackupMetadata.Identity provider = transport.configuredBackupIdentity();
-            try {
-                /* The transport configuration is authoritative for stable
-                 * cluster/generation identity. A live position may contribute
-                 * a recording or epoch that was unknown during wiring, but an
-                 * unavailable/empty position must never erase configured values. */
-                provider = provider.fillUnknowns(
-                        BackupMetadata.Identity.of(this.getReplicationPositionProvider().latest()));
-            } catch (final RuntimeException unavailable) {
-                LOGGER.log(System.Logger.Level.DEBUG,
-                        "Replication provider reports no backup identity; falling back to the local cursor",
-                        unavailable);
-            }
-            try {
-                final BackupMetadata.Identity merged = provider.fillUnknowns(
-                        BackupMetadata.Identity.of(this.getStoredReplicationCursorManager().get()));
-                if ("aeron".equalsIgnoreCase(transport.id()) &&
-                        (merged.clusterId() == null || merged.storeGeneration() == null)) {
-                    throw new ReseedRequiredException(
-                            "Aeron backup selection requires configured cluster and Store-generation identity");
-                }
-                return merged;
-            } catch (final RuntimeException unreadable) {
-                LOGGER.log(System.Logger.Level.DEBUG,
-                        "Local replication cursor is unreadable; restoring without its identity", unreadable);
-                if ("aeron".equalsIgnoreCase(transport.id()) &&
-                        (provider.clusterId() == null || provider.storeGeneration() == null)) {
-                    throw new ReseedRequiredException(
-                            "Aeron backup selection requires configured cluster and Store-generation identity",
-                            unreadable);
-                }
-                return provider;
-            }
-        }
-
-                /// Installs a backup and its cursor as one trusted startup boundary.
-        private void restoreBackupAndCursor(
-                final StorageBackupBackend backend,
-                final BackupMetadata selected,
-                final ReplicationCursor backup,
-                final Path storageRootPath
-        ) {
-            try {
-                backend.restoreBackup(this.storageParentPath(), selected);
-                this.getStoredReplicationCursorManager().set(backup);
-            } catch (final RuntimeException | Error failure) {
-                /* A downloaded Store without its matching cursor is not a valid
-                 * restart image. Remove it so a later startup cannot mistake the
-                 * partial boundary for trusted local state. */
-                try {
-                    this.deleteDirectory(storageRootPath);
-                } catch (final RuntimeException cleanupFailure) {
-                    failure.addSuppressed(cleanupFailure);
-                }
-                throw failure;
-            }
         }
 
         private void deleteOffsetFile() throws NodeLibraryException {
             try {
-                AtomicFileStore.delete(this.storageParentPath().resolve("offset"), true);
+                AtomicFileWriter.delete(this.storageParentPath().resolve("offset"), true);
             } catch (final IOException failure) {
                 throw new NodeLibraryException("Failed to remove stale replication cursor before backup restore", failure);
             }
@@ -1501,108 +1238,109 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
         }
 
         private void closeReplicationTransportAndPositionProvider() {
-            Throwable failure = null;
+            final CloseSequencer sequencer = new CloseSequencer();
             if (this.replicationTransport.isInitialized()) {
-                failure = closeResource(failure, () -> this.replicationTransport.get().close());
+                sequencer.add("replication transport", true, () -> this.replicationTransport.get().close());
             }
             if (this.positionProvider.isInitialized()) {
-                failure = closeResource(failure, () -> this.positionProvider.get().close());
+                sequencer.add("position provider", true, () -> this.positionProvider.get().close());
             }
             if (this.replicationRetention.isInitialized()) {
-                failure = closeResource(failure, () -> this.replicationRetention.get().close());
+                sequencer.add("replication retention", true, () -> this.replicationRetention.get().close());
             }
-            if (failure != null) {
-                throwFailure(failure, "failed to close replication resources");
-            }
+            sequencer.run("failed to close replication resources");
         }
 
         private void closeHousekeeperAndReplication(final NodeHousekeeper housekeeper) {
-            Throwable failure = null;
-            failure = closeResource(failure, housekeeper::close);
-            failure = closeResource(failure, this::closeReplicationTransportAndPositionProvider);
-            if (failure != null) {
-                throwFailure(failure, "failed to close housekeeper and replication resources");
-            }
+            final CloseSequencer sequencer = new CloseSequencer();
+            sequencer.add("housekeeper", true, housekeeper::close);
+            sequencer.add("replication resources", true, this::closeReplicationTransportAndPositionProvider);
+            sequencer.run("failed to close housekeeper and replication resources");
         }
 
                 /// Closes the complete foundation graph once, retaining all failures.
+        ///
+        /// The node monitor protects the lifecycle flags and is taken only
+        /// briefly here, so close waits for an in-flight start to finish
+        /// (start's whole body is synchronized on the same monitor) while the
+        /// long resource waits run outside it — waiting on the monitor
+        /// itself would freeze every node API and can deadlock against the
+        /// housekeeper termination join. Individual stages may briefly take
+        /// the node monitor themselves; each is a flag flip, never a wait.
         @Override
-        public synchronized void close() {
-            if (this.closed) {
-                return;
+        public void close() {
+            synchronized (this) {
+                if (this.closed) {
+                    return;
+                }
+                if (this.closing) {
+                    throw new IllegalStateException("Cluster foundation is already closing");
+                }
+                this.closing = true;
             }
-            if (this.closing) {
-                throw new IllegalStateException("Cluster foundation is already closing");
+            try {
+                final boolean storageManagerOwnsNodeResources = this.clusterStorageManager != null;
+                final boolean storageManagerClosed = this.storageNodeManager.isInitialized();
+                final boolean backupManagerClosed = this.backupNodeManager.isInitialized();
+                final StorageTaskExecutor backupTaskExecutor = this.storageBackupTaskExecutor.isInitialized()
+                        ? this.storageBackupTaskExecutor.get() : null;
+
+                final CloseSequencer sequencer = new CloseSequencer();
+                /* A started node manager owns its collaborators: closing it
+                 * cascades to the client, distributor, tasks, and health check.
+                 * Those collaborators are disposed individually only when their
+                 * manager never started — a close after partial construction —
+                 * or when the manager does not own them. Every implementation is
+                 * idempotent. Roles are fixed, so at most one manager started. */
+                sequencer
+                        .add("backup task executor", this.storageBackupTaskExecutor.isInitialized(),
+                                () -> this.storageBackupTaskExecutor.get().close())
+                        .add("storage task executor",
+                                this.storageTaskExecutor.isInitialized() && this.storageTaskExecutor.get() != backupTaskExecutor,
+                                () -> this.storageTaskExecutor.get().close())
+                        .add("cluster storage manager", this.clusterStorageManager != null,
+                                () -> this.clusterStorageManager.close())
+                        /* A startup failure can leave the raw Store started but
+                         * unwrapped: root creation, index validation, or the
+                         * writer dictionary failed after the Store opened but
+                         * before the cluster manager existed. The cluster
+                         * manager shuts the Store down when it exists, so this
+                         * stage owns the raw manager only in the failure path. */
+                        .add("embedded storage", this.clusterStorageManager == null && this.embeddedStorageManager != null,
+                                () -> this.embeddedStorageManager.shutdown())
+                        .add("storage node manager", storageManagerClosed,
+                                () -> this.storageNodeManager.get().close())
+                        .add("backup node manager", backupManagerClosed,
+                                () -> this.backupNodeManager.get().close())
+                        .add("data distributor", !storageManagerClosed && this.dataDistributor.isInitialized(),
+                                () -> this.dataDistributor.get().dispose())
+                        .add("health check", !storageManagerClosed && this.healthCheck.isInitialized(),
+                                () -> this.healthCheck.get().close())
+                        .add("data client", !storageManagerClosed && !backupManagerClosed && this.dataClient.isInitialized(),
+                                () -> this.dataClient.get().dispose())
+                        .add("data merger", this.dataMerger.isInitialized(),
+                                () -> this.dataMerger.get().dispose())
+                        .add("applied listener", this.dataMessageAppliedListener.isInitialized(),
+                                () -> this.dataMessageAppliedListener.get().close())
+                        .add("stored cursor manager",
+                                !this.dataMessageAppliedListener.isInitialized() && this.storedReplicationCursorManager != null,
+                                this::closeStoredReplicationCursorManager)
+                        .add("replication resources", !storageManagerOwnsNodeResources,
+                                this::closeReplicationTransportAndPositionProvider)
+                        .add("housekeeper", !storageManagerOwnsNodeResources && this.housekeeper.isInitialized(),
+                                () -> this.housekeeper.get().close());
+                sequencer.run("Failed to close cluster foundation");
+            } finally {
+                /* A failed close leaves the node permanently unusable rather
+                 * than half-open: every resource was already attempted and the
+                 * released managers must never be handed out again. */
+                synchronized (this) {
+                    this.clusterStorageManager = null;
+                    this.embeddedStorageManager = null;
+                    this.closed = true;
+                    this.closing = false;
+                }
             }
-            this.closing = true;
-            Throwable failure = null;
-            final boolean storageManagerOwnsNodeResources = this.clusterStorageManager != null;
-            /* Stop asynchronous Store users before closing the Store itself. The
-             * manager closes these collaborators idempotently later, but doing it
-             * here establishes the lifecycle boundary even during partial startup. */
-            failure = closeInitialized(
-                    failure, this.storageBackupTaskExecutor,
-                    () -> this.storageBackupTaskExecutor.get().close());
-            final StorageTaskExecutor backupTaskExecutor = this.storageBackupTaskExecutor.isInitialized()
-                    ? this.storageBackupTaskExecutor.get() : null;
-            if (this.storageTaskExecutor.isInitialized()
-                    && this.storageTaskExecutor.get() != backupTaskExecutor) {
-                failure = closeInitialized(
-                        failure, this.storageTaskExecutor,
-                        () -> this.storageTaskExecutor.get().close());
-            }
-            if (this.clusterStorageManager != null) {
-                failure = closeResource(failure, this.clusterStorageManager::close);
-            }
-            /* A started node manager owns its collaborators: closing it
-             * cascades to the client, distributor, tasks, and health check.
-             * Those collaborators are disposed individually only when their
-             * manager never started — a close after partial construction —
-             * or when the manager does not own them. Every implementation is
-             * idempotent. Roles are fixed, so at most one manager started. */
-            final boolean storageManagerClosed = this.storageNodeManager.isInitialized();
-            if (storageManagerClosed) {
-                failure = closeInitialized(
-                        failure, this.storageNodeManager, () -> this.storageNodeManager.get().close());
-            }
-            final boolean backupManagerClosed = this.backupNodeManager.isInitialized();
-            if (backupManagerClosed) {
-                failure = closeInitialized(
-                        failure, this.backupNodeManager, () -> this.backupNodeManager.get().close());
-            }
-            if (!storageManagerClosed) {
-                /* A backup manager owns only its client and tasks, never the
-                 * distributor or the health check. */
-                failure = closeInitialized(
-                        failure, this.dataDistributor, () -> this.dataDistributor.get().dispose());
-                failure = closeInitialized(failure, this.healthCheck, () -> this.healthCheck.get().close());
-            }
-            if (!storageManagerClosed && !backupManagerClosed) {
-                failure = closeInitialized(failure, this.dataClient, () -> this.dataClient.get().dispose());
-            }
-            failure = closeInitialized(failure, this.dataMerger, () -> this.dataMerger.get().dispose());
-            failure = closeInitialized(
-                    failure, this.afterDataMessageConsumedListener,
-                    () -> this.afterDataMessageConsumedListener.get().close());
-            if (!this.afterDataMessageConsumedListener.isInitialized()
-                    && this.storedReplicationCursorManager != null) {
-                failure = closeResource(failure, this.storedReplicationCursorManager::close);
-            }
-            if (!storageManagerOwnsNodeResources &&
-                (this.replicationTransport.isInitialized() || this.positionProvider.isInitialized() ||
-                 this.replicationRetention.isInitialized())
-            ) {
-                failure = closeResource(failure, this::closeReplicationTransportAndPositionProvider);
-            }
-            if (!storageManagerOwnsNodeResources) {
-                failure = closeInitialized(failure, this.housekeeper, () -> this.housekeeper.get().close());
-            }
-            if (failure != null) {
-                this.closing = false;
-                throwFailure(failure, "Failed to close cluster foundation");
-            }
-            this.closed = true;
-            this.closing = false;
         }
 
         private void ensureOpen() {
@@ -1610,6 +1348,5 @@ public interface ClusterFoundation extends InstanceDispatcher, AutoCloseable {
                 throw new IllegalStateException("Cluster foundation is closed");
             }
         }
-
     }
 }

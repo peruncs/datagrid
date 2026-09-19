@@ -1,12 +1,11 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
-import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -14,6 +13,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 import java.util.UUID;
+
+import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 
 /// Persists restart records without coupling them to the wire format.
 ///
@@ -34,16 +35,16 @@ public final class AeronReplicationCheckpointStore {
         Objects.requireNonNull(checkpoint, "checkpoint");
         /* The encoded bytes are intentionally owned by this invocation. A callback
          * (including a crash hook) can therefore not overwrite a buffer owned by
-         * this write while AtomicFileStore is still consuming it. Checkpoint writes are
+         * this write while AtomicFileWriter is still consuming it. Checkpoint writes are
          * infrequent and the fixed-size allocation is preferable to an escaping,
          * re-entrancy-sensitive mutable buffer. */
         final byte[] bytes = encode(checkpoint);
-        final AtomicFileStore.Phase phase = checkpoint.recordType() == AeronReplicationCheckpoint.RecordType.READER_CURSOR
-                ? AtomicFileStore.PHASE_CURSOR
-                : AtomicFileStore.PHASE_CHECKPOINT;
-        AtomicFileStore.write(path, channel ->
+        final AtomicFileWriter.Phase phase = checkpoint.recordType() == AeronReplicationCheckpoint.RecordType.READER_CURSOR
+                ? AtomicFileWriter.Phase.CURSOR
+                : AtomicFileWriter.Phase.CHECKPOINT;
+        AtomicFileWriter.write(path, channel ->
         {
-            final ByteBuffer encoded = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
+            final ByteBuffer encoded = ByteBuffer.wrap(bytes);
             while (encoded.hasRemaining()) {
                 if (channel.write(encoded) == 0) throw new IOException("Aeron checkpoint write made no progress");
             }
@@ -51,25 +52,24 @@ public final class AeronReplicationCheckpointStore {
     }
 
     private static byte[] encode(final AeronReplicationCheckpoint checkpoint) {
-        final ByteBuffer encoded = ByteBuffer.allocate(AeronReplicationCheckpoint.ENCODED_BYTES)
-                .order(ByteOrder.BIG_ENDIAN);
-        encoded.putInt(AeronReplicationCheckpoint.MAGIC)
-                .putShort(AeronReplicationCheckpoint.VERSION)
-                .put((byte) checkpoint.recordTypeCode())
-                .put((byte) checkpoint.durabilityModeCode())
-                .put((byte) checkpoint.stateCode())
-                .putShort((short) 0).put((byte) 0);
-        putUuid(encoded, checkpoint.clusterId());
-        putUuid(encoded, checkpoint.nodeId());
-        putUuid(encoded, checkpoint.storeGeneration());
-        encoded.putLong(checkpoint.recordingId()).putLong(checkpoint.writerEpoch())
-                .putLong(checkpoint.fencingToken())
-                .putLong(checkpoint.transactionSequence()).putLong(checkpoint.recordingPosition())
-                .putInt(checkpoint.dataLength()).putInt(checkpoint.dataChunkCount())
-                .putInt(checkpoint.resolutionCrc32c());
-        final byte[] bytes = encoded.array();
-        encoded.putInt(Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
-        return bytes;
+        final byte[] encoded = new byte[AeronReplicationCheckpoint.ENCODED_BYTES];
+        int offset = putHeader(encoded, 0, AeronReplicationCheckpoint.MAGIC, AeronReplicationCheckpoint.VERSION);
+        offset = putByte(encoded, offset, (byte) checkpoint.recordTypeCode());
+        offset = putByte(encoded, offset, (byte) checkpoint.durabilityModeCode());
+        offset = putByte(encoded, offset, (byte) checkpoint.stateCode());
+        offset = putUuid(encoded, offset, checkpoint.clusterId());
+        offset = putUuid(encoded, offset, checkpoint.nodeId());
+        offset = putUuid(encoded, offset, checkpoint.storeGeneration());
+        offset = putLong(encoded, offset, checkpoint.recordingId());
+        offset = putLong(encoded, offset, checkpoint.writerEpoch());
+        offset = putLong(encoded, offset, checkpoint.fencingToken());
+        offset = putLong(encoded, offset, checkpoint.transactionSequence());
+        offset = putLong(encoded, offset, checkpoint.recordingPosition());
+        offset = putInt(encoded, offset, checkpoint.dataLength());
+        offset = putInt(encoded, offset, checkpoint.dataChunkCount());
+        offset = putInt(encoded, offset, checkpoint.resolutionCrc32c());
+        putInt(encoded, offset, Crc32c.compute(encoded, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
+        return encoded;
     }
 
     /// Reads a record and rejects a torn, corrupt, or incompatible file.
@@ -79,27 +79,37 @@ public final class AeronReplicationCheckpointStore {
     /// @throws IOException if the file is missing, truncated, or invalid
     public static AeronReplicationCheckpoint read(final Path path) throws IOException {
         final byte[] bytes = readFixedRecord(path);
-        final int expected = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-                .getInt(AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES);
+        final int expected = getInt(bytes, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES);
         if (expected != Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES)) {
             throw new IOException("Aeron checkpoint CRC32C mismatch");
         }
         try {
-            final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
-            if (buffer.getInt() != AeronReplicationCheckpoint.MAGIC ||
-                buffer.getShort() != AeronReplicationCheckpoint.VERSION) {
+            if (getInt(bytes, 0) != AeronReplicationCheckpoint.MAGIC ||
+                getShort(bytes, VERSION_OFFSET) != AeronReplicationCheckpoint.VERSION) {
                 throw new IOException("unknown Aeron checkpoint format");
             }
-            final var recordType = AeronReplicationCheckpoint.RecordType.from(Byte.toUnsignedInt(buffer.get()));
-            final var mode = ReplicationDurabilityMode.fromCode(Byte.toUnsignedInt(buffer.get()));
-            final var state = AeronReplicationCheckpoint.State.from(Byte.toUnsignedInt(buffer.get()));
-            if (buffer.getShort() != 0 || buffer.get() != 0) {
-                throw new IOException("unsupported Aeron checkpoint reserved fields");
+            if (headerFlags(bytes) != 0) {
+                throw new IOException("unsupported Aeron checkpoint flags");
             }
+            final var reader = new FrameReader(bytes, AeronCheckpointCodec.HEADER_LENGTH);
+            final var recordType = AeronReplicationCheckpoint.RecordType.from(Byte.toUnsignedInt(reader.readByte()));
+            final var mode = ReplicationDurabilityMode.fromCode(Byte.toUnsignedInt(reader.readByte()));
+            final var state = AeronReplicationCheckpoint.State.from(Byte.toUnsignedInt(reader.readByte()));
+            final UUID clusterId = reader.readUuid();
+            final UUID nodeId = reader.readUuid();
+            final UUID storeGeneration = reader.readUuid();
+            final long recordingId = reader.readLong();
+            final long writerEpoch = reader.readLong();
+            final long fencingToken = reader.readLong();
+            final long transactionSequence = reader.readLong();
+            final long recordingPosition = reader.readLong();
+            final int dataLength = reader.readInt();
+            final int dataChunkCount = reader.readInt();
+            final int resolutionCrc32c = reader.readInt();
             return new AeronReplicationCheckpoint(recordType, mode, state,
-                    readUuid(buffer), readUuid(buffer), readUuid(buffer),
-                    buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),
-                    buffer.getInt(), buffer.getInt(), buffer.getInt());
+                    clusterId, nodeId, storeGeneration,
+                    recordingId, writerEpoch, fencingToken, transactionSequence, recordingPosition,
+                    dataLength, dataChunkCount, resolutionCrc32c);
         } catch (final RuntimeException e) {
             throw new IOException("invalid Aeron checkpoint fields", e);
         }
@@ -124,14 +134,6 @@ public final class AeronReplicationCheckpointStore {
             }
             return bytes;
         }
-    }
-
-    private static UUID readUuid(final ByteBuffer buffer) {
-        return new UUID(buffer.getLong(), buffer.getLong());
-    }
-
-    private static void putUuid(final ByteBuffer buffer, final UUID value) {
-        buffer.putLong(value.getMostSignificantBits()).putLong(value.getLeastSignificantBits());
     }
 
 }

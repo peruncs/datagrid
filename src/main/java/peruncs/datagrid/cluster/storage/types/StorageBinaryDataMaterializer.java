@@ -27,7 +27,7 @@ final class StorageBinaryDataMaterializer {
     /// @param storage Store connection owning the persistence manager
     /// @param buffers scratch array with the batch in its prefix
     /// @param length  number of populated prefix slots
-    public static void materialize(final StorageConnection storage, final ByteBuffer[] buffers, final int length) {
+    static void materialize(final StorageConnection storage, final ByteBuffer[] buffers, final int length) {
         Objects.requireNonNull(storage, "storage");
         Objects.requireNonNull(buffers, "buffers");
         if (length < 0 || length > buffers.length) {

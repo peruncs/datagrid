@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node.replication;
 
 import org.eclipse.serializer.concurrency.LockedExecutor;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.IOException;
 import java.nio.file.NoSuchFileException;

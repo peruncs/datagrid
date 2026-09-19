@@ -1,8 +1,10 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import io.aeron.archive.Archive;
+import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.client.PersistentSubscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import org.eclipse.serializer.persistence.binary.types.Binary;
@@ -17,8 +19,11 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 import java.io.File;
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.locks.LockSupport;
 
@@ -61,7 +66,7 @@ class AeronArchiveReplicationIT {
                 .controlResponseChannel(CONTROL_RESPONSE_CHANNEL).messageTimeoutNs(10_000_000_000L);
         final Archive.Context archiveContext = new Archive.Context()
                 .aeronDirectoryName(aeronDirectory.toString()).archiveDir(archiveDirectory.toFile())
-                .deleteArchiveOnStart(true).threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                .deleteArchiveOnStart(true).threadingMode(ArchiveThreadingMode.SHARED)
                 .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
         long recordingId;
         long startPosition;
@@ -102,7 +107,7 @@ class AeronArchiveReplicationIT {
     private static void delete(final File file) throws Exception {
         if (file.exists()) {
             try (var paths = Files.walk(file.toPath())) {
-                paths.sorted(java.util.Comparator.reverseOrder()).forEach(path ->
+                paths.sorted(Comparator.reverseOrder()).forEach(path ->
                 {
                     try {
                         Files.deleteIfExists(path);
@@ -136,7 +141,7 @@ class AeronArchiveReplicationIT {
                     .controlResponseChannel(CONTROL_RESPONSE_CHANNEL).messageTimeoutNs(10_000_000_000L);
             final Archive.Context archiveContext = new Archive.Context()
                     .aeronDirectoryName(aeronDirectory).archiveDir(archiveDirectory).deleteArchiveOnStart(true)
-                    .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                    .threadingMode(ArchiveThreadingMode.SHARED)
                     .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
             try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
                  AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
@@ -157,7 +162,7 @@ class AeronArchiveReplicationIT {
                         .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
                 final Archive.Context restartArchive = new Archive.Context()
                         .aeronDirectoryName(aeronDirectory).archiveDir(archiveDirectory).deleteArchiveOnStart(false)
-                        .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                        .threadingMode(ArchiveThreadingMode.SHARED)
                         .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
                 try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(restartMedia, restartArchive);
                      AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
@@ -187,7 +192,7 @@ class AeronArchiveReplicationIT {
                         .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
                 final Archive.Context archiveContext = new Archive.Context()
                         .aeronDirectoryName(fixture.aeronDirectory()).archiveDir(fixture.archiveDirectory().toFile())
-                        .deleteArchiveOnStart(false).threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                        .deleteArchiveOnStart(false).threadingMode(ArchiveThreadingMode.SHARED)
                         .controlChannel(fixture.controlChannel()).replicationChannel("aeron:udp?endpoint=localhost:0");
                 final AeronArchive.Context clientContext = new AeronArchive.Context()
                         .aeronDirectoryName(fixture.aeronDirectory()).controlRequestChannel(fixture.controlChannel())
@@ -212,7 +217,7 @@ class AeronArchiveReplicationIT {
     void truncatedRecordingFrameFailsArchiveInspection() throws Exception {
         final ArchiveFixture fixture = createStoppedRecording("datagrid-aeron-tail-");
         try {
-            final java.util.List<Path> segments = ArchiveArtifactMutator.segments(
+            final List<Path> segments = ArchiveArtifactMutator.segments(
                     fixture.archiveDirectory(), fixture.recordingId());
             ArchiveArtifactMutator.truncateFinalFrame(
                     segments.getLast(),
@@ -224,7 +229,7 @@ class AeronArchiveReplicationIT {
                         .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
                 final Archive.Context archiveContext = new Archive.Context()
                         .aeronDirectoryName(fixture.aeronDirectory()).archiveDir(fixture.archiveDirectory().toFile())
-                        .deleteArchiveOnStart(false).threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                        .deleteArchiveOnStart(false).threadingMode(ArchiveThreadingMode.SHARED)
                         .controlChannel(fixture.controlChannel()).replicationChannel("aeron:udp?endpoint=localhost:0");
                 final AeronArchive.Context clientContext = new AeronArchive.Context()
                         .aeronDirectoryName(fixture.aeronDirectory()).controlRequestChannel(fixture.controlChannel())
@@ -255,7 +260,7 @@ class AeronArchiveReplicationIT {
                     .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
             final Archive.Context archiveContext = new Archive.Context()
                     .aeronDirectoryName(fixture.aeronDirectory()).archiveDir(fixture.archiveDirectory().toFile())
-                    .deleteArchiveOnStart(false).threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                    .deleteArchiveOnStart(false).threadingMode(ArchiveThreadingMode.SHARED)
                     .controlChannel(fixture.controlChannel()).replicationChannel("aeron:udp?endpoint=localhost:0");
             final AeronArchive.Context clientContext = new AeronArchive.Context()
                     .aeronDirectoryName(fixture.aeronDirectory()).controlRequestChannel(fixture.controlChannel())
@@ -309,7 +314,7 @@ class AeronArchiveReplicationIT {
                 .aeronDirectoryName(directory)
                 .archiveDir(archiveDirectory)
                 .deleteArchiveOnStart(true)
-                .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                .threadingMode(ArchiveThreadingMode.SHARED)
                 .controlChannel(controlChannel)
                 .replicationChannel("aeron:udp?endpoint=localhost:0");
 
@@ -324,7 +329,7 @@ class AeronArchiveReplicationIT {
                 data[i] = (byte) (i * 13);
             }
             publisher.publishTransaction(
-                    "recorded.Type".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    "recorded.Type".getBytes(StandardCharsets.UTF_8),
                     new ByteBuffer[]{ByteBuffer.wrap(data)}
             );
             final long recordingId = awaitRecordingId(publisher);
@@ -351,7 +356,7 @@ class AeronArchiveReplicationIT {
                             .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                             .messageTimeoutNs(10_000_000_000L))
                     .recordingId(recordingId)
-                    .startPosition(io.aeron.archive.client.PersistentSubscription.FROM_START)
+                    .startPosition(PersistentSubscription.FROM_START)
                     .liveChannel(liveChannel).liveStreamId(1001)
                     .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
                     .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
@@ -430,7 +435,7 @@ class AeronArchiveReplicationIT {
                 .controlResponseChannel(CONTROL_RESPONSE_CHANNEL).messageTimeoutNs(10_000_000_000L);
         final Archive.Context archiveContext = new Archive.Context()
                 .aeronDirectoryName(directory).archiveDir(archiveDirectory).deleteArchiveOnStart(true)
-                .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                .threadingMode(ArchiveThreadingMode.SHARED)
                 .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext)) {
             final AeronArchive archive = AeronArchive.connect(archiveClientContext);

@@ -25,6 +25,59 @@ final class StorageBinaryDataMergerTestSupport {
                 (proxy, method, args) -> defaultValue(method.getReturnType()));
     }
 
+    /// Builds a merger configuration with the documented non-timing defaults
+    /// and an unwired coordinator.
+    ///
+    /// @param foundation               persistence foundation
+    /// @param storage                  Store connection
+    /// @param objectGraphUpdateHandler graph update handler
+    /// @param cachingTimeoutMs         coalescing delay
+    /// @param cachedBytesLimit         soft backpressure threshold in bytes
+    /// @param applyTimeoutMs           materialization wait budget
+    /// @return configuration with default hard cap, disposal, and validation bounds
+    static StorageBinaryDataMerger.Configuration configuration(
+            final BinaryPersistenceFoundation<?> foundation,
+            final StorageConnection storage,
+            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            final long cachingTimeoutMs,
+            final long cachedBytesLimit,
+            final long applyTimeoutMs) {
+        return configuration(foundation, storage, objectGraphUpdateHandler,
+                cachingTimeoutMs, cachedBytesLimit, applyTimeoutMs, null);
+    }
+
+    /// Builds a merger configuration with the documented non-timing defaults.
+    ///
+    /// @param foundation               persistence foundation
+    /// @param storage                  Store connection
+    /// @param objectGraphUpdateHandler graph update handler
+    /// @param cachingTimeoutMs         coalescing delay
+    /// @param cachedBytesLimit         soft backpressure threshold in bytes
+    /// @param applyTimeoutMs           materialization wait budget
+    /// @param graphCoordinator         optional per-Store graph coordinator
+    /// @return configuration with default hard cap, disposal, and validation bounds
+    static StorageBinaryDataMerger.Configuration configuration(
+            final BinaryPersistenceFoundation<?> foundation,
+            final StorageConnection storage,
+            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            final long cachingTimeoutMs,
+            final long cachedBytesLimit,
+            final long applyTimeoutMs,
+            final StorageGraphCoordinator graphCoordinator) {
+        return new StorageBinaryDataMerger.Configuration(
+                foundation,
+                storage,
+                objectGraphUpdateHandler,
+                cachingTimeoutMs,
+                cachedBytesLimit,
+                StorageBinaryDataMerger.Default.MAX_CACHED_BYTES,
+                applyTimeoutMs,
+                StorageBinaryDataMerger.Default.DISPOSE_ORDERLY_TIMEOUT_MS,
+                StorageBinaryDataMerger.Default.DISPOSE_INTERRUPT_TIMEOUT_MS,
+                StorageBinaryDataMerger.Default.MAX_VALIDATED_INDEX_OBJECTS,
+                graphCoordinator);
+    }
+
     static Object defaultValue(final Class<?> type) {
         if (type == boolean.class) return false;
         if (type == int.class) return 0;

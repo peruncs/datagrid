@@ -15,6 +15,11 @@ import java.util.concurrent.atomic.AtomicReference;
 public interface StorageBinaryDataDistributor extends Disposable {
         /// Publishes one complete Store binary.
     ///
+    /// A dictionary staged beside this binary is delivered first. The staged
+    /// dictionary is cleared only after both delegate calls succeed, so a
+    /// transient failure keeps it pending for the retry instead of shipping a
+    /// later data message whose type ids the reader cannot resolve.
+    ///
     /// @param data complete binary to publish
     void distributeData(Binary data);
 
@@ -138,11 +143,20 @@ public interface StorageBinaryDataDistributor extends Disposable {
 
         @Override
         public void distributeData(final Binary data) {
-            final Pending staged = this.pending.getAndSet(null);
+            /* The staged dictionary stays pending until the delegate accepted
+             * both calls: a failing dictionary delivery leaves no data
+             * published, and a failing data delivery must resend the same
+             * dictionary on the retry. compareAndSet only clears the value the
+             * delivery consumed, so a dictionary staged concurrently is not
+             * lost. */
+            final Pending staged = this.pending.get();
             if (staged != null) {
                 this.delegate.distributeTypeDictionary(staged.dictionary());
             }
             this.delegate.distributeData(data);
+            if (staged != null) {
+                this.pending.compareAndSet(staged, null);
+            }
         }
 
         @Override

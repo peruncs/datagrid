@@ -4,10 +4,10 @@ import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
@@ -77,65 +77,22 @@ final class TransactionAssembler {
     private int lastResolutionDictionaryChunkCount;
     private Transaction transaction;
 
-    TransactionAssembler(
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final StorageBinaryDataReceiver receiver
-    ) {
-        this(configuration, clusterId, epoch, -1, receiver, () -> {
-        });
-    }
-
-    TransactionAssembler(
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final StorageBinaryDataReceiver receiver
-    ) {
-        this(configuration, clusterId, epoch, initialSequence, receiver, () -> {
-        });
-    }
-
-    TransactionAssembler(
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved
-    ) {
-        this(configuration, clusterId, epoch, initialSequence, receiver, transactionResolved, null);
-    }
-
-    TransactionAssembler(
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved,
-            final ReaderDeliveryListener deliveryListener
-    ) {
-        this(configuration, clusterId, epoch, initialSequence, -1L, receiver, transactionResolved,
-                deliveryListener, AeronReplicationEnvelope.defaultWireNonce(clusterId));
-    }
-
-    TransactionAssembler(
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final long initialPosition,
-            final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved,
-            final ReaderDeliveryListener deliveryListener
-    ) {
-        this(configuration, clusterId, epoch, initialSequence, initialPosition, receiver, transactionResolved,
-                deliveryListener, AeronReplicationEnvelope.defaultWireNonce(clusterId));
-    }
-
+    /// Creates the one production assembler state machine.
+    ///
+    /// Callers pass the wire nonce explicitly so a fixture or a deployment can
+    /// never silently derive a nonce while its peer uses another. Test code
+    /// builds assemblers through `TransactionAssemblerTestSupport` factories
+    /// that fill in fixture defaults.
+    ///
+    /// @param configuration      framing and timeout limits shared with the writer
+    /// @param clusterId          expected cluster identity
+    /// @param epoch              expected writer epoch
+    /// @param initialSequence    last sequence already resolved, or `-1` before the first
+    /// @param initialPosition    last resolved Archive position, or `-1` before the first
+    /// @param receiver           destination for complete Store binaries
+    /// @param transactionResolved callback after a transaction resolves; never `null`
+    /// @param deliveryListener   callback around Store materialisation, or `null`
+    /// @param wireNonce          expected accidental-cross-wiring nonce; must not be zero
     TransactionAssembler(
             final AeronReplicationConfiguration configuration,
             final UUID clusterId,
@@ -147,13 +104,13 @@ final class TransactionAssembler {
             final ReaderDeliveryListener deliveryListener,
             final long wireNonce
     ) {
-        this.configuration = configuration;
-        this.clusterId = clusterId;
+        this.configuration = Objects.requireNonNull(configuration, "configuration");
+        this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
         if (wireNonce == 0L) throw new IllegalArgumentException("wireNonce must not be zero");
         this.wireNonce = wireNonce;
         this.epoch = epoch;
-        this.receiver = receiver;
-        this.transactionResolved = transactionResolved;
+        this.receiver = Objects.requireNonNull(receiver, "receiver");
+        this.transactionResolved = Objects.requireNonNull(transactionResolved, "transactionResolved");
         this.deliveryListener = deliveryListener;
         if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
             throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
@@ -164,6 +121,17 @@ final class TransactionAssembler {
         this.nextExpectedSequence = initialSequence + 1;
     }
 
+    /// Consumes one fragment from the subscription callback.
+    ///
+    /// The delivery monitor bounds detachment and execution to one delivery at
+    /// a time, but it is never acquired by the failure path: a Store import can
+    /// hold it for seconds. A latched failure is observed here, on the polling
+    /// thread, and releases any incomplete transaction before returning.
+    ///
+    /// @param buffer fragment source
+    /// @param offset fragment offset
+    /// @param length fragment length
+    /// @param header Aeron header, or `null` in direct tests
     void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header) {
         try {
             /* A single reusable Delivery carries the detached transaction. The Aeron
@@ -174,18 +142,27 @@ final class TransactionAssembler {
             synchronized (this.delivery) {
                 final boolean deliver;
                 synchronized (this) {
+                    if (this.failure.get() != null) {
+                        this.releaseIncompleteTransaction();
+                        return;
+                    }
                     final AeronReplicationEnvelope.EnvelopeView envelope =
                             AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
-                    if (this.failure.get() != null) return;
+                    if (this.failure.get() != null) {
+                        this.releaseIncompleteTransaction();
+                        return;
+                    }
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
                 }
                 if (deliver) this.delivery.run();
             }
         } catch (final RuntimeException e) {
             this.failure(e);
+            this.releaseIncompleteTransaction();
             throw e;
         } catch (final Error e) {
             this.failure(new IllegalStateException("Aeron envelope delivery failed", e));
+            this.releaseIncompleteTransaction();
             throw e;
         }
     }
@@ -297,7 +274,47 @@ final class TransactionAssembler {
             throw new IllegalStateException("interleaved replication transaction");
         }
         this.transaction.add(envelope);
+        /* Crash-test observation point after a data chunk is buffered: the
+         * natural-memory state of a partially assembled transaction is
+         * otherwise unreachable from forked children. The hook fires only for
+         * multi-chunk transactions, so single-chunk cells never park on it. */
+        final ChunkObserver observer = CHUNK_HOOK.isBound() ? CHUNK_HOOK.get() : null;
+        if (observer != null && envelope.chunkCount() > 1) {
+            observer.afterChunkBuffered(envelope.sequence(), envelope.chunkIndex(), envelope.chunkCount());
+        }
         return false;
+    }
+
+        /// Observation hook for crash tests: fires after one data chunk of a
+    /// multi-chunk transaction has been buffered.
+    @FunctionalInterface
+    interface ChunkObserver {
+        /// Reports one buffered chunk.
+        ///
+        /// @param sequence   transaction sequence
+        /// @param chunkIndex buffered chunk index
+        /// @param chunkCount transaction chunk count
+        void afterChunkBuffered(long sequence, int chunkIndex, int chunkCount);
+    }
+
+    private static final ScopedValue<ChunkObserver> CHUNK_HOOK = ScopedValue.newInstance();
+
+        /// Runs an action with the chunk observer bound to its dynamic scope.
+    ///
+    /// Test bridge only; unbound in production, and the assembler never
+    /// allocates for the hook when it is unbound.
+    ///
+    /// @param observer hook invoked after each buffered multi-chunk chunk
+    /// @param action  action to run with the hook bound
+    /// @return the action's result
+    static <T> T runWithChunkObserver(final ChunkObserver observer, final java.util.concurrent.Callable<T> action) {
+        try {
+            return ScopedValue.where(CHUNK_HOOK, observer).call(action::call);
+        } catch (final RuntimeException failure) {
+            throw failure;
+        } catch (final Exception checked) {
+            throw new IllegalStateException("chunk-observer action failed", checked);
+        }
     }
 
     private void validateDuplicateCommit(final AeronReplicationEnvelope.EnvelopeView envelope) {
@@ -385,18 +402,30 @@ final class TransactionAssembler {
         }
     }
 
+        /// Returns the last sequence resolved by a terminal marker.
+    ///
+    /// @return last resolved transaction sequence, or the initial value
     long lastResolvedSequence() {
         return this.lastResolvedSequence.get();
     }
 
+        /// Returns the last sequence materialised by the Store receiver.
+    ///
+    /// @return last applied transaction sequence, or the initial value
     long lastAppliedSequence() {
         return this.lastAppliedSequence.get();
     }
 
+        /// Returns the expected cluster identity.
+    ///
+    /// @return cluster identity enforced on every frame
     UUID clusterId() {
         return this.clusterId;
     }
 
+        /// Returns the expected writer epoch.
+    ///
+    /// @return writer epoch enforced on every frame
     long epoch() {
         return this.epoch;
     }
@@ -412,49 +441,69 @@ final class TransactionAssembler {
     }
 
         /// Returns the greatest writer fencing token accepted so far.
+    ///
+    /// @return greatest accepted fencing token, or the seeded floor
     long fencingToken() {
         return this.lastAcceptedFencingToken;
     }
 
+        /// Returns the Archive position of the last resolved transaction.
+    ///
+    /// @return last resolved Archive position, or the initial value
     long lastResolvedPosition() {
         return this.lastResolvedPosition.get();
     }
 
+        /// Returns an atomic sequence and position snapshot for cursor persistence.
+    ///
+    /// @return consistent cursor snapshot under the assembler monitor
     synchronized CursorSnapshot cursorSnapshot() {
         return new CursorSnapshot(this.lastResolvedSequence.get(), this.lastResolvedPosition.get());
     }
 
         /// Returns whether chunks are waiting for a terminal marker.
+    ///
+    /// @return `true` while an incomplete transaction retains native buffers
     synchronized boolean hasIncompleteTransaction() {
         return this.transaction != null;
     }
 
+        /// Returns the latched terminal failure, or `null` while healthy.
+    ///
+    /// @return terminal failure, or `null`
     RuntimeException failure() {
         return this.failure.get();
     }
 
+        /// Latches the terminal failure without waiting for an in-flight delivery.
+    ///
+    /// Aeron invokes this from its client conductor error handler, where a
+    /// Store import that holds the delivery monitor for seconds would block the
+    /// conductor past the driver timeout and tear down the whole client. The
+    /// compare-and-set is therefore the whole operation: the polling thread
+    /// releases an incomplete transaction when it next observes the failure,
+    /// and [dispose] releases one if polling never resumes.
+    ///
+    /// @param exception terminal failure to latch
     void failure(final RuntimeException exception) {
         Objects.requireNonNull(exception, "exception");
-        synchronized (this.delivery) {
-            synchronized (this) {
-                if (this.failure.compareAndSet(null, exception)) {
-                    if (this.transaction != null) {
-                        this.transaction.dispose();
-                        this.transaction = null;
-                    }
-                }
-            }
-        }
+        this.failure.compareAndSet(null, exception);
     }
 
         /// Releases native buffers retained by an incomplete transaction.
+    ///
+    /// This only acquires the assembler monitor, whose critical section never
+    /// covers Store import, so disposal cannot be blocked by a slow receiver.
+    /// An in-flight [Delivery] owns its detached transaction and is unaffected.
     void dispose() {
-        synchronized (this.delivery) {
-            synchronized (this) {
-                if (this.transaction != null) {
-                    this.transaction.dispose();
-                    this.transaction = null;
-                }
+        this.releaseIncompleteTransaction();
+    }
+
+    private void releaseIncompleteTransaction() {
+        synchronized (this) {
+            if (this.transaction != null) {
+                this.transaction.dispose();
+                this.transaction = null;
             }
         }
     }
@@ -470,6 +519,11 @@ final class TransactionAssembler {
         private ByteBuffer dictionaryStorage;
         private UnsafeBuffer data;
         private ByteBuffer dataStorage;
+        /* One reusable view over [dataStorage] for incremental CRC updates. The
+         * JDK ByteBuffer checksum API advances the buffer position, so hashing the
+         * destination range through a stable duplicate avoids the per-chunk
+         * duplicate that Crc32c.update would allocate for a direct source. */
+        private ByteBuffer dataCrcView;
         private int dictionaryOffset;
         private int dataOffset;
         private int dictionaryNextChunk;
@@ -489,6 +543,15 @@ final class TransactionAssembler {
             this.dataCrc.reset();
         }
 
+        /// Appends one validated chunk to the dictionary or the Store binary.
+        ///
+        /// The chunk must be contiguous with everything already buffered and
+        /// must repeat the transaction's chunk count. Any mismatch fails the
+        /// transaction instead of delivering a partial or reordered binary.
+        ///
+        /// @param envelope decoded data or dictionary chunk
+        /// @throws IllegalStateException    when chunks interleave or repeat
+        /// @throws IllegalArgumentException when bounds or lengths disagree
         void add(final AeronReplicationEnvelope.EnvelopeView envelope) {
             if (envelope.fencingToken() != this.fencingToken) {
                 throw new IllegalStateException("transaction mixes writer fencing tokens");
@@ -538,7 +601,7 @@ final class TransactionAssembler {
                     if (this.data == null) throw new IllegalStateException("Store data storage is unavailable");
                     this.ensureCapacity(false, this.dataOffset + wireLength);
                     this.data.putBytes(offset, envelope.source(), envelope.payloadOffset(), wireLength);
-                    this.updateDataCrc(envelope.source(), envelope.payloadOffset(), wireLength);
+                    this.updateDataCrc(offset, wireLength);
                 }
                 this.dataOffset += wireLength;
                 this.dataNextChunk++;
@@ -546,8 +609,11 @@ final class TransactionAssembler {
             }
         }
 
-        private void updateDataCrc(final DirectBuffer source, final int offset, final int length) {
-            Crc32c.update(this.dataCrc, source, offset, length);
+        private void updateDataCrc(final int storageOffset, final int length) {
+            final ByteBuffer view = this.dataCrcView;
+            view.clear();
+            view.position(storageOffset).limit(storageOffset + length);
+            this.dataCrc.update(view);
         }
 
         private void ensureCapacity(final boolean dictionary, final int required) {
@@ -570,6 +636,7 @@ final class TransactionAssembler {
                 } else {
                     this.dataStorage = replacementStorage;
                     this.data = replacement;
+                    this.dataCrcView = replacementStorage.duplicate();
                 }
             } catch (final RuntimeException | Error failure) {
                 XMemory.deallocateDirectByteBuffer(replacementStorage);
@@ -578,14 +645,21 @@ final class TransactionAssembler {
             if (current != null) XMemory.deallocateDirectByteBuffer(current);
         }
 
+        /// Returns the incremental checksum of the assembled Store binary.
+        ///
+        /// @return CRC32C accumulated over every data chunk copied so far
         int dataCrc32c() {
             return (int) this.dataCrc.getValue();
         }
 
+        /// Releases retained dictionary and Store buffers.
         void dispose() {
             this.dispose(false);
         }
 
+        /// Releases retained buffers, optionally keeping the delivered Store storage.
+        ///
+        /// @param dataTransferred whether the receiver already owns the Store storage
         void dispose(final boolean dataTransferred) {
             if (this.dictionaryStorage != null) {
                 XMemory.deallocateDirectByteBuffer(this.dictionaryStorage);
@@ -595,13 +669,16 @@ final class TransactionAssembler {
                 XMemory.deallocateDirectByteBuffer(this.dataStorage);
                 this.dataStorage = null;
             }
+            this.dataCrcView = null;
             this.dictionary = null;
             this.data = null;
         }
 
+        /// Forgets the Store storage after an owned receiver took responsibility for it.
         void detachDataStorage() {
             this.dataStorage = null;
             this.data = null;
+            this.dataCrcView = null;
         }
     }
 
@@ -617,6 +694,17 @@ final class TransactionAssembler {
         private int resolutionCrc32c;
         private AeronReplicationEnvelope.Kind resolutionKind;
 
+        /// Stages one resolved transaction for delivery outside the assembler monitor.
+        ///
+        /// @param dictionary                 assembled type dictionary, or `null`
+        /// @param data                       assembled Store binary storage, or `null` for abort
+        /// @param completed                  transaction that owns the storage
+        /// @param sequence                   terminal replication sequence
+        /// @param position                   terminal Archive position
+        /// @param resolutionDataLength       represented Store binary length
+        /// @param resolutionDataChunkCount   represented Store chunk count
+        /// @param resolutionCrc32c           commit checksum, or `0` for abort
+        /// @param resolutionKind             terminal marker kind
         void prepare(final String dictionary, final ByteBuffer data, final Transaction completed,
                      final long sequence, final long position, final int resolutionDataLength,
                      final int resolutionDataChunkCount, final int resolutionCrc32c,
@@ -632,6 +720,11 @@ final class TransactionAssembler {
             this.resolutionKind = resolutionKind;
         }
 
+        /// Delivers the staged transaction, then publishes the resolved cursor.
+        ///
+        /// The receiver import and wait run without the assembler monitor, so a
+        /// slow Store never blocks failure latching; the resolved-sequence update
+        /// runs under the monitor afterwards.
         void run() {
             boolean dataTransferred = false;
             try {
@@ -643,7 +736,7 @@ final class TransactionAssembler {
                         deliveryListener.beforeStoreImport(
                                 this.sequence, this.position, dataLength, dataChunkCount, this.resolutionCrc32c);
                     }
-                    final org.eclipse.serializer.persistence.binary.types.Binary binary = ChunksWrapper.New(this.data);
+                    final Binary binary = ChunksWrapper.New(this.data);
                     if (receiver.canReceiveDataOwned()) {
                         /* The owned receiver releases the original buffer on every path,
                          * including a failure thrown from receiveDataOwned or awaitApplied. */

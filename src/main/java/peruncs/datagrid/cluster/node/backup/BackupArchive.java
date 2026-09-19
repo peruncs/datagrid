@@ -2,12 +2,10 @@ package peruncs.datagrid.cluster.node.backup;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -16,53 +14,177 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.CRC32;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-import java.util.zip.ZipOutputStream;
+import java.util.zip.*;
 
 /// Encodes and validates the ZIP format used by filesystem backups.
 ///
 /// Archive names carry the backup generation — timestamp, slot, cluster,
-/// store image, epoch, recording, and a random publication id — so backups
-/// from different nodes sharing one volume never collide, and unrelated
-/// generations stay distinguishable without opening any archive. The node
-/// provenance and the content digest travel inside the archive as the
-/// `backup-identity` entry; archives without one predate generations and
-/// list with unknown provenance.
+/// store image, epoch, recording, replication sequence, and a random
+/// publication id — so backups from different nodes sharing one volume never
+/// collide, and unrelated generations stay distinguishable without opening
+/// any archive. The node provenance and the content digest travel inside the
+/// archive as the `backup-identity` entry; archives without one predate
+/// generations and list with unknown provenance.
+///
+/// A failure that conclusively proves an archive incomplete or corrupt is
+/// reported as [IncompleteArchiveException], so callers may replace the
+/// partial file. Transient I/O failures stay ordinary [NodeLibraryException]s
+/// and must never be treated as evidence that a durable archive is partial.
 final class BackupArchive {
         /// Sidecar entry carrying the full backup identity and content digest.
     static final String BACKUP_IDENTITY_ENTRY = "backup-identity";
+        /// Upper bound for the replication manifest entry.
+    static final int MAX_MANIFEST_BYTES = 1 << 20;
 
     private static final LazyConstant<Pattern> BACKUP_NAME = LazyConstant.of(
             () -> Pattern.compile(
-                    "^(\\d+)(\\.manual)?\\.([0-9a-f]{32})\\.([0-9a-f]{32})\\.(-?\\d+)\\.(-?\\d+)\\.([0-9a-f]{32})\\.zip$",
+                    "^(\\d+)(\\.manual)?\\.([0-9a-f]{32})\\.([0-9a-f]{32})\\.(-?\\d+)\\.(-?\\d+)\\.(-?\\d+)\\.([0-9a-f]{32})\\.zip$",
                     Pattern.CASE_INSENSITIVE));
-    private static final int MAX_ARCHIVE_ENTRIES = 1_000_000;
-    private static final int MAX_MANIFEST_BYTES = 1 << 20;
     private static final int MAX_IDENTITY_BYTES = 4096;
     private static final int IDENTITY_MAGIC = 0x44474249; // DGBI
-    private static final short IDENTITY_VERSION = 1;
+    private static final short IDENTITY_VERSION = 2;
     private static final UUID NIL_UUID = new UUID(0L, 0L);
 
     private BackupArchive() {
     }
 
+    /// Validates a user-uploaded storage archive before it may replace local state.
+    ///
+    /// Generated backups always carry `storage/`, `manifest`, and `ready`; user
+    /// uploads skip the metadata checks of the restore path, so this pre-check
+    /// requires the same essentials: exactly one readable, non-empty `manifest`
+    /// entry within [BackupArchive#MAX_MANIFEST_BYTES] (ambiguity fails) and at
+    /// least one non-empty Store payload entry under `storage/`. Declared sizes
+    /// are not trusted: every entry is decompressed through a dry run bounded by
+    /// the extraction budget, so a bomb that under-declares its content is
+    /// refused here — before any caller destroys local storage — instead of at
+    /// extraction time.
+    ///
+    /// @param archive upload archive path
+    /// @param limits  operator-configured extraction budgets
+    /// @throws NodeLibraryException when the upload is missing, ambiguous, partial, or over budget
+    static void validateUpload(final Path archive, final BackupArchiveLimits limits) throws NodeLibraryException {
+        try (ZipFile zip = openArchive(archive)) {
+            final List<ZipEntry> entries = listEntries(zip, limits.maxArchiveEntries());
+            int manifests = 0;
+            boolean manifestReadable = false;
+            boolean storagePayload = false;
+            for (final ZipEntry entry : entries) {
+                if (StorageBackupBackend.MANIFEST_ENTRY.equals(entry.getName())) {
+                    manifests++;
+                    manifestReadable = manifestReadable || isReadableManifest(zip, entry);
+                } else if (!entry.isDirectory() && entry.getSize() != 0L &&
+                           entry.getName().startsWith(StorageBackupBackend.STORAGE_ENTRY + "/")) {
+                    storagePayload = true;
+                }
+            }
+            if (manifests != 1 || !manifestReadable) {
+                throw new NodeLibraryException(
+                        "User-uploaded storage archive must contain exactly one readable manifest at %s; refusing to install"
+                                .formatted(archive));
+            }
+            if (!storagePayload) {
+                throw new NodeLibraryException(
+                        "User-uploaded storage archive contains no non-empty storage payload at %s; refusing to install a partial upload"
+                                .formatted(archive));
+            }
+            dryRunBudget(zip, entries, limits.maxExtractedBytes());
+        } catch (final IOException closeFailure) {
+            throw new NodeLibraryException(
+                    "User-uploaded storage archive cannot be read at %s; refusing to install".formatted(archive),
+                    closeFailure);
+        }
+        /* openArchive already rejects missing or unsafe paths; any other read
+         * failure is a refusal, never a fallback to trust. */
+    }
+
+    /// Decompresses every entry while discarding the bytes, bounded by the
+    /// extraction budget.
+    ///
+    /// Declared sizes in the central directory are attacker-controlled; the
+    /// dry run measures the real inflated stream, so an under-declaring bomb
+    /// is refused before the caller relies on it.
+    ///
+    /// @param zip        open upload archive
+    /// @param entries    bounded, de-duplicated entry list
+    /// @param maxExtractedBytes total extraction budget
+    /// @throws NodeLibraryException when the real content exceeds the budget
+    private static void dryRunBudget(
+            final ZipFile zip,
+            final List<ZipEntry> entries,
+            final long maxExtractedBytes
+    ) throws NodeLibraryException {
+        long remaining = maxExtractedBytes;
+        final byte[] discard = new byte[64 * 1024];
+        for (final ZipEntry entry : entries) {
+            if (entry.isDirectory()) continue;
+            try (InputStream data = zip.getInputStream(entry)) {
+                if (data == null) {
+                    throw new NodeLibraryException("Backup archive entry cannot be read: %s".formatted(entry.getName()));
+                }
+                while (true) {
+                    final int read = data.read(discard);
+                    if (read < 0) break;
+                    remaining -= read;
+                    if (remaining < 0L) {
+                        throw new NodeLibraryException(
+                                "Backup archive inflates beyond the extraction budget of %s bytes: %s"
+                                        .formatted(maxExtractedBytes, entry.getName()));
+                    }
+                }
+            } catch (final IOException unreadable) {
+                throw new NodeLibraryException(
+                        "Backup archive cannot be decompressed: %s".formatted(entry.getName()), unreadable);
+            }
+        }
+    }
+
+    /// Reports whether a manifest entry is a readable, non-empty byte
+    /// sequence within the manifest budget.
+    private static boolean isReadableManifest(final ZipFile zip, final ZipEntry entry) {
+        if (entry.isDirectory()) return false;
+        try (InputStream data = zip.getInputStream(entry)) {
+            final byte[] bytes = data.readNBytes(MAX_MANIFEST_BYTES);
+            return bytes.length != 0 && data.read() == -1;
+        } catch (final IOException unreadable) {
+            return false;
+        }
+    }
+
+        /// Reports whether a file name is a current-generation backup archive.
+    ///
+    /// @param name file name to check, or `null`
+    /// @return `true` when the name encodes a backup identity
+    static boolean isBackupFileName(final String name) {
+        return name != null && BACKUP_NAME.get().matcher(name).matches();
+    }
+
+        /// Formats the archive file name for a backup identity.
+    ///
+    /// The name pins every selection field of the backup, including the
+    /// replication sequence, so archives can be selected without opening
+    /// them.
+    ///
+    /// @param backup backup identity
+    /// @return archive file name
     static String toArchiveFileName(final BackupMetadata backup) {
-        return "%d%s.%s.%s.%d.%d.%s.zip".formatted(
+        return "%d%s.%s.%s.%d.%d.%d.%s.zip".formatted(
                 backup.timestamp(),
                 backup.manualSlot() ? ".manual" : "",
                 hexOrZero(backup.clusterId()),
                 hexOrZero(backup.storeGeneration()),
                 backup.epoch(),
                 backup.recordingId(),
+                backup.logicalSequence(),
                 backup.backupId() == null ? hexOrZero(null) : hex(backup.backupId()));
     }
 
-    static boolean isBackupFileName(final String name) {
-        return name != null && BACKUP_NAME.get().matcher(name).matches();
-    }
-
+        /// Parses the selection fields back out of an archive file name.
+    ///
+    /// @param name   archive file name
+    /// @param volume volume used for error reporting
+    /// @return parsed backup metadata without a digest
+    /// @throws NodeLibraryException when the name is not a valid archive name
     static BackupMetadata parseMetadata(final String name, final Path volume) throws NodeLibraryException {
         final Matcher matcher = BACKUP_NAME.get().matcher(name);
         if (!matcher.matches()) {
@@ -76,8 +198,9 @@ final class BackupArchive {
                     orNullUuid(matcher.group(4)),
                     unknownIfNegative(Long.parseLong(matcher.group(5))),
                     unknownIfNegative(Long.parseLong(matcher.group(6))),
+                    unknownIfNegative(Long.parseLong(matcher.group(7))),
                     null,
-                    uuid(matcher.group(7)),
+                    uuid(matcher.group(8)),
                     BackupMetadata.UNKNOWN);
         } catch (final IllegalArgumentException failure) {
             throw new NodeLibraryException("Invalid backup filename: %s".formatted(volume.resolve(name)), failure);
@@ -109,6 +232,11 @@ final class BackupArchive {
 
         /// Writes the full backup identity as an archive sidecar entry.
     ///
+    /// The identity is framed with a magic value, a version, and a trailing
+    /// CRC32C, and is replaced atomically through [AtomicFileWriter], so a
+    /// crash or partial write leaves either the old identity or the new one,
+    /// never a torn file.
+    ///
     /// @param file   destination file for the encoded identity
     /// @param backup backup identity to encode
     /// @throws NodeLibraryException if the identity cannot be written
@@ -119,7 +247,7 @@ final class BackupArchive {
         if (NIL_UUID.equals(backup.backupId())) {
             throw new NodeLibraryException("Backup identity carries a nil backup id");
         }
-        final ByteBuffer data = ByteBuffer.allocate(128);
+        final ByteBuffer data = ByteBuffer.allocate(136);
         data.putInt(IDENTITY_MAGIC);
         data.putShort(IDENTITY_VERSION);
         data.putLong(backup.timestamp());
@@ -128,6 +256,7 @@ final class BackupArchive {
         putUuid(data, backup.storeGeneration());
         data.putLong(backup.epoch());
         data.putLong(backup.recordingId());
+        data.putLong(backup.logicalSequence());
         putUuid(data, backup.nodeId());
         data.putLong(backup.backupId().getMostSignificantBits());
         data.putLong(backup.backupId().getLeastSignificantBits());
@@ -137,7 +266,7 @@ final class BackupArchive {
         framed.put(payload);
         framed.putInt(Crc32c.compute(payload));
         try {
-            Files.write(file, framed.array());
+            AtomicFileWriter.writeBytes(file, framed.array());
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to write backup identity to %s".formatted(file), failure);
         }
@@ -178,10 +307,10 @@ final class BackupArchive {
 
     private static BackupMetadata decodeIdentity(final Path archive, final byte[] bytes)
             throws NodeLibraryException {
-        /* Magic, version, timestamp, slot, two flagged UUIDs, two longs, one
-         * flagged UUID, one UUID, one digest, plus the trailing CRC. */
+        /* Magic, version, timestamp, slot, two flagged UUIDs, three longs,
+         * one flagged UUID, one UUID, one digest, plus the trailing CRC. */
         final int expected = Integer.BYTES + Short.BYTES + Long.BYTES + 1 +
-                             (1 + Long.BYTES * 2) * 2 + Long.BYTES * 2 +
+                             (1 + Long.BYTES * 2) * 2 + Long.BYTES * 3 +
                              (1 + Long.BYTES * 2) + Long.BYTES * 2 + Long.BYTES + Integer.BYTES;
         if (bytes.length != expected) {
             throw new NodeLibraryException("Backup identity has an unexpected size in %s".formatted(archive));
@@ -200,6 +329,7 @@ final class BackupArchive {
                     data.get() != 0,
                     getUuid(data),
                     getUuid(data),
+                    data.getLong(),
                     data.getLong(),
                     data.getLong(),
                     getUuid(data),
@@ -268,7 +398,7 @@ final class BackupArchive {
                 for (final var iterator = paths.iterator(); iterator.hasNext(); ) {
                     final Path path = iterator.next();
                     if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-                        names.add(storage.relativize(path).toString().replace(java.io.File.separatorChar, '/'));
+                        names.add(storage.relativize(path).toString().replace(File.separatorChar, '/'));
                     }
                 }
             }
@@ -292,36 +422,43 @@ final class BackupArchive {
         /// Digests the manifest and storage payload carried by an archive.
     ///
     /// Entries are visited in the same order as [#contentDigestOfDirectory],
-    /// so a digest taken before compression matches the archived bytes.
+    /// so a digest taken before compression matches the archived bytes. The
+    /// walk is bounded by the configured entry budget and the manifest by
+    /// [BackupArchive#MAX_MANIFEST_BYTES], exactly like [#readManifest].
     ///
     /// @param archive archive to digest
+    /// @param limits  entry and byte budgets
     /// @return CRC over the backup content
     /// @throws NodeLibraryException if the content cannot be read
-    static long contentDigestOfArchive(final Path archive) throws NodeLibraryException {
+    static long contentDigestOfArchive(final Path archive, final BackupArchiveLimits limits)
+            throws NodeLibraryException {
+        Objects.requireNonNull(limits, "limits");
         try (ZipFile zip = openArchive(archive)) {
-            final ZipEntry manifest = zip.getEntry(StorageBackupBackend.MANIFEST_ENTRY);
-            if (manifest == null || manifest.isDirectory()) {
-                throw new NodeLibraryException("Backup archive is missing manifest in %s".formatted(archive));
+            final List<ZipEntry> entries = listEntries(zip, limits.maxArchiveEntries());
+            final long declared = declaredTotalBytes(entries);
+            if (declared > limits.maxExtractedBytes()) {
+                throw new NodeLibraryException("Backup archive is too large");
             }
-            final CRC32 digest = new CRC32();
-            final byte[] buffer = new byte[8192];
-            try (InputStream data = zip.getInputStream(manifest)) {
-                int read;
-                while ((read = data.read(buffer)) != -1) {
-                    digest.update(buffer, 0, read);
-                }
-            }
-            /* The directory digest covers storage-relative paths, so the
-             * `storage/` prefix is stripped here to keep both sides identical. */
             final String prefix = StorageBackupBackend.STORAGE_ENTRY + "/";
+            ZipEntry manifest = null;
             final List<String> names = new ArrayList<>();
-            for (final var iterator = zip.entries().asIterator(); iterator.hasNext(); ) {
-                final ZipEntry entry = iterator.next();
-                if (!entry.isDirectory() && entry.getName().startsWith(prefix)) {
+            for (final ZipEntry entry : entries) {
+                if (StorageBackupBackend.MANIFEST_ENTRY.equals(entry.getName())) {
+                    if (entry.isDirectory()) {
+                        throw new IncompleteArchiveException("Backup manifest is missing in %s".formatted(archive));
+                    }
+                    manifest = entry;
+                } else if (!entry.isDirectory() && entry.getName().startsWith(prefix)) {
                     names.add(entry.getName().substring(prefix.length()));
                 }
             }
+            if (manifest == null) {
+                throw new IncompleteArchiveException("Backup archive is missing manifest in %s".formatted(archive));
+            }
+            final CRC32 digest = new CRC32();
+            digest.update(readBoundedManifest(zip, manifest, archive));
             names.sort(String::compareTo);
+            final byte[] buffer = new byte[8192];
             for (final String name : names) {
                 digest.update(name.getBytes(StandardCharsets.UTF_8));
                 try (InputStream data = zip.getInputStream(zip.getEntry(prefix + name))) {
@@ -337,6 +474,12 @@ final class BackupArchive {
         }
     }
 
+        /// Compresses the export root into a new archive file.
+    ///
+    /// @param workingDir      export workspace holding `storage`, `manifest`,
+    ///                        `ready`, and optionally `backup-identity`
+    /// @param archiveFilePath archive file to create; it must not exist
+    /// @throws NodeLibraryException if the content cannot be compressed
     static void compressStorage(final Path workingDir, final Path archiveFilePath) throws NodeLibraryException {
         try (FileChannel file = FileChannel.open(archiveFilePath,
                 StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
@@ -367,12 +510,20 @@ final class BackupArchive {
         }
     }
 
-    /// Extracts only archives with safe relative, non-link entries.
+        /// Extracts only archives with safe relative, non-link entries.
     ///
     /// The extraction budget is derived from the archive's declared entry
     /// sizes when all are known and falls back to the configured absolute
     /// ceiling otherwise, so legitimate large stores restore while
-    /// decompression bombs still fail fast.
+    /// decompression bombs still fail fast. The destination must be a freshly
+    /// created private directory: it is validated once and entries rely on
+    /// `NOFOLLOW_LINKS` creates inside it.
+    ///
+    /// @param destination           extraction root to create
+    /// @param archive               archive to extract
+    /// @param requireBackupMetadata whether the manifest and ready marker are required
+    /// @param limits                entry and byte budgets
+    /// @throws NodeLibraryException if the archive cannot be extracted safely
     static void extractArchive(
             final Path destination,
             final Path archive,
@@ -384,8 +535,9 @@ final class BackupArchive {
         try {
             StorageFileOperations.ensureNoSymbolicLinks(root);
             Files.createDirectories(root);
+            StorageFileOperations.ensureNoSymbolicLinks(root);
             try (ZipFile zip = openArchive(archive)) {
-                final List<ZipEntry> entries = listEntries(zip);
+                final List<ZipEntry> entries = listEntries(zip, limits.maxArchiveEntries());
                 final long budget = extractionBudget(entries, limits.maxExtractedBytes());
                 final byte[] transferBuffer = new byte[8192];
                 long extractedBytes = 0L;
@@ -399,61 +551,94 @@ final class BackupArchive {
         validateExtractedArchive(root, requireBackupMetadata);
     }
 
-    static byte[] readManifest(final Path archive, final long maxDeclaredBytes) throws NodeLibraryException {
-        if (maxDeclaredBytes <= 0L) throw new IllegalArgumentException("maxDeclaredBytes must be positive");
+        /// Reads the manifest from an archive without extracting the payload.
+    ///
+    /// The manifest is bounded by [BackupArchive#MAX_MANIFEST_BYTES], the
+    /// entry walk by `maxArchiveEntries`, and the total declared archive size
+    /// by `maxTotalDeclaredBytes`, so an oversized or bomb archive is rejected
+    /// before any manifest byte is inflated. The parameter covers the total
+    /// declared archive size, not the manifest size.
+    ///
+    /// @param archive                archive to read
+    /// @param maxTotalDeclaredBytes  total declared archive size ceiling
+    /// @param maxArchiveEntries      entry-count ceiling
+    /// @return manifest bytes
+    /// @throws NodeLibraryException if the manifest cannot be read
+    static byte[] readManifest(
+            final Path archive,
+            final long maxTotalDeclaredBytes,
+            final int maxArchiveEntries
+    ) throws NodeLibraryException {
+        if (maxTotalDeclaredBytes <= 0L) {
+            throw new IllegalArgumentException("maxTotalDeclaredBytes must be positive");
+        }
+        if (maxArchiveEntries <= 0) {
+            throw new IllegalArgumentException("maxArchiveEntries must be positive");
+        }
         try (ZipFile zip = openArchive(archive)) {
-            final List<ZipEntry> entries = listEntries(zip);
+            final List<ZipEntry> entries = listEntries(zip, maxArchiveEntries);
             /* A bomb that honestly declares petabytes dies here without
              * inflating a single byte. */
-            if (declaredTotalBytes(entries) > maxDeclaredBytes) {
+            if (declaredTotalBytes(entries) > maxTotalDeclaredBytes) {
                 throw new NodeLibraryException("Backup archive is too large");
             }
             ZipEntry manifest = null;
             for (final ZipEntry entry : entries) {
                 if (StorageBackupBackend.MANIFEST_ENTRY.equals(entry.getName())) {
                     if (entry.isDirectory()) {
-                        throw new NodeLibraryException("Backup manifest is missing or too large");
+                        throw new IncompleteArchiveException("Backup manifest is missing in %s".formatted(archive));
                     }
                     manifest = entry;
                     break;
                 }
             }
-            if (manifest == null) throw new NodeLibraryException("Backup archive is missing manifest");
-            final long declared = manifest.getSize();
-            final byte[] transferBuffer = new byte[8192];
-            final int initialCapacity = (int) Math.clamp(declared, 0L, MAX_MANIFEST_BYTES);
-            final ByteArrayOutputStream output = new ByteArrayOutputStream(initialCapacity);
-            try (InputStream data = zip.getInputStream(manifest)) {
-                try {
-                    transferBounded(data, output, 0L, MAX_MANIFEST_BYTES, transferBuffer);
-                } catch (final IOException truncated) {
-                    /* transferBounded fails on oversize input and on corrupt
-                     * streams alike. Only a full buffer means oversize;
-                     * anything else is a corrupt archive. */
-                    if (output.size() >= MAX_MANIFEST_BYTES) {
-                        throw new NodeLibraryException("Backup manifest is missing or too large", truncated);
-                    }
-                    throw truncated;
-                }
+            if (manifest == null) {
+                throw new IncompleteArchiveException("Backup archive is missing manifest in %s".formatted(archive));
             }
-            if (output.size() > MAX_MANIFEST_BYTES) {
-                throw new NodeLibraryException("Backup manifest is missing or too large");
-            }
-            if (declared >= 0L && output.size() > declared) {
-                throw new NodeLibraryException("Backup manifest exceeds its declared size");
-            }
-            return output.toByteArray();
+            return readBoundedManifest(zip, manifest, archive);
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to read backup manifest from %s".formatted(archive), failure);
         }
     }
 
+    private static byte[] readBoundedManifest(final ZipFile zip, final ZipEntry manifest, final Path archive)
+            throws NodeLibraryException {
+        if (manifest.getSize() > MAX_MANIFEST_BYTES) {
+            throw new NodeLibraryException("Backup manifest is too large in %s".formatted(archive));
+        }
+        final long declared = manifest.getSize();
+        final byte[] transferBuffer = new byte[8192];
+        final int initialCapacity = (int) Math.clamp(declared, 0L, MAX_MANIFEST_BYTES);
+        final ByteArrayOutputStream output = new ByteArrayOutputStream(initialCapacity);
+        try (InputStream data = zip.getInputStream(manifest)) {
+            transferBounded(data, output, 0L, MAX_MANIFEST_BYTES, transferBuffer);
+        } catch (final IOException truncated) {
+            /* transferBounded fails on oversize input and on corrupt streams
+             * alike. Only a full buffer means oversize; anything else is a
+             * truncated or corrupt archive. */
+            if (output.size() >= MAX_MANIFEST_BYTES) {
+                throw new NodeLibraryException("Backup manifest is too large in %s".formatted(archive), truncated);
+            }
+            throw incomplete("Backup manifest is truncated or corrupt in %s".formatted(archive), truncated);
+        }
+        if (declared >= 0L && output.size() > declared) {
+            throw new NodeLibraryException("Backup manifest exceeds its declared size in %s".formatted(archive));
+        }
+        return output.toByteArray();
+    }
+
     /// Reports whether the archive carries the storage payload, not just a manifest.
     ///
     /// A truncated archive with an intact manifest is not a complete backup.
-    static boolean containsStoragePayload(final Path archive) throws NodeLibraryException {
+    ///
+    /// @param archive           archive to inspect
+    /// @param maxArchiveEntries entry-count ceiling
+    /// @return `true` when a storage entry is present
+    /// @throws NodeLibraryException if the archive cannot be inspected
+    static boolean containsStoragePayload(final Path archive, final int maxArchiveEntries)
+            throws NodeLibraryException {
         try (ZipFile zip = openArchive(archive)) {
-            for (final ZipEntry entry : listEntries(zip)) {
+            for (final ZipEntry entry : listEntries(zip, maxArchiveEntries)) {
                 final String name = entry.getName();
                 if (StorageBackupBackend.STORAGE_ENTRY.equals(name) ||
                     name.startsWith(StorageBackupBackend.STORAGE_ENTRY + "/")) {
@@ -470,21 +655,36 @@ final class BackupArchive {
         try {
             StorageFileOperations.ensureNoSymbolicLinks(archive);
             return new ZipFile(archive.toFile());
+        } catch (final ZipException corrupt) {
+            throw incomplete("Backup archive is corrupt: %s".formatted(archive), corrupt);
+        } catch (final FileNotFoundException missing) {
+            /* ZipFile reports both a missing file and an unreadable one as
+             * FileNotFoundException. Only a path that is actually gone is
+             * conclusive evidence of an incomplete archive; a permission or
+             * transient open failure must fail closed. */
+            if (Files.notExists(archive)) {
+                throw incomplete("Backup archive is missing: %s".formatted(archive), missing);
+            }
+            throw new NodeLibraryException("Failed to open backup archive %s".formatted(archive), missing);
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to open backup archive %s".formatted(archive), failure);
         }
+    }
+
+    private static IncompleteArchiveException incomplete(final String message, final Throwable cause) {
+        return new IncompleteArchiveException(message, cause);
     }
 
     /// Lists central-directory entries after count, duplicate, and name checks.
     ///
     /// Reading the central directory inflates nothing, so hostile declared
     /// sizes are visible before any entry data is decompressed.
-    private static List<ZipEntry> listEntries(final ZipFile zip) throws NodeLibraryException {
+    private static List<ZipEntry> listEntries(final ZipFile zip, final int maxEntries) throws NodeLibraryException {
         final List<ZipEntry> entries = new ArrayList<>();
         final Set<String> names = new HashSet<>();
         for (final var iterator = zip.entries().asIterator(); iterator.hasNext(); ) {
             final ZipEntry entry = iterator.next();
-            if (entries.size() >= MAX_ARCHIVE_ENTRIES || !names.add(entry.getName())) {
+            if (entries.size() >= maxEntries || !names.add(entry.getName())) {
                 throw new NodeLibraryException("Backup archive contains too many or duplicate entries");
             }
             if (!safeArchiveName(entry.getName())) {
@@ -531,20 +731,18 @@ final class BackupArchive {
         if (!target.startsWith(root)) {
             throw new NodeLibraryException("Backup archive entry escapes extraction root");
         }
-        ensureNoSymlinkParent(root, target.getParent());
-        StorageFileOperations.ensureNoSymbolicLinks(target);
         if (entry.isDirectory()) {
             Files.createDirectories(target);
-            StorageFileOperations.ensureNoSymbolicLinks(target);
             return extractedBytes;
         }
         final Path parent = target.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
-            StorageFileOperations.ensureNoSymbolicLinks(parent);
         }
         /* A lying entry must not out-produce its declared size; unknown
-         * sizes fall back to the remaining overall budget. */
+         * sizes fall back to the remaining overall budget. The fresh private
+         * root and `NOFOLLOW_LINKS` create keep the entry from following a
+         * link, without re-walking every path component for each entry. */
         final long declared = entry.getSize();
         final long entryBudget = declared >= 0L ? declared : budget - extractedBytes;
         try (OutputStream output = Files.newOutputStream(target,
@@ -600,7 +798,7 @@ final class BackupArchive {
                                            !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("Backup source contains an unsupported entry: %s".formatted(path));
         }
-        final String name = workingDir.relativize(path).toString().replace(java.io.File.separatorChar, '/');
+        final String name = workingDir.relativize(path).toString().replace(File.separatorChar, '/');
         if (name.isEmpty()) return;
         final ZipEntry entry;
         if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
@@ -619,13 +817,6 @@ final class BackupArchive {
             }
         }
         zip.closeEntry();
-    }
-
-    private static void ensureNoSymlinkParent(final Path root, final Path parent) throws IOException {
-        for (Path current = parent; current != null && current.startsWith(root) && !current.equals(root);
-             current = current.getParent()) {
-            if (Files.isSymbolicLink(current)) throw new IOException("Archive path has a symbolic-link parent");
-        }
     }
 
     private static void validateExtractedArchive(final Path root, final boolean requireBackupMetadata)
@@ -649,6 +840,29 @@ final class BackupArchive {
             }
         } catch (final IOException failure) {
             throw new NodeLibraryException("Failed to validate extracted backup archive", failure);
+        }
+    }
+
+        /// Signals that an archive is conclusively incomplete or corrupt.
+    ///
+    /// Only truncation, a corrupt ZIP structure, or a missing manifest may be
+    /// reported through this type. Callers may replace such a file, while a
+    /// plain [NodeLibraryException] from a transient read error must fail
+    /// closed and leave any durable archive untouched.
+    static final class IncompleteArchiveException extends NodeLibraryException {
+                /// Creates an incomplete-archive failure.
+        ///
+        /// @param message failure message
+        IncompleteArchiveException(final String message) {
+            super(message);
+        }
+
+                /// Creates an incomplete-archive failure with a cause.
+        ///
+        /// @param message failure message
+        /// @param cause   evidence of truncation or corruption
+        IncompleteArchiveException(final String message, final Throwable cause) {
+            super(message, cause);
         }
     }
 }

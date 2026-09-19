@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -92,10 +93,7 @@ class StorageBinaryDataMergerTest {
         /// A disposed merger refuses both data and dictionary updates.
     @Test
     void disposedMergerRejectsDataAndDictionary() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                .foundation(foundation()).storage(connection())
-                .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(60_000L).build());
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
 
         merger.dispose();
 
@@ -122,14 +120,14 @@ class StorageBinaryDataMergerTest {
                 Thread.currentThread().interrupt();
             }
         };
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                .foundation(foundation()).storage(tolerantConnection()).objectGraphUpdateHandler(blockingHandler)
-                .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(50L).build());
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), blockingHandler, 0L, 1L, 50L));
         try {
             assertThrows(IllegalStateException.class, () -> merger.receiveData(binary(2)),
                     "a materialization timeout must fail the delivery call");
             assertTrue(handlerEntered.await(10, TimeUnit.SECONDS), "the worker never entered the handler");
             assertNotNull(merger.failure(), "the timeout must latch a terminal merger failure");
+            assertInstanceOf(StorageBinaryDataLifecycleException.class, merger.failure(),
+                    "a wait timeout is a lifecycle failure, not corrupt assembled data");
             assertTrue(merger.failure().getMessage().contains("Timed out"),
                     "a timeout must say timed out: " + merger.failure().getMessage());
             assertFalse(merger.failure().getMessage().contains("or failed"),
@@ -151,9 +149,7 @@ class StorageBinaryDataMergerTest {
         {
             throw boom;
         };
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                .foundation(foundation()).storage(tolerantConnection()).objectGraphUpdateHandler(failingHandler)
-                .cachingTimeoutMs(0L).cachedBinaryLimit(1_000_000L).applyTimeoutMs(60_000L).build());
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), failingHandler, 0L, 1_000_000L, 60_000L));
         try {
             merger.receiveDataOwned(binary(1));
             final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
@@ -191,9 +187,7 @@ class StorageBinaryDataMergerTest {
                 Thread.currentThread().interrupt();
             }
         };
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                .foundation(foundation()).storage(tolerantConnection()).objectGraphUpdateHandler(slowHandler)
-                .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(200L).build());
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), slowHandler, 0L, 1L, 200L));
         try {
             final Thread delivering = Thread.ofVirtual().start(() ->
             {
@@ -225,10 +219,7 @@ class StorageBinaryDataMergerTest {
     @Test
     void disposeRacingAcceptFailsCleanly() throws Exception {
         for (int iteration = 0; iteration < 8; iteration++) {
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(foundation()).storage(connection())
-                    .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                    .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(60_000L).build());
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
             final AtomicReference<Throwable> unexpected = new AtomicReference<>();
             final CountDownLatch start = new CountDownLatch(1);
             final Thread disposing = Thread.ofVirtual().start(() ->
@@ -260,10 +251,7 @@ class StorageBinaryDataMergerTest {
         /// exactly once and reports the refusal.
     @Test
     void receiveDataOwnedOnDisposedMergerFailsCleanly() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                .foundation(foundation()).storage(connection())
-                .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(60_000L).build());
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
 
         merger.dispose();
 
@@ -305,10 +293,11 @@ class StorageBinaryDataMergerTest {
                                 return defaultValue(method.getReturnType());
                         }
                     });
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(foundationWithDictionaryLoader()).storage(connection)
-                    .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                    .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(60_000L).build());
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), connection, updater ->
+            {
+                /* The synthetic batch carries no valid entity header; this case
+                 * observes the import/dictionary exclusion, not materialization. */
+            }, 0L, 1L, 60_000L));
             final AtomicReference<Throwable> dictionaryFailure = new AtomicReference<>();
             final AtomicReference<Throwable> dataFailure = new AtomicReference<>();
             final Thread dictionary = Thread.ofVirtual().start(() ->
@@ -380,10 +369,7 @@ class StorageBinaryDataMergerTest {
             coordinator.write(updater);
         };
         try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(foundationWithDictionaryLoader()).storage(reader.createConnection())
-                    .objectGraphUpdateHandler(recording).cachingTimeoutMs(0L).cachedBinaryLimit(1L)
-                    .applyTimeoutMs(60_000L).graphCoordinator(coordinator).build());
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), reader.createConnection(), recording, 0L, 1L, 60_000L, coordinator));
             try {
                 merger.receiveTypeDictionary(dictionary);
                 assertTrue(handlerUsed.get(),
@@ -415,10 +401,7 @@ class StorageBinaryDataMergerTest {
             coordinator.write(updater);
         };
         try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(foundationWithDictionaryLoader()).storage(reader.createConnection())
-                    .objectGraphUpdateHandler(recording).cachingTimeoutMs(0L).cachedBinaryLimit(1L)
-                    .applyTimeoutMs(60_000L).graphCoordinator(coordinator).build());
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), reader.createConnection(), recording, 0L, 1L, 60_000L, coordinator));
             try {
                 final CountDownLatch readHeld = new CountDownLatch(1);
                 final CountDownLatch releaseRead = new CountDownLatch(1);
@@ -467,6 +450,32 @@ class StorageBinaryDataMergerTest {
 
     public static final class Root {
         public Object extra;
+    }
+
+        /// A stream of multi-buffer commits coalesces by queued payload bytes
+    /// instead of by buffer count: three hundred small channel buffers must
+    /// not force one synchronous materialization per commit.
+    @Test
+    void multiBufferCommitsCoalesceByBytesNotBufferCount() throws Exception {
+        final AtomicInteger handlerCalls = new AtomicInteger();
+        final ObjectGraphUpdateHandler counting = updater -> handlerCalls.incrementAndGet();
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+                StorageBinaryDataMergerTestSupport.configuration(
+                        foundation(), connection(), counting, 60_000L, 64L << 20, 60_000L));
+        try {
+            for (int commit = 0; commit < 100; commit++) {
+                merger.receiveDataOwned(binary(3));
+            }
+            merger.awaitApplied();
+
+            assertNull(merger.failure(), "coalesced delivery must not fail the merger");
+            assertTrue(handlerCalls.get() >= 1, "the queued data must still be materialized");
+            assertTrue(handlerCalls.get() <= 2,
+                    "a multi-buffer commit stream must coalesce into one batch; saw "
+                            + handlerCalls.get() + " materializations");
+        } finally {
+            merger.dispose();
+        }
     }
 
         /// A bare foundation lacks the dictionary loader and storer that its

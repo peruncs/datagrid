@@ -6,9 +6,9 @@ import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.node.backup.BackupMetadata;
 import peruncs.datagrid.cluster.node.backup.FilesystemVolumeBackupBackend;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;

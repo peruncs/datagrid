@@ -13,23 +13,26 @@ Review @README.md and its module-info.java record for the general outline of the
 8. Single-use methods that could be inlined. Java entities with 1-2 static methods that should be folded into stronger entities.
 9. Proper use of AutoClosable with try/catch resources managemnt in Java. Exceptiong handlig in genral, sallowed exceptions.
 10. Minimal Java entinties and methods visibility surface (do not use "public" without reason)
-11. Proper package structure with package-info.java javadocs - do not throw everything in one big package.
-12. Avoid Java reflection unless absolutely necessary.
-13. Any security gaps.
-14. Any performance issues.
-15. Any threading, races, deadlocks, TOCTOU and data corruption issues.
-16. Robustness in face of network issues, configurable retrys.
-17. Proper exception design, handling, propagation and reporting.
-18. Correct and informative javadocs, including javadocs for packages (package-info.java) and modules (module-info.java)
-19. Addd ample junit test and simulation coverage, especially since clustering is inolved.
-20. Have we looked at the Aeron examples and cookbook for best practices? Does the implementation follow them?
-21. Use of Agrona and Eclipse Serializer and Eclipse Store utils (LockedExecutor, StripeLockedExecutor) as much as possible ?
-22. Eclipse Datagrid constraints are strictly obeyed: 1-writer/N-reader nodes.
-23. Memory inefficiencies when packing data in Aeron CBE and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want
-    to avoid allocating objects (even temporary) on the JVM heap.
-24. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
-25. Javadocs at all levels - module, package and individual Java entities. Use simple narrative suitable for humans, less jargon, first sentence is the most important. 
-26. Avoid using fully qualified names 9FQN) where sesnible imports can make the code more compact and better to read.
+11. Proper package structure with package-info.java javadocs - do not throw everything in one big "god" package.
+12. Beware of Java "god" obects/interafaces/records. When possible, break them into smaller focused entities, that are easier to junit test and reason about.
+13. Avoid Java reflection unless absolutely necessary.
+14. Javadocs at all levels - module, package and individual Java entities. Use simple narrative suitable for humans, less jargon, first sentence is the most important.
+15. Avoid using fully qualified names 9FQN) where sesnible imports can make the code more compact and better to read.
+16. Avoid methods with more than 5 arguments - consider replacing them Java record inputs. But avoid for of GC pressure and memory unefficiencies, if teh code is on the hot path!
+17. Conside Builder pattern for records and classes with complex structure and constructors,  and many fields, to make the code less error prone and more readable.
+18. An interface with staic methods only should be converted to a final class with private construtor and static methods.
+19. Any security gaps.
+20. Any performance issues.
+21. Any threading, races, deadlocks, TOCTOU and data corruption issues.
+22. Robustness in face of network issues, configurable retrys.
+23. Proper exception design, handling, propagation and reporting.
+24. Correct and informative javadocs, including javadocs for packages (package-info.java) and modules (module-info.java)
+25. Add ample well-documented junit test and simulation coverage.
+26. Have we looked at the Aeron examples and cookbook for best practices? Does the implementation follow them?
+27. Use of Agrona and Eclipse Serializer and Eclipse Store utils (LockedExecutor, StripeLockedExecutor) as much as possible ?
+28. Eclipse Datagrid constraints are strictly obeyed: 1-writer/N-reader nodes.
+29. Memory inefficiencies when packing data in Aeron CBE and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want to avoid allocating objects (even temporary) on the JVM heap.
+30. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
 
 
 ### If asked for review only

@@ -7,9 +7,11 @@ import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundati
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDescription;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryProvider;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
 
+import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.*;
@@ -18,7 +20,6 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
-import static java.lang.System.Logger.Level.WARNING;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Applies committed Store binary data on a reader node.
@@ -27,6 +28,17 @@ import static org.eclipse.serializer.util.X.notNull;
 /// coalesced for object-graph updates on a bounded single-thread executor.
 /// Providers must call this merger only after their transport-specific commit
 /// validation has completed.
+///
+/// # Delivery threading
+///
+/// Data admission ([#receiveData(Binary)], [#receiveDataOwned(Binary)]) and
+/// materialization scheduling assume a single delivery thread per merger: the
+/// transport delivers committed transactions in order, and the merger's
+/// queue/import hand-off relies on that ordering. Concurrent data admissions
+/// are not part of the contract. Type-dictionary delivery may share the same
+/// delivery thread.
+///
+/// # Locking
 ///
 /// The implementation holds two locks with one explicit order: queue draining
 /// runs inside the materialization {@code LockedExecutor} and then takes
@@ -42,133 +54,83 @@ import static org.eclipse.serializer.util.X.notNull;
 public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disposable {
         /// Immutable configuration for one bounded binary merger.
     ///
+    /// Every limit lives here so operators can tune coalescing, disposal
+    /// grace, and index-validation bounds without code changes; the constants
+    /// on [Default] hold the safe defaults.
+    ///
     /// The coordinator is optional. When present, post-materialization graph
     /// scans join its read/write boundary; when absent, the merger preserves
     /// the direct-scan behavior used by standalone storage clients.
     ///
-    /// @param foundation               persistence foundation
-    /// @param storage                  Store connection
-    /// @param objectGraphUpdateHandler graph update handler
-    /// @param cachingTimeoutMs         maximum wait for a cached batch
-    /// @param cachedBinaryLimit        maximum cached binary count
-    /// @param applyTimeoutMs           maximum wait for one materialization batch
-    /// @param graphCoordinator         per-Store graph coordinator, or `null`
+    /// @param foundation                persistence foundation
+    /// @param storage                   Store connection
+    /// @param objectGraphUpdateHandler  graph update handler
+    /// @param cachingTimeoutMs          maximum wait for a cached batch
+    /// @param cachedBytesLimit          queued payload bytes that trigger a backpressure wait
+    /// @param maxCachedBytes            hard cap on queued payload bytes
+    /// @param applyTimeoutMs            maximum wait for one materialization batch
+    /// @param disposeOrderlyTimeoutMs   orderly worker termination window during disposal
+    /// @param disposeInterruptTimeoutMs interrupt-based worker termination window during disposal
+    /// @param maxValidatedIndexObjects  bound on index-relevant objects visited by one root scan
+    /// @param graphCoordinator          per-Store graph coordinator, or `null`
     record Configuration(
             BinaryPersistenceFoundation<?> foundation,
             StorageConnection storage,
             ObjectGraphUpdateHandler objectGraphUpdateHandler,
             long cachingTimeoutMs,
-            long cachedBinaryLimit,
+            long cachedBytesLimit,
+            long maxCachedBytes,
             long applyTimeoutMs,
+            long disposeOrderlyTimeoutMs,
+            long disposeInterruptTimeoutMs,
+            int maxValidatedIndexObjects,
             StorageGraphCoordinator graphCoordinator
     ) {
-        /// Validates the merger collaborators and timing limits.
+        /// Validates the merger collaborators and limits.
         public Configuration {
             Objects.requireNonNull(foundation, "foundation");
             Objects.requireNonNull(storage, "storage");
             Objects.requireNonNull(objectGraphUpdateHandler, "objectGraphUpdateHandler");
             if (cachingTimeoutMs < 0L) throw new IllegalArgumentException("cachingTimeoutMs must not be negative");
-            if (cachedBinaryLimit <= 0L) throw new IllegalArgumentException("cachedBinaryLimit must be positive");
+            if (cachedBytesLimit <= 0L) throw new IllegalArgumentException("cachedBytesLimit must be positive");
+            if (maxCachedBytes <= 0L) throw new IllegalArgumentException("maxCachedBytes must be positive");
             if (applyTimeoutMs <= 0L) throw new IllegalArgumentException("applyTimeoutMs must be positive");
+            if (disposeOrderlyTimeoutMs <= 0L) {
+                throw new IllegalArgumentException("disposeOrderlyTimeoutMs must be positive");
+            }
+            if (disposeInterruptTimeoutMs <= 0L) {
+                throw new IllegalArgumentException("disposeInterruptTimeoutMs must be positive");
+            }
+            if (maxValidatedIndexObjects <= 0) {
+                throw new IllegalArgumentException("maxValidatedIndexObjects must be positive");
+            }
         }
 
-        /// Starts a builder for a merger configuration.
+        /// Creates a configuration with every documented default.
         ///
-        /// @return configuration builder initialized with safe timing defaults
-        public static Builder builder() {
-            return new Builder()
-                    .cachingTimeoutMs(Defaults.CACHING_TIMEOUT_MS)
-                    .cachedBinaryLimit(Defaults.CACHING_LIMIT)
-                    .applyTimeoutMs(Defaults.APPLY_TIMEOUT_MS);
-        }
-
-        /// Builds a merger configuration without a positional parameter list.
-        public static final class Builder {
-            private BinaryPersistenceFoundation<?> foundation;
-            private StorageConnection storage;
-            private ObjectGraphUpdateHandler objectGraphUpdateHandler;
-            private long cachingTimeoutMs;
-            private long cachedBinaryLimit;
-            private long applyTimeoutMs;
-            private StorageGraphCoordinator graphCoordinator;
-
-            /// Creates a merger configuration builder with safe timing defaults.
-            public Builder() {
-                this.cachingTimeoutMs = Defaults.CACHING_TIMEOUT_MS;
-                this.cachedBinaryLimit = Defaults.CACHING_LIMIT;
-                this.applyTimeoutMs = Defaults.APPLY_TIMEOUT_MS;
-            }
-
-            /// Sets the persistence foundation.
-            ///
-            /// @param value persistence foundation
-            /// @return this builder
-            public Builder foundation(final BinaryPersistenceFoundation<?> value) {
-                this.foundation = value;
-                return this;
-            }
-
-            /// Sets the Store connection.
-            ///
-            /// @param value Store connection
-            /// @return this builder
-            public Builder storage(final StorageConnection value) {
-                this.storage = value;
-                return this;
-            }
-
-            /// Sets the graph update handler.
-            ///
-            /// @param value graph update handler
-            /// @return this builder
-            public Builder objectGraphUpdateHandler(final ObjectGraphUpdateHandler value) {
-                this.objectGraphUpdateHandler = value;
-                return this;
-            }
-
-            /// Sets the maximum cache wait in milliseconds.
-            ///
-            /// @param value maximum cache wait in milliseconds
-            /// @return this builder
-            public Builder cachingTimeoutMs(final long value) {
-                this.cachingTimeoutMs = value;
-                return this;
-            }
-
-            /// Sets the maximum cached binary count.
-            ///
-            /// @param value maximum cached binary count
-            /// @return this builder
-            public Builder cachedBinaryLimit(final long value) {
-                this.cachedBinaryLimit = value;
-                return this;
-            }
-
-            /// Sets the maximum materialization wait in milliseconds.
-            ///
-            /// @param value maximum materialization wait in milliseconds
-            /// @return this builder
-            public Builder applyTimeoutMs(final long value) {
-                this.applyTimeoutMs = value;
-                return this;
-            }
-
-            /// Sets the optional Store graph coordinator.
-            ///
-            /// @param value optional Store graph coordinator
-            /// @return this builder
-            public Builder graphCoordinator(final StorageGraphCoordinator value) {
-                this.graphCoordinator = value;
-                return this;
-            }
-
-            /// Builds the immutable merger configuration.
-            ///
-            /// @return immutable merger configuration
-            public Configuration build() {
-                return new Configuration(foundation, storage, objectGraphUpdateHandler,
-                        cachingTimeoutMs, cachedBinaryLimit, applyTimeoutMs, graphCoordinator);
-            }
+        /// @param foundation               persistence foundation
+        /// @param storage                  Store connection
+        /// @param objectGraphUpdateHandler graph update handler
+        /// @param graphCoordinator         per-Store graph coordinator, or `null`
+        /// @return configuration using the default limits
+        public static Configuration New(
+                final BinaryPersistenceFoundation<?> foundation,
+                final StorageConnection storage,
+                final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+                final StorageGraphCoordinator graphCoordinator) {
+            return new Configuration(
+                    foundation,
+                    storage,
+                    objectGraphUpdateHandler,
+                    Default.CACHING_TIMEOUT_MS,
+                    Default.CACHING_BYTES_LIMIT,
+                    Default.MAX_CACHED_BYTES,
+                    Default.APPLY_TIMEOUT_MS,
+                    Default.DISPOSE_ORDERLY_TIMEOUT_MS,
+                    Default.DISPOSE_INTERRUPT_TIMEOUT_MS,
+                    Default.MAX_VALIDATED_INDEX_OBJECTS,
+                    graphCoordinator
+            );
         }
     }
 
@@ -177,16 +139,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
     /// @param configuration immutable merger configuration
     /// @return binary merger
     static StorageBinaryDataMerger New(final Configuration configuration) {
-        final Configuration settings = notNull(configuration);
-        return new Default(
-                notNull(settings.foundation()),
-                notNull(settings.storage()),
-                notNull(settings.objectGraphUpdateHandler()),
-                settings.cachingTimeoutMs(),
-                settings.cachedBinaryLimit(),
-                settings.applyTimeoutMs(),
-                settings.graphCoordinator()
-        );
+        return new Default(notNull(configuration));
     }
 
         /// Returns the graph coordinator this merger joins for its own Store reads.
@@ -216,20 +169,23 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         return null;
     }
 
-        /// Supplies conservative defaults for deferred object-graph application.
-    interface Defaults {
-                /// Default cache timeout in milliseconds.
-        long CACHING_TIMEOUT_MS = 10_000L;
-                /// Default cached binary count.
-        long CACHING_LIMIT = 50L;
-                /// Default maximum wait for one materialization batch, in milliseconds.
-        long APPLY_TIMEOUT_MS = 60_000L;
-    }
-
         /// Applies imported data on one bounded worker and reports failures.
     class Default implements StorageBinaryDataMerger {
         private static final System.Logger LOGGER = System.getLogger(StorageBinaryDataMerger.class.getName());
-        private static final long MAX_CACHED_BYTES = 1L << 30;
+        /// Default cache timeout in milliseconds.
+        static final long CACHING_TIMEOUT_MS = 10_000L;
+        /// Default queued payload bytes that trigger a backpressure wait.
+        static final long CACHING_BYTES_LIMIT = 64L << 20;
+        /// Default hard cap on queued payload bytes.
+        static final long MAX_CACHED_BYTES = 1L << 30;
+        /// Default maximum wait for one materialization batch, in milliseconds.
+        static final long APPLY_TIMEOUT_MS = 60_000L;
+        /// Default orderly worker termination window during disposal, in milliseconds.
+        static final long DISPOSE_ORDERLY_TIMEOUT_MS = 30_000L;
+        /// Default interrupt-based worker termination window during disposal, in milliseconds.
+        static final long DISPOSE_INTERRUPT_TIMEOUT_MS = 5_000L;
+        /// Default bound on index-relevant objects visited by one root scan.
+        static final int MAX_VALIDATED_INDEX_OBJECTS = 4096;
         /* One slow batch must not brick the reader: a GC pause or a slow disk
          * can exceed the apply timeout while the worker is still progressing.
          * The bounded wait is retried this many times before latching a
@@ -255,8 +211,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
         private final StorageGraphCoordinator graphCoordinator;
         private final long cachingTimeoutMs;
-        private final long cacheLimit;
+        private final long cacheBytesLimit;
+        private final long maxCachedBytes;
         private final long applyTimeoutMs;
+        private final long disposeOrderlyTimeoutMs;
+        private final long disposeInterruptTimeoutMs;
+        private final int maxValidatedIndexObjects;
         /* The worker's own structured-scope deadline covers the caller's whole
          * retry budget, so a slow-but-progressing batch is absorbed by the
          * caller's retries instead of being declared terminal by the worker on
@@ -277,28 +237,46 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
          * the batch; slots past it are always `null`. Grows to the largest
          * batch seen and stays there. */
         private ByteBuffer[] drainBuffers = new ByteBuffer[16];
+        /* Set inside the batch after validation, before the vector rebuild:
+         * the overrun budget bounds materialization, whose cost is
+         * batch-proportional, not the rebuild, which scans the whole store and
+         * grows with data size. Only touched under the materialization lock,
+         * so a plain long needs no atomics. */
+        private long materializedAtNanos;
+        /* One parsing foundation serves every dictionary message: rebuilding a
+         * BinaryPersistenceFoundation per message re-created its handler graph
+         * inside the materialization lock. A non-caching provider reads the
+         * current snapshot through this holder, so consecutive dictionaries
+         * never share parsed state. */
+        private final BinaryPersistenceFoundation<?> dictionaryFoundation;
+        private final Object dictionaryParseLock = new Object();
+        private String dictionarySource;
 
-        private Default(
-                final BinaryPersistenceFoundation<?> foundation,
-                final StorageConnection storage,
-                final ObjectGraphUpdateHandler objectGraphUpdateHandler,
-                final long cachingTimeoutMs,
-                final long cacheLimit,
-                final long applyTimeoutMs,
-                final StorageGraphCoordinator graphCoordinator
-        ) {
-            this.foundation = foundation;
-            this.storage = storage;
-            this.objectGraphUpdateHandler = objectGraphUpdateHandler;
-            this.graphCoordinator = graphCoordinator;
-            this.cachingTimeoutMs = cachingTimeoutMs;
-            this.cacheLimit = cacheLimit;
-            this.applyTimeoutMs = applyTimeoutMs;
+        private Default(final Configuration configuration) {
+            this.foundation = configuration.foundation();
+            this.storage = configuration.storage();
+            this.objectGraphUpdateHandler = configuration.objectGraphUpdateHandler();
+            this.graphCoordinator = configuration.graphCoordinator();
+            this.cachingTimeoutMs = configuration.cachingTimeoutMs();
+            this.cacheBytesLimit = configuration.cachedBytesLimit();
+            this.maxCachedBytes = configuration.maxCachedBytes();
+            this.applyTimeoutMs = configuration.applyTimeoutMs();
+            this.disposeOrderlyTimeoutMs = configuration.disposeOrderlyTimeoutMs();
+            this.disposeInterruptTimeoutMs = configuration.disposeInterruptTimeoutMs();
+            this.maxValidatedIndexObjects = configuration.maxValidatedIndexObjects();
             try {
                 this.materializationBudgetMs = Math.multiplyExact(applyTimeoutMs, APPLY_TIMEOUT_RETRIES + 1L);
             } catch (final ArithmeticException overflow) {
                 throw new IllegalArgumentException("applyTimeoutMs is too large: %s".formatted(applyTimeoutMs), overflow);
             }
+            final BinaryPersistenceFoundation<?> parsingFoundation = BinaryPersistence.Foundation()
+                    .setClassLoaderProvider(this.foundation.getClassLoaderProvider())
+                    .setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable());
+            parsingFoundation.setTypeDictionaryProvider(PersistenceTypeDictionaryProvider.New(
+                    () -> this.dictionarySource,
+                    parsingFoundation.getTypeDictionaryCompiler()
+            ));
+            this.dictionaryFoundation = parsingFoundation;
         }
 
                 /// Aeron transfers its assembled direct buffers before this callback starts.
@@ -309,6 +287,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             return true;
         }
 
+                /// Receives a borrowed binary. Must be called by the single
+        /// transport delivery thread; see the class javadoc.
+        ///
+        /// @param data complete binary to receive
         @Override
         public void receiveData(final Binary data) {
             if (this.failure.get() != null) {
@@ -318,9 +300,9 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 /* A disposed receiver must not acknowledge data. Returning normally
                  * would let the Aeron assembler advance its cursor even though the Store
                  * binary was discarded. */
-                throw new IllegalStateException("Storage binary merger is disposed");
+                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
             }
-            final ByteBuffer[] sourceBuffers = StorageBinaryDataChunker
+            final ByteBuffer[] sourceBuffers = StorageBinaryBuffers
                     .importArray(data);
             /* Serialize the Store import with deferred materialization: both
              * mutate the same persistence and type-handler state, and importing
@@ -336,21 +318,26 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
 
                 /// Imports Aeron-owned direct buffers without a second native allocation.
         ///
-        /// Every precondition and the buffer extraction itself run inside the
-        /// ownership cleanup block: once the assembler hands the binary over, a
-        /// validation throw must still release the native buffers instead of
-        /// leaking them. A `null` binary fails with [NullPointerException];
-        /// malformed buffers fail with [StorageBinaryDataException].
+        /// Must be called by the single transport delivery thread; see the
+        /// class javadoc. Every precondition and the buffer extraction itself
+        /// run inside the ownership cleanup block: once the assembler hands
+        /// the binary over, a validation throw must still release the native
+        /// buffers instead of leaking them. A `null` binary fails with
+        /// [NullPointerException]; malformed buffers fail with
+        /// [StorageBinaryDataException].
+        ///
+        /// @param data complete binary whose direct buffers may be transferred
+        /// @return always `true`; the receiver owns the buffers after return
         @Override
         public boolean receiveDataOwned(final Binary data) {
             ByteBuffer[] buffers = null;
             try {
-                buffers = StorageBinaryDataChunker.ownedArray(notNull(data));
+                buffers = StorageBinaryBuffers.ownedArray(notNull(data));
                 if (this.failure.get() != null) {
                     throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
                 }
                 if (this.disposed) {
-                    throw new IllegalStateException("Storage binary merger is disposed");
+                    throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
                 }
                 /* Same exclusion as the borrowed-copy path: the Store import must
                  * not interleave with a deferred materialization. */
@@ -368,7 +355,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * binary still exposes. */
                 try {
                     if (buffers != null) StorageBinaryDataImporter.release(buffers);
-                    else StorageBinaryDataChunker.releaseDirect(data);
+                    else StorageBinaryBuffers.releaseDirect(data);
                 } catch (final RuntimeException | Error cleanupFailure) {
                     if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
                 }
@@ -387,7 +374,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
             if (this.disposed) {
                 StorageBinaryDataImporter.release(ownedBuffers);
-                throw new IllegalStateException("Storage binary merger is disposed");
+                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
             }
 
             final long incomingBytes;
@@ -399,15 +386,17 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 StorageBinaryDataImporter.release(ownedBuffers);
                 throw new IllegalArgumentException("Storage binary length overflows accounting", overflow);
             }
-            if (incomingBytes > MAX_CACHED_BYTES) {
+            if (incomingBytes > this.maxCachedBytes) {
                 StorageBinaryDataImporter.release(ownedBuffers);
-                throw new IllegalArgumentException("Storage binary exceeds the 1 GiB materialization limit");
+                throw new IllegalArgumentException(
+                        "Storage binary of %s bytes exceeds the configured maxCachedBytes limit of %s bytes"
+                                .formatted(incomingBytes, this.maxCachedBytes));
             }
             final boolean drainFirst;
             this.queueLock.lock();
             try {
                 final long projected = Math.addExact(this.cachedBytes, incomingBytes);
-                drainFirst = this.cachedBytes > 0 && projected > MAX_CACHED_BYTES;
+                drainFirst = this.cachedBytes > 0 && projected > this.maxCachedBytes;
             } finally {
                 this.queueLock.unlock();
             }
@@ -423,7 +412,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
 
             boolean queued = false;
-            long bufferedCount;
+            long queuedBytes;
             try {
                 this.queueLock.lock();
                 try {
@@ -434,11 +423,13 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
                     }
                     if (this.disposed) {
-                        throw new IllegalStateException("Storage binary merger is disposed");
+                        throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
                     }
                     final long projectedBytes = Math.addExact(this.cachedBytes, incomingBytes);
-                    if (projectedBytes > MAX_CACHED_BYTES) {
-                        throw new IllegalStateException("Storage binary materialization cache is full");
+                    if (projectedBytes > this.maxCachedBytes) {
+                        throw new StorageBinaryDataLifecycleException(
+                                "Storage binary materialization cache is full: %s queued bytes with a %s byte limit"
+                                        .formatted(this.cachedBytes, this.maxCachedBytes));
                     }
                     /* Bulk add without a wrapper allocation: Collections.addAll
                      * passes the array straight through to per-element add. */
@@ -446,7 +437,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     this.cachedBufferCount += ownedBuffers.length;
                     this.cachedBytes = projectedBytes;
                     queued = true;
-                    bufferedCount = this.cachedBufferCount;
+                    queuedBytes = this.cachedBytes;
                     if (!this.workerScheduled) {
                         try {
                             this.workerScheduled = true;
@@ -466,7 +457,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                              * documented disposal refusal, not a raw executor
                              * rejection. */
                             if (failure instanceof RejectedExecutionException && this.disposed) {
-                                throw new IllegalStateException("Storage binary merger is disposed", failure);
+                                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed", failure);
                             }
                             throw failure;
                         }
@@ -475,23 +466,27 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     this.queueLock.unlock();
                 }
 
-                if (bufferedCount > this.cacheLimit) {
+                if (queuedBytes > this.cacheBytesLimit) {
                     try {
                         /* The worker is signalled before this wait when it is still in its
                          * coalescing delay. The wait is bounded and retried a small number
                          * of times: a hung materializer must fail the merger instead of
                          * hanging the delivery thread forever, while a merely slow one is
-                         * given the retry budget before the reader is failed. */
+                         * given the retry budget before the reader is failed. The metric is
+                         * payload bytes, not buffer count: a single multi-buffer
+                         * transaction must not bypass coalescing merely because it
+                         * carries many small channel buffers. */
                         this.awaitMaterialization(this.updateFuture, "import data task");
                     } catch (final InterruptedException e) {
                         Thread.currentThread().interrupt();
-                        throw new IllegalStateException("Interrupted while waiting for import data task", e);
+                        throw new StorageBinaryDataLifecycleException(
+                                "Interrupted while waiting for import data task", e);
                     } catch (final TimeoutException e) {
                         /* The batch is already queued, so the worker still owns it:
                          * release nothing here. Latch the terminal failure so no
                          * further batches are admitted; the worker drains or fails
                          * on its own while dispose() still joins it. */
-                        throw this.recordFailure("Timed out waiting for import data task", e);
+                        throw this.recordLifecycleFailure("Timed out waiting for import data task", e);
                     } catch (final ExecutionException e) {
                         final RuntimeException mergerFailure = this.failure.get();
                         if (mergerFailure != null) {
@@ -531,13 +526,15 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 }
             } catch (final Throwable t) {
                 if (this.disposed && Thread.currentThread().isInterrupted()) {
+                    LOGGER.log(Level.DEBUG,
+                            "Storage binary merger worker released pending data during disposal");
                     this.releaseCachedData();
                     return;
                 }
                 final RuntimeException normalized = t instanceof RuntimeException runtime
                         ? runtime : new IllegalStateException("Storage binary merger failed", t);
                 this.failure.compareAndSet(null, normalized);
-                LOGGER.log(System.Logger.Level.ERROR, "Storage binary merger failed", this.failure.get());
+                LOGGER.log(Level.ERROR, "Storage binary merger failed", this.failure.get());
                 this.releaseCachedData();
                 if (t instanceof Error error) throw error;
                 throw normalized;
@@ -605,11 +602,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * wait and reports the pinned buffers instead of freeing them
                  * underneath the Store. */
                 final long startedNanos = System.nanoTime();
-                /* Set inside the batch after validation, before the vector
-                 * rebuild: the overrun budget bounds materialization, whose
-                 * cost is batch-proportional, not the rebuild, which scans
-                 * the whole store and grows with data size. */
-                final long[] materializedAtNanos = new long[1];
+                this.materializedAtNanos = 0L;
                 try {
                     this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
                     {
@@ -632,30 +625,24 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                          * next query reopens over the current files. Runs
                          * only for non-empty batches: applyData returns early
                          * when idle. */
-                        ClusterStoreIndexes.refreshImportedIndexes(this.storage);
+                        ClusterStoreIndexes.refreshImportedIndexes(this.storage, this.maxValidatedIndexObjects);
                         StorageBinaryDataMaterializer.materialize(this.storage, this.drainBuffers, pending);
-                        /* Reader-side index enforcement: a writer that smuggled
-                         * an external Lucene directory or a non-persisted
-                         * vector index past registration fails this reader
-                         * closed instead of diverging it. The scan visits
-                         * index metadata only, never entity payload. */
-                        ClusterStoreIndexes.validateStorageRoots(this.storage);
-                        materializedAtNanos[0] = System.nanoTime();
-                        /* Rebuild the vector graphs now, inside this write
-                         * section: leaving the cleared guard for the next
-                         * query races a full store-scan rebuild against the
-                         * following batch's materialization, which wedges the
-                         * reader and reads torn entities. The overrun check
-                         * below measures only up to the end of validation,
-                         * so a large but healthy store's rebuild cannot trip
-                         * the materialization budget: any rebuild failure
-                         * still fails this merger through the catch outside. */
-                        try {
-                            ClusterStoreIndexes.rebuildVectorSearchGraphs(this.storage);
-                        } catch (final RuntimeException | Error rebuildFailure) {
-                            throw new IllegalStateException(
-                                    "Store graph vector-index rebuild failed", rebuildFailure);
-                        }
+                        /* Reader-side index enforcement plus the vector
+                         * rebuild share one root-graph traversal: a writer that
+                         * smuggled an external Lucene directory or a
+                         * non-persisted vector index past registration fails
+                         * this reader closed instead of diverging it, and any
+                         * vector graph cleared above is rebuilt eagerly in the
+                         * same section. The scan visits index metadata only,
+                         * never entity payload, and the rebuild is skipped
+                         * entirely when the store has no vector indices. The
+                         * eager rebuild keeps the deadlock-avoidance invariant
+                         * documented on the maintenance entry point: a lazy
+                         * rebuild on the next query would race the following
+                         * batch's bulk materialization. */
+                        ClusterStoreIndexes.validateAndRebuildImportedIndexes(
+                                this.storage, this.maxValidatedIndexObjects);
+                        this.materializedAtNanos = System.nanoTime();
                     });
                 } catch (final RuntimeException | Error failure) {
                     /* A genuine failure says failed; only an overrun says timed
@@ -672,13 +659,13 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * the whole store, so including it would fail a healthy
                  * large import. A batch that threw before stamping its
                  * boundary already failed through the catch above. */
-                final long materializedAt = materializedAtNanos[0] == 0L
+                final long materializedAt = this.materializedAtNanos == 0L
                         ? System.nanoTime()
-                        : materializedAtNanos[0];
+                        : this.materializedAtNanos;
                 final long elapsedMs =
                         TimeUnit.NANOSECONDS.toMillis(materializedAt - startedNanos);
                 if (elapsedMs > this.materializationBudgetMs) {
-                    final IllegalStateException terminal = new IllegalStateException(
+                    final StorageBinaryDataLifecycleException terminal = new StorageBinaryDataLifecycleException(
                             "Timed out while applying Store data: batch took %s ms with a budget of %s ms"
                                     .formatted(elapsedMs, this.materializationBudgetMs));
                     this.noteFailure(terminal.getMessage(), terminal);
@@ -725,7 +712,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     }
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    throw new IllegalStateException("Storage graph update worker was interrupted", interrupted);
+                    throw new StorageBinaryDataLifecycleException(
+                            "Storage graph update worker was interrupted", interrupted);
                 }
                 this.flushRequested = false;
             } finally {
@@ -763,6 +751,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         /// every imported type id. The first failure is recorded and rethrown
         /// on every later call; a failed merger never accepts more work.
         ///
+        /// The remote snapshot is parsed before the materialization lock on a
+        /// cached parsing foundation; only the local-conflict plan and the
+        /// handler registration run inside the lock.
+        ///
         /// @param typeDictionaryData writer's type dictionary snapshot
         @Override
         public void receiveTypeDictionary(final String typeDictionaryData) {
@@ -770,8 +762,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
             }
             if (this.disposed) {
-                throw new IllegalStateException("Storage binary merger is disposed");
+                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
             }
+            final ArrayList<PersistenceTypeDefinition> remoteTypes =
+                    this.parseRemoteTypeDefinitions(Objects.requireNonNull(typeDictionaryData, "typeDictionaryData"));
             /* Dictionary registration mutates the same type handlers the worker
              * reads while materializing. Funnel the merge through the shared
              * materialization mutual exclusion so a delivery-thread merge can
@@ -780,11 +774,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             this.materialization.write(() ->
             {
                 /* Read phase through the shared read side when a coordinator
-                 * is wired: parsing and conflict detection mutate nothing. The
+                 * is wired: conflict detection mutates nothing. The
                  * worker cannot interleave — it needs the materialization lock
                  * held here — so the plan stays valid until the write phase. */
                 final ArrayList<PersistenceTypeDefinition> pending =
-                        this.readJoined(() -> planDictionaryMerge(typeDictionaryData));
+                        this.readJoined(() -> planDictionaryMerge(remoteTypes));
                 if (pending.isEmpty()) return;
                 /* Mutation phase through the update handler like
                  * materialization: the materialization lock alone cannot
@@ -797,39 +791,61 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             });
         }
 
-                /// Parses the writer's dictionary snapshot and plans handler registrations.
+                /// Parses the writer's dictionary snapshot into remote definitions.
+        ///
+        /// Runs before the materialization lock on one cached parsing
+        /// foundation: only the delivery thread parses, and the dedicated
+        /// monitor guards the mutable snapshot holder if a transport ever
+        /// retries from another thread. Failures latch the terminal merger
+        /// failure.
+        ///
+        /// @param typeDictionaryData writer's type dictionary snapshot
+        /// @return every remote definition, in dictionary iteration order
+        private ArrayList<PersistenceTypeDefinition> parseRemoteTypeDefinitions(final String typeDictionaryData) {
+            try {
+                final PersistenceTypeDictionary remoteTypeDictionary;
+                synchronized (this.dictionaryParseLock) {
+                    this.dictionarySource = typeDictionaryData;
+                    remoteTypeDictionary = this.dictionaryFoundation
+                            .getTypeDictionaryProvider()
+                            .provideTypeDictionary();
+                }
+                final ArrayList<PersistenceTypeDefinition> remoteTypes = new ArrayList<>();
+                remoteTypeDictionary.iterateAllTypeDefinitions(remoteTypes::add);
+                return remoteTypes;
+            } catch (final RuntimeException | Error failure) {
+                this.noteFailure("Store type dictionary update failed", failure);
+                throw failure;
+            }
+        }
+
+                /// Filters remote definitions against the local dictionary.
         ///
         /// Read-only: unknown remote types are collected, structurally
         /// conflicting types fail with [StorageBinaryDataException]. Runs on
         /// the coordinator's read side when one is wired.
         ///
-        /// @param typeDictionaryData writer's type dictionary snapshot
+        /// @param remoteTypes parsed remote definitions
         /// @return remote definitions missing locally, in iteration order
-        private ArrayList<PersistenceTypeDefinition> planDictionaryMerge(final String typeDictionaryData) {
+        private ArrayList<PersistenceTypeDefinition> planDictionaryMerge(
+                final ArrayList<PersistenceTypeDefinition> remoteTypes) {
             try {
-                final PersistenceTypeDictionary remoteTypeDictionary = BinaryPersistence.Foundation()
-                        .setClassLoaderProvider(this.foundation.getClassLoaderProvider())
-                        .setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable())
-                        .setTypeDictionaryLoader(() -> typeDictionaryData)
-                        .getTypeDictionaryProvider()
-                        .provideTypeDictionary();
                 final PersistenceTypeDictionary localTypeDictionary =
                         this.storage.persistenceManager().typeDictionary();
 
                 final ArrayList<PersistenceTypeDefinition> pending = new ArrayList<>();
-                remoteTypeDictionary.iterateAllTypeDefinitions(remoteType ->
-                {
+                for (final PersistenceTypeDefinition remoteType : remoteTypes) {
                     final PersistenceTypeDefinition localType =
                             localTypeDictionary.lookupTypeById(remoteType.typeId());
                     if (localType == null) {
-                        LOGGER.log(System.Logger.Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
+                        LOGGER.log(Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
                         pending.add(remoteType);
                     } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
                         throw new StorageBinaryDataException(
                                 "Remote type definition conflicts with local definition: %s <> %s"
                                         .formatted(localType, remoteType));
                     }
-                });
+                }
                 return pending;
             } catch (final RuntimeException | Error failure) {
                 this.noteFailure("Store type dictionary update failed", failure);
@@ -895,20 +911,20 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             try {
                 // if any external processes like Kubernetes shuts us down, it will wait for the externally set
                 // grace period and then kill the process. But any other case we will await the task orderly like this.
-                terminated = this.executor.awaitTermination(30, TimeUnit.SECONDS);
+                terminated = this.executor.awaitTermination(this.disposeOrderlyTimeoutMs, TimeUnit.MILLISECONDS);
                 if (!terminated) {
-                    LOGGER.log(WARNING, "Timed out waiting for storage graph updates; interrupting remaining work");
+                    LOGGER.log(Level.WARNING, "Timed out waiting for storage graph updates; interrupting remaining work");
                     this.executor.shutdownNow();
-                    terminated = this.executor.awaitTermination(5, TimeUnit.SECONDS);
+                    terminated = this.executor.awaitTermination(this.disposeInterruptTimeoutMs, TimeUnit.MILLISECONDS);
                     if (!terminated) {
-                        throw new IllegalStateException(
+                        throw new StorageBinaryDataLifecycleException(
                                 "Storage graph update worker did not terminate; native buffers remain owned by it");
                     }
                 }
             } catch (final InterruptedException e) {
                 this.executor.shutdownNow();
                 Thread.currentThread().interrupt();
-                throw new StorageBinaryDataException("Interrupted while waiting for storage graph updates", e);
+                throw new StorageBinaryDataLifecycleException("Interrupted while waiting for storage graph updates", e);
             } finally {
                 if (terminated || this.executor.isTerminated()) this.releaseCachedData();
             }
@@ -935,7 +951,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
             }
             if (this.disposed) {
-                throw new IllegalStateException("Storage binary merger is disposed");
+                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
             }
             /*
              * The normal merger deliberately delays materialization to coalesce updates.
@@ -964,7 +980,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 Thread.currentThread().interrupt();
                 this.noteFailure("Interrupted while waiting for imported Store data materialization", e);
                 this.releaseCachedData();
-                throw new StorageBinaryDataException("Interrupted while waiting for imported Store data materialization", e);
+                throw new StorageBinaryDataLifecycleException(
+                        "Interrupted while waiting for imported Store data materialization", e);
             } catch (final ExecutionException e) {
                 final RuntimeException mergerFailure = this.failure.get();
                 if (mergerFailure != null) {
@@ -974,7 +991,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 this.releaseCachedData();
                 throw terminal;
             } catch (final TimeoutException e) {
-                final RuntimeException terminal = this.recordFailure("Timed out waiting for imported Store data materialization", e);
+                final RuntimeException terminal = this.recordLifecycleFailure(
+                        "Timed out waiting for imported Store data materialization", e);
                 /* Only queued buffers are safe to release here. The callback represented by
                  * pending may still own the batch whose wait timed out. */
                 this.releaseCachedData();
@@ -1006,7 +1024,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     if (retries-- <= 0) {
                         throw timeout;
                     }
-                    LOGGER.log(WARNING, "%s did not finish within %s ms; retrying (%s retries left)".formatted(operation, this.applyTimeoutMs, retries + 1));
+                    LOGGER.log(Level.WARNING, "%s did not finish within %s ms; retrying (%s retries left)".formatted(operation, this.applyTimeoutMs, retries + 1));
                 }
             }
         }
@@ -1016,6 +1034,16 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
          * for paths that throw the canonical first failure. */
         private void noteFailure(final String message, final Throwable cause) {
             this.failure.compareAndSet(null, new IllegalStateException(message, cause));
+        }
+
+        /* Records the first wait/interrupt/timeout failure and returns it; later
+         * failures are dropped so concurrent paths cannot overwrite the root
+         * cause. Lifecycle outcomes carry [StorageBinaryDataLifecycleException]
+         * so callers can distinguish an unusable-but-healthy transport message
+         * from a corrupt/unusable assembled one. */
+        private RuntimeException recordLifecycleFailure(final String message, final Throwable cause) {
+            this.failure.compareAndSet(null, new StorageBinaryDataLifecycleException(message, cause));
+            return this.failure.get();
         }
 
         /* Records the first failure and returns it; later failures are dropped so

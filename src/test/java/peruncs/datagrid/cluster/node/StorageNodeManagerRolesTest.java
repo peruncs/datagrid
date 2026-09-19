@@ -1,11 +1,11 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
@@ -13,7 +13,7 @@ import java.lang.reflect.Proxy;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Verifies the fixed reader/distributor role split: the role is chosen at
+/// Verifies the fixed reader/writer role split: the role is chosen at
 /// creation and never changes, so an unsupported transition is
 /// unrepresentable.
 class StorageNodeManagerRolesTest {
@@ -22,61 +22,59 @@ class StorageNodeManagerRolesTest {
     void readerNeverDistributes() {
         final StorageNodeManager manager = manager(StorageNodeManager.Role.READER, "aeron");
 
-        assertFalse(manager.isDistributor());
-        assertEquals("aeron", manager.getReplicationTransport());
+        assertFalse(manager.isWriter());
+        assertEquals("aeron", manager.replicationTransport());
     }
 
-        /// A fixed writer reports itself as the distributor and derives its
+        /// A fixed writer reports itself as the writer and derives its
         /// health from the distributor instead of a reader health check.
     @Test
-    void writerManagerIsDistributor() {
-        final StorageNodeManager manager = manager(StorageNodeManager.Role.DISTRIBUTOR, "aeron");
+    void writerManagerIsWriter() {
+        final StorageNodeManager manager = manager(StorageNodeManager.Role.WRITER, "aeron");
 
-        assertTrue(manager.isDistributor());
-        assertTrue(manager.isReady(), "a distributor must not depend on a reader health check");
-        assertTrue(manager.isHealthy(), "a distributor must not depend on a reader health check");
+        assertTrue(manager.isWriter());
+        assertTrue(manager.isReady(), "a writer must not depend on a reader health check");
+        assertTrue(manager.isHealthy(), "a writer must not depend on a reader health check");
     }
 
         /// The reader reports its current sequence from the replication client.
     @Test
     void readerReportsClientSequence() {
         final StorageBinaryDataClient client = stub(StorageBinaryDataClient.class);
-        final StorageNodeManager manager = StorageNodeManager.New(StorageNodeManager.Configuration.builder()
-                .dataDistributor(stub(StorageBinaryDataDistributor.class))
-                .storageTaskExecutor(stub(StorageTaskExecutor.class))
-                .dataClient(client)
-                .healthCheck(stub(StorageNodeHealthCheck.class))
-                .storageDiskSpaceReader(stub(StorageDiskSpaceReader.class))
-                .positionProvider(stub(ReplicationPositionProvider.class))
-                .replicationTransport("none")
-                .role(StorageNodeManager.Role.READER)
-                .build());
+        final StorageNodeManager manager = StorageNodeManager.New(new StorageNodeManager.Configuration(
+                stub(StorageBinaryDataDistributor.class),
+                stub(StorageTaskExecutor.class),
+                client,
+                stub(StorageNodeHealthCheck.class),
+                stub(StorageDiskSpaceReader.class),
+                stub(ReplicationPositionProvider.class),
+                "none",
+                StorageNodeManager.Role.READER));
 
-        assertFalse(manager.isDistributor());
-        assertEquals(0L, manager.getCurrentSequence());
+        assertFalse(manager.isWriter());
+        assertEquals(0L, manager.currentSequence());
     }
 
-        /// The distributor flag reflects the fixed role.
+        /// The writer flag reflects the fixed role.
     @Test
-    void distributorFlagReflectsFixedRole() {
+    void writerFlagReflectsFixedRole() {
         final StorageNodeManager reader = manager(StorageNodeManager.Role.READER, "aeron");
-        final StorageNodeManager writer = manager(StorageNodeManager.Role.DISTRIBUTOR, "aeron");
+        final StorageNodeManager writer = manager(StorageNodeManager.Role.WRITER, "aeron");
 
-        assertFalse(reader.isDistributor());
-        assertTrue(writer.isDistributor());
+        assertFalse(reader.isWriter());
+        assertTrue(writer.isWriter());
     }
 
     private static StorageNodeManager manager(final StorageNodeManager.Role role, final String transport) {
-        return StorageNodeManager.New(StorageNodeManager.Configuration.builder()
-                .dataDistributor(stub(StorageBinaryDataDistributor.class))
-                .storageTaskExecutor(stub(StorageTaskExecutor.class))
-                .dataClient(stub(StorageBinaryDataClient.class))
-                .healthCheck(stub(StorageNodeHealthCheck.class))
-                .storageDiskSpaceReader(stub(StorageDiskSpaceReader.class))
-                .positionProvider(stub(ReplicationPositionProvider.class))
-                .replicationTransport(transport)
-                .role(role)
-                .build());
+        return StorageNodeManager.New(new StorageNodeManager.Configuration(
+                stub(StorageBinaryDataDistributor.class),
+                stub(StorageTaskExecutor.class),
+                stub(StorageBinaryDataClient.class),
+                stub(StorageNodeHealthCheck.class),
+                stub(StorageDiskSpaceReader.class),
+                stub(ReplicationPositionProvider.class),
+                transport,
+                role));
     }
 
     @SuppressWarnings("unchecked")

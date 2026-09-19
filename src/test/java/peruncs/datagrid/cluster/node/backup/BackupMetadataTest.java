@@ -2,11 +2,15 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -34,6 +38,7 @@ class BackupMetadataTest {
         assertEquals(5L, backup.epoch());
         assertEquals(42L, backup.recordingId());
         assertEquals(NODE, backup.nodeId());
+        assertEquals(7L, backup.logicalSequence());
         assertNotNull(backup.backupId());
         assertEquals(BackupMetadata.UNKNOWN, backup.digest());
     }
@@ -119,6 +124,7 @@ class BackupMetadataTest {
         assertEquals(backup.storeGeneration(), parsed.storeGeneration());
         assertEquals(backup.epoch(), parsed.epoch());
         assertEquals(backup.recordingId(), parsed.recordingId());
+        assertEquals(backup.logicalSequence(), parsed.logicalSequence());
         assertEquals(backup.backupId(), parsed.backupId());
     }
 
@@ -137,7 +143,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(UUID.randomUUID(), NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(NodeLibraryException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -149,7 +155,7 @@ class BackupMetadataTest {
         final UUID otherGeneration = UUID.randomUUID();
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", otherGeneration, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, otherGeneration, 5L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(NodeLibraryException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -160,7 +166,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 43L, 0L, 7L).encode());
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(NodeLibraryException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -171,7 +177,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 6L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(NodeLibraryException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -182,7 +188,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
         final ReplicationCursor drifted = ReplicationCursor.of("aeron", GENERATION, 8L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(NodeLibraryException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, drifted));
     }
 
@@ -192,7 +198,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
         final ReplicationCursor corrupt =
                 new ReplicationCursor("aeron", GENERATION, 7L, "deadbeef");
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(NodeLibraryException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, corrupt));
     }
 
@@ -203,7 +209,64 @@ class BackupMetadataTest {
         assertFalse(BackupArchive.isBackupFileName("1700000000000.manual.zip"));
         assertFalse(BackupArchive.isBackupFileName("123.evil.zip"));
         assertFalse(BackupArchive.isBackupFileName(null));
-        assertThrows(peruncs.datagrid.cluster.node.exceptions.NodeLibraryException.class,
+        assertThrows(NodeLibraryException.class,
                 () -> BackupArchive.parseMetadata("1700000000000.zip", volume));
+    }
+
+    /// Verifies backup ordering prefers the replication sequence, falls back to the
+    /// wall-clock timestamp, and breaks exact ties by backup id.
+    @Test
+    void newestFirstPrefersSequenceThenTimestampThenBackupId() {
+        final UUID lowerId = new UUID(0L, 1L);
+        final UUID higherId = new UUID(0L, 2L);
+        final BackupMetadata sequencedNewer = new BackupMetadata(
+                50L, false, CLUSTER, GENERATION, 5L, 42L, 20L, NODE, higherId, 1L);
+        final BackupMetadata sequencedOlder = new BackupMetadata(
+                500L, false, CLUSTER, GENERATION, 5L, 42L, 10L, NODE, lowerId, 1L);
+        final BackupMetadata unsequenced = new BackupMetadata(
+                1000L, false, CLUSTER, GENERATION, 5L, 42L, BackupMetadata.UNKNOWN, NODE, UUID.randomUUID(), 1L);
+
+        final List<BackupMetadata> ordered =
+                new ArrayList<>(List.of(sequencedOlder, unsequenced, sequencedNewer));
+        ordered.sort(BackupMetadata.OLDEST_FIRST);
+        assertEquals(List.of(unsequenced, sequencedOlder, sequencedNewer), ordered,
+                "a known replication sequence orders after a timestamp-only fallback");
+        assertEquals(sequencedNewer,
+                Stream.of(sequencedOlder, unsequenced, sequencedNewer).max(BackupMetadata.OLDEST_FIRST).orElseThrow());
+
+        final BackupMetadata firstTie = new BackupMetadata(
+                10L, false, CLUSTER, GENERATION, 5L, 42L, BackupMetadata.UNKNOWN, NODE, lowerId, 1L);
+        final BackupMetadata secondTie = new BackupMetadata(
+                10L, false, CLUSTER, GENERATION, 5L, 42L, BackupMetadata.UNKNOWN, NODE, higherId, 1L);
+        assertEquals(secondTie, Stream.of(firstTie, secondTie).max(BackupMetadata.OLDEST_FIRST).orElseThrow(),
+                "the random backup id breaks exact ties deterministically");
+    }
+
+    /// Verifies backup compatibility is exactly the single identity match rule.
+    @Test
+    void compatibilityDelegatesToTheIdentityMatchRule() {
+        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+        final List<BackupMetadata.Identity> identities = List.of(
+                BackupMetadata.Identity.unknown(),
+                new BackupMetadata.Identity(CLUSTER, GENERATION, 5L, 42L),
+                new BackupMetadata.Identity(UUID.randomUUID(), GENERATION, 5L, 42L),
+                new BackupMetadata.Identity(CLUSTER, UUID.randomUUID(), 6L, 42L),
+                new BackupMetadata.Identity(CLUSTER, GENERATION, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN));
+
+        for (final BackupMetadata.Identity identity : identities) {
+            assertEquals(identity.matches(backup.identity()), backup.isCompatibleWith(identity),
+                    "compatibility and matching must share one comparison rule");
+        }
+    }
+
+    /// Verifies a cursor sequence is captured in the backup and checked against the archived cursor.
+    @Test
+    void rejectsMetadataSequenceThatDisagreesWithTheCursor() {
+        final ReplicationCursor cursor = aeronCursor(7L);
+        final BackupMetadata drifted = new BackupMetadata(
+                100L, false, CLUSTER, GENERATION, 5L, 42L, 6L, NODE, UUID.randomUUID(), BackupMetadata.UNKNOWN);
+
+        assertThrows(NodeLibraryException.class,
+                () -> BackupMetadata.requireConsistentWithCursor(drifted, cursor));
     }
 }

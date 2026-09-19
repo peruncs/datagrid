@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node;
 
-
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 
 /// Protocol-neutral control and observability view of a node manager.
 ///
@@ -17,7 +17,7 @@ public interface StorageNodeControl {
     /// Reports whether this node owns the single writer role.
     ///
     /// @return `true` for the writer, `false` for readers and backup readers
-    default boolean isDistributor() {
+    default boolean isWriter() {
         return false;
     }
 
@@ -49,73 +49,80 @@ public interface StorageNodeControl {
         /// Monitoring hook; nodes without a replication stream return `-1`.
     ///
     /// @return current applied sequence
-    default long getCurrentSequence() {
+    default long currentSequence() {
         return -1;
     }
 
         /// Monitoring hook; nodes without a replication stream return `-1`.
     ///
     /// @return latest writer sequence
-    default long getLatestSequence() {
+    default long latestSequence() {
         return -1;
     }
 
         /// Assembles the point-in-time replication observability values.
     ///
+    /// The values are sampled independently and may be torn across a
+    /// transition; implementations that can snapshot their collaborators
+    /// consistently should override this method.
+    ///
     /// @return raw replication metrics
     default ReplicationMetrics replicationMetrics() {
-        return ReplicationMetrics.of(
-                this.getCurrentSequence(),
-                this.getLatestSequence(),
-                this.getReplicationTransport(),
-                this.getReplicationState(),
+        return new ReplicationMetrics(
+                this.currentSequence(),
+                this.latestSequence(),
+                this.replicationTransport(),
+                this.replicationState(),
                 this.isReady(),
                 this.isHealthy(),
-                this.getArchiveUsableSpaceBytes(),
-                this.getWriterDurablePosition(),
-                this.getWriterDurableSequence(),
-                this.getAppliedSequence());
+                this.archiveUsableSpaceBytes(),
+                this.writerDurablePosition(),
+                this.writerDurableSequence(),
+                this.appliedSequence());
     }
 
         /// Monitoring hook for the selected provider.
     ///
     /// @return replication transport name
-    default String getReplicationTransport() {
+    default String replicationTransport() {
         return "none";
     }
 
         /// Monitoring hook for provider lifecycle state.
     ///
     /// @return replication state
-    default ReplicationHealth.State getReplicationState() {
-        return isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING;
+    default ReplicationHealth.State replicationState() {
+        if (this.isHealthy()) {
+            return ReplicationHealth.State.LIVE;
+        }
+        return this.isReady() ? ReplicationHealth.State.STARTING : ReplicationHealth.State.FAILED;
     }
 
         /// Monitoring hook for the selected provider's Archive capacity.
     ///
     /// @return usable archive space in bytes
-    default long getArchiveUsableSpaceBytes() {
+    default long archiveUsableSpaceBytes() {
         return -1L;
     }
 
         /// Monitoring hook for the writer's last durable recording position.
     ///
     /// @return durable recording position
-    default long getWriterDurablePosition() {
+    default long writerDurablePosition() {
         return -1L;
     }
 
         /// Monitoring hook for the writer's last durable sequence.
     ///
     /// @return durable sequence
-    default long getWriterDurableSequence() {
+    default long writerDurableSequence() {
         return -1L;
     }
 
         /// Monitoring hook for the reader's last applied sequence.
     ///
     /// @return applied sequence
-    default long getAppliedSequence() {
+    default long appliedSequence() {
         return -1L;
     }
 }

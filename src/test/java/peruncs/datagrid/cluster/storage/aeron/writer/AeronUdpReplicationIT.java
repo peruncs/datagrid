@@ -4,6 +4,7 @@ import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
+import io.aeron.driver.ThreadingMode;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
@@ -16,9 +17,11 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -56,7 +59,7 @@ class AeronUdpReplicationIT {
         final RecordingReceiver receiver = new RecordingReceiver();
 
         try (MediaDriver driver = MediaDriver.launchEmbedded(new MediaDriver.Context()
-                .threadingMode(io.aeron.driver.ThreadingMode.SHARED)
+                .threadingMode(ThreadingMode.SHARED)
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true));
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
@@ -72,10 +75,10 @@ class AeronUdpReplicationIT {
                 data[i] = (byte) (i * 31);
             }
             final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-                    new AeronReplicationPublisher(publication, configuration, clusterId, 1, 0)
+                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, 1, 0)
             );
-            final ByteBuffer first = XMemory.toDirectByteBuffer(java.util.Arrays.copyOfRange(data, 0, 37_000));
-            final ByteBuffer second = XMemory.toDirectByteBuffer(java.util.Arrays.copyOfRange(data, 37_000, data.length));
+            final ByteBuffer first = XMemory.toDirectByteBuffer(Arrays.copyOfRange(data, 0, 37_000));
+            final ByteBuffer second = XMemory.toDirectByteBuffer(Arrays.copyOfRange(data, 37_000, data.length));
             final int firstPosition = first.position();
             final int secondPosition = second.position();
             final boolean[] localAccepted = {false};
@@ -92,7 +95,7 @@ class AeronUdpReplicationIT {
                 }
             };
             receiver.localAccepted = () -> localAccepted[0];
-            new AeronStorageBinaryReplicationTarget(localTarget, coordinator)
+            AeronStorageBinaryReplicationTarget.New(localTarget, coordinator)
                     .write(ChunksWrapper.New(first, second));
             assertEquals(firstPosition, first.position());
             assertEquals(secondPosition, second.position());
@@ -128,7 +131,7 @@ class AeronUdpReplicationIT {
         final RecordingReceiver receiver = new RecordingReceiver();
 
         try (MediaDriver driver = MediaDriver.launchEmbedded(new MediaDriver.Context()
-                .threadingMode(io.aeron.driver.ThreadingMode.SHARED)
+                .threadingMode(ThreadingMode.SHARED)
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true));
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
@@ -140,7 +143,7 @@ class AeronUdpReplicationIT {
             );
             client.start();
             final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-                    new AeronReplicationPublisher(publication, configuration, clusterId, 1, 0)
+                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, 1, 0)
             );
             final PersistenceTarget<Binary> failingTarget = new PersistenceTarget<>() {
                 public void write(final Binary value) {
@@ -151,7 +154,7 @@ class AeronUdpReplicationIT {
                     return true;
                 }
             };
-            final PersistenceTarget<Binary> target = new AeronStorageBinaryReplicationTarget(failingTarget, coordinator);
+            final PersistenceTarget<Binary> target = AeronStorageBinaryReplicationTarget.New(failingTarget, coordinator);
             assertThrows(IllegalStateException.class,
                     () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{4, 5, 6}))));
             await(() -> client.lastResolvedSequence() == 0 || client.failure() != null);
@@ -174,7 +177,7 @@ class AeronUdpReplicationIT {
         final UUID clusterId = UUID.randomUUID();
         final RecordingReceiver receiver = new RecordingReceiver();
         try (MediaDriver driver = MediaDriver.launchEmbedded(new MediaDriver.Context()
-                .threadingMode(io.aeron.driver.ThreadingMode.SHARED).dirDeleteOnStart(true).dirDeleteOnShutdown(true));
+                .threadingMode(ThreadingMode.SHARED).dirDeleteOnStart(true).dirDeleteOnShutdown(true));
              Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
              ExclusivePublication publication = aeron.addExclusivePublication(publicationChannel, 1101);
              Subscription subscription = aeron.addSubscription(subscriptionChannel, 1101)) {
@@ -182,7 +185,7 @@ class AeronUdpReplicationIT {
             final StorageBinaryDataClientAeron client = new StorageBinaryDataClientAeron(
                     subscription, configuration, clusterId, 5, -1, receiver);
             client.start();
-            final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+            final AeronReplicationPublisher publisher = AeronReplicationPublisher.onPublication(
                     publication, configuration, clusterId, 5, 0);
             publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{9, 8, 7})});
             await(() -> client.lastResolvedSequence() == 0);
@@ -215,7 +218,7 @@ class AeronUdpReplicationIT {
         private volatile String dictionary;
         private volatile byte[] data;
         private volatile boolean observedBeforeLocal;
-        private java.util.function.BooleanSupplier localAccepted = () -> true;
+        private BooleanSupplier localAccepted = () -> true;
 
         @Override
         public void receiveData(final Binary value) {

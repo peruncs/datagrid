@@ -1,8 +1,10 @@
 package peruncs.datagrid.cluster.node.backup;
 
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
+import java.util.Comparator;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -10,9 +12,10 @@ import java.util.UUID;
 ///
 /// The timestamp orders backups and the manual slot separates ad-hoc backups
 /// from scheduled ones. The remaining fields form the backup generation: the
-/// cluster, store image, writer epoch, and recording the backup belongs to,
-/// the node that published it, a random id that keeps concurrent publishers
-/// from colliding on one shared volume, and a CRC over the archived content.
+/// cluster, store image, writer epoch, recording, and replication sequence the
+/// backup belongs to, the node that published it, a random id that keeps
+/// concurrent publishers from colliding on one shared volume, and a CRC over
+/// the archived content.
 ///
 /// Identity fields are unknown (`null` for UUIDs, `-1` for numbers) when the
 /// backup was taken without replication identity, for example on a node with
@@ -26,6 +29,7 @@ import java.util.UUID;
 /// @param storeGeneration Store image identity, or `null` when unknown
 /// @param epoch           writer epoch, or `-1` when unknown
 /// @param recordingId     replication recording identity, or `-1` when unknown
+/// @param logicalSequence replication sequence at the backup boundary, or `-1` when unknown
 /// @param nodeId          node that published the backup, or `null` when unknown
 /// @param backupId        random id unique to this publication
 /// @param digest          CRC over the archived content, or `-1` when unknown
@@ -36,19 +40,38 @@ public record BackupMetadata(
         UUID storeGeneration,
         long epoch,
         long recordingId,
+        long logicalSequence,
         UUID nodeId,
         UUID backupId,
         long digest) {
-        /// Sentinel for an unknown numeric identity or digest.
+        /// Sentinel for an unknown numeric identity, sequence, or digest.
     public static final long UNKNOWN = -1L;
+
+        /// Orders backups oldest first: replication sequence when known, the
+        /// creation timestamp as the fallback, and the random backup id to
+        /// break exact ties deterministically.
+    ///
+    /// Backups carrying a known sequence sort after sequence-less backups, so
+    /// a mixed volume never interleaves the two ordering domains
+    /// non-transitively. Nodes sharing a backup volume must keep their clocks
+    /// NTP-disciplined because the timestamp fallback is wall-clock based.
+    public static final Comparator<BackupMetadata> OLDEST_FIRST =
+            Comparator.comparingInt((BackupMetadata backup) -> backup.logicalSequence() >= 0L ? 1 : 0)
+                    .thenComparingLong(backup -> backup.logicalSequence() >= 0L
+                            ? backup.logicalSequence()
+                            : backup.timestamp())
+                    .thenComparing(BackupMetadata::backupId);
+
+        /// Orders backups newest first, the reverse of [OLDEST_FIRST].
+    public static final Comparator<BackupMetadata> NEWEST_FIRST = OLDEST_FIRST.reversed();
 
         /// Validates the backup identity.
     public BackupMetadata {
         if (timestamp < 0L) {
             throw new IllegalArgumentException("timestamp must not be negative");
         }
-        if (epoch < UNKNOWN || recordingId < UNKNOWN) {
-            throw new IllegalArgumentException("epoch and recordingId must be -1 when unknown");
+        if (epoch < UNKNOWN || recordingId < UNKNOWN || logicalSequence < UNKNOWN) {
+            throw new IllegalArgumentException("epoch, recordingId, and logicalSequence must be -1 when unknown");
         }
         Objects.requireNonNull(backupId, "backupId");
     }
@@ -58,10 +81,10 @@ public record BackupMetadata(
     /// The backup id is random, so two nodes publishing in the same
     /// millisecond still produce distinct archives. Generation fields come
     /// from the cursor: the store generation directly, and the cluster,
-    /// epoch, recording, and node identities from an Aeron provider position.
-    /// An Aeron cursor without a decodable identity is rejected; non-replicated
-    /// cursors remain identity-free. The digest stays unknown until the backend
-    /// has archived the content.
+    /// epoch, recording, sequence, and node identities from an Aeron provider
+    /// position. An Aeron cursor without a decodable identity is rejected;
+    /// non-replicated cursors remain identity-free. The digest stays unknown
+    /// until the backend has archived the content.
     ///
     /// @param timestamp  backup creation time
     /// @param manualSlot whether the backup uses the manual slot
@@ -84,6 +107,7 @@ public record BackupMetadata(
                 aeron == null ? (cursor == null ? null : cursor.storeGeneration()) : aeron.storeGeneration(),
                 aeron == null ? UNKNOWN : aeron.epoch(),
                 aeron == null ? UNKNOWN : aeron.recordingId(),
+                cursor == null || cursor.logicalSequence() < 0L ? UNKNOWN : cursor.logicalSequence(),
                 aeron == null ? null : aeron.nodeId(),
                 UUID.randomUUID(),
                 UNKNOWN);
@@ -96,7 +120,17 @@ public record BackupMetadata(
     BackupMetadata withDigest(final long digest) {
         return new BackupMetadata(
                 this.timestamp, this.manualSlot, this.clusterId, this.storeGeneration,
-                this.epoch, this.recordingId, this.nodeId, this.backupId, digest);
+                this.epoch, this.recordingId, this.logicalSequence, this.nodeId, this.backupId, digest);
+    }
+
+        /// Returns the comparison identity of this backup.
+    ///
+    /// This is the view [Identity#matches] compares, so compatibility checks
+    /// and post-restore validation share exactly one rule.
+    ///
+    /// @return identity built from the generation fields
+    Identity identity() {
+        return new Identity(this.clusterId, this.storeGeneration, this.epoch, this.recordingId);
     }
 
         /// Reports whether this backup may serve a node with the given identity.
@@ -110,10 +144,7 @@ public record BackupMetadata(
     /// @return `true` when no known dimension contradicts
     boolean isCompatibleWith(final Identity configured) {
         Objects.requireNonNull(configured, "configured");
-        return (configured.clusterId() == null || configured.clusterId().equals(this.clusterId)) &&
-               (configured.storeGeneration() == null || configured.storeGeneration().equals(this.storeGeneration)) &&
-               (configured.epoch() < 0L || configured.epoch() == this.epoch) &&
-               (configured.recordingId() < 0L || configured.recordingId() == this.recordingId);
+        return configured.matches(this.identity());
     }
 
         /// Verifies that archived metadata and its stored cursor describe one boundary.
@@ -122,34 +153,36 @@ public record BackupMetadata(
     /// archive: when recording is unconfigured, metadata and manifest can
     /// disagree about recording, and the outer cursor can disagree with its
     /// encoded Aeron position about generation or sequence. All three must
-    /// agree before local files are touched.
+    /// agree before local files are touched. A sequence of `-1` in the
+    /// metadata is unknown and is not compared.
     ///
     /// @param metadata selected backup metadata
     /// @param cursor   replication cursor archived with that backup
-    /// @throws IllegalArgumentException when metadata and cursor disagree
+    /// @throws NodeLibraryException when metadata and cursor disagree
     public static void requireConsistentWithCursor(final BackupMetadata metadata, final ReplicationCursor cursor) {
         Objects.requireNonNull(metadata, "metadata");
         Objects.requireNonNull(cursor, "cursor");
         if (!"aeron".equalsIgnoreCase(cursor.transport())) {
             final var generation = metadata.storeGeneration();
             if (!Objects.equals(generation, cursor.storeGeneration())) {
-                throw new IllegalArgumentException(
+                throw new NodeLibraryException(
                         "backup metadata store generation %s disagrees with archived cursor generation %s"
                                 .formatted(generation, cursor.storeGeneration()));
             }
+            requireSequenceAgreement(metadata, cursor);
             return;
         }
         final AeronReplicationCursor aeron;
         try {
             if (!cursor.hasProviderPosition()) {
-                throw new IllegalArgumentException("Aeron backup cursor carries no provider position");
+                throw new NodeLibraryException("Aeron backup cursor carries no provider position");
             }
             aeron = AeronReplicationCursor.decode(cursor.providerPositionBytes());
         } catch (final RuntimeException unreadable) {
-            throw new IllegalArgumentException("Aeron backup cursor provider position is undecodable", unreadable);
+            throw new NodeLibraryException("Aeron backup cursor provider position is undecodable", unreadable);
         }
         if (!Objects.equals(metadata.clusterId(), aeron.clusterId())) {
-            throw new IllegalArgumentException(
+            throw new NodeLibraryException(
                     "backup metadata cluster %s disagrees with archived cursor cluster %s"
                             .formatted(metadata.clusterId(), aeron.clusterId()));
         }
@@ -159,24 +192,33 @@ public record BackupMetadata(
         if (!Objects.equals(generation, aeronGeneration) ||
             !Objects.equals(generation, cursorGeneration) ||
             !Objects.equals(aeronGeneration, cursorGeneration)) {
-            throw new IllegalArgumentException(
+            throw new NodeLibraryException(
                     "backup metadata generation %s disagrees with archived cursor generation %s/%s"
                             .formatted(generation, aeronGeneration, cursorGeneration));
         }
         if (metadata.epoch() != aeron.epoch()) {
-            throw new IllegalArgumentException(
+            throw new NodeLibraryException(
                     "backup metadata epoch %s disagrees with archived cursor epoch %s"
                             .formatted(metadata.epoch(), aeron.epoch()));
         }
         if (metadata.recordingId() != aeron.recordingId()) {
-            throw new IllegalArgumentException(
+            throw new NodeLibraryException(
                     "backup metadata recording %s disagrees with archived cursor recording %s"
                             .formatted(metadata.recordingId(), aeron.recordingId()));
         }
         if (cursor.logicalSequence() != aeron.sequence()) {
-            throw new IllegalArgumentException(
+            throw new NodeLibraryException(
                     "archived cursor sequence %s disagrees with encoded Aeron sequence %s"
                             .formatted(cursor.logicalSequence(), aeron.sequence()));
+        }
+        requireSequenceAgreement(metadata, cursor);
+    }
+
+    private static void requireSequenceAgreement(final BackupMetadata metadata, final ReplicationCursor cursor) {
+        if (metadata.logicalSequence() != UNKNOWN && metadata.logicalSequence() != cursor.logicalSequence()) {
+            throw new NodeLibraryException(
+                    "backup metadata sequence %s disagrees with archived cursor sequence %s"
+                            .formatted(metadata.logicalSequence(), cursor.logicalSequence()));
         }
     }
 
@@ -256,8 +298,8 @@ public record BackupMetadata(
                 /// Reports whether this configured identity accepts a candidate.
         ///
         /// Every known configured dimension must be present and equal on the
-        /// candidate. This is used after reading a backup cursor so metadata
-        /// and the archived cursor cannot disagree before local files change.
+        /// candidate. This is the single compatibility rule used both to
+        /// select backups and to validate metadata after a restore.
         ///
         /// @param candidate candidate identity
         /// @return `true` when the candidate belongs to this identity

@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.storage.types;
 
-import peruncs.datagrid.cluster.node.store.StorageFileOperations;
-
 import java.io.IOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
@@ -10,31 +10,29 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiConsumer;
 
 /// Writes small replication metadata files with forced temporary replacement.
+///
 /// The operation fails when the filesystem cannot provide atomic rename or
 /// directory synchronization; callers must choose a filesystem with those
 /// durability primitives for replication metadata.
-public final class AtomicFileStore {
+public final class AtomicFileWriter {
         /// Selects the metadata family whose crash-test hook names are emitted.
     public enum Phase {
         CHECKPOINT,
         CURSOR
     }
 
-        /// Selects checkpoint-specific crash-test phases.
-    public static final Phase PHASE_CHECKPOINT = Phase.CHECKPOINT;
-        /// Selects cursor-specific crash-test phases.
-    public static final Phase PHASE_CURSOR = Phase.CURSOR;
-    private static final System.Logger LOGGER = System.getLogger(AtomicFileStore.class.getName());
+    private static final Logger LOGGER = System.getLogger(AtomicFileWriter.class.getName());
     private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
     private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY = PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
 
-    private AtomicFileStore() {
+    private AtomicFileWriter() {
     }
 
         /// Runs file operations with a crash-test hook bound to their dynamic scope.
@@ -71,13 +69,20 @@ public final class AtomicFileStore {
     /// When `null` the generic names `BEFORE_TEMP_WRITE`,
     /// `DURING_FILE_WRITE`, `AFTER_TEMP_WRITE_BEFORE_RENAME`,
     /// and `AFTER_RENAME_BEFORE_DIRECTORY_SYNC` are used. Checkpoint
-    /// and cursor stores pass [#PHASE_CHECKPOINT] or [#PHASE_CURSOR].
+    /// and cursor stores pass [Phase#CHECKPOINT] or [Phase#CURSOR].
     ///
     /// @param path    destination path
     /// @param encoder callback that writes the complete encoded contents
     /// @param phase   metadata family, or `null` for generic names
     /// @throws IOException if writing or replacement fails
     public static void write(final Path path, final Encoder encoder, final Phase phase) throws IOException {
+        /* The crash-test hook names are formatted only when a hook is bound:
+         * every production write runs with no hook, and the formatted phase
+         * names cost four string allocations per metadata write otherwise. */
+        if (!TEST_HOOK.isBound()) {
+            write(path, encoder, null, null, null, null);
+            return;
+        }
         final String phaseName = phase == null ? null : phase.name();
         final String beforePhase = phaseName != null ? "BEFORE_%s_TEMP_WRITE".formatted(phaseName) : "BEFORE_TEMP_WRITE";
         final String duringPhase = phaseName != null ? "DURING_%s_FILE_WRITE".formatted(phaseName) : "DURING_FILE_WRITE";
@@ -131,7 +136,7 @@ public final class AtomicFileStore {
             try {
                 Files.deleteIfExists(temporary);
             } catch (final IOException | RuntimeException cleanupFailure) {
-                LOGGER.log(System.Logger.Level.WARNING,
+                LOGGER.log(Level.WARNING,
                         "Unable to remove temporary replication metadata file %s".formatted(temporary), cleanupFailure);
             }
         }
@@ -173,14 +178,14 @@ public final class AtomicFileStore {
         final Path probe = parent.resolve("%s.probe-%s".formatted(absolute.getFileName(), UUID.randomUUID()));
         try {
             write(probe, channel -> writeFully(channel, ByteBuffer.wrap(new byte[]{1})));
-        } catch (final IOException | RuntimeException | Error failure) {
+        } catch (final IOException | RuntimeException failure) {
             /* Preserve the capability failure itself. Cleanup is best effort and must
              * not replace an informative atomic-move/fsync exception with a secondary
              * delete error. */
             try {
                 Files.deleteIfExists(probe);
                 forceDirectory(parent);
-            } catch (final IOException | RuntimeException | Error cleanupFailure) {
+            } catch (final IOException | RuntimeException cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
             }
             throw failure;
@@ -191,7 +196,7 @@ public final class AtomicFileStore {
             Files.deleteIfExists(probe);
             forceDirectory(parent);
         } catch (final IOException | RuntimeException cleanupFailure) {
-            LOGGER.log(System.Logger.Level.WARNING,
+            LOGGER.log(Level.WARNING,
                     "Unable to remove atomic-metadata probe %s".formatted(probe), cleanupFailure);
         }
     }
@@ -212,19 +217,44 @@ public final class AtomicFileStore {
     /// stale presence is safe after a crash. A stale marker causes reseeding; it
     /// must never make an uncheckpointed Store import appear durable.
     ///
+    /// # Threat model
+    ///
+    /// The path is re-checked for symlinks immediately before deletion, but a
+    /// same-user process that can swap the parent directory between the check
+    /// and the delete can still redirect any path-based removal. Full
+    /// protection would require a `SecureDirectoryStream` handle chain, which
+    /// this utility deliberately does not build. Callers must therefore keep
+    /// the metadata directory writable only by the node account.
+    ///
     /// @param path                 file to remove
     /// @param forceParentDirectory whether to force the parent directory after removal
     /// @throws IOException if the file or, when requested, its parent directory cannot be synced
     public static void delete(final Path path, final boolean forceParentDirectory) throws IOException {
         final Path absolute = path.toAbsolutePath();
         rejectSymbolicLinks(absolute);
+        final Path parent = absolute.getParent();
+        /* Re-verify the parent and the target immediately before deleting:
+         * the earlier rejection cannot prevent a component swap between that
+         * check and this use. */
+        if (parent != null
+                && !Files.readAttributes(parent, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isDirectory()) {
+            throw new IOException("Metadata parent is not a real directory: %s".formatted(parent));
+        }
+        if (Files.isSymbolicLink(absolute)) {
+            throw new IOException("Path contains a symbolic link: %s".formatted(absolute));
+        }
         if (Files.deleteIfExists(absolute)) {
-            if (forceParentDirectory) forceDirectory(absolute.getParent());
+            if (forceParentDirectory) forceDirectory(parent);
         }
     }
 
     private static void forceDirectory(final Path parent) throws IOException {
         if (parent == null) {
+            return;
+        }
+        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
+            /* Windows cannot open a directory as a channel; NTFS does not
+             * expose an equivalent directory-flush operation. */
             return;
         }
         try (FileChannel channel = FileChannel.open(parent, StandardOpenOption.READ)) {
@@ -235,11 +265,7 @@ public final class AtomicFileStore {
     }
 
     private static void rejectSymbolicLinks(final Path path) throws IOException {
-        for (Path current = path.toAbsolutePath(); current != null; current = current.getParent()) {
-            if (Files.isSymbolicLink(current) && !StorageFileOperations.isSystemPrivateAlias(current)) {
-                throw new IOException("Replication metadata path must not contain a symbolic link: " + current);
-            }
-        }
+        PathSecurity.ensureNoSymbolicLinks(path);
     }
 
     private static void writeFully(final FileChannel channel, final ByteBuffer buffer) throws IOException {

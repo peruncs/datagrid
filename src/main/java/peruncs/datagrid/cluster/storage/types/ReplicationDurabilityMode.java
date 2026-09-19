@@ -45,11 +45,13 @@ public enum ReplicationDurabilityMode {
     ///
     /// @param code persisted code
     /// @return durability mode
+    /// @throws StorageBinaryDataException if the persisted code is unknown,
+    ///                                    which marks the file as corrupt
     public static ReplicationDurabilityMode fromCode(final int code) {
         return switch (code) {
             case 1 -> ARCHIVE_FIRST;
             case 2 -> ENQUEUE_THEN_ARCHIVE;
-            default -> throw new IllegalArgumentException("unknown replication durability mode: %s".formatted(code));
+            default -> throw new StorageBinaryDataException("unknown replication durability mode: %s".formatted(code));
         };
     }
 }

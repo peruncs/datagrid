@@ -51,7 +51,10 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
     ///
     /// @return provider state
     default ReplicationHealth.State replicationState() {
-        return isHealthy() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING;
+        if (isHealthy()) {
+            return ReplicationHealth.State.LIVE;
+        }
+        return isReady() ? ReplicationHealth.State.STARTING : ReplicationHealth.State.FAILED;
     }
 
         /// Returns the provider's current Archive free-space estimate, or `-1`.
@@ -104,8 +107,7 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
 
         @Override
         public boolean isHealthy() {
-            return this.active && this.maintenanceHealthy.getAsBoolean()
-                    && this.storageReady() && this.replicationHealth.isHealthy();
+            return this.available() && this.replicationHealth.isHealthy();
         }
 
         @Override
@@ -135,8 +137,12 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
 
         @Override
         public boolean isReady() throws NodeLibraryException {
-            return this.active && this.maintenanceHealthy.getAsBoolean()
-                    && this.storageReady() && this.replicationHealth.isReady();
+            return this.available() && this.replicationHealth.isReady();
+        }
+
+        /// Reports whether the locally observable state allows replicating at all.
+        private boolean available() {
+            return this.active && this.maintenanceHealthy.getAsBoolean() && this.storageReady();
         }
 
         private boolean storageReady() {

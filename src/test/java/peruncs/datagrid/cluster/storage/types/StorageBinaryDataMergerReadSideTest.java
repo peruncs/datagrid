@@ -66,11 +66,7 @@ class StorageBinaryDataMergerReadSideTest {
                     });
 
             final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(StorageBinaryDataMergerTestSupport.foundation()).storage(connection)
-                    .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(coordinator))
-                    .cachingTimeoutMs(0L).cachedBinaryLimit(1_000_000L).applyTimeoutMs(60_000L)
-                    .graphCoordinator(coordinator).build());
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), connection, ObjectGraphUpdateHandler.PerStore(coordinator), 0L, 1_000_000L, 60_000L, coordinator));
             try {
                 assertSame(coordinator, merger.graphCoordinator(),
                         "the merger must expose the coordinator node read paths join through");
@@ -119,11 +115,7 @@ class StorageBinaryDataMergerReadSideTest {
     /// Verifies a merger built without a coordinator reports none so callers run scans directly.
     @Test
     void unwiredMergerExposesNoCoordinator() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                .foundation(StorageBinaryDataMergerTestSupport.foundation())
-                .storage(StorageBinaryDataMergerTestSupport.connection())
-                .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(60_000L).build());
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), StorageBinaryDataMergerTestSupport.connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
         try {
             assertNull(merger.graphCoordinator(),
                     "a merger built without a coordinator must report none so callers run scans directly");

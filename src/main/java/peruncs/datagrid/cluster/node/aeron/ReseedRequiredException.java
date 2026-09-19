@@ -10,9 +10,11 @@ import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 /// the node (restore a compatible backup or copy the writer's Store image
 /// with its cursor) instead of manufacturing independent state.
 ///
-/// This extends [peruncs.datagrid.cluster.node.exceptions.NodeLibraryException]
-/// so node-lifecycle `catch` blocks observe it; the `RESEED_REQUIRED: ` message
-/// prefix is kept for log triage.
+/// This is an unchecked [NodeLibraryException] on purpose: recovery evidence
+/// checks run across constructors, suppliers, and background paths that cannot
+/// declare checked exceptions, and callers must abort startup or fail closed
+/// rather than recover silently. The type carries the "needs a reseed"
+/// meaning; the `RESEED_REQUIRED: ` message prefix is kept for log triage.
 public final class ReseedRequiredException extends NodeLibraryException {
     /// Creates a reseed-required failure with a diagnostic message.
     ///

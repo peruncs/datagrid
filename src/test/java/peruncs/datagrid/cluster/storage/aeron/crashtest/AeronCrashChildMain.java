@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.crashtest;
 
-import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -44,9 +44,9 @@ public final class AeronCrashChildMain {
         throw new IllegalArgumentException("unknown dg.crash.mode");
     }
 
-    private static void atomicWrite(final Path destination, final AtomicFileStore.Encoder encoder)
+    private static void atomicWrite(final Path destination, final AtomicFileWriter.Encoder encoder)
             throws java.io.IOException {
-        AtomicFileStore.write(destination, encoder);
+        AtomicFileWriter.write(destination, encoder);
     }
 
     private static void write(final FileChannel channel, final String value) throws java.io.IOException {

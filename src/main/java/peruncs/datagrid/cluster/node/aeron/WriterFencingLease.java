@@ -1,7 +1,10 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
+import peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -17,6 +20,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+import java.util.function.LongSupplier;
+
+import static java.lang.System.Logger.Level.WARNING;
 
 /// Renewable external writer lease carrying a monotonically increasing fencing token.
 ///
@@ -39,19 +46,38 @@ import java.util.concurrent.TimeUnit;
 /// The lease directory must be shared by all writers of one cluster. Sharing
 /// only the Archive is not enough: separate Archives cannot see each other's
 /// lease without the shared volume.
+///
+/// ## Clock requirements
+///
+/// Freshness is ultimately a wall-clock comparison across machines, so every
+/// writer sharing the volume must run a synchronized wall clock (NTP, chrony,
+/// or equivalent hypervisor time sync) with drift well below the configured
+/// staleness bound. The holder additionally pairs its heartbeat with its own
+/// monotonic clock, so a backward wall-clock step does not immediately stale
+/// the holder's own view while the monotonic age stays within bound. Foreign
+/// readers cannot pair clocks across processes: a peer whose clock is ahead
+/// by more than half the staleness bound fails acquisition closed instead of
+/// stealing, and an operator must fix time sync before the lease can move.
 final class WriterFencingLease implements AutoCloseable {
     private static final int MAGIC = 0x4447574c; // DGWL
     private static final short VERSION = 2;
     private static final int ENCODED_BYTES = Integer.BYTES + Short.BYTES + Long.BYTES + Long.BYTES * 2
             + Long.BYTES * 2 + Long.BYTES + Integer.BYTES;
-    /* Serializes acquisition inside one JVM. The file lock below serializes
-     * across processes; without this mutex two threads of one process would
-     * fail with OverlappingFileLockException instead of acquiring in turn. */
-    private static final Object ACQUIRE_LOCK = new Object();
+    /* Serializes acquisition, renewal, terminal offers, and release for one
+     * lease path inside this JVM. The interprocess file lock below serializes
+     * across processes; without a per-path mutex two threads of one process
+     * would fail with OverlappingFileLockException instead of serializing.
+     * The map is keyed by absolute lease path and never pruned: one entry per
+     * cluster/generation is negligible and pruning would race a concurrent
+     * acquisition. */
+    private static final ConcurrentHashMap<Path, Object> PATH_MUTEXES = new ConcurrentHashMap<>();
     private static final UUID PROCESS_HOLDER_ID = UUID.randomUUID();
     private static final ConcurrentHashMap<Path, WriterFencingLease> ACTIVE = new ConcurrentHashMap<>();
-    /// Bounded wait for an in-flight heartbeat before the lease file is deleted.
+    /// Bounded wait for an in-flight heartbeat before the lease is released.
     private static final long CLOSE_AWAIT_MILLIS = 5_000L;
+    /// Default bounded wait for the interprocess lease lock.
+    private static final Duration DEFAULT_LOCK_TIMEOUT = Duration.ofSeconds(5);
+    private static final long LOCK_RETRY_PARK_NANOS = 1_000_000L;
 
         /// Creates and acquires a lease, starting heartbeat renewal.
     ///
@@ -74,21 +100,47 @@ final class WriterFencingLease implements AutoCloseable {
     /// @param maxStaleness    heartbeat freshness bound
     /// @return held lease
     /// @throws IllegalStateException if another writer holds a fresh lease, the lease file is corrupt,
-    ///                               or the token series is exhausted
-    public static WriterFencingLease acquire(
+    ///                               the interprocess lock cannot be acquired within the default
+    ///                               bounded wait, or the token series is exhausted
+    static WriterFencingLease acquire(
             final Path volumeDirectory,
             final UUID clusterId,
             final UUID storeGeneration,
             final UUID nodeId,
             final Duration maxStaleness
     ) {
+        return acquire(volumeDirectory, clusterId, storeGeneration, nodeId, maxStaleness, DEFAULT_LOCK_TIMEOUT);
+    }
+
+        /// Creates and acquires a lease with an explicit interprocess lock wait.
+    ///
+    /// @param volumeDirectory shared backup volume directory
+    /// @param clusterId       replication cluster identity
+    /// @param storeGeneration Store generation identity
+    /// @param nodeId          acquiring node identity
+    /// @param maxStaleness    heartbeat freshness bound
+    /// @param lockTimeout     bounded wait for the interprocess lease lock
+    /// @return held lease
+    /// @throws IllegalStateException when the lease cannot be acquired
+    static WriterFencingLease acquire(
+            final Path volumeDirectory,
+            final UUID clusterId,
+            final UUID storeGeneration,
+            final UUID nodeId,
+            final Duration maxStaleness,
+            final Duration lockTimeout
+    ) {
         Objects.requireNonNull(volumeDirectory, "volumeDirectory");
         Objects.requireNonNull(clusterId, "clusterId");
         Objects.requireNonNull(storeGeneration, "storeGeneration");
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(maxStaleness, "maxStaleness");
+        Objects.requireNonNull(lockTimeout, "lockTimeout");
         if (maxStaleness.isZero() || maxStaleness.isNegative()) {
             throw new IllegalArgumentException("lease staleness bound must be positive");
+        }
+        if (lockTimeout.isZero() || lockTimeout.isNegative()) {
+            throw new IllegalArgumentException("lease lock wait must be positive");
         }
         try {
             Files.createDirectories(volumeDirectory);
@@ -98,13 +150,18 @@ final class WriterFencingLease implements AutoCloseable {
         } catch (final IOException failure) {
             throw new IllegalStateException("cannot create writer lease directory %s".formatted(volumeDirectory), failure);
         }
-        synchronized (ACQUIRE_LOCK) {
-            final WriterFencingLease active = ACTIVE.get(leasePath(volumeDirectory, clusterId, storeGeneration));
+        final Path path = leasePath(volumeDirectory, clusterId, storeGeneration);
+        synchronized (mutexFor(path)) {
+            final WriterFencingLease active = ACTIVE.get(path);
             if (active != null && active.isCurrent()) {
                 throw new IllegalStateException("a writer lease is already held in this JVM");
             }
-            return acquireLocked(volumeDirectory, clusterId, storeGeneration, nodeId, maxStaleness);
+            return acquireLocked(volumeDirectory, clusterId, storeGeneration, nodeId, maxStaleness, lockTimeout);
         }
+    }
+
+    private static Object mutexFor(final Path path) {
+        return PATH_MUTEXES.computeIfAbsent(path.toAbsolutePath().normalize(), ignored -> new Object());
     }
 
     private static WriterFencingLease acquireLocked(
@@ -112,20 +169,27 @@ final class WriterFencingLease implements AutoCloseable {
             final UUID clusterId,
             final UUID storeGeneration,
             final UUID nodeId,
-            final Duration maxStaleness
+            final Duration maxStaleness,
+            final Duration lockTimeout
     ) {
         final Path path = leasePath(volumeDirectory, clusterId, storeGeneration);
         final Path lockPath = volumeDirectory.resolve("writer-lease.lock");
-        final long now = System.currentTimeMillis();
         final long token;
+        final long writeNanos;
+        final long now;
         try (final FileChannel lockChannel = FileChannel.open(
                 rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-             final FileLock ignored = lockChannel.lock()) {
+             final FileLock ignored = lockFile(lockChannel, lockTimeout)) {
+            /* Sample the wall clock only once the interprocess lock is held: a
+             * long wait for another writer must not make the freshly written
+             * heartbeat look older than it is, and the acquire decision must be
+             * based on the clock at decision time, not at open time. */
+            now = System.currentTimeMillis();
             final LeaseFile existing = readExistingOrNull(path, clusterId, storeGeneration);
             if (existing == null) {
                 token = 1L;
                 writeAtomically(path, new LeaseFile(token, nodeId, PROCESS_HOLDER_ID, now));
-            } else if (futureSkewed(now, existing.heartbeatMillis(), maxStaleness.toMillis())) {
+            } else if (futureSkewed(now, existing.heartbeatMillis(), maxStaleness.toMillis() / 2L)) {
                 throw new IllegalStateException(
                         "writer lease heartbeat is in the future beyond the configured clock-skew bound; synchronize writer clocks");
             } else if (now - existing.heartbeatMillis() > maxStaleness.toMillis()) {
@@ -148,6 +212,7 @@ final class WriterFencingLease implements AutoCloseable {
                         "writer lease for cluster %s generation %s is held by node %s (token %s)".formatted(
                                 clusterId, storeGeneration, existing.nodeId(), existing.token()));
             }
+            writeNanos = System.nanoTime();
         } catch (final OverlappingFileLockException contention) {
             throw new IllegalStateException("concurrent writer lease acquisition is already in progress", contention);
         } catch (final IOException failure) {
@@ -156,7 +221,7 @@ final class WriterFencingLease implements AutoCloseable {
                             clusterId, storeGeneration),
                     failure);
         }
-        final WriterFencingLease lease = new WriterFencingLease(path, token, nodeId, maxStaleness);
+        final WriterFencingLease lease = new WriterFencingLease(path, token, nodeId, maxStaleness, lockTimeout, writeNanos);
         ACTIVE.put(path, lease);
         lease.startHeartbeat();
         return lease;
@@ -170,6 +235,41 @@ final class WriterFencingLease implements AutoCloseable {
                     "writer fencing token space is exhausted for cluster %s generation %s; manual intervention is required".formatted(
                             clusterId, storeGeneration),
                     overflow);
+        }
+    }
+
+        /// Acquires the interprocess lock with a bounded wait.
+    ///
+    /// An unbounded [FileChannel#lock()] can park a writer (and, through the
+    /// shared path mutex, every other lease operation in this JVM) for as long
+    /// as another process holds the lock, including a wedged peer. The
+    /// bounded retry fails closed instead. [OverlappingFileLockException] is
+    /// ignored here because the per-path JVM mutex already serializes threads
+    /// of one process; a stray overlap means another path aliased the lock and
+    /// the bounded wait then expires.
+    ///
+    /// @param channel        channel for the lease lock file
+    /// @param lockTimeout    bounded wait
+    /// @return held file lock, released by the caller
+    /// @throws IOException when the lock cannot be acquired within the bound
+    private static FileLock lockFile(final FileChannel channel, final Duration lockTimeout) throws IOException {
+        final long deadline = ReplicationRetry.deadlineNanos(lockTimeout.toNanos());
+        for (; ; ) {
+            FileLock lock;
+            try {
+                lock = channel.tryLock();
+            } catch (final OverlappingFileLockException overlap) {
+                /* Serialized by the per-path mutex; a genuine overlap here means
+                 * the same file is reachable through a different path and must
+                 * fail closed rather than spin forever. */
+                throw new IOException("writer lease lock is already held by this process through another path", overlap);
+            }
+            if (lock != null) return lock;
+            if (ReplicationRetry.expired(deadline)) {
+                throw new IOException(
+                        "timed out after %s ms waiting for the writer lease lock".formatted(lockTimeout.toMillis()));
+            }
+            LockSupport.parkNanos(LOCK_RETRY_PARK_NANOS);
         }
     }
 
@@ -187,37 +287,54 @@ final class WriterFencingLease implements AutoCloseable {
     private final long token;
     private final UUID nodeId;
     private final UUID holderId;
-    private final long maxStalenessMillis;
-    private final long checkIntervalMillis;
+    private final long maxStalenessNanos;
+    private final long futureSkewMillis;
+    private final long checkIntervalNanos;
+    /* Bounded wait for every interprocess lease lock (acquisition, renewal,
+     * commit-offer proof, and release). Configured at acquisition so a
+     * deployment with a slow shared volume widens every lock wait, not only
+     * the initial one. */
+    private final Duration lockTimeout;
     private final ScheduledExecutorService heartbeat;
-    /* Guards renewal against release: a renew() that entered before close()
-     * must finish before the file is deleted, never rewrite after it. The
-     * same monitor guards the cached freshness below. */
+    /* Guards renewal against release and the cached freshness below. A renew()
+     * that entered before close() completes is additionally kept from writing
+     * by the closed check performed while holding the interprocess file lock,
+     * so a heartbeat can never be written after close() returns. */
     private final Object stateLock = new Object();
     private boolean closed;
     private boolean hasCheck;
-    private long lastCheckMillis;
+    private long lastCheckNanos;
     private boolean lastCheckResult;
+    /* Monotonic timestamp of the heartbeat this holder last wrote. It lets the
+     * holder treat a backward or forward wall-clock step as fresh while its
+     * own monotonic age stays within the staleness bound; a foreign reader
+     * cannot pair clocks across processes and must rely on wall time alone
+     * (see the class javadoc). */
+    private volatile long lastWriteNanos;
 
     private WriterFencingLease(
-            final Path path, final long token, final UUID nodeId, final Duration maxStaleness) {
+            final Path path, final long token, final UUID nodeId, final Duration maxStaleness,
+            final Duration lockTimeout, final long lastWriteNanos) {
         this.path = path;
         this.token = token;
         this.nodeId = nodeId;
         this.holderId = PROCESS_HOLDER_ID;
-        this.maxStalenessMillis = maxStaleness.toMillis();
-        this.checkIntervalMillis = Math.max(1L, maxStaleness.toMillis() / 3L);
+        this.maxStalenessNanos = maxStaleness.toNanos();
+        this.futureSkewMillis = Math.max(1L, maxStaleness.toMillis() / 2L);
+        this.checkIntervalNanos = Math.max(1L, this.maxStalenessNanos / 3L);
+        this.lockTimeout = lockTimeout;
+        this.lastWriteNanos = lastWriteNanos;
         this.heartbeat = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofVirtual().name("dg-writer-lease-heartbeat").factory());
     }
 
     private void startHeartbeat() {
-        final long period = this.checkIntervalMillis;
+        final long period = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(this.checkIntervalNanos));
         this.heartbeat.scheduleAtFixedRate(() -> {
             try {
                 this.renew();
             } catch (final RuntimeException failure) {
-                System.getLogger(WriterFencingLease.class.getName()).log(System.Logger.Level.WARNING,
+                System.getLogger(WriterFencingLease.class.getName()).log(WARNING,
                         "writer lease heartbeat failed; write admission is suspended until renewal succeeds",
                         failure);
             }
@@ -254,93 +371,113 @@ final class WriterFencingLease implements AutoCloseable {
     ///
     /// @return `true` while the lease file still names this holder with a fresh heartbeat
     public boolean isCurrent() {
-        final long now = System.currentTimeMillis();
-        synchronized (this.stateLock) {
-            if (this.closed) {
-                return false;
-            }
-            if (this.hasCheck && now - this.lastCheckMillis < this.checkIntervalMillis) {
-                return this.lastCheckResult;
-            }
-        }
         return this.isCurrentUncached();
     }
 
-        /// Re-reads the lease file without the freshness cache.
+        /// Re-reads the lease file with a rate-limited ownership proof.
     ///
-    /// Commit admission uses this path so a stolen lease cannot remain usable
-    /// for the normal cached-check interval. The result is also published to
-    /// the cache for callers that only need the cheaper [#isCurrent()] guard.
+    /// The physical re-read runs at most once per third of the staleness
+    /// bound; calls inside that window reuse the cached result, so a busy
+    /// write path cannot turn every admission check into file I/O. Use
+    /// [#executeUnderOwnership] for the authoritative per-commit proof: it
+    /// verifies ownership while holding the interprocess lock that serializes
+    /// acquisition and takeover.
     ///
     /// @return `true` while this holder owns a fresh lease
     boolean isCurrentUncached() {
+        final long nowNanos = System.nanoTime();
         synchronized (this.stateLock) {
             if (this.closed) return false;
+            if (this.hasCheck && nowNanos - this.lastCheckNanos < this.checkIntervalNanos) {
+                return this.lastCheckResult;
+            }
         }
-        final long checkedAt = System.currentTimeMillis();
         final LeaseFile current = readQuietly(this.path);
-        final boolean fresh = current != null && isFresh(checkedAt, current.heartbeatMillis(), this.maxStalenessMillis);
-        final boolean result = current != null && current.token() == this.token &&
-                current.nodeId().equals(this.nodeId) && current.holderId().equals(this.holderId) && fresh;
+        final boolean result = current != null && this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
         synchronized (this.stateLock) {
             if (this.closed) return false;
             this.hasCheck = true;
-            this.lastCheckMillis = checkedAt;
+            this.lastCheckNanos = nowNanos;
             this.lastCheckResult = result;
             return result;
         }
+    }
+
+    private boolean matchesHolder(final LeaseFile current) {
+        return current.token() == this.token && current.nodeId().equals(this.nodeId) &&
+               current.holderId().equals(this.holderId);
+    }
+
+        /// Reports whether the heartbeat this holder last wrote is still within
+    /// the staleness bound on the holder's monotonic clock.
+    ///
+    /// The wall-clock heartbeat written by the holder may look stale after a
+    /// forward step or fresh after a backward step; the monotonic age is the
+    /// authority for the holder's own view. Renewal keeps it below the bound,
+    /// so an age beyond the bound means renewal has stalled and admission must
+    /// suspend regardless of the wall reading.
+    private boolean ownLeaseFresh(final long nowNanos) {
+        final long writeNanos = this.lastWriteNanos;
+        final long age = nowNanos - writeNanos;
+        return writeNanos != 0L && age >= 0L && age <= this.maxStalenessNanos;
     }
 
     private static boolean futureSkewed(final long now, final long heartbeat, final long boundMillis) {
         return heartbeat > now && heartbeat - now > boundMillis;
     }
 
-    private static boolean isFresh(final long now, final long heartbeat, final long boundMillis) {
-        return !futureSkewed(now, heartbeat, boundMillis) && now >= heartbeat
-                && now - heartbeat <= boundMillis;
-    }
-
     private void renew() {
-        synchronized (ACQUIRE_LOCK) {
+        final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
+        synchronized (mutexFor(this.path)) {
             synchronized (this.stateLock) {
-                if (this.closed) {
-                    return;
-                }
+                if (this.closed) return;
             }
-            try {
-                final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
-                try (final FileChannel lockChannel = FileChannel.open(
-                        rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                      final FileLock ignored = lockChannel.lock()) {
-                    synchronized (this.stateLock) {
-                        if (this.closed) {
-                            return;
-                        }
-                    }
-                    final LeaseFile current = readForAcquire(this.path);
-                    if (current.token() != this.token || !current.nodeId().equals(this.nodeId) ||
-                        !current.holderId().equals(this.holderId)) {
-                        throw new IllegalStateException(
-                                "writer lease for token %s was stolen or removed; this writer is fenced".formatted(this.token));
-                    }
-                    writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
-                            System.currentTimeMillis()));
-                    synchronized (this.stateLock) {
-                        if (!this.closed) {
-                            this.hasCheck = true;
-                            this.lastCheckMillis = System.currentTimeMillis();
-                            this.lastCheckResult = true;
-                        }
-                    }
+            try (final FileChannel lockChannel = FileChannel.open(
+                    rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                 final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
+                final LeaseFile current = readForAcquire(this.path);
+                if (!this.matchesHolder(current)) {
+                    throw new WriterFencedException(
+                            "writer lease for token %s was stolen or removed; this writer is fenced".formatted(this.token));
                 }
+                this.refreshHeartbeatLocked();
             } catch (final IOException | RuntimeException failure) {
                 synchronized (this.stateLock) {
                     this.hasCheck = true;
-                    this.lastCheckMillis = System.currentTimeMillis();
+                    this.lastCheckNanos = System.nanoTime();
                     this.lastCheckResult = false;
+                }
+                if (failure instanceof WriterFencedException fenced) {
+                    /* Fencing loss must surface with its own type: wrapping it in a
+                     * generic renewal failure would misdirect recovery diagnostics. */
+                    throw fenced;
                 }
                 throw new IllegalStateException("writer lease heartbeat renewal failed", failure);
             }
+        }
+    }
+
+        /// Writes a fresh heartbeat while the caller holds the interprocess lock.
+    ///
+    /// A closed lease is never rewritten: the check runs under the state lock,
+    /// so a concurrent [close()] cannot return while this method is about to
+    /// write. The wall heartbeat and the writing process's monotonic timestamp
+    /// are stored together for [#ownLeaseFresh].
+    ///
+    /// @throws IOException when the lease file cannot be persisted
+    private void refreshHeartbeatLocked() throws IOException {
+        final long writeMillis = System.currentTimeMillis();
+        final long writeNanos = System.nanoTime();
+        synchronized (this.stateLock) {
+            if (this.closed) return;
+        }
+writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId, writeMillis));
+        this.lastWriteNanos = writeNanos;
+        synchronized (this.stateLock) {
+            if (this.closed) return;
+            this.hasCheck = true;
+            this.lastCheckNanos = writeNanos;
+            this.lastCheckResult = true;
         }
     }
 
@@ -354,90 +491,124 @@ final class WriterFencingLease implements AutoCloseable {
     /// a still-current heartbeat, or observes the refreshed heartbeat and fails
     /// its steal. A deposed writer fails here instead of offering a stale marker.
     ///
+    /// The heartbeat is rewritten only when it has aged past a third of the
+    /// staleness bound, and is also refreshed in the offer's failure path while
+    /// the interprocess lock is still held, so a long or throwing offer cannot
+    /// leave a stale-but-present lease for a successor to steal. This keeps the
+    /// shared volume's per-commit fsync cost proportional to renewal need
+    /// rather than to commit rate.
+    ///
     /// @param offer bounded marker offer returning the Aeron position
     /// @return Aeron position returned by the offer
-    /// @throws IllegalStateException when this holder no longer owns a fresh lease
-    public long executeUnderOwnership(final java.util.function.LongSupplier offer) {
+    /// @throws WriterFencedException when this holder no longer owns a fresh lease
+    public long executeUnderOwnership(final LongSupplier offer) {
         Objects.requireNonNull(offer, "offer");
         return this.executeUnderOwnership(ignored -> offer.getAsLong());
     }
 
-    /// Offers one terminal marker with a per-attempt ownership callback.
+        /// Offers one terminal marker with a per-attempt ownership callback.
     ///
     /// @param offer offer operation receiving the per-attempt ownership check
     /// @return Aeron position returned by the offer
-    /// @throws IllegalStateException when this holder no longer owns a fresh lease
-    public long executeUnderOwnership(final peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate.OwnedOffer offer) {
+    /// @throws WriterFencedException when this holder no longer owns a fresh lease
+    public long executeUnderOwnership(final WriterLeaseGate.OwnedOffer offer) {
         Objects.requireNonNull(offer, "offer");
-        synchronized (ACQUIRE_LOCK) {
+        synchronized (mutexFor(this.path)) {
             synchronized (this.stateLock) {
                 if (this.closed) {
-                    throw new IllegalStateException("writer fencing lease is closed");
+                    throw new WriterFencedException("writer fencing lease is closed");
                 }
             }
             final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
             try (final FileChannel lockChannel = FileChannel.open(
                     rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                 final FileLock ignored = lockChannel.lock()) {
+                 final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
                 final LeaseFile current = readForAcquire(this.path);
-                final long now = System.currentTimeMillis();
-                final boolean fresh = isFresh(now, current.heartbeatMillis(), this.maxStalenessMillis);
-                if (current.token() != this.token || !current.nodeId().equals(this.nodeId) ||
-                    !current.holderId().equals(this.holderId) || !fresh) {
-                    synchronized (this.stateLock) {
-                        this.hasCheck = true;
-                        this.lastCheckMillis = now;
-                        this.lastCheckResult = false;
-                    }
-                    throw new IllegalStateException(
+                final long nowNanos = System.nanoTime();
+                final boolean fresh = this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
+                if (!fresh) {
+                    this.publishFailedCheck(nowNanos);
+                    throw new WriterFencedException(
                             "writer fencing lease lost before commit; this writer is fenced");
                 }
-                final long position = offer.offer(this::isCurrentUncached);
-                writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
-                        System.currentTimeMillis()));
-                synchronized (this.stateLock) {
-                    if (!this.closed) {
-                        this.hasCheck = true;
-                        this.lastCheckMillis = System.currentTimeMillis();
-                        this.lastCheckResult = true;
+                this.refreshHeartbeatIfDueLocked();
+                try {
+                    final long position = offer.offer(this::isCurrentUncached);
+                    this.refreshHeartbeatIfDueLocked();
+                    return position;
+                } catch (final RuntimeException | Error failure) {
+                    /* The offer held the interprocess lock for an unknown time and
+                     * may now be older than the renewal interval. Refresh before
+                     * releasing the lock so a successor cannot observe a
+                     * stale-but-present lease caused by this failure; never let a
+                     * refresh failure mask the original offer failure. */
+                    try {
+                        this.refreshHeartbeatLocked();
+                    } catch (final IOException | RuntimeException refreshFailure) {
+                        failure.addSuppressed(refreshFailure);
                     }
+                    throw failure;
                 }
-                return position;
             } catch (final IOException failure) {
-                synchronized (this.stateLock) {
-                    this.hasCheck = true;
-                    this.lastCheckMillis = System.currentTimeMillis();
-                    this.lastCheckResult = false;
-                }
+                this.publishFailedCheck(System.nanoTime());
                 throw new IllegalStateException("writer lease commit offer failed", failure);
             }
         }
     }
 
+    private void refreshHeartbeatIfDueLocked() throws IOException {
+        if (System.nanoTime() - this.lastWriteNanos <= this.checkIntervalNanos) return;
+        this.refreshHeartbeatLocked();
+    }
+
+    private void publishFailedCheck(final long nowNanos) {
+        synchronized (this.stateLock) {
+            this.hasCheck = true;
+            this.lastCheckNanos = nowNanos;
+            this.lastCheckResult = false;
+        }
+    }
+
         /// Stops renewal, leaving the lease file in place for the next holder.
     ///
-    /// An in-flight heartbeat is awaited (bounded) before close returns, so a
-    /// renewal that entered before close can never rewrite the file after this
-    /// holder stopped. The file's heartbeat then ages out: a same-node restart
-    /// re-acquires with the next token, and any successor steals the lease with
-    /// a strictly greater token once the staleness bound passes. The fencing
-    /// token series therefore survives clean restarts, crashes, and takeovers.
+    /// An in-flight heartbeat is awaited (bounded) and the interprocess lock
+    /// is acquired (bounded) before close returns. A renewal that entered
+    /// before close observes `closed` under the state lock while holding the
+    /// interprocess lock and never rewrites the file, so no heartbeat write
+    /// can happen after close completes. The file's heartbeat then ages out:
+    /// a same-node restart re-acquires with the next token, and any successor
+    /// steals the lease with a strictly greater token once the staleness bound
+    /// passes. The fencing token series therefore survives clean restarts,
+    /// crashes, and takeovers.
     @Override
     public void close() {
         synchronized (this.stateLock) {
-            if (this.closed) {
-                return;
-            }
+            if (this.closed) return;
             this.closed = true;
         }
         this.heartbeat.shutdownNow();
         try {
             if (!this.heartbeat.awaitTermination(CLOSE_AWAIT_MILLIS, TimeUnit.MILLISECONDS)) {
-                System.getLogger(WriterFencingLease.class.getName()).log(System.Logger.Level.WARNING,
+                System.getLogger(WriterFencingLease.class.getName()).log(WARNING,
                         "writer lease heartbeat did not stop before release; a late renewal may have refreshed the heartbeat");
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
+        }
+        final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
+        try (final FileChannel lockChannel = FileChannel.open(
+                rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
+            /* Nothing to write: the file intentionally survives release.
+             * Holding the interprocess lock here proves that a renewal or
+             * terminal offer which passed the closed check has finished. A
+             * bounded failure is logged rather than thrown: `closed` already
+             * prevents every future renewal write, and close() must stay
+             * callable while an unrelated offer is in flight. */
+        } catch (final IOException | RuntimeException releaseFailure) {
+            System.getLogger(WriterFencingLease.class.getName()).log(WARNING,
+                    "writer lease lock was not available during release; a concurrent heartbeat or offer may still be finishing",
+                    releaseFailure);
         }
         ACTIVE.remove(this.path, this);
     }

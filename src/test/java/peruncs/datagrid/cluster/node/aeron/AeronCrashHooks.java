@@ -1,25 +1,29 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.storage.aeron.writer.WriterCrashHooks;
+import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 
 import java.util.function.BiConsumer;
 
 /// Test-only bridge for the forked Aeron crash harness.
+///
+/// Writer and provider crash seams share the public [CrashHook] dynamic
+/// binding, so one hook observes both. This bridge exists so test packages
+/// outside the writer package can arm the binding without touching production
+/// classpaths.
 public final class AeronCrashHooks {
     private AeronCrashHooks() {
     }
 
-        /// Runs an action with writer and provider hooks bound to its scope.
+        /// Runs an action with the writer/provider crash hook bound to its scope.
     ///
     /// @param hook callback that receives the crash seam name and sequence
     /// @param action guarded write operation
     public static void runWithHook(final BiConsumer<String, Long> hook, final Runnable action) {
-        WriterCrashHooks.runWithHook(hook, () ->
-                AeronClusterReplicationTransportProvider.runWithCrashHook(hook, action));
+        CrashHook.runWithHook(hook, action);
     }
 
-        /// Calls an operation with writer and provider hooks bound to its scope.
+        /// Calls an operation with the writer/provider crash hook bound to its scope.
     ///
     /// @param <T> operation result type
     /// @param <X> operation failure type
@@ -31,8 +35,7 @@ public final class AeronCrashHooks {
             final BiConsumer<String, Long> hook,
             final ScopedValue.CallableOp<? extends T, X> operation
     ) throws X {
-        return WriterCrashHooks.callWithHook(hook,
-                () -> AeronClusterReplicationTransportProvider.callWithCrashHook(hook, operation));
+        return CrashHook.callWithHook(hook, operation);
     }
 
     /// Captures all crash-test bindings for an explicitly created worker thread.
@@ -40,9 +43,7 @@ public final class AeronCrashHooks {
     /// @param action worker body
     /// @return wrapped action carrying the current bindings
     public static Runnable inheritCurrent(final Runnable action) {
-        return WriterCrashHooks.inheritCurrent(
-                AeronClusterReplicationTransportProvider.inheritCurrentCrashHook(
-                        FileStoreCrashHooks.inheritCurrent(action)));
+        return CrashHook.inheritCurrent(FileStoreCrashHooks.inheritCurrent(action));
     }
 
         /// Returns the checkpoint sequence associated with the current write callback.

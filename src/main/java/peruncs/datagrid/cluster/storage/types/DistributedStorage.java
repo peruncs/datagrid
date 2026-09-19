@@ -31,6 +31,16 @@ public final class DistributedStorage {
     /// remain one operation, never a local commit followed by an uncoordinated
     /// distribution.
     ///
+    /// The installed configurator replaces any previously installed
+    /// [InstanceDispatcherLogic]. Chaining is verifiably impossible: the
+    /// upstream foundation's only accessor for the installed logic
+    /// (`PersistenceFoundation.Default.getInstanceDispatcherLogic()`) is
+    /// self-recursive and always throws `StackOverflowError` — pinned by
+    /// `DistributedStorageTest.upstreamDispatcherLogicAccessorRemainsUnusable`
+    /// so chaining is restored the moment upstream fixes it. Until then,
+    /// compose prior dispatching into the target factory, and install
+    /// distributed writing once.
+    ///
     /// @param foundation    foundation to configure
     /// @param distributor   destination for committed data
     /// @param targetFactory wrapper for the local persistence target
@@ -53,43 +63,32 @@ public final class DistributedStorage {
     static final class Configurator implements InstanceDispatcherLogic {
         private final StorageBinaryDataDistributor distributor;
         private final UnaryOperator<PersistenceTarget<Binary>> targetFactory;
-        private final InstanceDispatcherLogic previous;
 
         Configurator(final StorageBinaryDataDistributor distributor, final UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
-            this(distributor, targetFactory, null);
-        }
-
-            /// Creates a configurator that preserves an already installed dispatcher.
-        Configurator(
-                final StorageBinaryDataDistributor distributor,
-                final UnaryOperator<PersistenceTarget<Binary>> targetFactory,
-                final InstanceDispatcherLogic previous) {
             super();
             this.distributor = notNull(distributor);
             this.targetFactory = notNull(targetFactory);
-            this.previous = previous;
         }
 
         @SuppressWarnings("unchecked") // Store supplies the Binary persistence target to this typed factory
         @Override
         public <T> T apply(final T subject) {
-            final T dispatched = this.previous == null ? subject : this.previous.apply(subject);
-            return switch (dispatched) {
+            return switch (subject) {
                 case null -> null;
-                case PersistenceTarget<?> target when dispatched instanceof PersistenceTypeDictionaryExporter dictionaryExporter ->
+                case PersistenceTarget<?> target when subject instanceof PersistenceTypeDictionaryExporter dictionaryExporter ->
                     /* Store foundations may expose one object through both SPIs. Returning
                      * only the target decorator silently drops dictionary publication, so
                      * preserve both contracts in one adapter. */
                         (T) new TargetAndDictionaryExporter(
                                 this.targetFactory.apply((PersistenceTarget<Binary>) target),
-                                StorageTypeDictionaryExporterDistributing.New(dictionaryExporter, this.distributor)
+                                DistributingTypeDictionaryExporter.New(dictionaryExporter, this.distributor)
                         );
                 case PersistenceTarget<?> target -> (T) this.targetFactory.apply((PersistenceTarget<Binary>) target);
-                case PersistenceTypeDictionaryExporter persistenceTypeDictionaryExporter -> (T) StorageTypeDictionaryExporterDistributing.New(
+                case PersistenceTypeDictionaryExporter persistenceTypeDictionaryExporter -> (T) DistributingTypeDictionaryExporter.New(
                         persistenceTypeDictionaryExporter,
                         this.distributor
                 );
-                default -> dispatched;
+                default -> subject;
             };
 
         }
@@ -111,6 +110,16 @@ public final class DistributedStorage {
             @Override
             public boolean isWritable() {
                 return this.target.isWritable();
+            }
+
+            @Override
+            public void prepareTarget() {
+                this.target.prepareTarget();
+            }
+
+            @Override
+            public void closeTarget() {
+                this.target.closeTarget();
             }
 
             @Override

@@ -4,6 +4,8 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
+import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator.HeaderField;
+import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator.Mutation;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPayloads;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
@@ -13,6 +15,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
@@ -409,6 +412,56 @@ class ProviderCrashMatrixIT {
                             base.resolve("archive"), checkpoint.recordingId());
                     ArchiveArtifactMutator.corruptFirstEnvelopePayload(segments.getLast());
                 });
+    }
+
+        /// Envelope-header corruption fuzz: mutates one header field per cell
+    /// and, except for the stored CRC fields themselves, recomputes the header
+    /// CRC afterwards — so the integrity check passes and only the decoder's
+    /// semantic validation (magic, version, kind, identity, nonce, fencing
+    /// token, chunk framing) can reject the frame. A mutation that lets the
+    /// child continue is silent acceptance of corrupted history and fails the
+    /// cell. The default run samples a seeded subset; `-Dcrash.header.fuzz.full=true`
+    /// sweeps every field × mutation combination.
+    @Test
+    void envelopeHeaderCorruptionNeverContinuesSilently() throws Exception {
+        final HeaderField[] fields = HeaderField.values();
+        final Mutation[] mutations = Mutation.values();
+        final boolean full = Boolean.getBoolean("crash.header.fuzz.full");
+        final int combosPerRun = Integer.getInteger("crash.header.fuzz.combos", 8);
+        final long seed = Long.getLong("crash.matrix.seed", 1L) ^ 0x4C0BABL;
+        final Random random = new Random(seed);
+        final List<int[]> selected = new ArrayList<>();
+        if (full) {
+            for (int field = 0; field < fields.length; field++) {
+                for (int mutation = 0; mutation < mutations.length; mutation++) {
+                    selected.add(new int[]{field, mutation});
+                }
+            }
+        } else {
+            for (int i = 0; i < Math.min(combosPerRun, fields.length * mutations.length); i++) {
+                selected.add(new int[]{random.nextInt(fields.length), random.nextInt(mutations.length)});
+            }
+        }
+        for (final int[] combo : selected) {
+            final HeaderField field = fields[combo[0]];
+            final Mutation mutation = mutations[combo[1]];
+            /* The stored-CRC fields are mutated without the fix-up: their
+             * whole purpose is the integrity check, and a recomputed CRC over
+             * a mutated CRC field is meaningless. Every other field is mutated
+             * with the CRC fixed up so semantics alone must reject it. */
+            final boolean isStoredCrc = field == HeaderField.HEADER_CRC ||
+                                        field == HeaderField.PAYLOAD_CRC ||
+                                        field == HeaderField.COMMIT_CRC;
+            this.assertSafeOutcomeAfterMutation("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT",
+                    ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+                        final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
+                                base.resolve("checkpoint/writer.checkpoint"));
+                        final List<Path> segments = ArchiveArtifactMutator.segments(
+                                base.resolve("archive"), checkpoint.recordingId());
+                        ArchiveArtifactMutator.corruptFirstEnvelopeHeader(
+                                segments.getLast(), field, mutation, !isStoredCrc);
+                    });
+        }
     }
 
         /// Seeded chunk-budget kills: the child dies after a randomized number

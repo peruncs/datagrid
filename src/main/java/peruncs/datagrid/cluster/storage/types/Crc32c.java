@@ -63,6 +63,15 @@ public final class Crc32c {
     /// Updates a caller-owned accumulator directly from an Agrona buffer.
     /// Native/direct buffers use the JDK zero-copy path; heap buffers use their
     /// existing backing array. No temporary heap scratch is allocated.
+    ///
+    /// The accumulator is NOT reset: this is the incremental API for streaming
+    /// CRCs. One-shot callers must use
+    /// [#compute(CRC32C, DirectBuffer, int, int)], which resets first.
+    ///
+    /// @param reuse  caller-owned accumulator
+    /// @param source buffer to read
+    /// @param offset first byte to include
+    /// @param length number of bytes to include
     public static void update(final CRC32C reuse, final DirectBuffer source,
                               final int offset, final int length) {
         Objects.requireNonNull(reuse, "reuse");
@@ -83,11 +92,23 @@ public final class Crc32c {
         reuse.update(view);
     }
 
-    /// Returns the CRC32C of an Agrona buffer range.
-    public static int compute(final DirectBuffer source, final int offset, final int length) {
-        final CRC32C reuse = accumulator();
+    /// Returns the one-shot CRC32C of an Agrona buffer range, reusing a
+    /// caller-owned accumulator.
+    ///
+    /// Unlike [#update(CRC32C, DirectBuffer, int, int)] this resets the
+    /// accumulator first, so a long-lived scratch computes one independent
+    /// CRC per call instead of accumulating across calls.
+    ///
+    /// @param reuse  caller-owned accumulator, reset before use
+    /// @param source buffer to read
+    /// @param offset first byte to include
+    /// @param length number of bytes to include
+    /// @return CRC32C value
+    public static int compute(final CRC32C reuse, final DirectBuffer source,
+                               final int offset, final int length) {
+        Objects.requireNonNull(reuse, "reuse");
+        reuse.reset();
         update(reuse, source, offset, length);
         return (int) reuse.getValue();
     }
-
 }

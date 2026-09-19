@@ -29,7 +29,7 @@ class StorageBinaryDataClientAeronTest {
             final StorageBinaryDataReceiver receiver,
             final int maxBytes
     ) {
-        return new TransactionAssembler(
+        return TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder()
                         .termLength(64 * 1024)
                         .chunkSize(Math.min(256, maxBytes))
@@ -203,7 +203,7 @@ class StorageBinaryDataClientAeronTest {
     @Test
     void rejectsSequenceRegressionInsteadOfSilentlySkippingData() {
         final RecordingReceiver receiver = new RecordingReceiver();
-        final TransactionAssembler assembler = new TransactionAssembler(
+        final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
                         .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, 5, receiver, () -> {
         });
@@ -288,7 +288,7 @@ class StorageBinaryDataClientAeronTest {
         final AtomicInteger callbacks = new AtomicInteger();
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler =
-                new TransactionAssembler(
+                TransactionAssemblerTestSupport.New(
                         AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver, callbacks::incrementAndGet);
         final byte[] data = {1, 2};
@@ -315,7 +315,7 @@ class StorageBinaryDataClientAeronTest {
                 throw new IllegalStateException("injected Store import failure");
             }
         };
-        final TransactionAssembler assembler = new TransactionAssembler(
+        final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
                         .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver, () -> {
         },
@@ -366,7 +366,7 @@ class StorageBinaryDataClientAeronTest {
     void resumesFromPersistedSequence() {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler =
-                new TransactionAssembler(
+                TransactionAssemblerTestSupport.New(
                         AeronReplicationConfiguration.builder()
                                 .termLength(64 * 1024)
                                 .chunkSize(256)
@@ -391,7 +391,7 @@ class StorageBinaryDataClientAeronTest {
         /// A reader resumed at the tail retains both cursor components before new data arrives.
     @Test
     void resumesFromPersistedCursorAtTail() {
-        final TransactionAssembler assembler = new TransactionAssembler(
+        final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder()
                         .termLength(64 * 1024)
                         .chunkSize(256)
@@ -480,7 +480,7 @@ class StorageBinaryDataClientAeronTest {
     void cursorPersistenceFailureStopsFurtherAssembly() {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler =
-                new TransactionAssembler(
+                TransactionAssemblerTestSupport.New(
                         AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver,
                         () -> {
@@ -593,7 +593,7 @@ class StorageBinaryDataClientAeronTest {
     @Test
     void receiverFailureIsTerminalAndDoesNotApplyLaterTransactions() {
         final TransactionAssembler assembler =
-                new TransactionAssembler(
+                TransactionAssemblerTestSupport.New(
                         AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1,
                         new StorageBinaryDataReceiver() {

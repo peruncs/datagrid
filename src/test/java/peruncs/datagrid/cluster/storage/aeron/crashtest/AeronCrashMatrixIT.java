@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/// Process-level crash tests. The child is killed while AtomicFileStore is
+/// Process-level crash tests. The child is killed while AtomicFileWriter is
 /// still in its temporary-file phase; exceptions in the same JVM cannot prove
 /// that the old destination survives that boundary.
 class AeronCrashMatrixIT {

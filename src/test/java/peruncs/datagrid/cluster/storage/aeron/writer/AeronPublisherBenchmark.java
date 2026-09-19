@@ -51,7 +51,7 @@ public final class AeronPublisherBenchmark {
                 .build();
         final ByteBuffer[] sources = sourceBuffers(payloadLength, sourceBuffers);
         final CountingOfferer offerer = new CountingOfferer();
-        try (AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        try (AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 offerer, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0)) {
             for (int i = 0; i < warmup; i++) publisher.publishTransaction(null, sources);
             offerer.reset();

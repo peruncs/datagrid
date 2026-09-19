@@ -39,15 +39,10 @@ public final class AeronProviderDriverFailureChildMain {
         final UUID cluster = UUID.randomUUID();
         final UUID node = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        return new NodeLibraryPropertiesProvider.Env() {
+        return new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return "writer";
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override

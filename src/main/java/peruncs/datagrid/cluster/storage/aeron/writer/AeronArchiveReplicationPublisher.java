@@ -16,6 +16,7 @@ import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
+import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -149,7 +150,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             return new AeronArchiveReplicationPublisher(
                     archive,
                     ownedPublication,
-                    new AeronReplicationPublisher(
+                    AeronReplicationPublisher.onPublication(
                             ownedPublication, configuration, clusterId, epoch, initialSequence,
                             position -> awaitRecorded(archive, ownedPublication, recordingId, configuration, position),
                             wireNonce
@@ -290,7 +291,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             }
             awaitRecordingStarted(archive, publication, recordingId, configuration);
             return new AeronArchiveReplicationPublisher(archive, publication,
-                    new AeronReplicationPublisher(publication, configuration, clusterId, epoch, initialSequence,
+                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, epoch, initialSequence,
                             positionValue -> awaitRecorded(archive, publication, recordingId, configuration, positionValue),
                             wireNonce), recordingId,
                     configuration, sourceLocation);
@@ -601,7 +602,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     ///
     /// @param dictionary optional type dictionary bytes
     /// @param data       Store binary buffers; their positions are read but not changed
-    synchronized void publishTransaction(final byte[] dictionary, final java.nio.ByteBuffer[] data) {
+    synchronized void publishTransaction(final byte[] dictionary, final ByteBuffer[] data) {
         if (this.closed) throw new IllegalStateException("Aeron archive publisher is closed");
         this.publisher.publishTransaction(dictionary, data);
     }

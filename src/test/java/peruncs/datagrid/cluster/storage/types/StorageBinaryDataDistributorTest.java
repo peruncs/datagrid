@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -42,9 +43,42 @@ class StorageBinaryDataDistributorTest {
         assertEquals(List.of("dictionary-1", "dictionary-2"), dictionaries);
     }
 
-        /// Verifies that the dictionary is cleared after delegate failure.
+        /// Verifies that a failed data delivery keeps the staged dictionary for
+    /// the retry, so a later data message cannot ship unresolvable type ids.
     @Test
-    void clearsDictionaryAfterDelegateFailure() {
+    void retainsDictionaryUntilDelegateDataDeliverySucceeds() {
+        final List<String> dictionaries = new ArrayList<>();
+        final AtomicBoolean failData = new AtomicBoolean(true);
+        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
+            public void distributeData(final Binary ignored) {
+                if (failData.get()) throw new IllegalStateException("data failure");
+            }
+
+            public void distributeTypeDictionary(final String value) {
+                dictionaries.add(value);
+            }
+
+            public void dispose() {
+            }
+        };
+        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
+        caching.distributeTypeDictionary("survives");
+
+        assertThrows(IllegalStateException.class, () -> caching.distributeData(null));
+        assertEquals(List.of("survives"), dictionaries);
+
+        failData.set(false);
+        caching.distributeData(null);
+        assertEquals(List.of("survives", "survives"), dictionaries,
+                "a retried data delivery must re-send the still-pending dictionary");
+        assertNull(caching.consumeTypeDictionary(),
+                "the staged dictionary clears only after the delegate accepted the data");
+    }
+
+        /// Verifies that a failed dictionary delivery leaves the dictionary
+    /// staged instead of losing it.
+    @Test
+    void retainsDictionaryWhenDictionaryDeliveryFails() {
         final AtomicInteger dictionaryCalls = new AtomicInteger();
         final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
             public void distributeData(final Binary ignored) {
@@ -59,10 +93,11 @@ class StorageBinaryDataDistributorTest {
             }
         };
         final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
-        caching.distributeTypeDictionary("stale");
+        caching.distributeTypeDictionary("pending");
         assertThrows(IllegalStateException.class, () -> caching.distributeData(null));
         assertEquals(1, dictionaryCalls.get());
-        assertNull(caching.consumeTypeDictionary());
+        assertEquals("pending", caching.consumeTypeDictionary(),
+                "a failed dictionary delivery must not drop the staged dictionary");
     }
 
         /// A stale incremental arriving after a restart snapshot is dropped.

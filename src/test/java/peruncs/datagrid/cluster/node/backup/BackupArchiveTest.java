@@ -3,9 +3,9 @@ package peruncs.datagrid.cluster.node.backup;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -73,7 +73,9 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.READY_ENTRY, (String) null));
 
         assertEquals(expected, ReplicationCursorStore.decode(
-                BackupArchive.readManifest(archive, BackupArchiveLimits.defaults().maxExtractedBytes())));
+                BackupArchive.readManifest(archive,
+                        BackupArchiveLimits.defaults().maxExtractedBytes(),
+                        BackupArchiveLimits.defaults().maxArchiveEntries())));
         assertFalse(Files.exists(root.resolve("extracted")));
     }
 
@@ -98,17 +100,19 @@ class BackupArchiveTest {
         writeArchive(archive, new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null));
 
         assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
-                archive, BackupArchiveLimits.defaults().maxExtractedBytes()));
+                archive, BackupArchiveLimits.defaults().maxExtractedBytes(),
+                BackupArchiveLimits.defaults().maxArchiveEntries()));
     }
 
-    /// Verifies a manifest larger than the extraction budget is rejected.
+    /// Verifies a manifest larger than the manifest bound is rejected.
     @Test
     void rejectsManifestLargerThanLimit(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("large-manifest.zip");
         writeArchive(archive, new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[(1 << 20) + 1]));
 
         assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
-                archive, BackupArchiveLimits.defaults().maxExtractedBytes()));
+                archive, BackupArchiveLimits.defaults().maxExtractedBytes(),
+                BackupArchiveLimits.defaults().maxArchiveEntries()));
     }
 
     /// Verifies a malformed backup file name is not recognized and its metadata parsing fails.
@@ -123,7 +127,7 @@ class BackupArchiveTest {
     @Test
     void acceptsCaseInsensitiveBackupFilename() {
         assertTrue(BackupArchive.isBackupFileName(
-                "123.MANUAL.38F5081FA27C4682AC01943D9DB25170.C5537F6F32824C38BAC12D2BC4D76659.5.42.B9A38329F6904FCC9B825E6908C30D9F.ZIP"));
+                "123.MANUAL.38F5081FA27C4682AC01943D9DB25170.C5537F6F32824C38BAC12D2BC4D76659.5.42.7.B9A38329F6904FCC9B825E6908C30D9F.ZIP"));
     }
 
     /// Verifies an archive declaring more bytes than the extraction budget is rejected for both extraction and manifest reads.
@@ -137,8 +141,8 @@ class BackupArchiveTest {
 
         final Path extracted = root.resolve("extracted");
         assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
-                extracted, archive, true, new BackupArchiveLimits(1024L)));
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive, 1024L));
+                extracted, archive, true, BackupArchiveLimits.of(1024L)));
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive, 1024L, 8));
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
@@ -167,7 +171,7 @@ class BackupArchiveTest {
 
         final Path tight = root.resolve("tight");
         assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
-                tight, archive, true, new BackupArchiveLimits(8L)));
+                tight, archive, true, BackupArchiveLimits.of(8L)));
         BackupArchive.extractArchive(
                 root.resolve("roomy"), archive, true, BackupArchiveLimits.defaults());
         assertEquals("payload", Files.readString(
@@ -188,7 +192,7 @@ class BackupArchiveTest {
         final Path archive = root.resolve("backup.zip");
         BackupArchive.compressStorage(export, archive);
 
-        assertEquals(before, BackupArchive.contentDigestOfArchive(archive),
+        assertEquals(before, BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()),
                 "identical content must digest identically before and after archiving");
     }
 
@@ -200,11 +204,62 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
                 new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
-        assertTrue(BackupArchive.containsStoragePayload(full));
+        assertTrue(BackupArchive.containsStoragePayload(full, BackupArchiveLimits.defaults().maxArchiveEntries()));
 
         final Path manifestOnly = root.resolve("manifest-only.zip");
         writeArchive(manifestOnly, new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"));
-        assertFalse(BackupArchive.containsStoragePayload(manifestOnly));
+        assertFalse(BackupArchive.containsStoragePayload(manifestOnly, BackupArchiveLimits.defaults().maxArchiveEntries()));
+    }
+
+    /// Verifies the archive digest honors the configured entry budget.
+    @Test
+    void digestHonorsTheEntryBudget(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("many-entries.zip");
+        writeArchive(archive,
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/one", "1"),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/two", "2"));
+
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.contentDigestOfArchive(
+                archive, BackupArchiveLimits.of(1L << 30, 2)));
+        assertTrue(BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()) >= 0L);
+    }
+
+    /// Verifies the digest rejects an archive whose manifest exceeds the manifest bound.
+    @Test
+    void digestRejectsAnOversizedManifest(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("oversized-manifest.zip");
+        writeArchive(archive,
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[BackupArchive.MAX_MANIFEST_BYTES + 1]),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload"));
+
+        assertThrows(NodeLibraryException.class,
+                () -> BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()));
+    }
+
+    /// Verifies an explicit entry budget bounds extraction independently of the byte budget.
+    @Test
+    void entryBudgetBoundsExtraction(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("entry-budget.zip");
+        writeArchive(archive,
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/one", "1"),
+                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/two", "2"),
+                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
+                new Entry(StorageBackupBackend.READY_ENTRY, ""));
+
+        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+                root.resolve("tight"), archive, true, BackupArchiveLimits.of(1L << 30, 2)));
+    }
+
+    /// Verifies default limits derive an entry budget proportional to the byte budget.
+    @Test
+    void entryBudgetIsProportionalToTheByteBudget() {
+        assertTrue(BackupArchiveLimits.of(1L << 20).maxArchiveEntries()
+                < BackupArchiveLimits.of(1L << 30).maxArchiveEntries());
+        assertTrue(BackupArchiveLimits.of(1L).maxArchiveEntries() >= 1);
+        assertEquals(BackupArchiveLimits.MAX_ENTRY_BUDGET,
+                BackupArchiveLimits.of(Long.MAX_VALUE).maxArchiveEntries());
     }
 
     private static void writeDuplicateArchive(final Path archive) throws IOException {

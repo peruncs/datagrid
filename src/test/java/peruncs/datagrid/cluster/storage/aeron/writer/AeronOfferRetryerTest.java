@@ -3,9 +3,11 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import io.aeron.Publication;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,6 +38,52 @@ class AeronOfferRetryerTest {
                 AeronReplicationConfiguration.defaults());
 
         assertEquals(42L, retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+    }
+
+    /// Full-jitter spacing must keep a persistent back-pressure loop from
+    /// hammering the publication: with a millisecond-scale jitter cap, a short
+    /// deadline allows only a handful of retries. Without jitter the same
+    /// deadline admits tens of thousands of attempts.
+    @Test
+    void jitterSpacesPersistentBackPressureRetries() {
+        final int attempts;
+        {
+            final var attemptsCounter = new AtomicInteger();
+            final var policy = new AeronRetryPolicy(
+                    1, 10, 1L, 1_000_000L,
+                    2_000_000L, 4_000_000L,
+                    10_000_000L, 1_000_000L, 100_000_000L);
+            final var configuration = AeronReplicationConfiguration.builder()
+                    .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024)
+                    .offerTimeoutNanos(20_000_000L)
+                    .retryPolicy(policy)
+                    .build();
+            final AeronOfferRetryer retryer = new AeronOfferRetryer(
+                    (buffer, offset, length) -> {
+                        attemptsCounter.incrementAndGet();
+                        return Publication.BACK_PRESSURED;
+                    }, configuration);
+            assertThrows(IllegalStateException.class,
+                    () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+            attempts = attemptsCounter.get();
+        }
+        /* Each retry parks uniform in [0, cap); reaching 30 attempts would
+         * require the jitter sum to stay under 20 ms, which is effectively
+         * impossible, while an un-jittered loop would produce far more. */
+        assertTrue(attempts < 30, "jitter must space retries, but observed %s attempts".formatted(attempts));
+        assertTrue(attempts > 1, "the deadline must allow retries before it expires");
+    }
+
+    /// Verifies the ownership callback failure is reported as fencing, not timeout.
+    @Test
+    void ownershipLossIsReportedAsWriterFenced() {
+        final AeronOfferRetryer retryer = new AeronOfferRetryer(
+                (buffer, offset, length) -> Publication.BACK_PRESSURED,
+                AeronReplicationConfiguration.defaults());
+
+        final WriterFencedException failure = assertThrows(WriterFencedException.class,
+                () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> false));
+        assertTrue(failure.getMessage().contains("lease lost"), failure::getMessage);
     }
 
     /// Verifies the default retry policy preserves the historical idle, jitter, and probe pacing.

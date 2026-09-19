@@ -17,6 +17,7 @@ class AeronReaderLifecycleTest {
     void closesSubscriptionWhenPollingThreadWaitIsInterrupted() {
         final AtomicBoolean active = new AtomicBoolean(true);
         final AtomicBoolean closed = new AtomicBoolean();
+        final AtomicBoolean closeCompleted = new AtomicBoolean();
         final CountDownLatch stopped = new CountDownLatch(1);
         final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
         {
@@ -30,11 +31,13 @@ class AeronReaderLifecycleTest {
         });
         pollingThread.start();
 
-        AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, () -> closed.set(true));
+        AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, closeCompleted,
+                () -> closed.set(true), TimeUnit.SECONDS.toNanos(5L));
 
         assertFalse(active.get());
         assertFalse(pollingThread.isAlive());
-        org.junit.jupiter.api.Assertions.assertTrue(closed.get());
+        assertTrue(closed.get());
+        assertTrue(closeCompleted.get());
     }
 
         /// Verifies subscription cleanup even when the close callback fails.
@@ -45,13 +48,30 @@ class AeronReaderLifecycleTest {
 
         final IllegalStateException actual = assertThrows(
                 IllegalStateException.class,
-                () -> AeronReaderLifecycle.stopAndClose(active, null, new CountDownLatch(0), () -> {
-                    throw expected;
-                })
+                () -> AeronReaderLifecycle.stopAndClose(active, null, new CountDownLatch(0), new AtomicBoolean(),
+                        () -> {
+                            throw expected;
+                        }, TimeUnit.SECONDS.toNanos(1L))
         );
 
         assertSame(expected, actual);
         assertFalse(active.get());
+    }
+
+        /// A completed close makes every later call a no-op.
+    @Test
+    void closeIsIdempotentAfterSuccess() {
+        final AtomicBoolean active = new AtomicBoolean(true);
+        final AtomicBoolean closeCompleted = new AtomicBoolean();
+        final AtomicInteger closeCalls = new AtomicInteger();
+
+        AeronReaderLifecycle.stopAndClose(active, null, new CountDownLatch(0), closeCompleted,
+                closeCalls::incrementAndGet, TimeUnit.SECONDS.toNanos(1L));
+        AeronReaderLifecycle.stopAndClose(active, null, new CountDownLatch(0), closeCompleted,
+                closeCalls::incrementAndGet, TimeUnit.SECONDS.toNanos(1L));
+
+        assertEquals(1, closeCalls.get());
+        assertTrue(closeCompleted.get());
     }
 
         /// A timeout retains ownership so a later disposal can finish cleanup safely.
@@ -59,6 +79,7 @@ class AeronReaderLifecycleTest {
     void timeoutLeavesSubscriptionOpenForRetry() {
         final AtomicBoolean active = new AtomicBoolean(true);
         final AtomicBoolean closed = new AtomicBoolean();
+        final AtomicBoolean closeCompleted = new AtomicBoolean();
         final CountDownLatch stopped = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
         final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
@@ -82,12 +103,16 @@ class AeronReaderLifecycleTest {
         pollingThread.start();
         try {
             assertThrows(IllegalStateException.class, () -> AeronReaderLifecycle.stopAndClose(
-                    active, pollingThread, stopped, () -> closed.set(true), TimeUnit.MILLISECONDS.toNanos(1L)));
+                    active, pollingThread, stopped, closeCompleted, () -> closed.set(true),
+                    TimeUnit.MILLISECONDS.toNanos(1L)));
             assertFalse(closed.get());
+            assertFalse(closeCompleted.get());
             release.countDown();
             AeronReaderLifecycle.stopAndClose(
-                    active, pollingThread, stopped, () -> closed.set(true), TimeUnit.SECONDS.toNanos(1L));
+                    active, pollingThread, stopped, closeCompleted, () -> closed.set(true),
+                    TimeUnit.SECONDS.toNanos(1L));
             assertTrue(closed.get());
+            assertTrue(closeCompleted.get());
             assertFalse(pollingThread.isAlive());
         } finally {
             release.countDown();
@@ -100,6 +125,7 @@ class AeronReaderLifecycleTest {
             throws Exception {
         final AtomicBoolean active = new AtomicBoolean(true);
         final AtomicBoolean closed = new AtomicBoolean();
+        final AtomicBoolean closeCompleted = new AtomicBoolean();
         final CountDownLatch stopped = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
         final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
@@ -121,7 +147,8 @@ class AeronReaderLifecycleTest {
         final Thread disposer = Thread.ofVirtual().unstarted(() ->
         {
             try {
-                AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, () -> closed.set(true));
+                AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, closeCompleted,
+                        () -> closed.set(true), TimeUnit.SECONDS.toNanos(5L));
             } catch (final IllegalStateException expected) {
                 interrupted.set(Thread.currentThread().isInterrupted());
             }
@@ -135,9 +162,11 @@ class AeronReaderLifecycleTest {
         disposer.join(1_000L);
         assertTrue(interrupted.get());
         assertFalse(closed.get());
+        assertFalse(closeCompleted.get());
         release.countDown();
         pollingThread.join(1_000L);
-        AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, () -> closed.set(true));
+        AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, closeCompleted,
+                () -> closed.set(true), TimeUnit.SECONDS.toNanos(1L));
         assertTrue(closed.get());
     }
 
@@ -147,7 +176,7 @@ class AeronReaderLifecycleTest {
         final Thread pollingThread = Thread.ofVirtual().unstarted(() -> {
         });
         assertThrows(NullPointerException.class, () -> AeronReaderLifecycle.stopAndClose(
-                new AtomicBoolean(true), pollingThread, null, () -> {
+                new AtomicBoolean(true), pollingThread, null, new AtomicBoolean(), () -> {
                 }, 1L));
     }
 

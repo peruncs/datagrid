@@ -5,6 +5,13 @@ import org.eclipse.serializer.exceptions.BaseException;
 
 /// Base runtime exception for node lifecycle and storage failures.
 public class NodeLibraryException extends BaseException {
+        /// Creates an exception that preserves only the underlying cause.
+    ///
+    /// @param cause underlying cause
+    public NodeLibraryException(final Throwable cause) {
+        super(cause);
+    }
+
         /// Creates an exception with a message.
     ///
     /// @param message error message

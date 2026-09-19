@@ -63,21 +63,15 @@ public final class AeronEnvelopeBenchmark {
         final var checksum = new AeronReplicationEnvelope.ChecksumContext();
         for (int i = 0; i < warmup; i++) {
             final int sequence = i;
-            AeronReplicationEnvelope.withChecksumContext(checksum, () -> {
-                encodeTransaction(target, payload, clusterId, epoch, sequence,
-                        payloadLength, chunkSize, chunkCount);
-                return null;
-            });
+            encodeTransaction(target, payload, clusterId, epoch, sequence,
+                    payloadLength, chunkSize, chunkCount, checksum);
         }
         final AllocationCounter allocation = AllocationCounter.start();
         final long start = System.nanoTime();
         for (int i = 0; i < iterations; i++) {
             final int sequence = i + warmup;
-            AeronReplicationEnvelope.withChecksumContext(checksum, () -> {
-                encodeTransaction(target, payload, clusterId, epoch, sequence,
-                        payloadLength, chunkSize, chunkCount);
-                return null;
-            });
+            encodeTransaction(target, payload, clusterId, epoch, sequence,
+                    payloadLength, chunkSize, chunkCount, checksum);
         }
         final long elapsed = System.nanoTime() - start;
         final long allocated = allocation.bytesSinceStart();
@@ -95,13 +89,15 @@ public final class AeronEnvelopeBenchmark {
             final long sequence,
             final int payloadLength,
             final int chunkSize,
-            final int chunkCount
+            final int chunkCount,
+            final AeronReplicationEnvelope.ChecksumContext checksum
     ) {
+        final long wireNonce = AeronReplicationEnvelope.defaultWireNonce(clusterId);
         for (int chunkIndex = 0, offset = 0; chunkIndex < chunkCount; chunkIndex++) {
             final int length = Math.min(chunkSize, payloadLength - offset);
-            AeronReplicationEnvelope.encode(target, 0, clusterId, epoch, 1L, sequence,
+            AeronReplicationEnvelope.encode(target, 0, clusterId, epoch, 1L, wireNonce, sequence,
                     AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength, chunkIndex, chunkCount, offset, 0,
-                    payload, offset, length);
+                    payload, offset, length, checksum);
             offset += length;
         }
     }

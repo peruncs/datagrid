@@ -22,7 +22,8 @@ record ReaderMilestone(String point, long sequence, long position) {
     private static final String[] POINTS = {
             "REPLAY_BEFORE_FIRST_IMPORT", "DURING_STORE_IMPORT", "DURING_STORE_IMPORT_FAILURE",
             "AFTER_STORE_IMPORT_BEFORE_CURSOR_WRITE", "DURING_CURSOR_FILE_WRITE",
-            "AFTER_CURSOR_TEMP_WRITE_BEFORE_RENAME", "AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC"
+            "AFTER_CURSOR_TEMP_WRITE_BEFORE_RENAME", "AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC",
+            "AFTER_RECOVERY_CURSOR_VALIDATED", "DURING_CHUNK_ASSEMBLY"
     };
     private static final int BYTES = Integer.BYTES + Short.BYTES + Short.BYTES + Long.BYTES * 3 + Integer.BYTES;
 

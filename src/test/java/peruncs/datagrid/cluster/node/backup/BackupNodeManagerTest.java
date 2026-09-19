@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.lang.reflect.Proxy;

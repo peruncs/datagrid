@@ -19,6 +19,9 @@ public final class StorageBinaryDataClientAeron implements Disposable {
     private final Subscription subscription;
     private final TransactionAssembler assembler;
     private final AtomicBoolean active = new AtomicBoolean();
+    private final AtomicBoolean subscriptionClosed = new AtomicBoolean();
+    private final int fragmentsPerPoll;
+    private final long stopTimeoutNanos;
     private final FragmentAssembler fragmentAssembler;
     private volatile Thread thread;
     private volatile CountDownLatch stopped = new CountDownLatch(0);
@@ -42,7 +45,10 @@ public final class StorageBinaryDataClientAeron implements Disposable {
     ) {
         this.subscription = subscription;
         try {
-            this.assembler = new TransactionAssembler(configuration, clusterId, epoch, initialSequence, receiver);
+            this.fragmentsPerPoll = configuration.readerFragmentsPerPoll();
+            this.stopTimeoutNanos = configuration.readerStopTimeoutNanos();
+            this.assembler = TransactionAssemblerTestSupport.New(
+                    configuration, clusterId, epoch, initialSequence, receiver);
             this.fragmentAssembler = new FragmentAssembler(this.assembler::onFragment);
         } catch (final RuntimeException | Error failure) {
             try {
@@ -68,7 +74,7 @@ public final class StorageBinaryDataClientAeron implements Disposable {
             AeronReaderLifecycle.runPollingLoop(
                     this.active,
                     () -> false,
-                    () -> this.subscription.poll(this.fragmentAssembler, 10),
+                    () -> this.subscription.poll(this.fragmentAssembler, this.fragmentsPerPoll),
                     () -> false,
                     () -> false,
                     () -> {
@@ -117,7 +123,8 @@ public final class StorageBinaryDataClientAeron implements Disposable {
     public synchronized void dispose() {
         if (this.disposed) return;
         final Thread pollingThread = this.thread;
-        AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close);
+        AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscriptionClosed,
+                this.subscription::close, this.stopTimeoutNanos);
         this.thread = null;
         this.assembler.dispose();
         this.disposed = true;

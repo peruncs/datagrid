@@ -37,11 +37,7 @@ class StorageBinaryDataOwnedReleaseTest {
     }
 
     private static StorageBinaryDataMerger merger() {
-        return StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                .foundation(StorageBinaryDataMergerTestSupport.foundation())
-                .storage(StorageBinaryDataMergerTestSupport.connection())
-                .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                .cachingTimeoutMs(0L).cachedBinaryLimit(1L).applyTimeoutMs(60_000L).build());
+        return StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), StorageBinaryDataMergerTestSupport.connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
     }
 
     private static ByteBuffer direct(final int bytes) {

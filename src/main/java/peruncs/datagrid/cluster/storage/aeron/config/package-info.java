@@ -1,10 +1,10 @@
 /// This package defines the settings that shape an Aeron storage stream.
 ///
-/// Configuration values describe endpoints, stream identity, and frame
+/// Configuration values describe endpoints, stream identity, frame, and poll
 /// limits. Members that share a stream must use compatible values. Settings
-/// are immutable after construction so a running reader and writer see one
-/// stable configuration; the retry policy is a record while the stream
-/// configuration itself is a validated builder.
+/// are immutable records validated at construction, so a running reader and
+/// writer see one stable configuration; the optional builder keeps call sites
+/// readable when only a few limits differ from the defaults.
 ///
 /// @since 1.0
 package peruncs.datagrid.cluster.storage.aeron.config;

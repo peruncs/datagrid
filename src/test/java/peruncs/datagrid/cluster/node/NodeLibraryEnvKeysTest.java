@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 import java.util.Map;
 
@@ -16,31 +17,27 @@ class NodeLibraryEnvKeysTest {
                 NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB, "64",
                 "STORAGE_LIMIT_GB", "32");
 
-        assertEquals("64", NodeLibraryPropertiesProvider.Env.resolve(
-                environment, NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB));
+        assertEquals("64", env(environment).resolve(
+                NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB));
     }
 
     /// Verifies legacy unprefixed names still resolve when the prefixed name is unset.
     @Test
     void legacyNameResolvesWhenPrefixedIsUnset() {
-        assertEquals("32", NodeLibraryPropertiesProvider.Env.resolve(
-                Map.of("STORAGE_LIMIT_GB", "32"),
+        assertEquals("32", env(Map.of("STORAGE_LIMIT_GB", "32")).resolve(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB));
-        assertEquals("secret", NodeLibraryPropertiesProvider.Env.resolve(
-                Map.of("MSCNL_PROD_MODE", "secret"),
+        assertEquals("secret", env(Map.of("MSCNL_PROD_MODE", "secret")).resolve(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.IS_PROD_MODE));
     }
 
     /// Verifies unknown or unset names resolve to null instead of a default value.
     @Test
     void unsetNameResolvesToNull() {
-        assertNull(NodeLibraryPropertiesProvider.Env.resolve(
-                Map.of(), NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB));
-        assertNull(NodeLibraryPropertiesProvider.Env.resolve(
-                Map.of("STORAGE_LIMIT_GB", "32"),
+        assertNull(env(Map.of()).resolve(
+                NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB));
+        assertNull(env(Map.of("STORAGE_LIMIT_GB", "32")).resolve(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_PATH));
-        assertNull(NodeLibraryPropertiesProvider.Env.resolve(
-                Map.of("UNRELATED", "1"),
+        assertNull(env(Map.of("UNRELATED", "1")).resolve(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.IS_BACKUP_NODE));
     }
 
@@ -67,19 +64,21 @@ class NodeLibraryEnvKeysTest {
         /// Lenient spellings (`yes`, `1`, `on`) are rejected, not coerced to `false`.
     @Test
     void invalidBooleanIsRejected() {
-        assertThrows(IllegalArgumentException.class, () -> env(Map.of(
+        assertThrows(NodeLibraryException.class, () -> env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.IS_BACKUP_NODE, "yes")).isBackupNode());
-        assertThrows(IllegalArgumentException.class, () -> env(Map.of(
+        assertThrows(NodeLibraryException.class, () -> env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.IS_BACKUP_NODE, "1")).isBackupNode());
-        assertThrows(IllegalArgumentException.class, () -> env(Map.of(
+        assertThrows(NodeLibraryException.class, () -> env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.IS_BACKUP_NODE, "on")).isBackupNode());
     }
 
-        /// The storage limit accepts an optional `G` suffix and surrounding blanks.
+        /// The storage limit accepts a `G` or `GB` suffix and surrounding blanks.
     @Test
     void storageLimitSuffixAndBlanks() {
         assertEquals(64, env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB, "64G")).storageLimitGB());
+        assertEquals(64, env(Map.of(
+                NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB, "64GB")).storageLimitGB());
         assertEquals(64, env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB, " 64g ")).storageLimitGB());
         assertEquals(64, env(Map.of(
@@ -92,25 +91,24 @@ class NodeLibraryEnvKeysTest {
         /// Malformed integers and limits fail instead of falling back to defaults.
     @Test
     void invalidIntegersAreRejected() {
-        assertThrows(IllegalArgumentException.class, () -> env(Map.of(
+        assertThrows(NodeLibraryException.class, () -> env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_LIMIT_GB, "sixty-four")).storageLimitGB());
-        assertThrows(IllegalArgumentException.class, () -> env(Map.of(
+        assertThrows(NodeLibraryException.class, () -> env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.KEPT_BACKUPS_COUNT, "many")).keptBackupsCount());
-        assertThrows(IllegalArgumentException.class, () -> env(Map.of(
+        assertThrows(NodeLibraryException.class, () -> env(Map.of(
                 NodeLibraryPropertiesProvider.Env.EnvKeys.DATA_MERGER_TIMEOUT_MS, "soon")).dataMergerTimeoutMs());
     }
 
-        /// An unset role falls back to `writer`, or `backup-reader` on backup nodes.
+        /// An unset role is absent and resolves through [NodeRole] to the
+    /// writer, or to the backup reader on legacy backup nodes.
     @Test
     void roleFallsBackWhenUnconfigured() {
-        assertEquals(NodeLibraryPropertiesProvider.WRITER_ROLE, env(Map.of()).replicationRole());
-        assertFalse(env(Map.of()).replicationRoleConfigured());
-        assertEquals(NodeLibraryPropertiesProvider.BACKUP_READER_ROLE, env(Map.of(
-                NodeLibraryPropertiesProvider.Env.EnvKeys.IS_BACKUP_NODE, "true")).replicationRole());
-        assertEquals(NodeLibraryPropertiesProvider.READER_ROLE, env(Map.of(
-                NodeLibraryPropertiesProvider.Env.EnvKeys.REPLICATION_ROLE, "reader")).replicationRole());
-        assertTrue(env(Map.of(
-                NodeLibraryPropertiesProvider.Env.EnvKeys.REPLICATION_ROLE, "reader")).replicationRoleConfigured());
+        assertNull(env(Map.of()).replicationRole());
+        assertEquals(NodeRole.WRITER, env(Map.of()).nodeRole());
+        assertEquals(NodeRole.BACKUP_READER, env(Map.of(
+                NodeLibraryPropertiesProvider.Env.EnvKeys.IS_BACKUP_NODE, "true")).nodeRole());
+        assertEquals(NodeRole.READER, env(Map.of(
+                NodeLibraryPropertiesProvider.Env.EnvKeys.REPLICATION_ROLE, "reader")).nodeRole());
     }
 
     private static NodeLibraryPropertiesProvider.Env env(final Map<String, String> environment) {

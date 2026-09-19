@@ -8,10 +8,10 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
@@ -37,15 +37,10 @@ class AeronReplicationMonitoringTest {
         final String clusterId = UUID.randomUUID().toString();
         final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
                 "datagrid-aeron-monitoring-%s".formatted(UUID.randomUUID()));
-        return new NodeLibraryPropertiesProvider.Env() {
+        return new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return role;
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override
@@ -251,15 +246,10 @@ class AeronReplicationMonitoringTest {
     void rejectsLeaseDirectoryInsideAeronDirectory() {
         final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
                 "datagrid-lease-overlap-%s".formatted(UUID.randomUUID()));
-        final NodeLibraryPropertiesProvider properties = new NodeLibraryPropertiesProvider.Env() {
+        final NodeLibraryPropertiesProvider properties = new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return "writer";
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override
@@ -285,15 +275,10 @@ class AeronReplicationMonitoringTest {
     void writerWithoutSharedLeaseDirectoryFailsAtStartup() {
         final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
                 "datagrid-lease-absent-%s".formatted(UUID.randomUUID()));
-        final NodeLibraryPropertiesProvider properties = new NodeLibraryPropertiesProvider.Env() {
+        final NodeLibraryPropertiesProvider properties = new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return "writer";
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override
@@ -320,15 +305,10 @@ class AeronReplicationMonitoringTest {
     @Test
     void rejectsMalformedNumericAndProductionTemporaryDirectorySettings() {        assertThrows(IllegalArgumentException.class, () -> new AeronClusterReplicationTransportProvider()
                 .create(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_EPOCH", "not-a-number")));
-        final NodeLibraryPropertiesProvider production = new NodeLibraryPropertiesProvider.Env() {
+        final NodeLibraryPropertiesProvider production = new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return "writer";
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override

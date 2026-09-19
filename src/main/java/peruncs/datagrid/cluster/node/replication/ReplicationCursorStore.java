@@ -2,8 +2,9 @@ package peruncs.datagrid.cluster.node.replication;
 
 import org.eclipse.serializer.io.XIO;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -48,8 +49,8 @@ public final class ReplicationCursorStore {
     /// @throws IOException if the cursor cannot be stored
     public static void write(final Path path, final ReplicationCursor cursor) throws IOException {
         final ByteBuffer encoded = ByteBuffer.wrap(encode(cursor));
-        AtomicFileStore.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[]{encoded}),
-                AtomicFileStore.PHASE_CURSOR);
+        AtomicFileWriter.write(path, channel -> XIO.appendAll(channel, new ByteBuffer[]{encoded}),
+                AtomicFileWriter.Phase.CURSOR);
     }
 
         /// Reads and validates a persisted cursor, rejecting symbolic-link paths,

@@ -1,6 +1,5 @@
 package peruncs.datagrid.cluster.storage.types;
 
-import org.eclipse.serializer.functional.InstanceDispatcherLogic;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
@@ -23,48 +22,6 @@ class DistributedStorageConfiguratorTest {
 
         assertInstanceOf(PersistenceTarget.class, decorated);
         assertInstanceOf(PersistenceTypeDictionaryExporter.class, decorated);
-    }
-
-        /// The previous dispatcher runs first; its result is what gets decorated.
-    @Test
-    void chainsThroughPreviousDispatcher() {
-        final PersistenceTarget<Binary> target = targetProxy(new ArrayList<>());
-        final List<Object> seen = new ArrayList<>();
-        final InstanceDispatcherLogic previous = new InstanceDispatcherLogic() {
-            @Override
-            @SuppressWarnings("unchecked")
-            public <T> T apply(final T subject) {
-                seen.add(subject);
-                return (T) target;
-            }
-        };
-        final List<PersistenceTarget<Binary>> decorated = new ArrayList<>();
-        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
-                new NoOpDistributor(),
-                delegate -> {
-                    decorated.add(delegate);
-                    return delegate;
-                },
-                previous);
-        final Object subject = new Object();
-
-        assertSame(target, configurator.apply(subject));
-        assertEquals(List.of(subject), seen);
-        assertEquals(List.of(target), decorated);
-    }
-
-        /// A `null` from the previous dispatcher passes through undecorated.
-    @Test
-    void nullFromPreviousPassesThrough() {
-        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
-                new NoOpDistributor(), delegate -> delegate, new InstanceDispatcherLogic() {
-                    @Override
-                    public <T> T apply(final T subject) {
-                        return null;
-                    }
-                });
-
-        assertNull(configurator.apply(new Object()));
     }
 
         /// Plain subjects that implement neither SPI pass through untouched.
@@ -98,7 +55,24 @@ class DistributedStorageConfiguratorTest {
         final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
         final PersistenceTypeDictionaryExporter exporter = exporterProxy();
 
-        assertInstanceOf(StorageTypeDictionaryExporterDistributing.class, configurator.apply(exporter));
+        assertInstanceOf(DistributingTypeDictionaryExporter.class, configurator.apply(exporter));
+    }
+
+        /// The combined adapter forwards target lifecycle calls to the wrapped
+    /// target, so Store startup and shutdown reach the real target.
+    @Test
+    void bothContractsForwardTargetLifecycle() {
+        final List<String> lifecycle = new ArrayList<>();
+        final PersistenceTarget<Binary> target = lifecycleTargetProxy(lifecycle);
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
+                new NoOpDistributor(), delegate -> target);
+
+        final PersistenceTarget<Binary> decorated = configurator.apply(new BothContracts());
+        decorated.prepareTarget();
+        decorated.closeTarget();
+
+        assertEquals(List.of("prepareTarget", "closeTarget"), lifecycle,
+                "the combined adapter must forward target lifecycle calls");
     }
 
         /// The combined adapter forwards writes to the factory target.
@@ -113,6 +87,24 @@ class DistributedStorageConfiguratorTest {
         decorated.write(null);
 
         assertEquals(1, written.size());
+    }
+
+    private static PersistenceTarget<Binary> lifecycleTargetProxy(final List<String> lifecycle) {
+        return (PersistenceTarget<Binary>) Proxy.newProxyInstance(
+                DistributedStorageConfiguratorTest.class.getClassLoader(),
+                new Class<?>[]{PersistenceTarget.class},
+                (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) return objectMethodValue(proxy, method, args);
+                    switch (method.getName()) {
+                        case "prepareTarget", "closeTarget" -> lifecycle.add(method.getName());
+                        case "isWritable" -> {
+                            return true;
+                        }
+                        default -> {
+                        }
+                    }
+                    return null;
+                });
     }
 
     @SuppressWarnings("unchecked")

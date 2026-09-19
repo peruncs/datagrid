@@ -10,7 +10,8 @@ import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpo
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.aeron.reader.TransactionCrashHooks;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
@@ -80,6 +81,10 @@ public final class ReaderCrashChildMain {
                     .messageTimeoutNs(configuration.offerTimeoutNanos());
             final long recordingId = Long.parseLong(required("dg.reader.recordingId"));
             final Cursor cursor = readCursor(base.resolve("reader.cursor"));
+            /* Whether this phase must replay recorded history from behind the
+             * durable cursor: the recovery outcome distinguishes a genuine
+             * archive replay from joining a live tail. */
+            final boolean replayedFromArchive = cursor == null || cursor.sequence < 1L;
             final AtomicReference<AeronArchiveReader> readerRef = new AtomicReference<>();
             final ReaderFixture fixture = new ReaderFixture(base, point, new AtomicReference<>());
             final AeronArchiveReader reader = AeronArchiveReader.New(
@@ -101,7 +106,13 @@ public final class ReaderCrashChildMain {
                         }
                     }).deliveryListener(new Listener(fixture, uncertainty, point, recordingId)).build());
             readerRef.set(reader);
-            try {
+            if ("AFTER_RECOVERY_CURSOR_VALIDATED".equals(point)) {
+                /* Parks with no import started, no marker written, and the
+                 * durable cursor (if any) validated: a kill here must be
+                 * recoverable by pure archive replay. */
+                barrier(control, point, -1L, cursor == null ? -1L : cursor.position);
+            }
+            final java.util.concurrent.Callable<Void> runReader = () -> {
                 reader.start();
                 atomicText(control.resolve("ready"), "ready");
                 final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L);
@@ -110,10 +121,22 @@ public final class ReaderCrashChildMain {
                 }
                 if (reader.failure() != null) throw reader.failure();
                 if (System.nanoTime() >= deadline) throw new IllegalStateException("reader did not resolve target sequence");
-                writeOutcome(control, "CONTINUE", null);
-            } finally {
-                reader.dispose();
+                return null;
+            };
+            if ("DURING_CHUNK_ASSEMBLY".equals(point)) {
+                /* Park after the first chunk of a multi-chunk transaction is
+                 * buffered: the kill leaves partially assembled natural-memory
+                 * state behind, which recovery must never apply. */
+                TransactionCrashHooks.runWithChunkObserver((sequence, chunkIndex, chunkCount) -> {
+                    if (chunkIndex == 0) {
+                        barrier(control, point, sequence, -1L);
+                    }
+                }, runReader);
+            } else {
+                runReader.call();
             }
+            writeOutcome(control, replayedFromArchive ? "REPLAY_FROM_ARCHIVE" : "CONTINUE", null);
+            reader.dispose();
         } catch (final RuntimeException | Error failure) {
             writeOutcome(control, failure.getMessage() != null && failure.getMessage().startsWith("RESEED_REQUIRED:")
                     ? "RESEED_REQUIRED" : "FAIL_CLOSED", failure.toString());
@@ -239,7 +262,7 @@ public final class ReaderCrashChildMain {
 
     private static void writeOutcome(final Path control, final String outcome, final String error) {
         final String health = switch (outcome) {
-            case "CONTINUE" -> "LIVE";
+            case "CONTINUE", "REPLAY_FROM_ARCHIVE" -> "LIVE";
             case "RESEED_REQUIRED" -> "RESEED_REQUIRED";
             default -> "FAILED";
         };
@@ -284,7 +307,7 @@ public final class ReaderCrashChildMain {
         @Override
         public void afterStoreImport() {
             try {
-                AtomicFileStore.delete(this.uncertainty);
+                AtomicFileWriter.delete(this.uncertainty);
             } catch (final IOException failure) {
                 throw new IllegalStateException("cannot clear reader uncertainty", failure);
             }

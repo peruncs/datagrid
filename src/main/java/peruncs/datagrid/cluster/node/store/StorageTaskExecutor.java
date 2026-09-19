@@ -34,6 +34,10 @@ public interface StorageTaskExecutor extends AutoCloseable {
     Throwable failure();
 
         /// Stops outstanding maintenance work and releases executor state.
+    ///
+    /// The shutdown starts with the first call. When the bounded wait fails,
+    /// the failure is rethrown and a later call retries the wait; the
+    /// executor never accepts new work once the shutdown has started.
     @Override
     default void close() {
     }
@@ -47,7 +51,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
         private final AtomicReference<Throwable> failure = new AtomicReference<>();
 
         private final AtomicReference<Future<?>> checksTask = new AtomicReference<>();
-        private volatile boolean closing;
+        private volatile boolean startingShutdown;
         private volatile boolean closed;
 
                 /// Creates the shared executor state.
@@ -62,7 +66,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
 
         @Override
         public synchronized void runChecks() {
-            if (this.closed || this.closing) {
+            if (this.closed || this.startingShutdown) {
                 throw new IllegalStateException("Storage task executor is closed");
             }
             final Future<?> current = this.checksTask.get();
@@ -73,7 +77,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
             } catch (final RejectedExecutionException rejected) {
                 /* Close won the race after the state check above and shut the
                  * executor down. Report closed instead of leaking the rejection. */
-                if (this.closed || this.closing) {
+                if (this.closed || this.startingShutdown) {
                     throw new IllegalStateException("Storage task executor is closed", rejected);
                 }
                 throw rejected;
@@ -94,32 +98,29 @@ public interface StorageTaskExecutor extends AutoCloseable {
         @Override
         public synchronized void close() {
             if (this.closed) return;
-            this.closing = true;
-            RuntimeException failure = null;
-            try {
+            if (!this.startingShutdown) {
+                this.startingShutdown = true;
                 final Future<?> task = this.checksTask.get();
                 if (task != null) task.cancel(true);
                 this.executor.shutdownNow();
-                try {
-                    if (!this.executor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                        failure = new IllegalStateException(
-                                "Storage checks did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
-                    }
-                } catch (final InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    failure = new IllegalStateException("Interrupted while stopping storage checks", interrupted);
-                }
-            } finally {
-                /* The executor is shut down and must never accept another task, so
-                 * mark the terminal state even when the bounded wait timed out;
-                 * otherwise a later runChecks would submit to a dead executor and
-                 * leak the raw RejectedExecutionException. */
-                this.closed = true;
-                this.closing = false;
             }
+            RuntimeException failure = null;
+            try {
+                if (!this.executor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                    failure = new IllegalStateException(
+                            "Storage checks did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                }
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                failure = new IllegalStateException("Interrupted while stopping storage checks", interrupted);
+            }
+            /* The executor is shut down and must never accept another task.
+             * A failed bounded wait leaves the task retryable, so a later
+             * close retries the wait instead of losing the resource. */
             if (failure != null) {
                 throw failure;
             }
+            this.closed = true;
         }
 
         private void runChecksTask() {

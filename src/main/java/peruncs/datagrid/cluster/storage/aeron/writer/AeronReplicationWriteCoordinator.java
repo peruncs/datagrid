@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
@@ -23,10 +24,15 @@ import java.util.function.LongSupplier;
 /// restart can distinguish a committed transaction from an uncertain one.
 ///
 /// Lock order is strict: coordinator {@code writeLock} → publisher state
-/// monitor → publisher {@code offerLock}. Slow Aeron offers, Archive waits, and
-/// retention callbacks run after releasing {@code writeLock}; only the
-/// bounded state transitions reacquire it. No callback may acquire the
-/// coordinator lock while holding the publisher offer lock.
+/// monitor → publisher {@code offerLock}. The coordinator lock is a short
+/// state-transition lock, never a wait lock: the slow marker offer and the
+/// Archive acknowledgement wait run with no coordinator lock held, and the
+/// in-progress guard is what keeps a second writer out. No callback may
+/// acquire the coordinator lock while holding the publisher offer lock.
+///
+/// Every coordinator method either holds no lock or acquires {@code writeLock}
+/// in a {@code try/finally} that releases it before returning or throwing, so
+/// a failed method can never hand a leaked hold to its caller.
 ///
 /// This is an Aeron-only write coordinator. Store integration must use
 /// [AeronStorageBinaryReplicationTarget]; exposing this object as the
@@ -44,11 +50,14 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
      * so a steal racing back pressure cannot slip a stale marker into Aeron. */
     private final WriterLeaseGate leaseGate;
     /* The single lock for all coordinator state below. It is reentrant: write
-     * admission holds it across a whole Store transaction while the state
-     * transitions nest inside. It is released only across the slow Archive
-     * acknowledgement wait: commitOrMarkUncertain releases the caller's hold
-     * after setting the commit guard, and commit() releases its own hold after
-     * re-checking the writer identity. */
+     * admission holds it across the fast phase of a Store transaction
+     * (marking, local acceptance, preparation) while the state transitions
+     * nest inside. The slow phase of a commit never holds it: the in-progress
+     * guard is set under a short hold and the wait itself runs unlocked, so
+     * health, maintenance, and dispose paths never block behind Archive
+     * progress. A standalone abort likewise releases before its bounded offer;
+     * only the target's local-rejection path keeps its admission hold across
+     * that bounded abort offer. */
     private final ReentrantLock writeLock = new ReentrantLock();
     /* Writer identity pinned at claim time. The publisher seeds its sequence
      * from the checkpoint (recording ID + epoch) at construction; these values
@@ -64,14 +73,17 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
      * acceptance fence keeps the count beside the array until preparation ends. */
     private ByteBuffer[] bufferScratch = new ByteBuffer[8];
     private int bufferScratchCount;
-    /* Set only after publisher.commit() has returned.  A checkpoint cleanup
-     * failure after that point must not overwrite a durable COMMITTED record with
+    /* Set only after the Archive recorded position has been acknowledged and
+     * the COMMITTED checkpoint has been written. A checkpoint cleanup failure
+     * after that point must not overwrite a durable COMMITTED record with
      * COMMITTING_UNCERTAIN. */
     private boolean commitMarkerPublished;
     private boolean commitInProgress;
     /* Signalled whenever commitInProgress is cleared. Shutdown and Archive
      * maintenance wait on it (bounded) instead of failing while a commit that
-     * already released the write lock is still awaiting its Archive position. */
+     * holds no coordinator lock is still awaiting its Archive position. The
+     * condition belongs to writeLock because it guards the same flag and the
+     * waiters already hold writeLock while inspecting the transaction state. */
     private final Condition commitDone = this.writeLock.newCondition();
 
     AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher) {
@@ -168,14 +180,25 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-        /// Serializes one complete Store acceptance/publication transaction.
-    void executeWriteAtomically(final WriteOperation operation) {
+    /// Serializes the fast phase of one Store acceptance/publication
+    /// transaction.
+    ///
+    /// The supplied operation must not perform the slow commit wait; callers
+    /// run [AeronReplicationPublisher.PreparedTransaction] commits outside this
+    /// method so a long Archive acknowledgement cannot hold write admission.
+    /// The operation runs while holding the write lock; commit paths must call
+    /// [#commitOrMarkUncertain] only after this method has released it.
+    ///
+    /// @param <T> operation result type
+    /// @param operation transaction body
+    /// @return the value returned by the operation
+    <T> T executeWriteAtomically(final WriteOperation<T> operation) {
         Objects.requireNonNull(operation, "operation");
         this.writeLock.lock();
         try {
             this.ensureNotCommitting();
             this.ensureWriterIdentity();
-            operation.run();
+            return operation.run();
         } finally {
             this.writeLock.unlock();
         }
@@ -190,72 +213,100 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     ///
     /// @param data binary to publish
     void distributeData(final Binary data) {
-        this.executeWriteAtomically(() ->
-        {
-            try (final AeronReplicationPublisher.PreparedTransaction prepared = this.prepare(data)) {
-                this.commitOrMarkUncertain(prepared);
-            }
-        });
+        final AeronReplicationPublisher.PreparedTransaction prepared =
+                this.executeWriteAtomically(() -> this.prepare(data));
+        try (prepared) {
+            this.commitOrMarkUncertain(prepared);
+        }
     }
 
         /// Commits a token. If the result is unclear, records that fact before
     /// rethrowing so restart cannot silently reuse the sequence.
     ///
-    /// Must be called with the write lock held (the write-admission path
-    /// does). Admission and the commit guard are set under that hold, then the
-    /// lock is released for the commit and reacquired before this returns, so
-    /// the caller's own unlock still balances exactly.
+    /// Must be called with the write lock released — asserted up front, so a
+    /// reentrant caller that still holds the lock fails fast instead of
+    /// silently holding it across the slow offer and Archive wait below. The
+    /// guard is set under a short lock hold, both slow waits (marker offer and
+    /// Archive acknowledgement) run without any coordinator lock, and the
+    /// terminal state is recorded under a second short hold. Every lock
+    /// acquisition in this method is released before it returns or throws, so
+    /// a failure can never leak a hold to the caller and no
+    /// `isHeldByCurrentThread` balancing is needed.
+    ///
+    /// @param prepared transaction whose commit marker is offered now
     void commitOrMarkUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        this.commitMarkerPublished = false;
-        /* Set the guard while the caller's lock is still held. Releasing first
-         * would let a second writer pass ensureNotCommitting() and prepare
-         * concurrently with this commit, leaving two pending transactions
-         * against one single-pending publisher. */
-        this.ensureNotCommitting();
-        this.ensureWriterIdentity();
-        this.commitInProgress = true;
-        this.writeLock.unlock();
+        if (this.writeLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "commitOrMarkUncertain must be called with the write lock released; the slow offer path may not run under it");
+        }
+        this.beginCommit();
+        RuntimeException failure = null;
+        Error fatal = null;
         try {
-            this.commit(prepared);
-        } catch (final Error failure) {
-            /* A fatal JVM error is not a recoverable publication failure.  Do not
-             * attempt checkpoint I/O here: the existing PREPARING/ENQUEUED fence is
-             * already the fail-closed recovery evidence, and allocating a second
-             * marker can mask the original Error. */
-            this.writeLock.lock();
-            this.commitInProgress = false;
-            this.commitDone.signalAll();
-            this.publisher.failClosed();
-            throw failure;
-        } catch (final RuntimeException failure) {
-            this.writeLock.lock();
-            /* Clear the guard before marking uncertain: commit() clears it on
-             * every path inside its own try, but a failure before that (for
-             * example an identity change) leaves the guard set, and
-             * markCommittingUncertain requires it clear. */
-            this.commitInProgress = false;
-            this.commitDone.signalAll();
-            if (!this.commitMarkerPublished) {
-                try {
-                    this.markCommittingUncertain(prepared);
-                } catch (final RuntimeException uncertainFailure) {
-                    failure.addSuppressed(uncertainFailure);
-                }
-            } else {
-                /* The Archive terminal marker is known durable. Keep the checkpoint
-                 * state already written by notifyState(COMMITTED); a failed fence
-                 * cleanup is a degraded shutdown, not an uncertain commit. */
-                failure.addSuppressed(new IllegalStateException(
-                        "Aeron commit is durable but its checkpoint cleanup failed"));
-            }
-            throw failure;
+            this.performCommit(prepared);
+        } catch (final Error error) {
+            fatal = error;
+        } catch (final RuntimeException error) {
+            failure = error;
+        }
+        this.finishCommit(prepared, failure, fatal);
+        /* Throw only after every lock has been released; a fatal JVM error is
+         * not a recoverable publication failure and must not trigger checkpoint
+         * I/O, so it is recorded as failed closed but not as uncertain. */
+        if (fatal != null) throw fatal;
+        if (failure != null) throw failure;
+    }
+
+    /// Sets the commit guard and pins the writer identity.
+    ///
+    /// Called with no lock held; the method holds {@code writeLock} only for
+    /// the state change. Setting the guard before any slow wait is what makes
+    /// a concurrent writer fail fast with {@code "Aeron commit is in progress"}
+    /// instead of preparing against the same publisher.
+    private void beginCommit() {
+        this.writeLock.lock();
+        try {
+            this.commitMarkerPublished = false;
+            this.ensureNotCommitting();
+            this.ensureWriterIdentity();
+            this.commitInProgress = true;
         } finally {
-            /* Restore the caller's hold: commit() releases the lock for its slow
-             * wait, and the catch paths above reacquire it before rethrowing. */
-            if (!this.writeLock.isHeldByCurrentThread()) {
-                this.writeLock.lock();
+            this.writeLock.unlock();
+        }
+    }
+
+    /// Clears the commit guard and records uncertainty when the commit failed.
+    ///
+    /// Called with no lock held after the slow phase. Fatal errors fail the
+    /// publisher closed without a second checkpoint marker; a recoverable
+    /// failure marks the transaction uncertain unless the durable COMMITTED
+    /// record was already written.
+    private void finishCommit(final AeronReplicationPublisher.PreparedTransaction prepared,
+                              final RuntimeException failure, final Error fatal) {
+        this.writeLock.lock();
+        try {
+            this.commitInProgress = false;
+            this.commitDone.signalAll();
+            if (fatal != null) {
+                this.publisher.failClosed();
+            } else if (failure != null) {
+                if (!this.commitMarkerPublished) {
+                    try {
+                        this.markCommittingUncertainLocked(prepared);
+                    } catch (final RuntimeException uncertainFailure) {
+                        failure.addSuppressed(uncertainFailure);
+                    }
+                } else {
+                    /* The Archive terminal marker is known durable. Keep the checkpoint
+                     * state already written by notifyState(COMMITTED); a failed fence
+                     * cleanup is a degraded shutdown, not an uncertain commit. */
+                    failure.addSuppressed(new IllegalStateException(
+                            "Aeron commit is durable but its checkpoint cleanup failed"));
+                }
             }
             this.commitMarkerPublished = false;
+        } finally {
+            this.writeLock.unlock();
         }
     }
 
@@ -483,7 +534,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private void ensureWriteAdmitted(final int dataLength) {
         if (!this.leaseGate.isValid()) {
             this.publisher.failLeaseLost();
-            throw new IllegalStateException(
+            throw new WriterFencedException(
                     "writer fencing lease lost, restart required; this writer is fenced");
         }
         final long dictionaryLength = this.pendingDictionary == null ? 0L : this.pendingDictionary.length;
@@ -618,91 +669,59 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.clearBufferScratch();
     }
 
-        /// Publishes the commit marker and waits for the durability boundary.
+        /// Offers the commit marker under lease ownership and waits for the
+    /// durability boundary.
     ///
-    /// The caller must hold no write lock: the commit releases it for the
-    /// Archive wait, and requiring a zero entry hold count turns a nested call
-    /// into an immediate failure instead of a silent lock-accounting bug.
-    /// Admission is granted by [commitOrMarkUncertain]; the commit guard is
-    /// set here as well (idempotently) so a direct caller is still protected.
-    void commit(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        if (this.writeLock.isHeldByCurrentThread()) {
-            throw new IllegalStateException(
-                    "Aeron commit must be called with the write lock released");
+    /// Called only by [commitOrMarkUncertain] with no coordinator lock held.
+    /// The marker offer runs under interprocess lease ownership while the
+    /// Archive acknowledgement wait runs outside it: the offer retries under
+    /// back pressure long enough for a successor to steal the lease, and a
+    /// marker offered after that steal can never be retracted.
+    private void performCommit(final AeronReplicationPublisher.PreparedTransaction prepared) {
+        if (!this.leaseGate.isValid()) {
+            this.publisher.failLeaseLost();
+            throw new WriterFencedException("writer fencing lease lost before commit; restart required");
         }
-        this.writeLock.lock();
-        try {
-            this.ensureWriterIdentity();
-            this.commitInProgress = true;
-            this.commitMarkerPublished = false;
-        } finally {
-            this.writeLock.unlock();
-        }
-        /* The marker offer runs under interprocess lease ownership while the
-         * Archive acknowledgement wait runs outside it: the offer retries under
-         * back pressure long enough for a successor to steal the lease, and a
-         * marker offered after that steal can never be retracted. Do not hold
-         * the write lock during either slow wait; commitInProgress keeps other
-         * writers out until the terminal state below is recorded. */
+        CrashHook.invoke("BEFORE_COMMIT_GATE", prepared.sequence());
         final long commitPosition;
+        try {
+            commitPosition = this.leaseGate.offerUnderOwnership(
+                    stillOwner -> this.publisher.offerCommitMarker(prepared, stillOwner));
+        } catch (final WriterFencedException fenced) {
+            /* Genuine fencing loss only: the lease gate and the ownership check
+             * inside the offer retry loop throw this type exclusively. Every
+             * other failure (back-pressure timeout, closed publication,
+             * interrupt) keeps its own category and message. */
+            this.publisher.failLeaseLost();
+            throw fenced;
+        }
+        final long position = this.publisher.awaitCommitPosition(prepared, commitPosition);
+        this.writeLock.lock();
         try {
             if (!this.leaseGate.isValid()) {
                 this.publisher.failLeaseLost();
-                throw new IllegalStateException("writer fencing lease lost before commit; restart required");
+                throw new WriterFencedException(
+                        "writer fencing lease lost during commit; transaction is uncertain");
             }
-            CrashHook.invoke("BEFORE_COMMIT_GATE", prepared.sequence());
-            try {
-                commitPosition = this.leaseGate.offerUnderOwnership(
-                        stillOwner -> this.publisher.offerCommitMarker(prepared, stillOwner));
-            } catch (final IllegalStateException fenced) {
-                this.publisher.failLeaseLost();
-                throw new IllegalStateException(
-                        "writer fencing lease lost before commit; restart required", fenced);
-            }
-            final long position = this.publisher.awaitCommitPosition(prepared, commitPosition);
-            this.writeLock.lock();
-            try {
-                if (!this.leaseGate.isValid()) {
-                    this.publisher.failLeaseLost();
-                    throw new IllegalStateException("writer fencing lease lost during commit; transaction is uncertain");
-                }
-                try {
-                    CrashHook.invoke("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", prepared.sequence());
-                    this.notifyState(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
-                            prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), position);
-                    /* Only a successful checkpoint callback proves that the
-                     * durable COMMITTED record is visible. If the callback
-                     * throws after a partial write, the outer failure path
-                     * records COMMITTING_UNCERTAIN instead of guessing. */
-                    this.commitMarkerPublished = true;
-                } catch (final RuntimeException | Error failure) {
-                    this.publisher.failClosed();
-                    throw failure;
-                }
-                /* The dictionary is part of the durable transaction. Keep it available until
-                 * the COMMITTED checkpoint has been written successfully; a checkpoint failure
-                 * must never make a retry publish data whose type definitions were dropped. */
-                this.pendingDictionary = null;
-                this.localAcceptanceFence = null;
-                this.clearBufferScratch();
-                this.commitMarkerPublished = false;
-            } finally {
-                this.commitInProgress = false;
-                this.commitDone.signalAll();
-                this.writeLock.unlock();
-            }
+            CrashHook.invoke("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", prepared.sequence());
+            this.notifyState(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
+                    prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), position);
+            /* Only a successful checkpoint callback proves that the durable
+             * COMMITTED record is visible. If the callback throws after a
+             * partial write, the caller records COMMITTING_UNCERTAIN instead
+             * of guessing. */
+            this.commitMarkerPublished = true;
+            /* The dictionary is part of the durable transaction. Keep it available until
+             * the COMMITTED checkpoint has been written successfully; a checkpoint failure
+             * must never make a retry publish data whose type definitions were dropped. */
+            this.pendingDictionary = null;
+            this.localAcceptanceFence = null;
+            this.clearBufferScratch();
         } catch (final RuntimeException | Error failure) {
-            /* The marker offer itself failed before any terminal state was
-             * recorded. Clear the guard so commitOrMarkUncertain can mark the
-             * transaction uncertain instead of wedging the coordinator. */
-            this.writeLock.lock();
-            try {
-                this.commitInProgress = false;
-                this.commitDone.signalAll();
-            } finally {
-                this.writeLock.unlock();
-            }
+            this.publisher.failClosed();
             throw failure;
+        } finally {
+            this.writeLock.unlock();
         }
     }
 
@@ -867,8 +886,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     @FunctionalInterface
-    interface WriteOperation {
-        void run();
+    interface WriteOperation<T> {
+        T run();
     }
 
         /// Pairs a reserved sequence with the transaction queued for publication.

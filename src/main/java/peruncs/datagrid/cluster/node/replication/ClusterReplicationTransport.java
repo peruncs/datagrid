@@ -4,6 +4,7 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.datagrid.cluster.node.backup.BackupMetadata;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
@@ -29,95 +30,99 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     }
         /// Creates a transport that performs no replication.
     ///
-    /// @return disabled transport
+    /// @return the shared disabled transport
     static ClusterReplicationTransport noOp() {
+        return NoOp.INSTANCE;
+    }
 
-        return new ClusterReplicationTransport() {
+        /// Shared stateless transport for nodes with replication disabled.
+    final class NoOp implements ClusterReplicationTransport {
+        private static final NoOp INSTANCE = new NoOp();
 
-            private final ReplicationCursor cursor = new ReplicationCursor("none", null, -1, "");
+        private NoOp() {
+        }
 
-            @Override
-            public String id() {
-                return "none";
-            }
+        @Override
+        public String id() {
+            return "none";
+        }
 
-            @Override
-            public StorageBinaryDataDistributor distributor(final String streamName, final boolean asynchronous) {
-                return StorageBinaryDataDistributor.NoOp();
-            }
+        @Override
+        public StorageBinaryDataDistributor distributor(final String streamName, final boolean asynchronous) {
+            return StorageBinaryDataDistributor.NoOp();
+        }
 
-            @Override
-            public StorageBinaryDataClient client(
-                    final StorageBinaryDataReceiver receiver,
-                    final String streamName,
-                    final AfterDataMessageConsumedListener cursorListener,
-                    final ReplicationCursor startingCursor,
-                    final boolean commitPosition
-            ) {
-                return StorageBinaryDataClient.NoOp(startingCursor);
-            }
+        @Override
+        public StorageBinaryDataClient client(
+                final StorageBinaryDataReceiver receiver,
+                final String streamName,
+                final DataMessageAppliedListener cursorListener,
+                final ReplicationCursor startingCursor,
+                final boolean commitPosition
+        ) {
+            return StorageBinaryDataClient.NoOp(startingCursor);
+        }
 
-            @Override
-            public ReplicationPositionProvider positionProvider(final String streamName) {
-                return new ReplicationPositionProvider() {
-                    public void init() {
-                    }
+        @Override
+        public ReplicationPositionProvider positionProvider(final String streamName) {
+            return new ReplicationPositionProvider() {
+                public void init() {
+                }
 
-                    public ReplicationCursor latest() {
-                        return cursor;
-                    }
+                public ReplicationCursor latest() {
+                    return ReplicationCursor.NONE;
+                }
 
-                    public void close() {
-                    }
-                };
-            }
+                public void close() {
+                }
+            };
+        }
 
-            @Override
-            public ReplicationLogRetention retention() {
-                return new ReplicationLogRetention() {
-                    public MaintenanceResult deleteThrough(final ReplicationCursor ignored) {
-                        return new MaintenanceResult(MaintenanceResult.Status.NOTHING_TO_DELETE, -1, "no replication log");
-                    }
+        @Override
+        public ReplicationLogRetention retention() {
+            return new ReplicationLogRetention() {
+                public MaintenanceResult deleteThrough(final ReplicationCursor ignored) {
+                    return new MaintenanceResult(MaintenanceResult.Status.NOTHING_TO_DELETE, -1, "no replication log");
+                }
 
-                    public void close() {
-                    }
-                };
-            }
+                public void close() {
+                }
+            };
+        }
 
-            @Override
-            public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-                    final String streamName,
-                    final StorageBinaryDataDistributor distributor,
-                    final Supplier<StorageConnection> writerStorage
-            ) {
-                /* No replication: the local target is the whole story. */
-                return delegate -> delegate;
-            }
+        @Override
+        public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
+                final String streamName,
+                final StorageBinaryDataDistributor distributor,
+                final Supplier<StorageConnection> writerStorage
+        ) {
+            /* No replication: the local target is the whole story. */
+            return delegate -> delegate;
+        }
 
-            @Override
-            public ReplicationHealth health(
-                    final StorageControllerAdapter storage,
-                    final StorageBinaryDataClient client
-            ) {
-                return new ReplicationHealth() {
-                    public boolean isReady() {
-                        return storage.isReady();
-                    }
+        @Override
+        public ReplicationHealth health(
+                final StorageControllerAdapter storage,
+                final StorageBinaryDataClient client
+        ) {
+            return new ReplicationHealth() {
+                public boolean isReady() {
+                    return storage.isReady();
+                }
 
-                    public boolean isHealthy() {
-                        return storage.isReady();
-                    }
+                public boolean isHealthy() {
+                    return storage.isReady();
+                }
 
-                    public void close() {
-                        // No-op transport holds no health resources.
-                    }
-                };
-            }
+                public void close() {
+                    /* The stateless transport holds no health resources. */
+                }
+            };
+        }
 
-            @Override
-            public void close() {
-            }
-        };
+        @Override
+        public void close() {
+        }
     }
 
         /// Returns the stable provider id, `aeron` or `none`.
@@ -149,7 +154,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     StorageBinaryDataClient client(
             StorageBinaryDataReceiver receiver,
             String streamName,
-            AfterDataMessageConsumedListener cursorListener,
+            DataMessageAppliedListener cursorListener,
             ReplicationCursor startingCursor,
             boolean commitPosition
     );

@@ -49,17 +49,25 @@ public interface ReplicationHealth extends AutoCloseable {
 
         /// Returns the current health state.
     ///
+    /// A provider whose readiness probe throws is reported as [#State.FAILED]
+    /// and the failure is logged at debug level so a monitoring scrape never
+    /// hides the failure cause completely.
+    ///
     /// @return health state
     default State state() {
         try {
             return isReady() ? State.LIVE : State.STARTING;
         } catch (final RuntimeException failure) {
+            LOGGER.log(System.Logger.Level.DEBUG, "Replication readiness probe failed; reporting FAILED", failure);
             return State.FAILED;
         }
     }
 
     @Override
     void close();
+
+    /// Logger shared by the default health-state implementation.
+    System.Logger LOGGER = System.getLogger(ReplicationHealth.class.getName());
 
         /// States reported while a provider starts, runs, or requires recovery.
     enum State {

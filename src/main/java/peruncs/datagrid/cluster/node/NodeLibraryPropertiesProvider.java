@@ -1,11 +1,22 @@
 package peruncs.datagrid.cluster.node;
 
+import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 /// Configuration contract shared by cluster lifecycle code and the Aeron provider.
+///
 /// [#replicationTransport()] selects an explicit `aeron` or `none` selection.
+///
+/// @since 1.0
+/// The nested [Env] implementation reads the process environment; embedding
+/// applications may implement this interface directly to supply configuration
+/// without environment variables.
 public interface NodeLibraryPropertiesProvider {
         /// Creates an environment-backed provider.
     ///
@@ -41,9 +52,11 @@ public interface NodeLibraryPropertiesProvider {
 
         /// Fixed-topology node role: `writer`, `reader`, or `backup-reader`.
     ///
-    /// @return node role
+    /// A blank value inherits the legacy backup flag via [NodeRole#resolve].
+    ///
+    /// @return node role, or `null` when unconfigured
     default String replicationRole() {
-        return isBackupNode() ? BACKUP_READER_ROLE : WRITER_ROLE;
+        return null;
     }
 
         /// Single writer role: owns the Store and the Aeron Archive recording.
@@ -54,13 +67,6 @@ public interface NodeLibraryPropertiesProvider {
 
         /// Backup reader role: replays like a reader and additionally serves backups.
     String BACKUP_READER_ROLE = "backup-reader";
-
-        /// Returns whether the role was explicitly configured rather than inherited from the default.
-    ///
-    /// @return `true` when explicitly configured
-    default boolean replicationRoleConfigured() {
-        return false;
-    }
 
         /// Returns the single normalized role every decision point uses.
     ///
@@ -106,26 +112,19 @@ public interface NodeLibraryPropertiesProvider {
 
         /// Returns the storage limit in gigabytes.
     ///
-    /// @return storage limit
-    Integer storageLimitGB();
-
-        /// Returns the pod name.
+    /// Accepts a bare number (`20`) or a number with a `G`/`GB` suffix
+    /// (`20G`, `20GB`), case-insensitively.
     ///
-    /// @return pod name
-    String myPodName();
+    /// @return storage limit in gigabytes
+    Integer storageLimitGB();
 
         /// Returns a stable node identity for transports that need to retain a
     /// consumer-group identity across process restarts.
     ///
     /// @return configured node identity, or `null` when none was supplied
     default String replicationNodeIdentity() {
-        return this.replicationProperty("ECLIPSE_DATAGRID_NODE_ID");
+        return this.replicationProperty(Env.EnvKeys.NODE_ID);
     }
-
-        /// Returns the pod namespace.
-    ///
-    /// @return namespace
-    String myNamespace();
 
         /// Reports whether production mode is enabled.
     ///
@@ -154,7 +153,17 @@ public interface NodeLibraryPropertiesProvider {
 
         /// Reads node properties from environment variables.
     class Env implements NodeLibraryPropertiesProvider {
-                /// Creates an environment-backed provider reading the process environment.
+        private static final System.Logger LOGGER = System.getLogger(NodeLibraryPropertiesProvider.class.getName());
+
+        private final Map<String, String> environment;
+
+        /// Legacy names already reported for this provider instance, so each is
+        /// warned about once without leaking state across provider instances.
+        private final Set<String> legacyWarned = ConcurrentHashMap.newKeySet();
+
+        private final AtomicBoolean prodModeWarningLogged = new AtomicBoolean();
+
+        /// Creates an environment-backed provider reading the process environment.
         public Env() {
             this(null);
         }
@@ -162,11 +171,9 @@ public interface NodeLibraryPropertiesProvider {
                 /// Creates a provider reading a fixed environment, for tests.
         ///
         /// @param environment variable source, or `null` for the process environment
-        Env(final Map<String, String> environment) {
+        public Env(final Map<String, String> environment) {
             this.environment = environment == null ? null : Map.copyOf(environment);
         }
-
-        private final Map<String, String> environment;
 
         @Override
         public String replicationStreamName() {
@@ -191,14 +198,7 @@ public interface NodeLibraryPropertiesProvider {
 
         @Override
         public String replicationRole() {
-            final String role = this.envString(EnvKeys.REPLICATION_ROLE);
-            return role == null || role.isBlank() ? NodeLibraryPropertiesProvider.super.replicationRole() : role;
-        }
-
-        @Override
-        public boolean replicationRoleConfigured() {
-            final String role = this.envString(EnvKeys.REPLICATION_ROLE);
-            return role != null && !role.isBlank();
+            return this.envString(EnvKeys.REPLICATION_ROLE);
         }
 
         @Override
@@ -228,30 +228,16 @@ public interface NodeLibraryPropertiesProvider {
                 return null;
             }
             final String value = configured.trim();
-            final String number = value.endsWith("G") || value.endsWith("g")
-                    ? value.substring(0, value.length() - 1).trim()
-                    : value;
-            try {
-                return Integer.valueOf(number);
-            } catch (final NumberFormatException failure) {
-                throw new IllegalArgumentException(
-                        "Invalid %s value: %s".formatted(EnvKeys.STORAGE_LIMIT_GB, configured), failure);
+            final String upper = value.toUpperCase(Locale.ROOT);
+            final String number;
+            if (upper.endsWith("GB")) {
+                number = value.substring(0, value.length() - 2).trim();
+            } else if (upper.endsWith("G")) {
+                number = value.substring(0, value.length() - 1).trim();
+            } else {
+                number = value;
             }
-        }
-
-        @Override
-        public String myPodName() {
-            return this.envString(EnvKeys.MY_POD_NAME);
-        }
-
-        @Override
-        public String replicationNodeIdentity() {
-            return this.envString("ECLIPSE_DATAGRID_NODE_ID");
-        }
-
-        @Override
-        public String myNamespace() {
-            return this.envString(EnvKeys.MY_NAMESPACE);
+            return this.envNumber(EnvKeys.STORAGE_LIMIT_GB, configured, number, Integer::valueOf);
         }
 
         @Override
@@ -259,17 +245,19 @@ public interface NodeLibraryPropertiesProvider {
             final String configured = this.envString(EnvKeys.IS_PROD_MODE);
             if (configured == null || configured.isBlank()) {
                 if (this.hasProductionOnlySetting()) {
-                    throw new IllegalStateException(
+                    throw new NodeLibraryException(
                             "%s must be explicitly set when production-only settings are configured"
                                     .formatted(EnvKeys.IS_PROD_MODE));
                 }
-                LOGGER.log(System.Logger.Level.WARNING,
-                        "%s is unset; using development mode".formatted(EnvKeys.IS_PROD_MODE));
+                if (this.prodModeWarningLogged.compareAndSet(false, true)) {
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "%s is unset; using development mode".formatted(EnvKeys.IS_PROD_MODE));
+                }
                 return false;
             }
             if ("true".equalsIgnoreCase(configured.trim())) return true;
             if ("false".equalsIgnoreCase(configured.trim())) return false;
-            throw new IllegalArgumentException("Invalid %s value: %s".formatted(EnvKeys.IS_PROD_MODE, configured));
+            throw new NodeLibraryException("Invalid %s value: %s".formatted(EnvKeys.IS_PROD_MODE, configured));
         }
 
         private boolean hasProductionOnlySetting() {
@@ -302,20 +290,28 @@ public interface NodeLibraryPropertiesProvider {
         private Integer envInteger(final String envKey) {
             final String env = this.envString(envKey);
             if (env == null || env.isBlank()) return null;
-            try {
-                return Integer.valueOf(env.trim());
-            } catch (final NumberFormatException failure) {
-                throw new IllegalArgumentException("Invalid %s value: %s".formatted(envKey, env), failure);
-            }
+            return this.envNumber(envKey, env, env.trim(), Integer::valueOf);
         }
 
         private Long envLong(final String envKey) {
             final String env = this.envString(envKey);
             if (env == null || env.isBlank()) return null;
+            return this.envNumber(envKey, env, env.trim(), Long::valueOf);
+        }
+
+        /// Parses one numeric environment value, reporting the raw text and key
+        /// in a single error type shared with every other configuration failure.
+        private <T> T envNumber(
+                final String envKey,
+                final String rawValue,
+                final String number,
+                final Function<String, T> parser
+        ) {
             try {
-                return Long.valueOf(env.trim());
+                return parser.apply(number);
             } catch (final NumberFormatException failure) {
-                throw new IllegalArgumentException("Invalid %s value: %s".formatted(envKey, env), failure);
+                throw new NodeLibraryException(
+                        "Invalid %s value: %s".formatted(envKey, rawValue), failure);
             }
         }
 
@@ -324,57 +320,34 @@ public interface NodeLibraryPropertiesProvider {
             if (env == null || env.isBlank()) return false;
             if ("true".equalsIgnoreCase(env.trim())) return true;
             if ("false".equalsIgnoreCase(env.trim())) return false;
-            throw new IllegalArgumentException("Invalid %s value: %s".formatted(envKey, env));
+            throw new NodeLibraryException("Invalid %s value: %s".formatted(envKey, env));
         }
 
         private String envString(final String envKey) {
-            return this.environment == null
-                    ? resolve(System.getenv(), envKey)
-                    : resolve(this.environment, envKey);
+            return this.resolve(envKey);
         }
 
-        /// Resolves one variable against an explicit environment, falling back
-        /// to its pre-prefix name when the prefixed name is unset.
+        /// Resolves one variable against this provider's environment, falling
+        /// back to its pre-prefix name when the prefixed name is unset.
         ///
-        /// A consumed legacy name is reported once per process so an operator
-        /// can migrate without the fallback staying silent forever.
+        /// A consumed legacy name is reported once per provider instance so an
+        /// operator can migrate without the fallback staying silent forever.
         ///
-        /// @param environment variable source, normally the process environment
-        /// @param envKey      prefixed variable name
+        /// @param envKey prefixed variable name
         /// @return the prefixed value, else the legacy value, else `null`
-        static String resolve(final Map<String, String> environment, final String envKey) {
-            final String value = environment.get(envKey);
+        String resolve(final String envKey) {
+            final Map<String, String> source = this.environment == null ? System.getenv() : this.environment;
+            final String value = source.get(envKey);
             if (value != null) return value;
-            final String legacy = LEGACY_ENV_KEYS.get(envKey);
+            final String legacy = EnvKeys.LEGACY_ENV_KEYS.get(envKey);
             if (legacy == null) return null;
-            final String legacyValue = environment.get(legacy);
-            if (legacyValue != null && LEGACY_WARNED.add(legacy)) {
+            final String legacyValue = source.get(legacy);
+            if (legacyValue != null && this.legacyWarned.add(legacy)) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Environment variable %s is deprecated; use %s instead".formatted(legacy, envKey));
             }
             return legacyValue;
         }
-
-        private static final System.Logger LOGGER = System.getLogger(NodeLibraryPropertiesProvider.class.getName());
-
-        /// Legacy names already reported, so each is warned about once.
-        private static final Set<String> LEGACY_WARNED = ConcurrentHashMap.newKeySet();
-
-        /// Pre-prefix variable names, kept working while operators migrate.
-        private static final Map<String, String> LEGACY_ENV_KEYS = Map.ofEntries(
-                Map.entry(EnvKeys.IS_BACKUP_NODE, "IS_BACKUP_NODE"),
-                Map.entry(EnvKeys.KEPT_BACKUPS_COUNT, "KEPT_BACKUPS_COUNT"),
-                Map.entry(
-                        EnvKeys.STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES, "STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES"),
-                Map.entry(EnvKeys.GC_INTERVAL_MINUTES, "GC_INTERVAL_MINUTES"),
-                Map.entry(EnvKeys.BACKUP_INTERVAL_MINUTES, "BACKUP_INTERVAL_MINUTES"),
-                Map.entry(EnvKeys.STORAGE_LIMIT_GB, "STORAGE_LIMIT_GB"),
-                Map.entry(EnvKeys.MY_POD_NAME, "MY_POD_NAME"),
-                Map.entry(EnvKeys.MY_NAMESPACE, "MY_NAMESPACE"),
-                Map.entry(EnvKeys.IS_PROD_MODE, "MSCNL_PROD_MODE"),
-                Map.entry(EnvKeys.DATA_MERGER_TIMEOUT_MS, "MSCNL_DATA_MERGER_TIMEOUT"),
-                Map.entry(EnvKeys.DATA_MERGER_LIMIT, "MSCNL_DATA_MERGER_LIMIT")
-        );
 
                 /// Names of the environment variables understood by the provider.
         ///
@@ -383,6 +356,8 @@ public interface NodeLibraryPropertiesProvider {
         /// name is unset, so existing deployments keep working; when both are
         /// set, the prefixed name wins.
         public static final class EnvKeys {
+                        /// Stable node identity environment variable.
+            public static final String NODE_ID = "ECLIPSE_DATAGRID_NODE_ID";
                         /// Replication stream environment variable.
             public static final String REPLICATION_STREAM_NAME = "ECLIPSE_DATAGRID_REPLICATION_STREAM";
                         /// Replication transport environment variable.
@@ -406,10 +381,6 @@ public interface NodeLibraryPropertiesProvider {
             public static final String BACKUP_INTERVAL_MINUTES = "ECLIPSE_DATAGRID_BACKUP_INTERVAL_MINUTES";
                         /// Storage limit environment variable.
             public static final String STORAGE_LIMIT_GB = "ECLIPSE_DATAGRID_STORAGE_LIMIT_GB";
-                        /// Pod name environment variable.
-            public static final String MY_POD_NAME = "ECLIPSE_DATAGRID_MY_POD_NAME";
-                        /// Pod namespace environment variable.
-            public static final String MY_NAMESPACE = "ECLIPSE_DATAGRID_MY_NAMESPACE";
                         /// Production-mode environment variable.
             public static final String IS_PROD_MODE = "ECLIPSE_DATAGRID_PROD_MODE";
                         /// Merger timeout environment variable.
@@ -428,6 +399,19 @@ public interface NodeLibraryPropertiesProvider {
             public static final String AERON_ARCHIVE_DIRECTORY = "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY";
                         /// Shared writer lease path.
             public static final String AERON_LEASE_PATH = "ECLIPSE_DATAGRID_AERON_LEASE_PATH";
+
+            /// Pre-prefix variable names, kept working while operators migrate.
+            private static final Map<String, String> LEGACY_ENV_KEYS = Map.ofEntries(
+                    Map.entry(IS_BACKUP_NODE, "IS_BACKUP_NODE"),
+                    Map.entry(KEPT_BACKUPS_COUNT, "KEPT_BACKUPS_COUNT"),
+                    Map.entry(STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES, "STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES"),
+                    Map.entry(GC_INTERVAL_MINUTES, "GC_INTERVAL_MINUTES"),
+                    Map.entry(BACKUP_INTERVAL_MINUTES, "BACKUP_INTERVAL_MINUTES"),
+                    Map.entry(STORAGE_LIMIT_GB, "STORAGE_LIMIT_GB"),
+                    Map.entry(IS_PROD_MODE, "MSCNL_PROD_MODE"),
+                    Map.entry(DATA_MERGER_TIMEOUT_MS, "MSCNL_DATA_MERGER_TIMEOUT"),
+                    Map.entry(DATA_MERGER_LIMIT, "MSCNL_DATA_MERGER_LIMIT")
+            );
 
             private EnvKeys() {
             }

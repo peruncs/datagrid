@@ -3,6 +3,7 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
 import org.agrona.BufferUtil;
+import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -14,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongConsumer;
 import java.util.function.LongUnaryOperator;
 import java.util.zip.CRC32C;
 
@@ -76,48 +78,72 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private boolean envelopeFreed;
     private boolean closed;
 
-    AeronReplicationPublisher(final ExclusivePublication publication,
-                              final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-                              final long initialSequence) {
-        this(offerer(publication), actualMaxMessageLength(publication, configuration), configuration, clusterId, epoch, initialSequence,
-                null, LongUnaryOperator.identity(), AeronReplicationEnvelope.defaultWireNonce(clusterId));
+        /// Creates a publisher for a production Aeron publication.
+    ///
+    /// @param publication          exclusive publication owned by the publisher
+    /// @param configuration        framing, retry, and timeout limits
+    /// @param clusterId            replication cluster identity
+    /// @param epoch                writer epoch bound to the checkpoint
+    /// @param initialSequence      first sequence to publish
+    /// @param commitPositionAwaiter waits for the Archive to record a position
+    /// @param wireNonce            nonce reserved for this publication
+    /// @return publisher that closes the publication on close
+    static AeronReplicationPublisher onPublication(final ExclusivePublication publication,
+                                                   final AeronReplicationConfiguration configuration, final UUID clusterId,
+                                                   final long epoch, final long initialSequence,
+                                                   final LongUnaryOperator commitPositionAwaiter, final long wireNonce) {
+        return new AeronReplicationPublisher(offerer(publication), actualMaxMessageLength(publication, configuration),
+                configuration, clusterId, epoch, initialSequence, publication, commitPositionAwaiter, wireNonce);
     }
 
-
-    AeronReplicationPublisher(final ExclusivePublication publication,
-                              final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-                              final long initialSequence, final LongUnaryOperator commitPositionAwaiter) {
-        this(offerer(publication), actualMaxMessageLength(publication, configuration), configuration, clusterId, epoch, initialSequence,
-                publication, commitPositionAwaiter, AeronReplicationEnvelope.defaultWireNonce(clusterId));
-    }
-
-    AeronReplicationPublisher(final ExclusivePublication publication,
-                              final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-                              final long initialSequence, final LongUnaryOperator commitPositionAwaiter,
-                              final long wireNonce) {
-        this(offerer(publication), actualMaxMessageLength(publication, configuration), configuration, clusterId, epoch,
-                initialSequence, publication, commitPositionAwaiter, wireNonce);
-    }
-
-    AeronReplicationPublisher(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
-                              final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-                              final long initialSequence) {
-        this(offerer, maxMessageLength, configuration, clusterId, epoch, initialSequence, (AutoCloseable) null,
+        /// Creates a publisher for an integration test that owns a real publication.
+    ///
+    /// @param publication     exclusive publication owned by the publisher
+    /// @param configuration   framing, retry, and timeout limits
+    /// @param clusterId       replication cluster identity
+    /// @param epoch           writer epoch bound to the checkpoint
+    /// @param initialSequence first sequence to publish
+    /// @return publisher using identity position acknowledgement
+    static AeronReplicationPublisher onPublication(final ExclusivePublication publication,
+                                                   final AeronReplicationConfiguration configuration, final UUID clusterId,
+                                                   final long epoch, final long initialSequence) {
+        return onPublication(publication, configuration, clusterId, epoch, initialSequence,
                 LongUnaryOperator.identity(), AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 
-    AeronReplicationPublisher(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
-                              final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-                              final long initialSequence, final LongUnaryOperator commitPositionAwaiter) {
-        this(offerer, maxMessageLength, configuration, clusterId, epoch, initialSequence, null,
-                commitPositionAwaiter, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+        /// Creates a publisher driven by a test offerer.
+    ///
+    /// @param offerer        publication attempt sink
+    /// @param maxMessageLength publication message capacity
+    /// @param configuration  framing, retry, and timeout limits
+    /// @param clusterId      replication cluster identity
+    /// @param epoch          writer epoch bound to the checkpoint
+    /// @param initialSequence first sequence to publish
+    /// @return publisher using identity position acknowledgement
+    static AeronReplicationPublisher forTests(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
+                                              final AeronReplicationConfiguration configuration, final UUID clusterId,
+                                              final long epoch, final long initialSequence) {
+        return forTests(offerer, maxMessageLength, configuration, clusterId, epoch, initialSequence,
+                LongUnaryOperator.identity());
     }
 
-    private AeronReplicationPublisher(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
-                                      final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-                                      final long initialSequence, final AutoCloseable closeAction) {
-        this(offerer, maxMessageLength, configuration, clusterId, epoch, initialSequence, closeAction,
-                LongUnaryOperator.identity(), AeronReplicationEnvelope.defaultWireNonce(clusterId));
+        /// Creates a publisher driven by a test offerer with an explicit position
+    /// acknowledgement.
+    ///
+    /// @param offerer        publication attempt sink
+    /// @param maxMessageLength publication message capacity
+    /// @param configuration  framing, retry, and timeout limits
+    /// @param clusterId      replication cluster identity
+    /// @param epoch          writer epoch bound to the checkpoint
+    /// @param initialSequence first sequence to publish
+    /// @param commitPositionAwaiter waits for the Archive to record a position
+    /// @return publisher without an owned publication
+    static AeronReplicationPublisher forTests(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
+                                              final AeronReplicationConfiguration configuration, final UUID clusterId,
+                                              final long epoch, final long initialSequence,
+                                              final LongUnaryOperator commitPositionAwaiter) {
+        return new AeronReplicationPublisher(offerer, maxMessageLength, configuration, clusterId, epoch,
+                initialSequence, null, commitPositionAwaiter, AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 
     private AeronReplicationPublisher(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
@@ -149,7 +175,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private static AeronOfferRetryer.Offerer offerer(final ExclusivePublication publication) {
         return new AeronOfferRetryer.Offerer() {
             @Override
-            public long offer(final org.agrona.DirectBuffer buffer, final int offset, final int length) {
+            public long offer(final DirectBuffer buffer, final int offset, final int length) {
                 return publication.offer(buffer, offset, length);
             }
 
@@ -587,12 +613,24 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return (int) crc.getValue();
     }
 
-        /// Updates CRC32C from a source range without copying or mutating caller state.
+        /// Updates CRC32C from a source range without copying or allocating a view.
+    ///
+    /// The publisher is the only reader of these buffers for the duration of a
+    /// write, so the position and limit are moved to the requested range and
+    /// restored before returning. Both checksum passes cover the same
+    /// segments, so this replaces two `ByteBuffer.duplicate()` views per
+    /// segment per chunk with no view at all; on return the caller's buffer
+    /// state is byte-for-byte unchanged.
     private static void updateCrc(final CRC32C crc, final ByteBuffer source,
                                   final int offset, final int length) {
-        final ByteBuffer view = source.duplicate();
-        view.position(offset).limit(offset + length);
-        crc.update(view);
+        final int position = source.position();
+        final int limit = source.limit();
+        try {
+            source.position(offset).limit(offset + length);
+            crc.update(source);
+        } finally {
+            source.limit(limit).position(position);
+        }
     }
 
         /// Marks one transaction terminal and releases the publisher for the next one.
@@ -717,7 +755,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
     }
 
-    private void publishDictionaryChunks(final long sequence, final org.agrona.DirectBuffer bytes, final int length) {
+    private void publishDictionaryChunks(final long sequence, final DirectBuffer bytes, final int length) {
         if (length == 0) {
             return;
         }
@@ -737,7 +775,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
 
     private long offerEncoded(final long sequence, final AeronReplicationEnvelope.Kind kind,
                               final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
-                              final int commitCrc32c, final org.agrona.DirectBuffer payload, final int payloadOffset,
+                              final int commitCrc32c, final DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
         return this.offerEncoded(sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset,
                 commitCrc32c, payload, payloadOffset, payloadChunkLength, () -> true);
@@ -745,22 +783,19 @@ final class AeronReplicationPublisher implements AutoCloseable {
 
     private long offerEncoded(final long sequence, final AeronReplicationEnvelope.Kind kind,
                               final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
-                              final int commitCrc32c, final org.agrona.DirectBuffer payload, final int payloadOffset,
+                              final int commitCrc32c, final DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength, final BooleanSupplier stillOwner) {
         this.offerLock.lock();
         try {
-            return AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
-                final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
-                        this.epoch, this.fencingToken, this.wireNonce, sequence, kind, payloadLength, chunkIndex, chunkCount,
-                        chunkOffset, commitCrc32c,
-                        payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength,
-                        AeronReplicationEnvelope.crc32c(payload == null ? EMPTY_BUFFER.get() : payload,
-                                payloadOffset, payloadChunkLength));
-                if (encodedLength > this.maxMessageLength) {
-                    throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
-                }
-                return this.offerer.offer(this.envelopeBuffer, encodedLength, stillOwner);
-            });
+            final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
+                    this.epoch, this.fencingToken, this.wireNonce, sequence, kind, payloadLength, chunkIndex, chunkCount,
+                    chunkOffset, commitCrc32c,
+                    payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength,
+                    this.envelopeChecksum);
+            if (encodedLength > this.maxMessageLength) {
+                throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+            }
+            return this.offerer.offer(this.envelopeBuffer, encodedLength, stillOwner);
         } finally {
             this.offerLock.unlock();
         }
@@ -770,19 +805,16 @@ final class AeronReplicationPublisher implements AutoCloseable {
                                 final int chunkCount, final int chunkOffset, final int payloadChunkLength, final int payloadCrc32c) {
         this.offerLock.lock();
         try {
-            AeronReplicationEnvelope.withChecksumContext(this.envelopeChecksum, () -> {
-                final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.envelopeBuffer, 0,
-                        this.clusterId, this.epoch, this.fencingToken, this.wireNonce, sequence,
-                        AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
-                        chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
-                        AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
-                        payloadCrc32c);
-                if (encodedLength > this.maxMessageLength) {
-                    throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
-                }
-                this.offerer.offer(this.envelopeBuffer, encodedLength);
-                return null;
-            });
+            final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.envelopeBuffer, 0,
+                    this.clusterId, this.epoch, this.fencingToken, this.wireNonce, sequence,
+                    AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
+                    chunkIndex, chunkCount, chunkOffset, 0, this.envelopeBuffer,
+                    AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
+                    payloadCrc32c, this.envelopeChecksum);
+            if (encodedLength > this.maxMessageLength) {
+                throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+            }
+            this.offerer.offer(this.envelopeBuffer, encodedLength);
         } finally {
             this.offerLock.unlock();
         }
@@ -1065,7 +1097,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         private final int dataLength;
         private final int dataChunkCount;
         private final int crc32c;
-        private volatile java.util.function.LongConsumer abortAction;
+        private volatile LongConsumer abortAction;
         private boolean abortActionInvoked;
         private boolean abortAttempted;
         private volatile boolean terminal;
@@ -1104,7 +1136,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         /// but its durable Archive position is unknown.
         ///
         /// @param action receives the recorded abort position
-        void onAbort(final java.util.function.LongConsumer action) {
+        void onAbort(final LongConsumer action) {
             Objects.requireNonNull(action, "action");
             boolean invoke;
             synchronized (this.owner) {
@@ -1123,7 +1155,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
 
         private void invokeAbortAction(final long position) {
-            final java.util.function.LongConsumer action;
+            final LongConsumer action;
             synchronized (this.owner) {
                 if (!this.abortAttempted || this.abortActionInvoked || this.abortAction == null) return;
                 this.abortActionInvoked = true;

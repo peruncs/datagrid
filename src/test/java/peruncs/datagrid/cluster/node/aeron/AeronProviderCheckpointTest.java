@@ -41,15 +41,10 @@ class AeronProviderCheckpointTest {
         final int controlPort = freePort();
         final int livePort = freePort();
         final String clusterId = UUID.randomUUID().toString();
-        final NodeLibraryPropertiesProvider properties = new NodeLibraryPropertiesProvider.Env() {
+        final NodeLibraryPropertiesProvider properties = new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return "writer";
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override

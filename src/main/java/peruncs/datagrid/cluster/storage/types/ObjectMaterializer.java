@@ -20,7 +20,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
         /// Creates a materializer for one persistence manager.
     ///
     /// @param persistenceManager manager that owns the target graph
-    public ObjectMaterializer(final PersistenceManager<?> persistenceManager) {
+    ObjectMaterializer(final PersistenceManager<?> persistenceManager) {
         super();
 
         this.persistenceTypeDictionary = persistenceManager.typeDictionary();
@@ -28,12 +28,24 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
         this.loader = persistenceManager.createLoader();
     }
 
+        /// Collects one entity's object id, or fails on a malformed entity header.
+    ///
+    /// A truncated header means the containing batch is corrupt: the entity
+    /// data cannot be skipped without silently dropping the rest of the
+    /// buffer, so it fails with [StorageBinaryDataException] instead of
+    /// stopping iteration.
+    ///
+    /// @param entityStartAddress entity header start address
+    /// @param dataBoundAddress   end of the available entity data
+    /// @return always `true`; a truncated header throws
+    /// @throws StorageBinaryDataException if the entity header is truncated
     @Override
     public boolean acceptEntityData(final long entityStartAddress, final long dataBoundAddress) {
-        // check for incomplete entity header
         if (entityStartAddress + Binary.entityHeaderLength() > dataBoundAddress) {
-            // signal to calling context that entity cannot be processed and header must be reloaded
-            return false;
+            throw new StorageBinaryDataException(
+                    "truncated entity header at %s: %s bytes available, %s required"
+                            .formatted(entityStartAddress, dataBoundAddress - entityStartAddress,
+                                    Binary.entityHeaderLength()));
         }
 
         final PersistenceTypeDefinition ptd = this.persistenceTypeDictionary.lookupTypeById(
@@ -67,7 +79,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
     }
 
         /// Materializes each object collected by [#acceptEntityData(long, long)].
-    public void materialize() {
+    void materialize() {
         try {
             // Batch-materializes all collected objects in the live graph
             this.loader.collect(_ ->

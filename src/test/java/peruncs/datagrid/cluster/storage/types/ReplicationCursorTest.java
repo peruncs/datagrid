@@ -1,4 +1,4 @@
-package peruncs.datagrid.cluster.node.replication;
+package peruncs.datagrid.cluster.storage.types;
 
 import org.junit.jupiter.api.Test;
 

@@ -4,9 +4,9 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
 import peruncs.datagrid.cluster.node.aeron.AeronCrashHooks;
+import peruncs.datagrid.cluster.node.aeron.TestNodeProperties;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
@@ -257,7 +257,7 @@ public final class ProviderCrashChildMain {
         {
             /* The in-flight fence is deliberately not a terminal checkpoint.
              * Do not let a generic file hook kill a checkpoint cell on the wrong
-             * metadata file. The phase-aware AtomicFileStore names below are used
+             * metadata file. The phase-aware AtomicFileWriter names below are used
              * by the terminal writer checkpoint only. */
             if (path.getFileName().toString().endsWith(".inflight")) return;
             final String mapped = switch (phase) {
@@ -533,7 +533,7 @@ public final class ProviderCrashChildMain {
         }
     }
 
-    private static final class ChildProperties implements NodeLibraryPropertiesProvider {
+    private static final class ChildProperties extends TestNodeProperties {
         private final Path base;
         private final ReplicationDurabilityMode durability;
         private final boolean externalArchive;
@@ -565,21 +565,6 @@ public final class ProviderCrashChildMain {
         }
 
         @Override
-        public boolean replicationRoleConfigured() {
-            return true;
-        }
-
-        @Override
-        public boolean isBackupNode() {
-            return false;
-        }
-
-        @Override
-        public Integer keptBackupsCount() {
-            return 0;
-        }
-
-        @Override
         public Integer storageLimitCheckerIntervalMinutes() {
             return 1;
         }
@@ -590,21 +575,6 @@ public final class ProviderCrashChildMain {
         }
 
         @Override
-        public String myPodName() {
-            return "crash-matrix";
-        }
-
-        @Override
-        public String myNamespace() {
-            return "test";
-        }
-
-        @Override
-        public boolean isProdMode() {
-            return false;
-        }
-
-        @Override
         public Long dataMergerTimeoutMs() {
             return 5_000L;
         }
@@ -612,16 +582,6 @@ public final class ProviderCrashChildMain {
         @Override
         public Long dataMergerCachedDataLimit() {
             return 1024L * 1024L;
-        }
-
-        @Override
-        public Long writerLeaseStalenessMillis() {
-            return null;
-        }
-
-        @Override
-        public Long dataMergerApplyTimeoutMs() {
-            return null;
         }
 
         @Override

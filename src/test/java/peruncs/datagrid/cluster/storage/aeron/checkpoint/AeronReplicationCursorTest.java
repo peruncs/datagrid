@@ -50,6 +50,28 @@ class AeronReplicationCursorTest {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationCursor.decode(encoded));
     }
 
+    /// Pins the shared checkpoint header shape: magic int, version short, zero flags short.
+    @Test
+    void usesSharedCheckpointHeaderShape() {
+        final AeronReplicationCursor cursor = new AeronReplicationCursor(
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, 5, 2, 3, 4);
+        final byte[] encoded = cursor.encode();
+        final java.nio.ByteBuffer header = java.nio.ByteBuffer.wrap(encoded).order(java.nio.ByteOrder.BIG_ENDIAN);
+        assertEquals(0x44474143, header.getInt(0));
+        assertEquals((short) 2, header.getShort(4));
+        assertEquals((short) 0, header.getShort(6));
+    }
+
+    /// Verifies a corrupted flags half-word is rejected rather than interpreted.
+    @Test
+    void rejectsUnknownHeaderFlags() {
+        final AeronReplicationCursor cursor = new AeronReplicationCursor(
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, 5, 2, 3, 4);
+        final byte[] encoded = cursor.encode();
+        encoded[7] ^= 1;
+        assertThrows(IllegalArgumentException.class, () -> AeronReplicationCursor.decode(encoded));
+    }
+
         /// Verifies rejection of invalid replay identity and positions.
     @Test
     void rejectsInvalidReplayIdentityAndPositions() {

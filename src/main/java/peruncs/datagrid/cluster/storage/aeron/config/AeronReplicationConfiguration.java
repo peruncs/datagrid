@@ -8,13 +8,40 @@ import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.util.Objects;
 
-/// Immutable framing and durability limits shared by one writer and its
-/// readers.
+/// Immutable framing, delivery, and durability limits shared by one writer and
+/// its readers.
 ///
-/// Both sides must use the same values to interpret the stream. The builder
+/// Both sides must use the same values to interpret the stream. Construction
 /// rejects values that could create a frame the writer cannot publish or the
-/// reader cannot assemble.
-public final class AeronReplicationConfiguration {
+/// reader cannot assemble. The builder is a convenience over the canonical
+/// record constructor; the record itself carries the validated values.
+///
+/// @param termLength                 Aeron term length shared by publication and subscription
+/// @param mtuLength                  publication MTU
+/// @param chunkSize                  logical Store-data chunk size carried by one envelope
+/// @param maxTransactionBytes        largest complete Store transaction accepted
+/// @param offerTimeoutNanos          bounded wait for publication and Archive progress
+/// @param recordingStartTimeoutNanos bounded wait for an Archive recording to become active
+/// @param recordedPositionTimeoutNanos bounded wait for the Archive to report a recorded position
+/// @param recordingStopTimeoutNanos  bounded wait for an Archive recording to stop
+/// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary
+/// @param readerFragmentsPerPoll     fragments a reader consumes per poll call while replaying
+/// @param durabilityMode             local-versus-Archive ordering used by the writer
+/// @param retryPolicy                idle pacing and probe spacing for bounded retry loops
+public record AeronReplicationConfiguration(
+        int termLength,
+        int mtuLength,
+        int chunkSize,
+        int maxTransactionBytes,
+        long offerTimeoutNanos,
+        long recordingStartTimeoutNanos,
+        long recordedPositionTimeoutNanos,
+        long recordingStopTimeoutNanos,
+        long readerStopTimeoutNanos,
+        int readerFragmentsPerPoll,
+        ReplicationDurabilityMode durabilityMode,
+        AeronRetryPolicy retryPolicy
+) {
         /// Default Aeron term length in bytes.
     public static final int DEFAULT_TERM_LENGTH = 16 * 1024 * 1024;
         /// Default publication MTU in bytes.
@@ -25,47 +52,55 @@ public final class AeronReplicationConfiguration {
     public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
         /// Hard upper bound for the largest accepted transaction in bytes.
     public static final int MAX_SUPPORTED_TRANSACTION_BYTES = AeronReplicationEnvelope.MAX_TRANSACTION_PAYLOAD_BYTES;
+        /// Default fragments consumed per reader poll; a replay backlog drains in a few polls instead of thousands.
+    public static final int DEFAULT_READER_FRAGMENTS_PER_POLL = 256;
     private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_START_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_STOP_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_READER_STOP_TIMEOUT_NANOS = 30_000_000_000L;
-    private final int termLength;
-    private final int mtuLength;
-    private final int chunkSize;
-    private final int maxTransactionBytes;
-    private final long offerTimeoutNanos;
-    private final long recordingStartTimeoutNanos;
-    private final long recordedPositionTimeoutNanos;
-    private final long recordingStopTimeoutNanos;
-    private final long readerStopTimeoutNanos;
-    private final ReplicationDurabilityMode durabilityMode;
-    private final AeronRetryPolicy retryPolicy;
 
-    private AeronReplicationConfiguration(
-            final int termLength,
-            final int mtuLength,
-            final int chunkSize,
-            final int maxTransactionBytes,
-            final long offerTimeoutNanos,
-            final long recordingStartTimeoutNanos,
-            final long recordedPositionTimeoutNanos,
-            final long recordingStopTimeoutNanos,
-            final long readerStopTimeoutNanos,
-            final ReplicationDurabilityMode durabilityMode,
-            final AeronRetryPolicy retryPolicy
-    ) {
-        this.termLength = termLength;
-        this.mtuLength = mtuLength;
-        this.chunkSize = chunkSize;
-        this.maxTransactionBytes = maxTransactionBytes;
-        this.offerTimeoutNanos = offerTimeoutNanos;
-        this.recordingStartTimeoutNanos = recordingStartTimeoutNanos;
-        this.recordedPositionTimeoutNanos = recordedPositionTimeoutNanos;
-        this.recordingStopTimeoutNanos = recordingStopTimeoutNanos;
-        this.readerStopTimeoutNanos = readerStopTimeoutNanos;
-        this.durabilityMode = durabilityMode;
-        this.retryPolicy = retryPolicy;
+        /// Validates every framing, timeout, and delivery limit.
+    ///
+    /// @throws IllegalArgumentException when the limits cannot describe a valid
+    ///                                  Aeron envelope
+    public AeronReplicationConfiguration {
+        if (durabilityMode == null || retryPolicy == null) {
+            throw new IllegalArgumentException("durabilityMode and retryPolicy must be set");
+        }
+        if (!BitUtil.isPowerOfTwo(termLength) || termLength < 64 * 1024) {
+            throw new IllegalArgumentException("termLength must be a power of two >= 64 KiB");
+        }
+        try {
+            Configuration.validateMtuLength(mtuLength);
+        } catch (final RuntimeException failure) {
+            throw new IllegalArgumentException("Invalid Aeron MTU length: " + mtuLength, failure);
+        }
+        if (maxTransactionBytes <= 0 || maxTransactionBytes > MAX_SUPPORTED_TRANSACTION_BYTES) {
+            throw new IllegalArgumentException(
+                    "maxTransactionBytes must be between 1 and %s".formatted(MAX_SUPPORTED_TRANSACTION_BYTES));
+        }
+        if (chunkSize <= 0 || chunkSize > maxTransactionBytes) {
+            throw new IllegalArgumentException("chunkSize must be positive and <= maxTransactionBytes");
+        }
+        final long packetCount = (maxTransactionBytes + (long) chunkSize - 1L) / chunkSize;
+        if (packetCount > AeronReplicationEnvelope.MAX_PACKET_COUNT) {
+            throw new IllegalArgumentException(
+                    "maxTransactionBytes requires more than %s packets".formatted(AeronReplicationEnvelope.MAX_PACKET_COUNT));
+        }
+        if (offerTimeoutNanos <= 0 || recordingStartTimeoutNanos <= 0 ||
+            recordedPositionTimeoutNanos <= 0 || recordingStopTimeoutNanos <= 0 ||
+            readerStopTimeoutNanos <= 0) {
+            throw new IllegalArgumentException("all Aeron timeouts must be positive");
+        }
+        if (readerFragmentsPerPoll <= 0) {
+            throw new IllegalArgumentException("readerFragmentsPerPoll must be positive");
+        }
+        final int maxMessageLength = maxMessageLengthForTermLength(termLength);
+        if ((long) chunkSize + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength) {
+            throw new IllegalArgumentException(
+                    "chunkSize plus envelope exceeds Aeron maxMessageLength=%s".formatted(maxMessageLength));
+        }
     }
 
         /// Returns the validated default configuration.
@@ -86,83 +121,6 @@ public final class AeronReplicationConfiguration {
         return Math.min(FrameDescriptor.computeMaxMessageLength(termLength), 16 * 1024 * 1024);
     }
 
-        /// Returns the Aeron term length in bytes.
-    ///
-    /// @return term length in bytes
-    public int termLength() {
-        return this.termLength;
-    }
-
-        /// Returns the transport MTU used when the publication is created.
-    ///
-    /// @return MTU in bytes
-    public int mtuLength() {
-        return this.mtuLength;
-    }
-
-        /// Returns the largest logical Store-data chunk in one envelope.
-    ///
-    /// @return chunk size in bytes
-    public int chunkSize() {
-        return this.chunkSize;
-    }
-
-        /// Returns the largest Store transaction accepted by the writer.
-    ///
-    /// @return maximum transaction size in bytes
-    public int maxTransactionBytes() {
-        return this.maxTransactionBytes;
-    }
-
-        /// Returns the deadline used for publication and Archive progress waits.
-    ///
-    /// @return wait in nanoseconds
-    public long offerTimeoutNanos() {
-        return this.offerTimeoutNanos;
-    }
-
-        /// Returns the bounded wait for an Archive recording to become active.
-    ///
-    /// @return wait in nanoseconds
-    public long recordingStartTimeoutNanos() {
-        return this.recordingStartTimeoutNanos;
-    }
-
-        /// Returns the bounded wait for the Archive to report a recorded position.
-    ///
-    /// @return wait in nanoseconds
-    public long recordedPositionTimeoutNanos() {
-        return this.recordedPositionTimeoutNanos;
-    }
-
-        /// Returns the bounded wait for an Archive recording to stop.
-    ///
-    /// @return wait in nanoseconds
-    public long recordingStopTimeoutNanos() {
-        return this.recordingStopTimeoutNanos;
-    }
-
-        /// Returns the bounded wait used when a reader is stopped at the live tail.
-    ///
-    /// @return wait in nanoseconds
-    public long readerStopTimeoutNanos() {
-        return this.readerStopTimeoutNanos;
-    }
-
-        /// Returns the order in which local acceptance and Archive publication occur.
-    ///
-    /// @return selected durability mode
-    public ReplicationDurabilityMode durabilityMode() {
-        return this.durabilityMode;
-    }
-
-        /// Returns the idle pacing and probe spacing for bounded retry loops.
-    ///
-    /// @return retry policy
-    public AeronRetryPolicy retryPolicy() {
-        return this.retryPolicy;
-    }
-
         /// Returns the largest envelope message that this publication may offer.
     /// Aeron fragments that message according to the MTU; the logical chunk must
     /// still fit within this publication limit.
@@ -172,7 +130,8 @@ public final class AeronReplicationConfiguration {
         return maxMessageLengthForTermLength(this.termLength);
     }
 
-        /// Builds an immutable Aeron replication configuration.
+        /// Builds an immutable Aeron replication configuration with the
+    /// documented defaults, then applies only the setter values.
     public static final class Builder {
         private int termLength = DEFAULT_TERM_LENGTH;
         private int mtuLength = DEFAULT_MTU_LENGTH;
@@ -183,6 +142,7 @@ public final class AeronReplicationConfiguration {
         private long recordedPositionTimeoutNanos = DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS;
         private long recordingStopTimeoutNanos = DEFAULT_RECORDING_STOP_TIMEOUT_NANOS;
         private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
+        private int readerFragmentsPerPoll = DEFAULT_READER_FRAGMENTS_PER_POLL;
         private ReplicationDurabilityMode durabilityMode = ReplicationDurabilityMode.ARCHIVE_FIRST;
         private AeronRetryPolicy retryPolicy = AeronRetryPolicy.Default();
 
@@ -271,6 +231,19 @@ public final class AeronReplicationConfiguration {
             return this;
         }
 
+                /// Sets the fragments a reader consumes per poll call.
+        ///
+        /// A larger value drains a replay backlog in fewer polls; the default
+        /// of [#DEFAULT_READER_FRAGMENTS_PER_POLL] balances replay throughput
+        /// against live-tail latency.
+        ///
+        /// @param value fragments per poll; must be positive
+        /// @return this builder
+        public Builder readerFragmentsPerPoll(final int value) {
+            this.readerFragmentsPerPoll = value;
+            return this;
+        }
+
                 /// Sets the local-versus-Archive ordering used by the writer.
         ///
         /// @param value durability mode
@@ -295,37 +268,6 @@ public final class AeronReplicationConfiguration {
         /// @throws IllegalArgumentException if the limits cannot describe a valid
         ///                                  Aeron envelope
         public AeronReplicationConfiguration build() {
-            if (!BitUtil.isPowerOfTwo(this.termLength) || this.termLength < 64 * 1024) {
-                throw new IllegalArgumentException("termLength must be a power of two >= 64 KiB");
-            }
-            try {
-                Configuration.validateMtuLength(this.mtuLength);
-            } catch (final RuntimeException failure) {
-                throw new IllegalArgumentException("Invalid Aeron MTU length: " + this.mtuLength, failure);
-            }
-            if (this.maxTransactionBytes <= 0 || this.maxTransactionBytes > MAX_SUPPORTED_TRANSACTION_BYTES) {
-                throw new IllegalArgumentException(
-                        "maxTransactionBytes must be between 1 and %s".formatted(MAX_SUPPORTED_TRANSACTION_BYTES));
-            }
-            if (this.chunkSize <= 0 || this.chunkSize > this.maxTransactionBytes) {
-                throw new IllegalArgumentException("chunkSize must be positive and <= maxTransactionBytes");
-            }
-            final long packetCount = (this.maxTransactionBytes + (long) this.chunkSize - 1L) / this.chunkSize;
-            if (packetCount > AeronReplicationEnvelope.MAX_PACKET_COUNT) {
-                throw new IllegalArgumentException(
-                        "maxTransactionBytes requires more than %s packets".formatted(AeronReplicationEnvelope.MAX_PACKET_COUNT));
-            }
-            if (this.offerTimeoutNanos <= 0 || this.recordingStartTimeoutNanos <= 0 ||
-                this.recordedPositionTimeoutNanos <= 0 || this.recordingStopTimeoutNanos <= 0 ||
-                this.readerStopTimeoutNanos <= 0 || this.durabilityMode == null || this.retryPolicy == null) {
-                throw new IllegalArgumentException(
-                        "all Aeron timeouts must be positive and durabilityMode/retryPolicy must be set");
-            }
-            final int maxMessageLength = maxMessageLengthForTermLength(this.termLength);
-            if ((long) this.chunkSize + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength) {
-                throw new IllegalArgumentException(
-                        "chunkSize plus envelope exceeds Aeron maxMessageLength=%s".formatted(maxMessageLength));
-            }
             return new AeronReplicationConfiguration(
                     this.termLength,
                     this.mtuLength,
@@ -336,6 +278,7 @@ public final class AeronReplicationConfiguration {
                     this.recordedPositionTimeoutNanos,
                     this.recordingStopTimeoutNanos,
                     this.readerStopTimeoutNanos,
+                    this.readerFragmentsPerPoll,
                     this.durabilityMode,
                     this.retryPolicy
             );

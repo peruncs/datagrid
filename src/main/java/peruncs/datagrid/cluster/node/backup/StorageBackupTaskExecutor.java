@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.datagrid.cluster.node.CloseSequencer;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
 
 import java.util.concurrent.ExecutorService;
@@ -72,10 +73,23 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     ///
     /// A failed asynchronous task must remain observable by health checks and
     /// operators; logging it and allowing the executor future to complete
-    /// normally would make the failure indistinguishable from success.
+    /// normally would make the failure indistinguishable from success. A
+    /// successful publication followed by a maintenance failure is not
+    /// reported here; see [#maintenanceFailure()].
     ///
     /// @return the most recent backup failure, or `null` after a successful backup
     Throwable backupFailure();
+
+        /// Reports the most recent post-publication maintenance failure, if any.
+    ///
+    /// Pruning and replication-retention failures happen after the archive is
+    /// already durable, so they are exposed separately from
+    /// [#backupFailure()] and never mark a completed backup as failed.
+    ///
+    /// @return the most recent maintenance failure, or `null`
+    default Throwable maintenanceFailure() {
+        return null;
+    }
 
     /// Provides one virtual backup executor and the inherited storage-check executor.
     final class Default implements StorageBackupTaskExecutor {
@@ -149,12 +163,20 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             return this.backupFailure.get();
         }
 
+        @Override
+        public Throwable maintenanceFailure() {
+            return this.backupManager.maintenanceFailure();
+        }
+
         /// Stops the backup executor, cancelling a running backup first.
         ///
-        /// A repeated call retries an incomplete shutdown. A running export is
-        /// never interrupted: Eclipse Store may swallow interruption and leave
-        /// a partial image that looks complete. The executor is allowed to
-        /// drain the export, then storage checks are stopped.
+        /// Shutdown is retry-until-clean, matching [StorageTaskExecutor]: after
+        /// the first call no new backup is accepted, a bounded wait failure is
+        /// rethrown, and a later call retries the wait instead of losing the
+        /// resource. A running export is never interrupted: Eclipse Store may
+        /// swallow interruption and leave a partial image that looks complete.
+        /// The executor is allowed to drain the export, then storage checks are
+        /// stopped; failures from both phases are aggregated.
         @Override
         public void close() {
             final Future<?> task;
@@ -186,14 +208,10 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             try {
                 this.storageChecks.close();
             } catch (final Throwable closeFailure) {
-                if (failure == null) failure = closeFailure;
-                else failure.addSuppressed(closeFailure);
+                failure = CloseSequencer.append(failure, closeFailure);
             }
-            if (failure != null) {
-                if (failure instanceof Error error) throw error;
-                if (failure instanceof RuntimeException runtime) throw runtime;
-                throw new IllegalStateException("failed to close storage backup executor", failure);
-            }
+            if (failure instanceof Error error) throw error;
+            if (failure instanceof RuntimeException runtime) throw runtime;
         }
     }
 }

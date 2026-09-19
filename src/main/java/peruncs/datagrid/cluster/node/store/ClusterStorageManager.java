@@ -156,6 +156,13 @@ public interface ClusterStorageManager<T> extends StorageManager {
         ///
         /// @return `true` when the limit is reached
         boolean isStorageLimitReached();
+
+                /// Returns a validation that never rejects, for read-only managers.
+        ///
+        /// @return validation that never reports the limit as reached
+        static StorageSizeValidation notReached() {
+            return () -> false;
+        }
     }
 
 
@@ -168,6 +175,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
         private final StorageManager delegate;
         private final ShutdownCallback shutdownCallback;
         private final StorageGraphCoordinator graphCoordinator;
+        private final LazyConstant<PersistenceManager<Binary>> persistenceManager;
         private boolean callbackCompleted;
         private boolean storeShutdownCompleted;
 
@@ -181,6 +189,12 @@ public interface ClusterStorageManager<T> extends StorageManager {
             this.storageSizeValidation = storageSizeValidation;
             this.shutdownCallback = shutdownCallback;
             this.graphCoordinator = graphCoordinator;
+            /* One adapter is enough for the manager's lifetime. Each call used
+             * to build a new wrapper over the same shared delegate, so closing
+             * one borrower's adapter closed Store's persistence manager for
+             * everyone. */
+            this.persistenceManager = LazyConstant.of(
+                    () -> new BinaryPersistenceManagerAdapter(delegate.persistenceManager()));
         }
 
         /* The limit gates only the write entry points (store, storeAll,
@@ -337,7 +351,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         public PersistenceManager<Binary> persistenceManager() {
-            return new BinaryPersistenceManagerAdapter(this.delegate.persistenceManager());
+            return this.persistenceManager.get();
         }
 
         @Override
@@ -854,7 +868,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
     final class ReadOnly<T> extends Default<T> {
         private ReadOnly(final StorageManager delegate, final ShutdownCallback shutdownCallback,
                          final StorageGraphCoordinator graphCoordinator) {
-            super(delegate, () -> false, shutdownCallback, graphCoordinator);
+            super(delegate, StorageSizeValidation.notReached(), shutdownCallback, graphCoordinator);
         }
 
         @Override

@@ -1,5 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
+import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
+
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
@@ -14,31 +16,46 @@ import java.util.function.LongSupplier;
 /// receives a callback that is evaluated before every publication attempt. The
 /// heartbeat is refreshed before the lock is released. The slow Archive
 /// acknowledgement wait always runs outside that lock.
+///
+/// Only genuine fencing loss is reported as [WriterFencedException]. Gate
+/// implementations must not translate back-pressure timeouts, closed
+/// publications, interrupts, or IO failures into that type: recovery
+/// diagnostics depend on the real failure category.
 public interface WriterLeaseGate {
     /// Reports whether the writer lease is still current.
     ///
     /// @return `true` while this writer still owns a fresh lease
     boolean isValid();
 
-    /// Offers one terminal marker under continued ownership.
+    /// Offers one terminal marker after a single ownership check.
+    ///
+    /// This overload cannot re-check ownership between publication retries and
+    /// is therefore reserved for gates whose offer cannot pause long enough
+    /// for a takeover. Paths that can retry must use
+    /// [#offerUnderOwnership(OwnedOffer)].
     ///
     /// @param offer bounded Aeron offer returning the publication position
     /// @return Aeron position returned by the offer
-    /// @throws IllegalStateException when the lease was lost before the offer
+    /// @throws WriterFencedException when the lease was lost before the offer
     long offerUnderOwnership(LongSupplier offer);
 
     /// Offers a terminal marker while passing the current ownership check into
     /// each bounded publication attempt.
     ///
-    /// The legacy zero-argument overload remains the compatibility seam for
-    /// simple test gates. Production gates override this overload so retries
-    /// cannot continue after fencing.
+    /// Production gates override this overload so a retry cannot continue after
+    /// fencing. The default fails instead of silently degrading to the
+    /// single-check [#offerUnderOwnership(LongSupplier)] overload, which would
+    /// let a deposed writer offer a stale marker after its lease was stolen.
     ///
     /// @param offer offer operation receiving the per-attempt ownership check
     /// @return Aeron position returned by the offer
+    /// @throws WriterFencedException         when the lease was lost
+    /// @throws UnsupportedOperationException when the gate only supports
+    ///                                       single-check offers
     default long offerUnderOwnership(final OwnedOffer offer) {
         Objects.requireNonNull(offer, "offer");
-        return this.offerUnderOwnership(() -> offer.offer(() -> true));
+        throw new UnsupportedOperationException(
+                "writer lease gate does not support per-attempt ownership checks");
     }
 
     /// Supplies a publication operation and its per-attempt ownership check.
@@ -74,6 +91,7 @@ public interface WriterLeaseGate {
     /// @param valid validity supplier
     /// @return gate that checks validity but does not serialize offers
     static WriterLeaseGate of(final BooleanSupplier valid) {
+        Objects.requireNonNull(valid, "valid");
         return new WriterLeaseGate() {
             @Override
             public boolean isValid() {
@@ -83,7 +101,7 @@ public interface WriterLeaseGate {
             @Override
             public long offerUnderOwnership(final LongSupplier offer) {
                 if (!valid.getAsBoolean()) {
-                    throw new IllegalStateException("writer fencing lease lost before commit; restart required");
+                    throw new WriterFencedException("writer fencing lease lost before commit; restart required");
                 }
                 return offer.getAsLong();
             }
@@ -91,7 +109,7 @@ public interface WriterLeaseGate {
             @Override
             public long offerUnderOwnership(final OwnedOffer offer) {
                 if (!valid.getAsBoolean()) {
-                    throw new IllegalStateException("writer fencing lease lost before commit; restart required");
+                    throw new WriterFencedException("writer fencing lease lost before commit; restart required");
                 }
                 return offer.offer(valid);
             }

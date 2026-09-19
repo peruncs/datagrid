@@ -19,6 +19,14 @@ import static org.eclipse.serializer.util.X.notNull;
 /// the divergence would never surface. Every write entry point throws, while
 /// target lifecycle calls delegate so storage startup and shutdown are
 /// unaffected.
+///
+/// The write-controller validators are deliberately not overridden: Store's
+/// [PersistenceWriteController] defaults derive `validateIsWritable()` and
+/// `validateIsStoringEnabled()` from the always-true predicates below, so the
+/// defaults already let the write reach [#write(Binary)] and be rejected with
+/// the read-only domain failure. Only that failure type carries the reader
+/// semantics; a bare `IllegalStateException` from a validator would be less
+/// precise.
 public final class RejectingPersistenceTarget implements PersistenceTarget<Binary> {
     private final PersistenceTarget<Binary> delegate;
 
@@ -41,25 +49,14 @@ public final class RejectingPersistenceTarget implements PersistenceTarget<Binar
     }
 
         /// Always returns `true` so the Store routes every write into [#write(Binary)],
-    /// where it is rejected loudly instead of skipped silently.
+    /// where it is rejected loudly instead of skipped silently. Store's default
+    /// `isStoringEnabled()` delegates here, and both default validators are
+    /// no-ops for a writable, store-enabled target.
     ///
     /// @return always `true`
     @Override
     public boolean isWritable() {
         return true;
-    }
-
-    @Override
-    public boolean isStoringEnabled() {
-        return true;
-    }
-
-    @Override
-    public void validateIsWritable() {
-    }
-
-    @Override
-    public void validateIsStoringEnabled() {
     }
 
     @Override

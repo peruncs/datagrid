@@ -1,15 +1,18 @@
-package peruncs.datagrid.cluster.node.replication;
+package peruncs.datagrid.cluster.storage.types;
 
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.UUID;
 
-/// Durable Aeron replication position.
+/// Durable replication position.
 ///
 /// `logicalSequence` is the Data Grid ordering value. The opaque
-/// `providerPosition` is interpreted only by the Aeron transport (for
-/// example an Aeron recording id/position pair), stored as lowercase hex so
-/// the record is deeply immutable; an empty string carries no position.
+/// `providerPosition` is interpreted only by the transport (for example an
+/// Aeron recording id/position pair), stored as lowercase hex so the record
+/// is deeply immutable; an empty string carries no position.
+///
+/// This type lives in the storage contract package because the reader port
+/// ([StorageBinaryDataClient]) publishes it; the node layer consumes it.
 ///
 /// @param transport        selected provider id
 /// @param storeGeneration  immutable Store image identity, or `null` when the provider has none
@@ -23,6 +26,9 @@ public record ReplicationCursor(
     /* Shared codec: HexFormat is immutable and thread-safe. A single instance
      * serves every cursor instead of allocating one per format and parse. */
     private static final HexFormat HEX = HexFormat.of();
+
+    /// Cursor for a node with replication disabled.
+    public static final ReplicationCursor NONE = new ReplicationCursor("none", null, -1, "");
 
         /// Validates the cursor fields.
     ///
@@ -90,10 +96,20 @@ public record ReplicationCursor(
 
         /// Decodes the hex position back to bytes for provider codecs.
     ///
+    /// Decoding allocates; callers that decode the same cursor repeatedly
+    /// should decode once and reuse the array.
+    ///
     /// @return provider position bytes, empty when absent
     public byte[] providerPositionBytes() {
         return this.providerPosition.isEmpty()
                 ? new byte[0]
                 : HEX.parseHex(this.providerPosition);
+    }
+
+        /// Returns the provider position size in bytes without decoding it.
+    ///
+    /// @return provider position byte length
+    public int providerPositionByteLength() {
+        return this.providerPosition.length() / 2;
     }
 }

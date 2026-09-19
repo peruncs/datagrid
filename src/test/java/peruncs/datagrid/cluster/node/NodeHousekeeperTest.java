@@ -183,6 +183,35 @@ class NodeHousekeeperTest {
         }
     }
 
+        /// A task that fails past the degradation threshold degrades health,
+    /// and the next successful run clears the degradation: a transient flap
+    /// must not mark the node degraded for its lifetime.
+    @Test
+    void degradedTaskRecoversOnNextSuccess() throws InterruptedException {
+        final AtomicInteger runs = new AtomicInteger();
+        /* Fails until the test has observed the degradation, then succeeds:
+         * without the gate, the clearing run could race the observation and
+         * the first await would miss the latched window. */
+        final AtomicBoolean degradedObserved = new AtomicBoolean(false);
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+            housekeeper.schedule("flap", () -> {
+                if (!degradedObserved.get()) {
+                    runs.incrementAndGet();
+                    throw new IllegalStateException("transient maintenance failure");
+                }
+            }, Duration.ofMillis(20));
+            housekeeper.start();
+            awaitCondition(() -> housekeeper.failure() != null, 10_000L,
+                    "repeated failures must degrade health");
+            assertTrue(runs.get() >= NodeHousekeeper.FAILURE_THRESHOLD,
+                    "degradation must require the documented threshold, saw %s".formatted(runs.get()));
+            degradedObserved.set(true);
+            awaitCondition(() -> housekeeper.failure() == null, 10_000L,
+                    "the first success after degradation must clear it");
+        }
+    }
+
+
         /// A slow run postpones its own next run instead of overlapping it.
     @Test
     void slowRunDoesNotOverlapItself() throws InterruptedException {

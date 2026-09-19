@@ -1,6 +1,8 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import io.aeron.Aeron;
+import io.aeron.ChannelUri;
+import io.aeron.CommonContext;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.archive.client.AeronArchive;
@@ -169,41 +171,37 @@ final class AeronRuntime implements AutoCloseable {
     }
 
     private static boolean explicitlyDisablesSpySimulation(final String channel) {
-        final int query = channel.indexOf('?');
-        if (query < 0) return false;
-        for (final String option : channel.substring(query + 1).split("\\|")) {
-            if (option.trim().equalsIgnoreCase("ssc=false")) return true;
-        }
-        return false;
+        final ChannelUri uri = ChannelUri.parse(channel);
+        return "false".equalsIgnoreCase(uri.get(CommonContext.SPIES_SIMULATE_CONNECTION_PARAM_NAME));
     }
 
     private void start(final Runnable beforeDriverLaunch) {
-        ensurePrivateDirectory(this.settings.aeronDirectory(), this.settings.productionMode());
-        final Path checkpointParent = this.settings.checkpointPath().toAbsolutePath().getParent();
+        ensurePrivateDirectory(this.settings.directories().aeronDirectory(), this.settings.productionMode());
+        final Path checkpointParent = this.settings.directories().checkpointPath().toAbsolutePath().getParent();
         if (checkpointParent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
         ensurePrivateDirectory(checkpointParent, this.settings.productionMode());
         final boolean embeddedWriter = this.settings.role().isWriter() && !this.settings.externalArchive();
-        if (embeddedWriter) ensurePrivateDirectory(this.settings.archiveDirectory(), this.settings.productionMode());
+        if (embeddedWriter) ensurePrivateDirectory(this.settings.directories().archiveDirectory(), this.settings.productionMode());
         final MediaDriver.Context media = new MediaDriver.Context()
-                .aeronDirectoryName(this.settings.aeronDirectory().toString())
+                .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
                 .driverTimeoutMs(this.settings.driverTimeoutMillis())
                 .threadingMode(this.settings.threadingMode())
                 .mtuLength(this.settings.replication().mtuLength())
                 .publicationTermBufferLength(this.settings.replication().termLength())
-                .spiesSimulateConnection(embeddedWriter && !explicitlyDisablesSpySimulation(this.settings.liveChannel()))
+                .spiesSimulateConnection(embeddedWriter && !explicitlyDisablesSpySimulation(this.settings.channels().live()))
                 .errorHandler(this.errorHandler)
                 .dirDeleteOnStart(false)
                 .dirDeleteOnShutdown(false);
         beforeDriverLaunch.run();
         if (embeddedWriter) {
             final Archive.Context archiveContext = new Archive.Context()
-                    .aeronDirectoryName(this.settings.aeronDirectory().toString())
-                    .archiveDir(this.settings.archiveDirectory().toFile())
+                    .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
+                    .archiveDir(this.settings.directories().archiveDirectory().toFile())
                     .deleteArchiveOnStart(false)
                     .threadingMode(this.settings.archiveThreadingMode())
-                    .controlChannel(this.settings.controlChannel())
+                    .controlChannel(this.settings.channels().control())
                     .localControlChannel("aeron:ipc")
-                    .replicationChannel(this.settings.archiveReplicationChannel())
+                    .replicationChannel(this.settings.channels().archiveReplication())
                     .segmentFileLength(this.settings.archiveSegmentFileLength())
                     .lowStorageSpaceThreshold(this.settings.archiveLowStorageSpaceThreshold())
                     .maxConcurrentReplays(this.settings.maxConcurrentReplays())
@@ -213,7 +211,7 @@ final class AeronRuntime implements AutoCloseable {
             /* The MediaDriver context in this Aeron version exposes no authentication
              * hooks, so the embedded Archive is the enforcement point: it authenticates
              * control sessions while the driver stays a local IPC detail. */
-            if (this.settings.authEnabled()) {
+            if (this.settings.auth().enabled()) {
                 archiveContext.authenticatorSupplier(this.settings.authenticatorSupplier());
                 archiveContext.authorisationServiceSupplier(this.settings.authorisationServiceSupplier());
             }
@@ -223,7 +221,7 @@ final class AeronRuntime implements AutoCloseable {
             this.driver = launchDriver(media, () -> MediaDriver.launch(media.clone()));
         }
         this.aeron = Aeron.connect(new Aeron.Context()
-                .aeronDirectoryName(this.settings.aeronDirectory().toString())
+                .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
                 .driverTimeoutMs(this.settings.driverTimeoutMillis())
                 .errorHandler(this.errorHandler)
                 .subscriberErrorHandler(this.subscriberErrorHandler));
@@ -241,12 +239,12 @@ final class AeronRuntime implements AutoCloseable {
     AeronArchive.Context archiveContext() {
         final AeronArchive.Context context = new AeronArchive.Context()
                 .aeron(this.aeron)
-                .aeronDirectoryName(this.settings.aeronDirectory().toString())
-                .controlRequestChannel(this.settings.controlChannel())
-                .controlResponseChannel(this.settings.controlResponseChannel())
+                .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
+                .controlRequestChannel(this.settings.channels().control())
+                .controlResponseChannel(this.settings.channels().controlResponse())
                 .errorHandler(this.errorHandler)
-                .messageTimeoutNs(this.settings.replication().offerTimeoutNanos());
-        if (this.settings.authEnabled()) {
+                .messageTimeoutNs(this.settings.archiveControlTimeoutNanos());
+        if (this.settings.auth().enabled()) {
             context.credentialsSupplier(this.settings.credentialsSupplier());
         }
         return context;

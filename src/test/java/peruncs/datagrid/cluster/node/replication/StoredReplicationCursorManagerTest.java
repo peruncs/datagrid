@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -50,7 +51,7 @@ class StoredReplicationCursorManagerTest {
 
         /// Verifies production cursor writes use the shared atomic-file boundary.
     @Test
-    void atomicCursorWriteUsesAtomicFileStore() throws Exception {
+    void atomicCursorWriteUsesAtomicFileWriter() throws Exception {
         final Path directory = Files.createTempDirectory("replication-cursor-hook-");
         final Path path = directory.resolve("offset");
         final AtomicReference<String> phase = new AtomicReference<>();

@@ -4,11 +4,11 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import org.eclipse.serializer.functional.Action;
 import org.eclipse.serializer.functional.Producer;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.AtomicFileStore;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -37,6 +37,12 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
      * watermark encoding. There is no migration contract, so the unsigned
      * watermark layout starts at version 4. */
     private static final int STATE_VERSION = 4;
+    /* Aeron 1.53's purge guard reports an active-recording purge as
+     * ACTIVE_RECORDING, but its detach guard for an in-progress replay sends
+     * GENERIC with this producer-owned prefix. There is no dedicated error
+     * code for the replay case, so the probe is string-based on top of the
+     * code and pinned by a test. */
+    private static final String REPLAY_IN_PROGRESS_DETACH_MESSAGE = "invalid detach: replay in progress";
 
     private final Set<UUID> configuredReaders;
     private final Runnable ensureWriter;
@@ -126,11 +132,16 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     ///
     /// Calls already on the agent thread (nested retention calls) run
     /// directly; every other caller queues behind ongoing Archive work and
-    /// waits at most the configured operation timeout for its outcome. A timed
-    /// out wait cancels the queued command and fails; the command itself may
-    /// still complete on the agent thread when the underlying Archive call
-    /// ignores interruption. Failures keep their original type so policy
-    /// rejections stay distinguishable from transport faults.
+    /// waits at most the configured operation timeout for its outcome.
+    ///
+    /// A timed-out wait does not interrupt the agent thread: Archive control
+    /// RPCs are not interrupt-safe and interrupting one mid-protocol can leave
+    /// the AeronArchive client in an unknown state. Instead the wait fails,
+    /// the future is cancelled without interruption (so a command that has not
+    /// started yet never runs), and a running command is allowed to finish.
+    /// Callers must treat a timed-out operation as unknown-until-retried.
+    /// Failures keep their original type so policy rejections stay
+    /// distinguishable from transport faults.
     private <T> T onAgent(final Producer<T> operation) {
         if (Boolean.TRUE.equals(this.onAgentThread.get())) return operation.produce();
         final Future<T> submitted;
@@ -149,7 +160,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         try {
             return submitted.get(this.operationTimeoutMillis, TimeUnit.MILLISECONDS);
         } catch (final TimeoutException timeout) {
-            submitted.cancel(true);
+            submitted.cancel(false);
             throw new IllegalStateException(
                     "Timed out waiting for Aeron retention after %s ms".formatted(this.operationTimeoutMillis),
                     timeout);
@@ -246,12 +257,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             try {
                 this.segmentPurger.applyAsLong(boundary);
             } catch (final ArchiveException failure) {
-                /* Aeron 1.53 sends active-recording as ACTIVE_RECORDING, but its
-                 * isValidDetach replay guard sends GENERIC plus this producer-owned
-                 * prefix. Keep both cases explicit and regression-pinned. */
-                if (failure.errorCode() == ArchiveException.ACTIVE_RECORDING ||
-                    failure.errorCode() == ArchiveException.GENERIC && failure.getMessage() != null &&
-                    failure.getMessage().contains("invalid detach: replay in progress")) {
+                if (isReplayInProgressDetach(failure)) {
                     return new MaintenanceResult(MaintenanceResult.Status.DEFERRED_ACTIVE_REPLAY, boundary,
                             "Archive replay still uses a segment selected for retention");
                 }
@@ -463,7 +469,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             if (count < 0 || count > 1024)
                 throw new IOException("invalid retention state count");
             final ArrayList<AeronReaderWatermark> watermarks = new ArrayList<>(count);
-            final java.util.HashSet<UUID> watermarkReaders = new java.util.HashSet<>();
+            final HashSet<UUID> watermarkReaders = new HashSet<>();
             for (int i = 0; i < count; i++) {
                 if (buffer.remaining() < Integer.BYTES)
                     throw new IOException("truncated retention state");
@@ -493,7 +499,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             if (retiredCount < 0 || retiredCount > 1024 || buffer.remaining() != retiredCount * 16)
                 throw new IOException("invalid retirement state count");
             final ArrayList<UUID> retiredReaders = new ArrayList<>(retiredCount);
-            final java.util.HashSet<UUID> retiredReaderSet = new java.util.HashSet<>();
+            final HashSet<UUID> retiredReaderSet = new HashSet<>();
             for (int i = 0; i < retiredCount; i++) {
                 final UUID readerId = new UUID(buffer.getLong(), buffer.getLong());
                 if (!this.configuredReaders.contains(readerId))
@@ -541,6 +547,17 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                watermark.writerEpoch() == this.writerEpoch;
     }
 
+    /// Reports whether one purge failure means a live replay still uses a
+    /// selected segment, in which case retention defers instead of failing.
+    ///
+    /// @param failure Archive purge failure
+    /// @return `true` when the purge must be deferred for an active replay
+    static boolean isReplayInProgressDetach(final ArchiveException failure) {
+        return failure.errorCode() == ArchiveException.ACTIVE_RECORDING ||
+               failure.errorCode() == ArchiveException.GENERIC && failure.getMessage() != null &&
+               failure.getMessage().contains(REPLAY_IN_PROGRESS_DETACH_MESSAGE);
+    }
+
     private void persistState() {
         if (this.statePath == null) return;
         try {
@@ -569,7 +586,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 buffer.putLong(readerId.getMostSignificantBits()).putLong(readerId.getLeastSignificantBits());
             }
             buffer.flip();
-            AtomicFileStore.write(this.statePath, channel ->
+            AtomicFileWriter.write(this.statePath, channel ->
             {
                 final ByteBuffer source = buffer.duplicate();
                 while (source.hasRemaining()) {

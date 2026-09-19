@@ -1,5 +1,8 @@
 package peruncs.datagrid.cluster.node;
 
+import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
+import org.eclipse.store.storage.types.Storage;
+import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.node.aeron.ReseedRequiredException;
@@ -13,8 +16,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.stream.Stream;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that a reader cannot start from an empty directory.
 ///
@@ -81,16 +83,6 @@ class ReaderSeedBootstrapTest {
         public Integer storageLimitGB() {
             return 1;
         }
-
-        @Override
-        public String myPodName() {
-            return "test-pod";
-        }
-
-        @Override
-        public String myNamespace() {
-            return "test-namespace";
-        }
     }
 
     /// Verifies an empty reader fails fast with a reseed error instead of manufacturing a divergent root, leaving no fresh Store image behind.
@@ -142,6 +134,44 @@ class ReaderSeedBootstrapTest {
                     "lost cursor must fail closed, was: %s".formatted(failure.getMessage()));
             assertTrue(failure.getMessage().contains("no durable replication cursor"),
                     "lost cursor must name the missing cursor, was: %s".formatted(failure.getMessage()));
+        }
+    }
+
+        /// A backup node holding leftover Store files that carry no root must
+    /// fail closed when root creation would be needed: only the writer, or a
+    /// backup node seeding from a user-uploaded Store, may manufacture a
+    /// root. This is the loophole path past the file-existence and
+    /// lost-cursor gates — the failure belongs to root creation, not to
+    /// seeding.
+    @Test
+    void backupReaderWithRootlessStoreFilesFailsAtRootCreation(@TempDir final Path root) throws Exception {
+        final Path backupHome = root.resolve("rootless-backup");
+        final Path storage = backupHome.resolve("storage");
+
+        /* Build a valid Store image that holds files but no root: open the raw
+         * embedded foundation (no root supplier), persist one detached entity
+         * so channel files exist, and leave the root unset. */
+        final var image = EmbeddedStorageFoundation.New()
+                .setConfiguration(StorageConfiguration.Builder()
+                        .setStorageFileProvider(Storage.FileProvider(storage))
+                        .createConfiguration())
+                .start();
+        assertNull(image.root(), "image preparation must not create a root");
+        image.store(new ArrayList<String>());
+        assertNull(image.root(), "storing a detached entity must not create a root");
+        image.shutdown();
+        assertTrue(Files.isDirectory(storage), "the rootless image must hold Store files");
+
+        try (final ClusterFoundation backup = ClusterFoundation.New()
+                .setNodeLibraryPropertiesProvider(new TestProperties(
+                        backupHome, root.resolve("rootless-backups"),
+                        NodeLibraryPropertiesProvider.BACKUP_READER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            final var failure = assertThrows(ReseedRequiredException.class, backup::startStorageManager);
+            assertTrue(failure.getMessage().contains("opened a Store without a root"),
+                    "the backup reader must fail at root creation instead of manufacturing a divergent image, was: %s"
+                            .formatted(failure.getMessage()));
         }
     }
 
@@ -231,11 +261,6 @@ class ReaderSeedBootstrapTest {
         @Override
         public String replicationTransport() {
             return "aeron";
-        }
-
-        @Override
-        public boolean replicationRoleConfigured() {
-            return true;
         }
 
         @Override

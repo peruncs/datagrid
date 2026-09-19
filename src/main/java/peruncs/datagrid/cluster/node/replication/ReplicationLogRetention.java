@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -43,7 +44,7 @@ public interface ReplicationLogRetention extends AutoCloseable {
         throw new UnsupportedOperationException("reader retirement is unsupported by this transport");
     }
 
-        /// Releases the retention resources and erases any retained key material.
+        /// Releases the retention resources.
     @Override
     void close();
 

@@ -28,7 +28,6 @@ import java.util.concurrent.atomic.AtomicReference;
 /// The subscription belongs to this reader; the caller remains responsible for
 /// the shared Aeron and Archive clients.
 public final class AeronArchiveReader implements Disposable {
-    private static final int FRAGMENTS_PER_POLL = 10;
     /// Immutable setup for one Archive replay and live reader.
     ///
     /// The builder groups subscription wiring, recovered cursor, and delivery
@@ -71,12 +70,12 @@ public final class AeronArchiveReader implements Disposable {
             ReaderDeliveryListener deliveryListener
     ) {
         /// Validates required reader collaborators and recovered cursor bounds.
-        public Configuration {
+    public Configuration {
             Objects.requireNonNull(aeron, "aeron");
             Objects.requireNonNull(archiveContext, "archiveContext");
             Objects.requireNonNull(replicationConfiguration, "replicationConfiguration");
             Objects.requireNonNull(clusterId, "clusterId");
-            if (wireNonce == 0L) wireNonce = AeronReplicationEnvelope.defaultWireNonce(clusterId);
+            if (wireNonce == 0L) throw new IllegalArgumentException("wireNonce must not be zero");
             Objects.requireNonNull(receiver, "receiver");
             Objects.requireNonNull(transactionResolved, "transactionResolved");
             if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
@@ -104,6 +103,7 @@ public final class AeronArchiveReader implements Disposable {
             private AeronReplicationConfiguration replicationConfiguration;
             private UUID clusterId;
             private long wireNonce;
+            private boolean wireNonceSet;
             private long epoch;
             private long initialSequence = -1L;
             private long initialPosition = -1L;
@@ -167,7 +167,19 @@ public final class AeronArchiveReader implements Disposable {
             /// @return this builder
             public Builder clusterId(final UUID value) { this.clusterId = value; return this; }
             /// Sets the accidental-cross-wiring nonce shared with the writer.
-            public Builder wireNonce(final long value) { this.wireNonce = value; return this; }
+            ///
+            /// When no nonce is set, the reader derives the same documented
+            /// default as [AeronClusterReplicationTransportProvider] from the
+            /// cluster identity; setting it explicitly keeps peers pinned to a
+            /// deployment-chosen value. An explicit zero is rejected.
+            ///
+            /// @param value shared deployment nonce
+            /// @return this builder
+            public Builder wireNonce(final long value) {
+                this.wireNonce = value;
+                this.wireNonceSet = true;
+                return this;
+            }
             /// Sets the writer epoch.
             ///
             /// @param value writer epoch
@@ -203,9 +215,12 @@ public final class AeronArchiveReader implements Disposable {
             ///
             /// @return immutable reader configuration
             public Configuration build() {
+                final long effectiveNonce = this.wireNonceSet
+                        ? this.wireNonce
+                        : AeronReplicationEnvelope.defaultWireNonce(this.clusterId);
                 return new Configuration(aeron, archiveContext, recordingId, startPosition, liveChannel,
                         liveStreamId, replayChannel, replayStreamId, replicationConfiguration, clusterId,
-                        wireNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
+                        effectiveNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
             }
         }
     }
@@ -214,6 +229,7 @@ public final class AeronArchiveReader implements Disposable {
     private final TransactionAssembler assembler;
     private final ControlledFragmentHandler fragmentHandler;
     private final long stopTimeoutNanos;
+    private final int fragmentsPerPoll;
     private final IdleStrategy idleStrategy;
     private final AtomicBoolean active = new AtomicBoolean();
     private final AtomicLong stopDeadlineNanos = new AtomicLong();
@@ -230,6 +246,10 @@ public final class AeronArchiveReader implements Disposable {
     private volatile Thread thread;
     private volatile CountDownLatch stopped = new CountDownLatch(0);
     private volatile boolean disposed;
+    /* Close-once guard for the subscription: a failed or timed-out disposal
+     * leaves it false so a retry can still close after the polling thread
+     * exits, while a successful close makes every later attempt a no-op. */
+    private final AtomicBoolean subscriptionClosed = new AtomicBoolean();
     /* Seeding closes on the first start: the stale-token floor must be fixed
      * before any frame is accepted, and a late seed would silently lower it. */
     private volatile boolean seedingClosed;
@@ -255,6 +275,7 @@ public final class AeronArchiveReader implements Disposable {
             final Configuration required = Objects.requireNonNull(configuration, "configuration");
             final AeronReplicationConfiguration requiredConfiguration = required.replicationConfiguration();
             this.stopTimeoutNanos = requiredConfiguration.readerStopTimeoutNanos();
+            this.fragmentsPerPoll = requiredConfiguration.readerFragmentsPerPoll();
             this.idleStrategy = requiredConfiguration.retryPolicy().idleStrategy();
             this.assembler = new TransactionAssembler(
                     requiredConfiguration, required.clusterId(), required.epoch(), required.initialSequence(),
@@ -369,7 +390,7 @@ public final class AeronArchiveReader implements Disposable {
                     () -> this.subscription.hasFailed() || this.assembler.failure() != null,
                     () ->
                     {
-                        final int work = this.subscription.controlledPoll(this.fragmentHandler, FRAGMENTS_PER_POLL);
+                        final int work = this.subscription.controlledPoll(this.fragmentHandler, this.fragmentsPerPoll);
                         this.live = this.subscription.isLive();
                         if (this.stopAtLatest) extendStopDeadline();
                         return work;
@@ -608,11 +629,13 @@ public final class AeronArchiveReader implements Disposable {
 
         /// Stops polling and releases this reader's subscriptions.
     ///
-    /// If the polling thread does not terminate within the bounded shutdown
-    /// window this method throws and leaves the subscription and assembler-owned
-    /// buffers intact. A later call must retry after the thread has exited; this
-    /// preserves native-buffer ownership and avoids closing a subscription under
-    /// the polling thread.
+    /// Disposal is idempotent and retry-safe. If the polling thread does not
+    /// terminate within the bounded shutdown window this method throws and
+    /// leaves the subscription and assembler-owned buffers intact. A later call
+    /// retries the stop and closes the subscription only once the thread has
+    /// exited, which preserves native-buffer ownership and avoids closing a
+    /// subscription under the polling thread. After a successful close every
+    /// later call is a no-op.
     @Override
     public void dispose() {
         final Thread pollingThread;
@@ -622,8 +645,8 @@ public final class AeronArchiveReader implements Disposable {
             if (this.active.get()) this.updateOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
             pollingThread = this.thread;
         }
-        AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscription::close,
-                this.stopTimeoutNanos);
+        AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscriptionClosed,
+                this.subscription::close, this.stopTimeoutNanos);
         synchronized (this) {
             this.assembler.dispose();
             this.thread = null;

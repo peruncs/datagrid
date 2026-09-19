@@ -27,6 +27,9 @@ final class AeronDistributionGate implements StorageBinaryDataDistributor {
         this.sequenceSynchronizer = Objects.requireNonNull(sequenceSynchronizer, "sequenceSynchronizer");
     }
 
+    /// Records the Store message index for the writer.
+    ///
+    /// @param value store message index
     @Override
     public void messageIndex(final long value) {
         if (!this.writer.getAsBoolean()) {
@@ -38,31 +41,52 @@ final class AeronDistributionGate implements StorageBinaryDataDistributor {
         this.sequenceSynchronizer.accept(value + 1);
     }
 
+    /// Returns the last recorded Store message index.
+    ///
+    /// @return message index, or `-1` when none was recorded
     @Override
     public long messageIndex() {
         return this.index.get();
     }
 
+    /// Enables or disables distribution without changing the recorded index.
+    ///
+    /// @param value `true` while startup must not distribute
     @Override
     public void ignoreDistribution(final boolean value) {
         this.ignored.set(value);
     }
 
+    /// Reports whether distribution is currently ignored.
+    ///
+    /// @return `true` while distribution is disabled
     @Override
     public boolean ignoreDistribution() {
         return this.ignored.get();
     }
 
+    /// Stores the newest type dictionary for the next consumer.
+    ///
+    /// @param value exported type dictionary
     @Override
     public void distributeTypeDictionary(final String value) {
         this.dictionary.set(value);
     }
 
+    /// Consumes the stored type dictionary, if any.
+    ///
+    /// @return type dictionary, or `null` when none is pending
     @Override
     public String consumeTypeDictionary() {
         return this.dictionary.getAndSet(null);
     }
 
+    /// Rejects direct Store data publication.
+    ///
+    /// Aeron writes flow through the provider's persistence target so local
+    /// acceptance and checkpoint fencing stay one operation.
+    ///
+    /// @param data committed binary data
     @Override
     public void distributeData(final Binary data) {
         Objects.requireNonNull(data, "data");

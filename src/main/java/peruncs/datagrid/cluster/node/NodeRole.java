@@ -61,25 +61,24 @@ public enum NodeRole {
             }
         }
         throw new IllegalArgumentException(
-                "ECLIPSE_DATAGRID_REPLICATION_ROLE must be writer, reader, or backup-reader");
+                "unknown replication role '%s'; must be writer, reader, or backup-reader"
+                        .formatted(configured));
     }
 
         /// Resolves the effective role from both settings, rejecting conflicts.
     ///
-    /// An explicitly configured new value wins over the legacy flag, except
-    /// that a legacy backup node combined with an explicit `writer` or
+    /// A non-blank configured value is explicit and wins over the legacy flag,
+    /// except that a legacy backup node combined with an explicit `writer` or
     /// `reader` is a misconfiguration and fails instead of silently picking a
     /// side. An unconfigured value inherits the legacy flag, defaulting to
     /// [NodeRole#WRITER].
     ///
-    /// @param configured         raw `ECLIPSE_DATAGRID_REPLICATION_ROLE` value, or `null`
-    /// @param configuredExplicitly whether the new setting was explicitly configured
-    /// @param legacyBackup       legacy backup flag
+    /// @param configured   raw `ECLIPSE_DATAGRID_REPLICATION_ROLE` value, or `null`
+    /// @param legacyBackup legacy backup flag
     /// @return effective role
     /// @throws IllegalArgumentException for an unknown value or a legacy/new conflict
-    public static NodeRole resolve(final String configured, final boolean configuredExplicitly,
-                                   final boolean legacyBackup) {
-        if (configuredExplicitly) {
+    public static NodeRole resolve(final String configured, final boolean legacyBackup) {
+        if (configured != null && !configured.isBlank()) {
             final NodeRole role = parse(configured);
             if (legacyBackup && role != BACKUP_READER) {
                 throw new IllegalArgumentException(
@@ -88,10 +87,7 @@ public enum NodeRole {
             }
             return role;
         }
-        if (legacyBackup) {
-            return BACKUP_READER;
-        }
-        return configured == null || configured.isBlank() ? WRITER : parse(configured);
+        return legacyBackup ? BACKUP_READER : WRITER;
     }
 
         /// Resolves the effective role for one provider.
@@ -101,7 +97,6 @@ public enum NodeRole {
     /// @throws IllegalArgumentException for an unknown value or a legacy/new conflict
     public static NodeRole of(final NodeLibraryPropertiesProvider properties) {
         Objects.requireNonNull(properties, "properties");
-        return resolve(properties.replicationRole(), properties.replicationRoleConfigured(),
-                properties.isBackupNode());
+        return resolve(properties.replicationRole(), properties.isBackupNode());
     }
 }

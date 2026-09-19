@@ -113,12 +113,19 @@ and 64 MiB transaction limit; override with the full environment keys
 `ECLIPSE_DATAGRID_AERON_MTU_LENGTH`,
 `ECLIPSE_DATAGRID_AERON_CHUNK_SIZE`,
 `ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES`, and
-`ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS`. Archive recording startup,
+`ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS` (publication back-pressure only).
+Archive recording startup,
 recorded-position, and stop waits are independently configurable with
 `ECLIPSE_DATAGRID_AERON_RECORDING_START_TIMEOUT_NANOS`,
 `ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS`, and
 `ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS`; reader shutdown uses
 `ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
+Archive control calls have their own
+`ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS` (5 s default, matching
+Aeron), the watermark channel flushes on close within
+`ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS` (5 s default), and the
+fencing lease bounds every interprocess lock wait with
+`ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS` (5,000 ms default).
 Replication must run on an isolated network
 (VPN, firewall rules, or Kubernetes NetworkPolicies): any host that can reach
 the live channel can publish well-formed frames; the nonce only rejects
@@ -234,7 +241,7 @@ recorded in the module documentation. What remains here is the operator
 contract for driving the node through its control views:
 
 - `storageNodeManager()` on a storage node returns a `StorageNodeControl`:
-  role (`isDistributor`), liveness (`isHealthy`), readiness (`isReady`),
+  role (`isWriter`), liveness (`isHealthy`), readiness (`isReady`),
   storage size (`readStorageSizeBytes`), and raw replication observability
   (`replicationMetrics()` — transport, replay/live state, current/latest
   sequence, lag, readiness, health, including Archive or replay failures).
@@ -348,7 +355,7 @@ Soak controls are:
 | `soak.miniCensus` | `20` | Entities checked by each mid-soak mini-census |
 | `soak.pollDelayMs` | `2` | Applied delay used by slow-reader chaos |
 | `soak.pollStallMs` | `800` | Slow-reader burst duration; near the configured reader-stop timeout it also probes the sliding deadline |
-| `soak.fsyncDelayMs` | `3` | Delay injected through the AtomicFileStore fsync hook |
+| `soak.fsyncDelayMs` | `3` | Delay injected through the AtomicFileWriter fsync hook |
 | `soak.maxTornReads` | `64` | Maximum classified benign query retries; set to `0` for strict mode |
 | `soak.corrupt` | `true` | Enable cursor, rollback, and Archive-tail corruption operations |
 | `soak.events` | `target/soak-events.jsonl` | JSONL event-log destination |

@@ -54,9 +54,14 @@
 /// # Durable cursors and checkpoints
 ///
 /// Every applied commit advances a durable `ReplicationCursor` of
-/// transport, Store generation, logical sequence, and provider position,
-/// while writers persist a checkpoint binding cluster, Store generation,
-/// epoch, recording, and sequence. Startup reconciles the two so a cursor
+/// transport, Store generation, logical sequence, and provider position.
+/// The neutral cursor lives in the storage contract package
+/// (`storage.types`), so the node layer persists it through
+/// `ReplicationCursorStore` without importing the transport; the Aeron
+/// provider encodes its recording identity inside the cursor's opaque
+/// provider-position bytes. Writers additionally persist a checkpoint
+/// binding cluster, Store generation, epoch, recording, and sequence.
+/// Startup reconciles the two so a cursor
 /// from another Store generation never resumes an unrelated recording.
 /// Restarts stay routine instead of reseeds as long as Archive and cursor
 /// survive together; cursor and checkpoint writes are CRC-protected and

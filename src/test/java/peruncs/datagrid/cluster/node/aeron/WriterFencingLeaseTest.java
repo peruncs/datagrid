@@ -319,4 +319,129 @@ class WriterFencingLeaseTest {
         final byte[] bytes = Files.readAllBytes(WriterFencingLease.leasePath(volume, cluster, generation));
         return ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getLong(6);
     }
+
+    /* Encoded layout: int magic, short version, long token, UUID node (16),
+     * UUID holder (16), long heartbeat, int crc. */
+    private static final int HEARTBEAT_OFFSET = Integer.BYTES + Short.BYTES + Long.BYTES + 16 + 16;
+
+        /// Verifies a throwing commit offer still refreshes the heartbeat before the lock releases.
+    ///
+    /// Without the catch-path refresh, a failed offer leaves a stale-but-present
+    /// lease that a successor can steal while the deposed writer still believes
+    /// it holds the lease.
+    @Test
+    void failedOfferRefreshesHeartbeatBeforeLockRelease(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        try (final WriterFencingLease holder =
+                     WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+            holder.suspendHeartbeatForTest();
+            final long before = heartbeatAt(volume, cluster, generation);
+            Thread.sleep(5L);
+            assertThrows(IllegalStateException.class, () -> holder.executeUnderOwnership(
+                    () -> {
+                        throw new IllegalStateException("injected offer failure");
+                    }));
+            assertTrue(heartbeatAt(volume, cluster, generation) > before,
+                    "a throwing commit offer must refresh the heartbeat before releasing the interprocess lock");
+            assertTrue(holder.isCurrent(), "the refreshed lease must still be current after a failed offer");
+        }
+    }
+
+        /// Verifies a commit refreshes the heartbeat only when renewal is due.
+    ///
+    /// The per-commit fsync cost must stay proportional to renewal need, not
+    /// to commit rate: a fresh heartbeat is reused, and a heartbeat past the
+    /// renewal interval is rewritten before the next commit.
+    @Test
+    void heartbeatRefreshOnCommitIsRateLimited(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        try (final WriterFencingLease holder =
+                     WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
+            holder.suspendHeartbeatForTest();
+            final long acquired = heartbeatAt(volume, cluster, generation);
+            holder.executeUnderOwnership(() -> 1L);
+            assertEquals(acquired, heartbeatAt(volume, cluster, generation),
+                    "a commit inside the renewal interval must not rewrite the heartbeat");
+            Thread.sleep(STALENESS.toMillis() / 3L + 60L);
+            holder.executeUnderOwnership(() -> 2L);
+            assertTrue(heartbeatAt(volume, cluster, generation) > acquired,
+                    "a commit past the renewal interval must refresh the heartbeat");
+        }
+    }
+
+        /// Verifies the holder's monotonic pairing treats a wall-clock offset as fresh
+    /// while a foreign acquirer still fails closed on the future-skew bound.
+    @Test
+    void ownLeaseTreatsWallClockOffsetAsFreshWhileForeignAcquireRejectsIt(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final WriterFencingLease holder =
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS);
+        holder.suspendHeartbeatForTest();
+        /* Simulate a backward wall-clock step on the holder by making the file
+         * heartbeat look far in the future. The holder pairs it with its own
+         * monotonic age and still admits commits. */
+        overwriteHeartbeat(volume, cluster, generation, System.currentTimeMillis() + STALENESS.toMillis());
+        assertEquals(9L, holder.executeUnderOwnership(() -> 9L));
+        holder.close();
+        final IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS));
+        assertTrue(failure.getMessage().contains("clock-skew"),
+                "a foreign acquirer must fail closed beyond the future-skew bound, was: " + failure.getMessage());
+    }
+
+        /// Verifies a closed lease never writes another heartbeat and rejects offers.
+    @Test
+    void closedLeaseNeverWritesHeartbeatAgain(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final WriterFencingLease holder =
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS);
+        holder.close();
+        final long afterClose = heartbeatAt(volume, cluster, generation);
+        final var failure = assertThrows(IllegalStateException.class, () ->
+                holder.executeUnderOwnership(() -> 3L));
+        assertTrue(failure.getMessage().contains("closed"), "closed lease must reject offers: " + failure.getMessage());
+        Thread.sleep(STALENESS.toMillis() + 50L);
+        assertEquals(afterClose, heartbeatAt(volume, cluster, generation),
+                "a closed lease must never refresh its heartbeat again");
+    }
+
+        /// Verifies an overlapping interprocess lock fails closed within the bounded wait
+    /// instead of blocking an unbounded [java.nio.channels.FileChannel#lock].
+    @Test
+    void overlappingLeaseLockFailsClosed(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final Path lockPath = volume.resolve("writer-lease.lock");
+        try (var channel = java.nio.channels.FileChannel.open(
+                lockPath, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+             var ignored = channel.lock()) {
+            final long started = System.nanoTime();
+            final var failure = assertThrows(IllegalStateException.class, () ->
+                    WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS,
+                            Duration.ofMillis(100)));
+            assertTrue(System.nanoTime() - started < Duration.ofSeconds(5).toNanos(),
+                    "a lock held elsewhere in the JVM must fail closed quickly");
+            assertNotNull(failure.getCause());
+        }
+    }
+
+    private static long heartbeatAt(final Path volume, final UUID cluster, final UUID generation) throws Exception {
+        final byte[] bytes = Files.readAllBytes(WriterFencingLease.leasePath(volume, cluster, generation));
+        return ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getLong(HEARTBEAT_OFFSET);
+    }
+
+    private static void overwriteHeartbeat(final Path volume, final UUID cluster, final UUID generation,
+                                           final long heartbeatMillis) throws Exception {
+        final Path path = WriterFencingLease.leasePath(volume, cluster, generation);
+        final byte[] bytes = Files.readAllBytes(path);
+        final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
+        buffer.putLong(HEARTBEAT_OFFSET, heartbeatMillis);
+        buffer.putInt(bytes.length - Integer.BYTES,
+                peruncs.datagrid.cluster.storage.types.Crc32c.compute(bytes, 0, bytes.length - Integer.BYTES));
+        Files.write(path, bytes);
+    }
 }

@@ -21,31 +21,29 @@ class NodeRoleTest {
             " Writer ,    false, WRITER",
     })
     void explicitNewValueWins(final String configured, final boolean legacy, final NodeRole expected) {
-        assertEquals(expected, NodeRole.resolve(configured, true, legacy));
+        assertEquals(expected, NodeRole.resolve(configured, legacy));
     }
 
-    /// Verifies an unconfigured role inherits the legacy backup flag while a default value still applies when the flag is clear.
-    @ParameterizedTest(name = "legacy={0} default={1} resolves {2}")
+    /// Verifies an unconfigured or blank role inherits the legacy backup flag.
+    @ParameterizedTest(name = "legacy={0} configured={1} resolves {2}")
     @CsvSource({
             "false, '',      WRITER",
             "true,  '',      BACKUP_READER",
             "false, reader,  READER",
-            "true,  writer,  BACKUP_READER",
     })
     void unconfiguredValueInheritsTheLegacyFlag(final boolean legacy, final String configured,
                                                 final NodeRole expected) {
         final String value = configured.isEmpty() ? null : configured;
-        assertEquals(expected, NodeRole.resolve(value, false, legacy));
+        assertEquals(expected, NodeRole.resolve(value, legacy));
     }
 
-    /// Verifies conflicting legacy and new role settings plus unknown or missing values are rejected with an error.
+    /// Verifies conflicting legacy and new role settings plus unknown values are rejected with an error.
     @Test
     void conflictingLegacyAndNewValuesFail() {
-        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("writer", true, true));
-        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("reader", true, true));
-        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("archiver", true, false));
-        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("  ", true, false));
-        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve(null, true, false));
+        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("writer", true));
+        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("reader", true));
+        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("archiver", false));
+        assertThrows(IllegalArgumentException.class, () -> NodeRole.resolve("nonsense", false));
     }
 
         /// A node configured only as `backup-reader` resolves the backup role

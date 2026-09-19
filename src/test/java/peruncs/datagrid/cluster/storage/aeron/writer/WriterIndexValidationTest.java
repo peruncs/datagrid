@@ -118,7 +118,7 @@ class WriterIndexValidationTest {
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
                 .build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -126,7 +126,7 @@ class WriterIndexValidationTest {
         });
         try {
             final List<String> localWrites = new ArrayList<>();
-            final AeronStorageBinaryReplicationTarget target = new AeronStorageBinaryReplicationTarget(
+            final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.New(
                     recordingTarget(localWrites), coordinator, null, ignored -> {
             }, () -> true);
             assertDoesNotThrow(target::validateWriterState,
@@ -169,7 +169,7 @@ class WriterIndexValidationTest {
                     .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                     .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
                     .build();
-            final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+            final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                     (buffer, offset, length) ->
                     {
                         this.publications.add("archive");
@@ -188,7 +188,7 @@ class WriterIndexValidationTest {
                     () ->
                     {
                         this.hookRan.set(true);
-                        ClusterStoreIndexes.validateForPublication(connection);
+                        ClusterStoreIndexes.validateStorageRoots(connection);
                     });
         }
 

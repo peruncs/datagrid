@@ -39,4 +39,23 @@ class ReplicationRetryTest {
 
         assertThrows(IllegalArgumentException.class, () -> ReplicationRetry.deadlineNanos(0L, now::get));
     }
+
+        /// Full-jitter backoff stays inside the exponential cap and rejects
+    /// non-positive inputs.
+    @Test
+    void fullJitterDelayStaysWithinTheExponentialCap() {
+        for (long attempt = 1L; attempt <= 8L; attempt++) {
+            final long delay = ReplicationRetry.fullJitterDelayNanos(attempt, 10L, 1_000L);
+            final long exponential = Math.min(10L << Math.min(attempt - 1L, 62L), 1_000L);
+            assertTrue(delay >= 0L, "a jitter delay must never be negative");
+            assertTrue(delay <= exponential,
+                    "attempt %s produced %s beyond its %s bound".formatted(attempt, delay, exponential));
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> ReplicationRetry.fullJitterDelayNanos(0L, 10L, 100L));
+        assertThrows(IllegalArgumentException.class,
+                () -> ReplicationRetry.fullJitterDelayNanos(1L, 0L, 100L));
+        assertThrows(IllegalArgumentException.class,
+                () -> ReplicationRetry.fullJitterDelayNanos(1L, 10L, 0L));
+    }
 }

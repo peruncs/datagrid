@@ -2,9 +2,9 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -83,6 +83,8 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
         return ReplicationCursor.of("aeron", generation, boundary.sequence(), encoded);
     }
 
+        /// Releases nothing: the provider reads the transport's published
+        /// boundary and never owns reader or writer resources.
     @Override
     public void close() {
     }

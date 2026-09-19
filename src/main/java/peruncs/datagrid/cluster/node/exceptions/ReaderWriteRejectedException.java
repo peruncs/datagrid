@@ -6,7 +6,7 @@ package peruncs.datagrid.cluster.node.exceptions;
 /// replication import path. A local mutation would persist without
 /// publication and permanently diverge the node, so every application
 /// write entry point fails with this exception instead.
-public class ReaderWriteRejectedException extends NodeLibraryException {
+public final class ReaderWriteRejectedException extends NodeLibraryException {
         /// Creates an exception with a message.
     ///
     /// @param message error message

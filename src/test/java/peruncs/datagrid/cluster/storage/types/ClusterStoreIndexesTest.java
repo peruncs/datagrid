@@ -490,7 +490,7 @@ class ClusterStoreIndexesTest {
                 this.storagePath.resolve("writer-external-lucene"), new ArticlePopulator())));
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(luceneRoot, this.storagePath.resolve("lucene"))) {
             assertThrows(IllegalArgumentException.class,
-                    () -> ClusterStoreIndexes.validateForPublication(storage.createConnection()));
+                    () -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
         }
 
         final Root vectorRoot = new Root();
@@ -504,7 +504,7 @@ class ClusterStoreIndexesTest {
                 .build(), new ArticleVectorizer());
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(vectorRoot, this.storagePath.resolve("vectors"))) {
             assertThrows(IllegalArgumentException.class,
-                    () -> ClusterStoreIndexes.validateForPublication(storage.createConnection()));
+                    () -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
         }
     }
 
@@ -560,10 +560,10 @@ class ClusterStoreIndexesTest {
             ClusterStoreIndexes.registerLucene(clean.articles, new ArticlePopulator());
             try (EmbeddedStorageManager mine = EmbeddedStorage.start(clean, this.storagePath.resolve("mine"))) {
                 mine.storeRoot();
-                assertDoesNotThrow(() -> ClusterStoreIndexes.validateForPublication(mine.createConnection()),
+                assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(mine.createConnection()),
                         "another Store's violating map must not block this writer");
                 assertThrows(IllegalArgumentException.class,
-                        () -> ClusterStoreIndexes.validateForPublication(other.createConnection()),
+                        () -> ClusterStoreIndexes.validateStorageRoots(other.createConnection()),
                         "the violating Store must still fail its own validation");
             }
         }
@@ -581,7 +581,7 @@ class ClusterStoreIndexesTest {
         }
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
             storage.storeRoot();
-            assertDoesNotThrow(() -> ClusterStoreIndexes.validateForPublication(storage.createConnection()),
+            assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()),
                     "the writer entry must not walk the application's data set per transaction");
         }
     }
@@ -596,7 +596,7 @@ class ClusterStoreIndexesTest {
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
             root.articles.add(new Article("Eclipse", "distributed storage", new float[]{1, 0, 0}));
             storage.storeRoot();
-            assertDoesNotThrow(() -> ClusterStoreIndexes.validateForPublication(storage.createConnection()));
+            assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
         }
     }
 

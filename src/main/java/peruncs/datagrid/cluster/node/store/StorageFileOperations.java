@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.store;
 
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.storage.types.PathSecurity;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -15,6 +16,8 @@ import java.util.Objects;
 /// This class is public only because backup and node packages share it;
 /// it is not application API.
 public final class StorageFileOperations {
+    private static final System.Logger LOGGER = System.getLogger(StorageFileOperations.class.getName());
+
     private StorageFileOperations() {
     }
 
@@ -78,15 +81,7 @@ public final class StorageFileOperations {
     /// @param path path to check, or `null` for no check
     /// @throws IOException if a link is found
     public static void ensureNoSymbolicLinks(final Path path) throws IOException {
-        if (path == null) return;
-        final Path absolute = path.toAbsolutePath().normalize();
-        Path current = absolute.getRoot();
-        for (final Path component : absolute) {
-            current = current == null ? component : current.resolve(component);
-            if (Files.isSymbolicLink(current) && !isSystemPrivateAlias(current)) {
-                throw new IOException("Path contains a symbolic link: %s".formatted(current));
-            }
-        }
+        PathSecurity.ensureNoSymbolicLinks(path);
     }
 
     /// Atomically moves one file, verifying symlink-free paths and file identity
@@ -185,22 +180,7 @@ public final class StorageFileOperations {
     /// @param path link to inspect
     /// @return `true` for a macOS system `/private` alias
     public static boolean isSystemPrivateAlias(final Path path) {
-        if (!isMacOs()) return false;
-        final Path root = path.getRoot();
-        if (root == null || !root.equals(path.getParent())) return false;
-        final Path name = path.getFileName();
-        if (name == null) return false;
-        try {
-            final Path target = Files.readSymbolicLink(path);
-            return target.equals(Path.of("private").resolve(name)) ||
-                   target.equals(Path.of("/private").resolve(name));
-        } catch (final IOException failure) {
-            return false;
-        }
-    }
-
-    private static boolean isMacOs() {
-        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac");
+        return PathSecurity.isSystemPrivateAlias(path);
     }
 
     private static Object stableFileKey(final Path path) throws IOException {
@@ -231,33 +211,60 @@ public final class StorageFileOperations {
 
     /// Forces directory metadata to stable storage.
     ///
+    /// Windows cannot open a directory as a channel; the call is a documented
+    /// no-op there because NTFS does not expose an equivalent directory-flush
+    /// operation. Every other failure is reported with the directory path.
+    ///
     /// @param directory directory to force
     /// @throws IOException if the filesystem refuses
     public static void forceDirectory(final Path directory) throws IOException {
+        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
+            return;
+        }
         try (final FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
             channel.force(true);
-        } catch (final UnsupportedOperationException unsupported) {
-            throw new IOException("Filesystem does not support forcing directory metadata", unsupported);
+        } catch (final UnsupportedOperationException | IOException failure) {
+            throw new IOException("Filesystem does not support forcing directory metadata: %s".formatted(directory), failure);
         }
     }
 
     /// Deletes a directory tree idempotently; a missing root is not an error.
     ///
+    /// The root must be at least two levels deep, must not be the user home
+    /// directory, and must not be a filesystem root, so a mistyped
+    /// configuration path cannot turn a restore cleanup into a destructive
+    /// delete of a broad filesystem tree. The path and its entry count are
+    /// logged before deletion.
+    ///
     /// @param path root to delete
+    /// @throws NodeLibraryException when the path is unsafe or deletion fails
     public static void deleteDirectory(final Path path) throws NodeLibraryException {
-        try {
-            ensureNoSymbolicLinks(path);
-        } catch (final IOException failure) {
-            throw new NodeLibraryException("Directory path contains a symbolic link: %s".formatted(path), failure);
+        final Path absolute = path.toAbsolutePath().normalize();
+        if (absolute.getParent() == null || absolute.getNameCount() < 2) {
+            throw new NodeLibraryException("Refusing to delete a top-level path: %s".formatted(absolute));
         }
-        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+        final Path home = Path.of(System.getProperty("user.home", "")).toAbsolutePath().normalize();
+        if (absolute.equals(home)) {
+            throw new NodeLibraryException("Refusing to delete the user home directory: %s".formatted(absolute));
+        }
+        try {
+            ensureNoSymbolicLinks(absolute);
+        } catch (final IOException failure) {
+            throw new NodeLibraryException("Directory path contains a symbolic link: %s".formatted(absolute), failure);
+        }
+        if (!Files.exists(absolute, LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
-        try (final var files = Files.walk(path)) {
+        LOGGER.log(System.Logger.Level.INFO, "Deleting directory tree at %s".formatted(absolute));
+        try (final var files = Files.walk(absolute)) {
             files.sorted(Comparator.reverseOrder()).forEach(file ->
             {
                 try {
                     Files.delete(file);
+                } catch (final NoSuchFileException alreadyRemoved) {
+                    /* A concurrent cleanup may remove a child after the root
+                     * existence check. Deletion is intentionally idempotent for
+                     * backup retry paths. */
                 } catch (final IOException e) {
                     throw new NodeLibraryException("Failed to delete file at %s".formatted(file), e);
                 }
@@ -266,7 +273,7 @@ public final class StorageFileOperations {
             /* A concurrent cleanup may remove the root after the existence check.
              * Deletion is intentionally idempotent for backup retry paths. */
         } catch (final IOException e) {
-            throw new NodeLibraryException("Failed to iterate files at %s".formatted(path), e);
+            throw new NodeLibraryException("Failed to iterate files at %s".formatted(absolute), e);
         }
     }
 }

@@ -8,8 +8,14 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Objects;
 
-/// Exposes Store binary buffers to the replication transport without mutating them.
-final class StorageBinaryDataChunker {
+/// Exposes Store binary buffers to the replication transport without mutating
+/// the source binary.
+///
+/// The class only normalizes and enumerates channel buffers; it never splits
+/// or chunks a binary. Borrowed views are duplicates at position zero, and
+/// owned extraction hands the original direct buffers back to a caller that
+/// already owns the binary.
+final class StorageBinaryBuffers {
         /* The merger calls the array collectors once per transaction. Reuse one
          * collection scratch list per thread instead of allocating (and growing)
          * a new list for every batch. Only the returned arrays escape; the
@@ -18,25 +24,39 @@ final class StorageBinaryDataChunker {
     private static final ThreadLocal<ArrayList<ByteBuffer>> SCRATCH =
             ThreadLocal.withInitial(ArrayList::new);
 
-    private StorageBinaryDataChunker() {
+    private StorageBinaryBuffers() {
     }
 
-    /// Returns duplicate source views in channel order.
+    /// Returns import-ready duplicate views with position zero in channel order.
+    ///
+    /// Serializer's [ChunksWrapper] stores its logical length in the source
+    /// position; ordinary binaries expose the remaining bytes instead. The
+    /// source buffers are never mutated.
     ///
     /// @param data source Store binary
-    /// @return duplicate views in channel order
-    static ByteBuffer[] bufferArray(final Binary data) {
+    /// @return import-ready duplicate views
+    static ByteBuffer[] importArray(final Binary data) {
         Objects.requireNonNull(data, "data");
+        final boolean wrapped = data instanceof ChunksWrapper;
         final ArrayList<ByteBuffer> scratch = scratch();
         try {
             data.iterateChannelChunks(chunk ->
             {
-                if (chunk == null)
-                    throw new StorageBinaryDataException("binary contains a null channel");
-                for (final ByteBuffer buffer : chunk.buffers()) {
-                    if (buffer == null)
+                if (chunk == null) throw new StorageBinaryDataException("binary contains a null channel");
+                for (final ByteBuffer source : chunk.buffers()) {
+                    if (source == null) {
                         throw new StorageBinaryDataException("binary contains a null channel buffer");
-                    scratch.add(buffer.duplicate());
+                    }
+                    final ByteBuffer view = source.duplicate();
+                    if (wrapped) {
+                        final int logicalLength = view.position();
+                        if (logicalLength < 0 || logicalLength > view.capacity()) {
+                            throw new StorageBinaryDataException("invalid wrapped binary buffer length");
+                        }
+                        view.clear();
+                        view.limit(logicalLength);
+                    }
+                    scratch.add(view.slice());
                 }
             });
             return scratch.toArray(ByteBuffer[]::new);
@@ -52,7 +72,7 @@ final class StorageBinaryDataChunker {
     ///
     /// @param data owned binary
     /// @return original direct buffers, positioned at zero
-    public static ByteBuffer[] ownedArray(final Binary data) {
+    static ByteBuffer[] ownedArray(final Binary data) {
         Objects.requireNonNull(data, "data");
         /* One pass with one reused scratch list: each buffer is validated and
          * normalized inline, so no boxed length list and no second loop.
@@ -86,7 +106,7 @@ final class StorageBinaryDataChunker {
     }
 
         /// Best-effort release of every direct buffer still reachable from a binary
-    /// whose owned extraction failed before producing a normalized array.
+        /// whose owned extraction failed before producing a normalized array.
     ///
     /// Extraction validates inline, so a late malformed buffer leaves earlier
     /// direct buffers with no owner but the caller. This fallback frees exactly
@@ -126,32 +146,6 @@ final class StorageBinaryDataChunker {
         final ArrayList<ByteBuffer> scratch = SCRATCH.get();
         scratch.clear();
         return scratch;
-    }
-
-    /// Returns import-ready duplicate views with position zero. Serializer's
-    /// [ChunksWrapper] stores its logical length in the source position;
-    /// ordinary binaries expose the remaining bytes instead.
-    ///
-    /// @param data source Store binary
-    /// @return import-ready duplicate views
-    static ByteBuffer[] importArray(final Binary data) {
-        Objects.requireNonNull(data, "data");
-        final ByteBuffer[] source = bufferArray(data);
-        final ByteBuffer[] result = new ByteBuffer[source.length];
-        final boolean wrapped = data instanceof ChunksWrapper;
-        for (int index = 0; index < source.length; index++) {
-            final ByteBuffer buffer = source[index];
-            if (wrapped) {
-                final int logicalLength = buffer.position();
-                if (logicalLength < 0 || logicalLength > buffer.capacity()) {
-                    throw new StorageBinaryDataException("invalid wrapped binary buffer length");
-                }
-                buffer.clear();
-                buffer.limit(logicalLength);
-            }
-            result[index] = buffer.slice();
-        }
-        return result;
     }
 
     /// Returns the logical payload length of one channel buffer.

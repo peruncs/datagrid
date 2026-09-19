@@ -67,7 +67,7 @@ class AeronCrashBoundaryTest {
     void enqueueFenceIsCreatedBeforeLocalWrite() {
         final AtomicInteger localWrites = new AtomicInteger();
         final AtomicInteger offers = new AtomicInteger();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> {
                     offers.incrementAndGet();
                     return length;
@@ -93,7 +93,7 @@ class AeronCrashBoundaryTest {
                     CrashPoint.AFTER_ENQUEUE_BEFORE_PREPARE,
                     true, 1_000_000_000L)) {
                 CrashHook.runWithHook(barrier::reached, () -> assertThrows(CrashBarrier.SimulatedCrash.class, () ->
-                        new AeronStorageBinaryReplicationTarget(local, coordinator).write(
+                        AeronStorageBinaryReplicationTarget.New(local, coordinator).write(
                                 ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{7})))));
             }
             assertEquals(1, localWrites.get());
@@ -132,7 +132,7 @@ class AeronCrashBoundaryTest {
     }
 
     private AeronReplicationPublisher publisher(final List<AeronReplicationEnvelope.Kind> kinds) {
-        return new AeronReplicationPublisher(
+        return AeronReplicationPublisher.forTests(
                 (buffer, offset, length) ->
                 {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());

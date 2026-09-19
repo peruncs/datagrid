@@ -3,11 +3,11 @@ package peruncs.datagrid.cluster.node;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
@@ -39,10 +39,6 @@ class StorageNodeManagerCloseTest {
                 case "latest" -> {
                     if (this.latestFailure != null) throw this.latestFailure;
                     return new ReplicationCursor("test", UUID.randomUUID(), 5L, "");
-                }
-                case "latestSequence" -> {
-                    if (this.latestFailure != null) throw this.latestFailure;
-                    return 5L;
                 }
                 case "close" -> {
                     this.closeCalls.incrementAndGet();
@@ -76,16 +72,15 @@ class StorageNodeManagerCloseTest {
             final StorageNodeManager.Role role,
             final CountingHandler distributor, final CountingHandler client,
             final CountingHandler health, final CountingHandler position) {
-        return StorageNodeManager.New(StorageNodeManager.Configuration.builder()
-                .dataDistributor(tracked(StorageBinaryDataDistributor.class, distributor))
-                .storageTaskExecutor(tracked(StorageTaskExecutor.class, new CountingHandler()))
-                .dataClient(tracked(StorageBinaryDataClient.class, client))
-                .healthCheck(tracked(StorageNodeHealthCheck.class, health))
-                .storageDiskSpaceReader(tracked(StorageDiskSpaceReader.class, new CountingHandler()))
-                .positionProvider(tracked(ReplicationPositionProvider.class, position))
-                .replicationTransport("aeron")
-                .role(role)
-                .build());
+        return StorageNodeManager.New(new StorageNodeManager.Configuration(
+                tracked(StorageBinaryDataDistributor.class, distributor),
+                tracked(StorageTaskExecutor.class, new CountingHandler()),
+                tracked(StorageBinaryDataClient.class, client),
+                tracked(StorageNodeHealthCheck.class, health),
+                tracked(StorageDiskSpaceReader.class, new CountingHandler()),
+                tracked(ReplicationPositionProvider.class, position),
+                "aeron",
+                role));
     }
 
     private static StorageNodeManager reader(
@@ -122,14 +117,14 @@ class StorageNodeManagerCloseTest {
         position.latestFailure = new NodeLibraryException("writer boundary not readable");
         final StorageNodeManager transportFailure = reader(
                 new CountingHandler(), new CountingHandler(), new CountingHandler(), position);
-        assertEquals(-1L, transportFailure.getLatestSequence());
+        assertEquals(-1L, transportFailure.latestSequence());
 
         final CountingHandler unavailable = new CountingHandler();
         unavailable.latestFailure = new ReplicationPositionUnavailableException(
                 "no writer boundary for this role");
         final StorageNodeManager boundaryMissing = reader(
                 new CountingHandler(), new CountingHandler(), new CountingHandler(), unavailable);
-        assertEquals(-1L, boundaryMissing.getLatestSequence());
+        assertEquals(-1L, boundaryMissing.latestSequence());
     }
 
         /// An Error during close is rethrown even when a RuntimeException came first.
@@ -146,17 +141,17 @@ class StorageNodeManagerCloseTest {
         assertInstanceOf(IllegalStateException.class, fatal.getSuppressed()[0]);
     }
 
-        /// A fixed distributor closes every resource exactly once.
+        /// A fixed writer closes every resource exactly once.
     @Test
-    void distributorCloseDisposesEverythingOnce() {
+    void writerCloseDisposesEverythingOnce() {
         final CountingHandler distributor = new CountingHandler();
         final CountingHandler client = new CountingHandler();
         final CountingHandler health = new CountingHandler();
         final CountingHandler position = new CountingHandler();
         final StorageNodeManager manager =
-                manager(StorageNodeManager.Role.DISTRIBUTOR, distributor, client, health, position);
+                manager(StorageNodeManager.Role.WRITER, distributor, client, health, position);
 
-        assertTrue(manager.isDistributor());
+        assertTrue(manager.isWriter());
         manager.close();
         manager.close();
 

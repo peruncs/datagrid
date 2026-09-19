@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.typing.Disposable;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 
 import java.util.Objects;
 
@@ -20,7 +19,7 @@ public interface StorageBinaryDataClient extends Disposable {
     /// @return neutral client
     static StorageBinaryDataClient NoOp(final ReplicationCursor startingCursor) {
         final ReplicationCursor cursor = startingCursor == null
-                ? new ReplicationCursor("none", null, -1, "")
+                ? ReplicationCursor.NONE
                 : startingCursor;
         return new StorageBinaryDataClient() {
 
@@ -65,6 +64,15 @@ public interface StorageBinaryDataClient extends Disposable {
     /// @return replication cursor
     ReplicationCursor cursor();
 
+        /// Returns the latest applied logical sequence without materializing a
+        /// cursor. The default delegates to [#cursor()]; hot monitoring paths
+        /// should override it.
+    ///
+    /// @return applied logical sequence, or `-1` when none
+    default long currentSequence() {
+        return this.cursor().logicalSequence();
+    }
+
         /// Reports whether the reader is running.
     ///
     /// @return `true` when running
@@ -90,10 +98,18 @@ public interface StorageBinaryDataClient extends Disposable {
 
         /// Returns the stop outcome together with the last resolved cursor.
     ///
+    /// The fallback is best-effort and allocates only the result record: the
+    /// transport position is unknowable without provider state, so it is
+    /// reported as `-1` (unknown) and a `null` cursor is normalized to
+    /// [ReplicationCursor#NONE]. Implementations that can distinguish a
+    /// transport position override this method; callers that poll it must not
+    /// assume the position is always available.
+    ///
     /// @return stop result
     default StopResult stopResult() {
         final ReplicationCursor cursor = this.cursor();
-        return new StopResult(this.stopOutcome(), cursor.logicalSequence(), -1L);
+        final ReplicationCursor resolved = cursor == null ? ReplicationCursor.NONE : cursor;
+        return new StopResult(this.stopOutcome(), resolved.logicalSequence(), -1L);
     }
 
         /// Reports whether the reader is live.

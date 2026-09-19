@@ -38,7 +38,7 @@ public record AeronReplicationCursor(
 ) {
     private static final int MAGIC = 0x44474143; // DGAC
     private static final short VERSION = 2;
-    private static final int PAYLOAD_LENGTH = Integer.BYTES + Short.BYTES * 2 + UUID_BYTES * 3 + Long.BYTES * 5;
+    private static final int PAYLOAD_LENGTH = AeronCheckpointCodec.HEADER_LENGTH + UUID_BYTES * 3 + Long.BYTES * 5;
     private static final int ENCODED_LENGTH = PAYLOAD_LENGTH + Integer.BYTES;
 
         /// Validates the identities and position carried by the durable cursor.
@@ -73,29 +73,20 @@ public record AeronReplicationCursor(
         if (getInt(encoded, offset) != MAGIC) {
             throw new IllegalArgumentException("unsupported Aeron cursor format");
         }
-        offset += Integer.BYTES;
-        if (getShort(encoded, offset) != VERSION) {
+        if (getShort(encoded, VERSION_OFFSET) != VERSION) {
             throw new IllegalArgumentException("unsupported Aeron cursor format");
         }
-        offset += Short.BYTES;
-        if (getShort(encoded, offset) != 0)
-            throw new IllegalArgumentException("unsupported Aeron cursor format");
-        offset += Short.BYTES;
-        final UUID clusterId = getUuid(encoded, offset);
-        offset += UUID_BYTES;
-        final UUID nodeId = getUuid(encoded, offset);
-        offset += UUID_BYTES;
-        final UUID storeGeneration = getUuid(encoded, offset);
-        offset += UUID_BYTES;
-        final long epoch = getLong(encoded, offset);
-        offset += Long.BYTES;
-        final long fencingToken = getLong(encoded, offset);
-        offset += Long.BYTES;
-        final long recordingId = getLong(encoded, offset);
-        offset += Long.BYTES;
-        final long recordingPosition = getLong(encoded, offset);
-        offset += Long.BYTES;
-        final long sequence = getLong(encoded, offset);
+        if (headerFlags(encoded) != 0)
+            throw new IllegalArgumentException("unsupported Aeron cursor flags");
+        final var reader = new FrameReader(encoded, AeronCheckpointCodec.HEADER_LENGTH);
+        final UUID clusterId = reader.readUuid();
+        final UUID nodeId = reader.readUuid();
+        final UUID storeGeneration = reader.readUuid();
+        final long epoch = reader.readLong();
+        final long fencingToken = reader.readLong();
+        final long recordingId = reader.readLong();
+        final long recordingPosition = reader.readLong();
+        final long sequence = reader.readLong();
         return new AeronReplicationCursor(
                 clusterId, nodeId, storeGeneration, epoch, fencingToken, recordingId, recordingPosition, sequence);
     }
@@ -105,10 +96,7 @@ public record AeronReplicationCursor(
     /// @return serialized cursor bytes
     public byte[] encode() {
         final byte[] encoded = new byte[ENCODED_LENGTH];
-        int offset = 0;
-        offset = putInt(encoded, offset, MAGIC);
-        offset = putShort(encoded, offset, VERSION);
-        offset = putShort(encoded, offset, (short) 0);
+        int offset = putHeader(encoded, 0, MAGIC, VERSION);
         offset = putUuid(encoded, offset, this.clusterId);
         offset = putUuid(encoded, offset, this.nodeId);
         offset = putUuid(encoded, offset, this.storeGeneration);

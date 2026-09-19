@@ -16,7 +16,7 @@ public final class FileStoreCrashHooks {
     /// @param hook callback that receives the crash seam name and file path
     /// @param action guarded file operation
     public static void runWithHook(final BiConsumer<String, Path> hook, final Runnable action) {
-        AtomicFileStore.runWithTestHook(hook, action);
+        AtomicFileWriter.runWithTestHook(hook, action);
     }
 
     /// Calls an operation with a file-store crash hook bound to its dynamic scope.
@@ -31,7 +31,7 @@ public final class FileStoreCrashHooks {
             final BiConsumer<String, Path> hook,
             final ScopedValue.CallableOp<? extends T, X> operation
     ) throws X {
-        return AtomicFileStore.callWithTestHook(hook, operation);
+        return AtomicFileWriter.callWithTestHook(hook, operation);
     }
 
     /// Captures the current file-store hook for an explicitly created worker thread.
@@ -39,6 +39,6 @@ public final class FileStoreCrashHooks {
     /// @param action worker body
     /// @return wrapped action carrying the current hook
     public static Runnable inheritCurrent(final Runnable action) {
-        return AtomicFileStore.inheritCurrentTestHook(action);
+        return AtomicFileWriter.inheritCurrentTestHook(action);
     }
 }

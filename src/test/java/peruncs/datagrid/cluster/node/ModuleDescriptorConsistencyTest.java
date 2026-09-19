@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 
 import java.lang.module.ModuleDescriptor;
 import java.net.URISyntaxException;
@@ -107,5 +108,116 @@ class ModuleDescriptorConsistencyTest {
                         "org.eclipse.store.gigamap.lucene",
                         "org.eclipes.store.gigamap.jvector")),
                 () -> "public upstream contracts require transitive modules: " + transitive);
+    }
+
+        /// No public type from a non-exported package of this module may
+    /// appear in the signature of an exported API member.
+    ///
+    /// Consumers on the module path can only read exported packages; a public
+    /// helper type (for example a shared exception) referenced by exported
+    /// code but living in an unexported package would be undeclarable in
+    /// consumer catch clauses and unchecked exception specifications. The
+    /// sweep reflects over every public class of every exported package and
+    /// collects referenced types, so a regression fails with the exact
+    /// member and type to relocate or export.
+    @Test
+    void exportedSignaturesReferenceNoPublicTypeOfUnexportedPackages() throws Exception {
+        final Path classes = classesDirectory();
+        final Set<String> exportedPackages = descriptor().exports().stream()
+                .map(ModuleDescriptor.Exports::source)
+                .collect(Collectors.toSet());
+
+        /* Every public class of this module's non-exported packages is
+         * forbidden in exported signatures; package-private types cannot
+         * cross packages, so only public ones can leak. */
+        final Set<String> forbiddenTypes = new java.util.HashSet<>();
+        try (Stream<Path> moduleClasses = Files.walk(classes)) {
+            moduleClasses.filter(path -> path.toString().endsWith(".class"))
+                    .filter(path -> !path.toString().endsWith("module-info.class"))
+                    .forEach(path -> {
+                        final String binaryName = classes.relativize(path).toString()
+                                .replace(".class", "").replace('/', '.');
+                        if (binaryName.indexOf('$') >= 0) return;
+                        final String packageName = binaryName.lastIndexOf('.') >= 0
+                                ? binaryName.substring(0, binaryName.lastIndexOf('.')) : "";
+                        if (exportedPackages.contains(packageName)) return;
+                        try {
+                            final Class<?> type = Class.forName(binaryName, false,
+                                    ReplicationMetrics.class.getClassLoader());
+                            if (java.lang.reflect.Modifier.isPublic(type.getModifiers())) {
+                                forbiddenTypes.add(binaryName);
+                            }
+                        } catch (final ClassNotFoundException unresolved) {
+                            throw new IllegalStateException("cannot load " + binaryName, unresolved);
+                        }
+                    });
+        }
+
+        final Set<String> violations = new java.util.TreeSet<>();
+        for (final String exportedPackage : exportedPackages) {
+            final Path packageDirectory = classes.resolve(exportedPackage.replace('.', '/'));
+            try (Stream<Path> entries = Files.list(packageDirectory)) {
+                for (final Path entry : entries.filter(file -> file.toString().endsWith(".class")).toList()) {
+                    final String binaryName = classes.relativize(entry).toString()
+                            .replace(".class", "").replace('/', '.');
+                    final Class<?> type;
+                    try {
+                        type = Class.forName(binaryName, false, ReplicationMetrics.class.getClassLoader());
+                    } catch (final ClassNotFoundException unresolved) {
+                        throw new IllegalStateException("cannot load " + binaryName, unresolved);
+                    }
+                    if (!java.lang.reflect.Modifier.isPublic(type.getModifiers())) continue;
+                    violations.addAll(forbiddenSignatureReferences(type, forbiddenTypes));
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(),
+                "exported signatures reference public types of unexported packages: " + violations);
+    }
+
+        /// Collects forbidden types referenced by one exported type's public
+    /// surface: methods (including inherited public ones), constructors,
+    /// fields, and public nested types.
+    private static Set<String> forbiddenSignatureReferences(final Class<?> exported, final Set<String> forbidden) {
+        final Set<String> found = new java.util.HashSet<>();
+        for (final java.lang.reflect.Method method : exported.getMethods()) {
+            if (isOurMember(method.getDeclaringClass())) {
+                checkType(method.getReturnType(), forbidden, found, method);
+                for (final Class<?> parameter : method.getParameterTypes()) {
+                    checkType(parameter, forbidden, found, method);
+                }
+                for (final Class<?> exception : method.getExceptionTypes()) {
+                    checkType(exception, forbidden, found, method);
+                }
+            }
+        }
+        for (final java.lang.reflect.Constructor<?> constructor : exported.getConstructors()) {
+            for (final Class<?> parameter : constructor.getParameterTypes()) {
+                checkType(parameter, forbidden, found, constructor);
+            }
+        }
+        for (final java.lang.reflect.Field field : exported.getFields()) {
+            if (isOurMember(field.getDeclaringClass())) {
+                checkType(field.getType(), forbidden, found, field);
+            }
+        }
+        for (final Class<?> nested : exported.getClasses()) {
+            if (forbidden.contains(nested.getName())) {
+                found.add(nested.getName() + " nested in " + exported.getName());
+            }
+        }
+        return found;
+    }
+
+    private static boolean isOurMember(final Class<?> declaring) {
+        return declaring.getName().startsWith("peruncs.");
+    }
+
+    private static void checkType(final Class<?> type, final Set<String> forbidden,
+                                  final Set<String> found, final java.lang.reflect.Member member) {
+        if (forbidden.contains(type.getName())) {
+            found.add(type.getName() + " in " + member.getDeclaringClass().getName()
+                    + "." + member.getName());
+        }
     }
 }

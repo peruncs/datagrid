@@ -105,7 +105,7 @@ public final class AeronStoreProcessChildMain {
                         manager.shutdown();
                     }
                 }
-                final long sequence = transport.positionProvider("store").latestSequence();
+                final long sequence = transport.positionProvider("store").latest().logicalSequence();
                 Files.writeString(root.resolve("control").resolve(mode),
                         "channels=%s;dictionaries=%s;sequence=%s".formatted(sawFourChannels.get(), dictionaryChunks.get(), sequence));
                 return null;
@@ -123,15 +123,10 @@ public final class AeronStoreProcessChildMain {
 
     private static NodeLibraryPropertiesProvider properties(
             final Path root, final UUID clusterId, final UUID nodeId, final UUID generation) {
-        return new NodeLibraryPropertiesProvider.Env() {
+        return new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return "writer";
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override

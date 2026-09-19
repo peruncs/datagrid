@@ -3,17 +3,14 @@ package peruncs.datagrid.cluster.node;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/// Verifies the `-1`-when-unknown lag rule owned by [ReplicationMetrics#of].
-class ClusterNodeManagerLagTest {
-    private static ClusterNodeManager manager(final long current, final long latest) {
-        return new ClusterNodeManager() {
-            @Override
-            public void close() {
-            }
-
+/// Verifies the -1-when-unknown lag rule owned by [ReplicationMetrics].
+class ReplicationMetricsLagTest {
+    private static StorageNodeControl manager(final long current, final long latest) {
+        return new StorageNodeControl() {
             @Override
             public void startStorageChecks() {
             }
@@ -39,17 +36,17 @@ class ClusterNodeManagerLagTest {
             }
 
             @Override
-            public long getCurrentSequence() {
+            public long currentSequence() {
                 return current;
             }
 
             @Override
-            public long getLatestSequence() {
+            public long latestSequence() {
                 return latest;
             }
 
             @Override
-            public ReplicationHealth.State getReplicationState() {
+            public ReplicationHealth.State replicationState() {
                 return ReplicationHealth.State.LIVE;
             }
         };
@@ -76,9 +73,9 @@ class ClusterNodeManagerLagTest {
         assertEquals(0L, manager(12L, 9L).replicationMetrics().lagTransactions());
     }
 
-        /// The factory carries the raw boundaries through untouched.
+        /// The snapshot carries the raw boundaries through untouched.
     @Test
-    void factoryPreservesRawSequences() {
+    void snapshotPreservesRawSequences() {
         final ReplicationMetrics metrics = manager(5L, 9L).replicationMetrics();
 
         assertEquals(5L, metrics.currentSequence());

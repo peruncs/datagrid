@@ -8,4 +8,12 @@ public final class StorageLimitReachedException extends NodeLibraryException {
     public StorageLimitReachedException(final String message) {
         super(message);
     }
+
+        /// Creates an exception with a message and cause.
+    ///
+    /// @param message error message
+    /// @param cause   underlying cause
+    public StorageLimitReachedException(final String message, final Throwable cause) {
+        super(message, cause);
+    }
 }

@@ -25,7 +25,7 @@ class TransactionAssemblerFencingTest {
     private static final long EPOCH = 17;
 
     private static TransactionAssembler assembler(final StorageBinaryDataReceiver receiver) {
-        return new TransactionAssembler(
+        return TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder()
                         .termLength(64 * 1024)
                         .chunkSize(256)

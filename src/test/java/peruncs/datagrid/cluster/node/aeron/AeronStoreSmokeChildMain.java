@@ -6,8 +6,8 @@ import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.nio.file.Path;

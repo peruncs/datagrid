@@ -14,14 +14,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /// Verifies the distributing exporter updates the local delegate before
 /// publishing, so receivers learn type definitions first.
-class StorageTypeDictionaryExporterDistributingTest {
+class DistributingTypeDictionaryExporterTest {
         /// Local export happens before distribution, with the assembled dictionary.
     @Test
     void localExportPrecedesDistribution() {
         final List<String> order = new ArrayList<>();
         final AtomicReference<String> distributed = new AtomicReference<>();
         final PersistenceTypeDictionaryExporter delegate = (PersistenceTypeDictionaryExporter) Proxy.newProxyInstance(
-                StorageTypeDictionaryExporterDistributingTest.class.getClassLoader(),
+                DistributingTypeDictionaryExporterTest.class.getClassLoader(),
                 new Class<?>[]{PersistenceTypeDictionaryExporter.class},
                 (proxy, method, args) -> {
                     if (method.getDeclaringClass() == Object.class) return objectMethodValue(proxy, method, args);
@@ -29,14 +29,14 @@ class StorageTypeDictionaryExporterDistributingTest {
                     return null;
                 });
         final PersistenceTypeDictionaryAssembler assembler = (PersistenceTypeDictionaryAssembler) Proxy.newProxyInstance(
-                StorageTypeDictionaryExporterDistributingTest.class.getClassLoader(),
+                DistributingTypeDictionaryExporterTest.class.getClassLoader(),
                 new Class<?>[]{PersistenceTypeDictionaryAssembler.class},
                 (proxy, method, args) -> {
                     if (method.getDeclaringClass() == Object.class) return objectMethodValue(proxy, method, args);
                     return "assembled-dictionary";
                 });
         final StorageBinaryDataDistributor distributor = (StorageBinaryDataDistributor) Proxy.newProxyInstance(
-                StorageTypeDictionaryExporterDistributingTest.class.getClassLoader(),
+                DistributingTypeDictionaryExporterTest.class.getClassLoader(),
                 new Class<?>[]{StorageBinaryDataDistributor.class},
                 (proxy, method, args) -> {
                     if (method.getDeclaringClass() == Object.class) return objectMethodValue(proxy, method, args);
@@ -47,7 +47,7 @@ class StorageTypeDictionaryExporterDistributingTest {
                     return null;
                 });
 
-        new StorageTypeDictionaryExporterDistributing.Default(delegate, assembler, distributor)
+        new DistributingTypeDictionaryExporter(delegate, assembler, distributor)
                 .exportTypeDictionary(dictionaryProxy());
 
         assertEquals(List.of("delegate", "distributor"), order);
@@ -66,7 +66,7 @@ class StorageTypeDictionaryExporterDistributingTest {
 
     private static PersistenceTypeDictionary dictionaryProxy() {
         return (PersistenceTypeDictionary) Proxy.newProxyInstance(
-                StorageTypeDictionaryExporterDistributingTest.class.getClassLoader(),
+                DistributingTypeDictionaryExporterTest.class.getClassLoader(),
                 new Class<?>[]{PersistenceTypeDictionary.class},
                 (proxy, method, args) -> {
                     final Class<?> result = method.getReturnType();

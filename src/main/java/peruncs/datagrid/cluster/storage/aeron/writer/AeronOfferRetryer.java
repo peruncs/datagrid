@@ -2,29 +2,32 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import io.aeron.Publication;
 import org.agrona.DirectBuffer;
-import org.agrona.concurrent.BackoffIdleStrategy;
+import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.Objects;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 /// The bounded retry policy used by the writer's Aeron publications.
 ///
-/// The helper reuses its buffer and idle strategy, so it belongs to one
-/// publisher and must be called by that publisher's serialized write path.
+/// The helper is allocation-free, so it belongs to one publisher and must be
+/// called by that publisher's serialized write path. Each failed attempt is
+/// spaced by a full-jitter delay derived from the configured jitter bounds, so
+/// concurrent writers that share an outage do not retry in lockstep.
 final class AeronOfferRetryer {
     private final Offerer offerer;
     private final AeronReplicationConfiguration configuration;
     private final LongSupplier clock;
-    private final BackoffIdleStrategy idle;
 
     AeronOfferRetryer(final Offerer offerer, final AeronReplicationConfiguration configuration) {
         this(offerer, configuration, System::nanoTime);
     }
 
-        /// Creates a retryer with an explicit monotonic clock for deterministic tests.
+    /// Creates a retryer with an explicit monotonic clock for deterministic tests.
     AeronOfferRetryer(
             final Offerer offerer,
             final AeronReplicationConfiguration configuration,
@@ -33,13 +36,9 @@ final class AeronOfferRetryer {
         this.offerer = Objects.requireNonNull(offerer, "offerer");
         this.configuration = Objects.requireNonNull(configuration, "configuration");
         this.clock = Objects.requireNonNull(clock, "clock");
-        final var policy = this.configuration.retryPolicy();
-        this.idle = new BackoffIdleStrategy(
-                policy.idleMaxSpins(), policy.idleMaxYields(),
-                policy.idleMinParkNanos(), policy.idleMaxParkNanos());
     }
 
-        /// Offers the first `length` bytes of a buffer until Aeron accepts them
+    /// Offers the first `length` bytes of a buffer until Aeron accepts them
     /// or the configured deadline expires.
     ///
     /// The buffer is read synchronously and is not retained after this method
@@ -62,6 +61,8 @@ final class AeronOfferRetryer {
     /// The ownership callback is evaluated before every publication attempt. It is
     /// intentionally part of this loop rather than a one-time caller check: a
     /// terminal marker must not be retried after its writer lease has been fenced.
+    ///
+    /// @throws WriterFencedException when `stillOwner` reports that the lease was lost
     long offer(final DirectBuffer source, final int length, final BooleanSupplier stillOwner) {
         if (source == null || length < 0 || length > source.capacity()) {
             throw new IllegalArgumentException("invalid Aeron offer length");
@@ -70,7 +71,7 @@ final class AeronOfferRetryer {
     }
 
     private long offerLoop(final DirectBuffer source, final int length, final BooleanSupplier stillOwner) {
-        this.idle.reset();
+        final AeronRetryPolicy policy = this.configuration.retryPolicy();
         final long deadline = ReplicationRetry.deadlineNanos(this.configuration.offerTimeoutNanos(), this.clock);
         long backPressured = 0;
         long notConnected = 0;
@@ -78,7 +79,7 @@ final class AeronOfferRetryer {
         long attempt = 0L;
         while (true) {
             if (!stillOwner.getAsBoolean()) {
-                throw new IllegalStateException("writer fencing lease lost during Aeron offer retry");
+                throw new WriterFencedException("writer fencing lease lost during Aeron offer retry");
             }
             if (Thread.currentThread().isInterrupted()) {
                 Thread.currentThread().interrupt();
@@ -108,20 +109,23 @@ final class AeronOfferRetryer {
                 }
                 throw new IllegalStateException("Aeron offer timed out: %s, connected=%s".formatted(reason, this.offerer.isConnected()));
             }
-            /* BackoffIdleStrategy is the single pacing mechanism. A second
-             * explicit park compounded latency on every retry and made the
-             * configured offer deadline much less predictable. */
+            /* Full jitter is the single pacing mechanism: it spreads retries of
+             * writers that share an outage instead of letting them collide on
+             * every back-pressure interval. The park never outlives the
+             * operation deadline, so the timeout stays bounded. */
             attempt++;
-            this.idle.idle();
+            final long delay = ReplicationRetry.fullJitterDelayNanos(
+                    attempt, policy.jitterBaseNanos(), policy.jitterCapNanos());
+            LockSupport.parkNanos(Math.min(delay, ReplicationRetry.remainingNanos(deadline, this.clock)));
         }
     }
 
-        /// Supplies one publication attempt to the retry loop.
+    /// Supplies one publication attempt to the retry loop.
     @FunctionalInterface
     interface Offerer {
         long offer(DirectBuffer buffer, int offset, int length);
 
-                /// Returns the publication connectivity observed by the offerer. Test
+        /// Returns the publication connectivity observed by the offerer. Test
         /// offerers may keep the default because they do not model a subscription.
         default boolean isConnected() {
             return true;

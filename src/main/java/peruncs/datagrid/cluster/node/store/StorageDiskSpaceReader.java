@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node.store;
 
 import org.eclipse.serializer.afs.types.ADirectory;
 
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.eclipse.serializer.util.X.notNull;
@@ -12,12 +13,24 @@ import static org.eclipse.serializer.util.X.notNull;
 /// Implementations therefore treat that individual file as unavailable and
 /// continue the measurement.
 public interface StorageDiskSpaceReader {
-        /// Creates a disk-space reader.
+    /// Default cache lifetime for one directory measurement.
+    Duration DEFAULT_CACHE_TTL = Duration.ofSeconds(5);
+
+        /// Creates a disk-space reader with the default cache lifetime.
     ///
     /// @param storageDir storage directory
     /// @return disk-space reader
     static StorageDiskSpaceReader New(final ADirectory storageDir) {
-        return new Default(notNull(storageDir));
+        return New(storageDir, DEFAULT_CACHE_TTL);
+    }
+
+        /// Creates a disk-space reader with an explicit cache lifetime.
+    ///
+    /// @param storageDir storage directory
+    /// @param cacheTtl   how long one measurement is reused
+    /// @return disk-space reader
+    static StorageDiskSpaceReader New(final ADirectory storageDir, final Duration cacheTtl) {
+        return new Default(notNull(storageDir), notNull(cacheTtl));
     }
 
         /// Reads used bytes in the storage directory.
@@ -28,21 +41,25 @@ public interface StorageDiskSpaceReader {
         /// Recursively measures the configured Store directory.
     class Default implements StorageDiskSpaceReader {
         private static final System.Logger LOGGER = System.getLogger(StorageDiskSpaceReader.class.getName());
-        private static final long CACHE_NANOS = 5_000_000_000L;
         private final ADirectory storageDir;
+        private final long cacheNanos;
         private final AtomicLong lastLog = new AtomicLong(System.currentTimeMillis());
         private volatile long cachedBytes;
         private volatile long measuredAtNanos;
 
-        private Default(final ADirectory storageDir) {
+        private Default(final ADirectory storageDir, final Duration cacheTtl) {
+            if (cacheTtl.isNegative()) {
+                throw new IllegalArgumentException("cacheTtl must not be negative");
+            }
             this.storageDir = storageDir;
+            this.cacheNanos = cacheTtl.toNanos();
         }
 
         @Override
         public long readUsedDiskSpaceBytes() {
             final long now = System.nanoTime();
             final long measuredAt = this.measuredAtNanos;
-            if (measuredAt != 0L && now - measuredAt >= 0L && now - measuredAt < CACHE_NANOS) {
+            if (measuredAt != 0L && now - measuredAt >= 0L && now - measuredAt < this.cacheNanos) {
                 return this.cachedBytes;
             }
             final long sizeBytes;
@@ -50,7 +67,7 @@ public interface StorageDiskSpaceReader {
                 final long secondMeasuredAt = this.measuredAtNanos;
                 final long secondNow = System.nanoTime();
                 if (secondMeasuredAt != 0L && secondNow - secondMeasuredAt >= 0L &&
-                    secondNow - secondMeasuredAt < CACHE_NANOS) {
+                    secondNow - secondMeasuredAt < this.cacheNanos) {
                     return this.cachedBytes;
                 }
                 sizeBytes = this.totalSize(this.storageDir);

@@ -11,11 +11,11 @@ import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticl
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.lang.management.ManagementFactory;
@@ -119,6 +119,8 @@ class AeronWriterReaderSoakIT {
     private final AtomicLong servedQueries = new AtomicLong();
     private final AtomicLong verifiedQueries = new AtomicLong();
     private final AtomicLong tornReads = new AtomicLong();
+    /// Completed per-reader observability cross-checks (live vs durable cursor).
+    private long metricsCrossChecks;
     private final AtomicLong completedRestarts = new AtomicLong();
     private final AtomicLong abruptRestarts = new AtomicLong();
     private final AtomicLong chaosOps = new AtomicLong();
@@ -203,9 +205,13 @@ class AeronWriterReaderSoakIT {
         final Path[] readerNodes = {
                 root.resolve("reader-1"), root.resolve("reader-2"), root.resolve("reader-3")};
         final UUID[] readerIds = {UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID()};
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
-                AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
-                        controlPort, livePort, watermarkPort))) {
+        final UUID writerNodeId = UUID.randomUUID();
+        try (WriterHandle writerHandle = new WriterHandle(writerStore, root.resolve("writer"),
+                clusterId, writerNodeId, generation, controlPort, livePort, watermarkPort,
+                new AeronClusterReplicationTransportProvider().create(
+                        AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
+                                controlPort, livePort, watermarkPort)))) {
+            final ClusterReplicationTransport writerTransport = writerHandle.transport();
             writerTransport.positionProvider("store").init();
             final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
             final Random seedRandom = new Random(seed);
@@ -220,13 +226,14 @@ class AeronWriterReaderSoakIT {
             seeded.shutdown();
             audit(startNanos, "seeded articles=%d".formatted(SEED_ARTICLES + SENTINELS.length));
 
-            final ReplicationCursor baseline = AeronStoreIntegrationIT.latest(writerTransport);
+            final ReplicationCursor baseline = writerHandle.latest();
             this.baselineSeq = baseline.logicalSequence();
             this.lastWriterSeq = this.baselineSeq;
             for (final Path readerStore : readerStores) AeronStoreIntegrationIT.copyDirectory(writerStore, readerStore);
             final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor,
                     writerTransport.persistenceTargetFactory("store", distributor));
-            final IndexRoot writerRoot = writer.root();
+            writerHandle.install(writer, writer.root());
+            final IndexRoot writerRoot = writerHandle.root();
             try {
                 final ReaderNode[] holders = new ReaderNode[readerStores.length];
                 final ReadWriteLock[] gates = new ReadWriteLock[readerStores.length];
@@ -255,7 +262,7 @@ class AeronWriterReaderSoakIT {
                 for (int i = 0; i < writerThreads; i++) {
                     final int workerIndex = i;
                     workers.add(launch("soak-writer-%d".formatted(workerIndex),
-                            () -> writeLoop(writerRoot, writerTransport, soakEndNanos,
+                            () -> writeLoop(writerHandle, soakEndNanos,
                                     new Random(seed ^ 0x9E3779B9L ^ workerIndex))));
                 }
                 for (int r = 0; r < holders.length; r++) {
@@ -267,7 +274,7 @@ class AeronWriterReaderSoakIT {
                                 new Random(seed ^ 0x51ED734BL ^ readerIndex ^ queryIndex))));
                     }
                 }
-                workers.add(launch("soak-chaos", () -> chaosLoop(startNanos, root, writerRoot, writerTransport,
+                workers.add(launch("soak-chaos", () -> chaosLoop(startNanos, root, writerHandle,
                         holders, gates, readerNodes, baseline, soakEndNanos, restarts,
                         readerRestarts, readerReseeds, readerCorruptionParks,
                         new Random(seed ^ 0xC0FFEE11L))));
@@ -555,17 +562,22 @@ class AeronWriterReaderSoakIT {
         }
     }
 
-    private void writeLoop(final IndexRoot writerRoot, final ClusterReplicationTransport writerTransport,
+    private void writeLoop(final WriterHandle writer,
                            final long soakEndNanos, final Random random) throws Exception {
         final String worker = Thread.currentThread().getName();
         while (System.nanoTime() < soakEndNanos) {
             beat(worker, "store");
             final int op = random.nextInt(100);
             synchronized (this.writeLock) {
+                /* Resolve the current writer pair under the mutation lock: a
+                 * writer-restart chaos op swaps both under this same lock, so
+                 * one iteration can never publish through a disposed pair. */
+                final IndexRoot writerRoot = writer.root();
+                final ClusterReplicationTransport writerTransport = writer.transport();
                 if (op < 55) addBatch(writerRoot, random, 1 + random.nextInt(4));
                 else if (op < 80) updateOne(writerRoot, random);
                 else removeOne(writerRoot, random);
-                /* Fsync-delay chaos rides the real AtomicFileStore hook when
+                /* Fsync-delay chaos rides the real AtomicFileWriter hook when
                  * the checkpoint path fires synchronously on this thread;
                  * when it does not fire the occasional writer stall below
                  * still widens the backlog window deterministically. Kept
@@ -584,7 +596,7 @@ class AeronWriterReaderSoakIT {
              * position read outside the mutation lock: the boundary is a
              * writer-side snapshot, and the guard only needs a current upper
              * bound rather than lock-coupled sequencing. */
-            this.lastWriterSeq = AeronStoreIntegrationIT.latest(writerTransport).logicalSequence();
+            this.lastWriterSeq = writer.latest().logicalSequence();
             /* Occasional writer-side stall widens the backlog even when the
              * fsync hook has nothing to delay on this thread. */
             sleepJitter(random, 5);
@@ -825,8 +837,7 @@ class AeronWriterReaderSoakIT {
     private static final List<String> CHAOS_ROTATION =
             List.of("single", "dual", "slow", "cpu", "cursor", "rollback", "segment");
 
-    private void chaosLoop(final long startNanos, final Path root, final IndexRoot writerRoot,
-                           final ClusterReplicationTransport writerTransport,
+    private void chaosLoop(final long startNanos, final Path root, final WriterHandle writer,
                            final ReaderNode[] holders, final ReadWriteLock[] gates,
                            final Path[] readerNodes, final ReplicationCursor baseline,
                            final long soakEndNanos, final int restarts,
@@ -878,7 +889,7 @@ class AeronWriterReaderSoakIT {
                         readerCorruptionParks, random);
                 case "rollback" -> () -> rollbackCursor(startNanos, holders, gates, baseline,
                         readerReseeds, readerRestarts, random);
-                case "segment" -> () -> corruptLiveSegment(startNanos, root, writerRoot, writerTransport,
+                case "segment" -> () -> corruptLiveSegment(startNanos, root, writer.root(), writer.transport(),
                         holders, gates, readerCorruptionParks, random);
                 default -> throw new IllegalStateException("unknown chaos op " + selected);
             };
@@ -1661,6 +1672,21 @@ class AeronWriterReaderSoakIT {
                     final ReplicationCursor cursor = holders[r].persistedCursor();
                     final boolean live = holders[r].isLive();
                     final boolean running = holders[r].isRunning();
+                    /* Observability cross-check: the live (applied) boundary the
+                     * client reports must never sit behind the durable cursor
+                     * ground truth, and the two lags must agree within one
+                     * transaction — a wider gap means the operator-facing
+                     * sequence is lying about durable state. */
+                    if (cursor != null && live && running) {
+                        final long applied = holders[r].liveCursor().logicalSequence();
+                        assertTrue(applied >= cursor.logicalSequence(),
+                                "reader %d reported applied sequence %s behind its durable cursor %s"
+                                        .formatted(r, applied, cursor.logicalSequence()));
+                        assertTrue(applied - cursor.logicalSequence() <= 1L,
+                                "reader %d live sequence drifted %s transactions past its durable cursor"
+                                        .formatted(r, applied - cursor.logicalSequence()));
+                        this.metricsCrossChecks++;
+                    }
                     if (live != wasLive[r]) {
                         wasLive[r] = live;
                         this.liveFlips.incrementAndGet();
@@ -1688,10 +1714,10 @@ class AeronWriterReaderSoakIT {
                     gates[r].readLock().unlock();
                 }
             }
-            audit(startNanos, "progress tx=%d queries=%d verified=%d torn=%d restarts=%d abrupt=%d writerSeq=%d%s jvm=%s"
+            audit(startNanos, "progress tx=%d queries=%d verified=%d torn=%d restarts=%d abrupt=%d writerSeq=%d metricsChecks=%d%s jvm=%s"
                     .formatted(this.publishedTransactions.get(), this.servedQueries.get(),
                             this.verifiedQueries.get(), this.tornReads.get(), this.completedRestarts.get(),
-                            this.abruptRestarts.get(), writerSequence, state,
+                            this.abruptRestarts.get(), writerSequence, this.metricsCrossChecks, state,
                             jvmTelemetry()));
         }
     }
@@ -2221,6 +2247,99 @@ class AeronWriterReaderSoakIT {
 
         static OpOutcome skipped(final String reason) {
             return new OpOutcome(0, reason);
+        }
+    }
+
+        /// The soak writer's restartable state: transport, Store manager, and
+    /// the live root, swappable as one unit.
+    ///
+    /// Writer threads resolve the pair under the soak's mutation lock before
+    /// every transaction; [ #restart()] swaps both under the same lock, so no
+    /// iteration can publish through a disposed transport. The restart keeps
+    /// the cluster, Store-generation, and node identities, so the transport
+    /// extends the same Archive recording and the fencing lease mints the
+    /// next token for the same node — the production writer-restart cycle.
+    private static final class WriterHandle implements AutoCloseable {
+        private final Path storePath;
+        private final Path nodeRoot;
+        private final UUID clusterId;
+        private final UUID nodeId;
+        private final UUID generation;
+        private final int controlPort;
+        private final int livePort;
+        private final int watermarkPort;
+        private ClusterReplicationTransport transport;
+        private EmbeddedStorageManager manager;
+        private IndexRoot root;
+
+        WriterHandle(
+                final Path storePath, final Path nodeRoot,
+                final UUID clusterId, final UUID nodeId, final UUID generation,
+                final int controlPort, final int livePort, final int watermarkPort,
+                final ClusterReplicationTransport transport
+        ) {
+            this.storePath = storePath;
+            this.nodeRoot = nodeRoot;
+            this.clusterId = clusterId;
+            this.nodeId = nodeId;
+            this.generation = generation;
+            this.controlPort = controlPort;
+            this.livePort = livePort;
+            this.watermarkPort = watermarkPort;
+            this.transport = transport;
+        }
+
+        synchronized ClusterReplicationTransport transport() {
+            return this.transport;
+        }
+
+        synchronized IndexRoot root() {
+            return this.root;
+        }
+
+        synchronized ReplicationCursor latest() {
+            return AeronStoreIntegrationIT.latest(this.transport);
+        }
+
+        synchronized void install(final EmbeddedStorageManager manager, final IndexRoot root) {
+            this.manager = manager;
+            this.root = root;
+        }
+
+            /// Stops the Store, releases the transport, and brings both back
+        /// with the same identities: the new transport extends the recording
+        /// and the reloaded Store graph keeps every previously stored entity.
+        ///
+        /// @throws Exception when the restart cannot complete
+        synchronized void restart() throws Exception {
+            if (this.manager != null) this.manager.shutdown();
+            this.transport.close();
+            this.transport = new AeronClusterReplicationTransportProvider().create(
+                    AeronStoreIntegrationIT.properties(this.nodeRoot, this.clusterId, this.nodeId,
+                            this.generation, "writer", -1L,
+                            this.controlPort, this.livePort, this.watermarkPort));
+            this.transport.positionProvider("store").init();
+            final StorageBinaryDataDistributor distributor = this.transport.distributor("store", false);
+            final EmbeddedStorageManager restarted = AeronStoreIntegrationIT.startExistingIndex(
+                    this.storePath, distributor,
+                    this.transport.persistenceTargetFactory("store", distributor));
+            this.manager = restarted;
+            this.root = restarted.root();
+        }
+
+        @Override
+        public synchronized void close() {
+            if (this.manager != null) {
+                try {
+                    this.manager.shutdown();
+                } catch (final RuntimeException shutdownFailure) {
+                    /* The transport close below is the stronger guarantee;
+                     * a Store shutdown failure must not skip it. */
+                }
+            }
+            if (this.transport != null) this.transport.close();
+            this.manager = null;
+            this.root = null;
         }
     }
 

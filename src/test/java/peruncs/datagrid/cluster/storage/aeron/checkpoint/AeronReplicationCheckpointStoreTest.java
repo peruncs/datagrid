@@ -52,20 +52,36 @@ class AeronReplicationCheckpointStoreTest {
         Files.deleteIfExists(path);
     }
 
-    /// Verifies reading rejects unsupported reserved fields even when the checksum is valid.
+        /// Verifies reading rejects unsupported header flags even when the checksum is valid.
     @Test
-    void rejectsUnsupportedReservedFieldsEvenWithValidChecksum() throws Exception {
+    void rejectsUnsupportedFlagsEvenWithValidChecksum() throws Exception {
         final Path path = Files.createTempFile("datagrid-checkpoint-reserved", ".bin");
         try {
             AeronReplicationCheckpointStore.write(path, checkpoint());
             final byte[] bytes = Files.readAllBytes(path);
             final ByteBuffer encoded = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
-            encoded.putShort(9, (short) 1);
+            encoded.putShort(6, (short) 1);
             encoded.putInt(AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES,
                     Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
             Files.write(path, bytes);
 
             assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(path));
+        } finally {
+            Files.deleteIfExists(path);
+        }
+    }
+
+    /// Pins the shared checkpoint header shape: magic int, version short, zero flags short.
+    @Test
+    void usesSharedCheckpointHeaderShape() throws Exception {
+        final Path path = Files.createTempFile("datagrid-checkpoint-header", ".bin");
+        try {
+            AeronReplicationCheckpointStore.write(path, checkpoint());
+            final ByteBuffer encoded = ByteBuffer.wrap(Files.readAllBytes(path)).order(ByteOrder.BIG_ENDIAN);
+            assertEquals(AeronReplicationCheckpoint.MAGIC, encoded.getInt(0));
+            assertEquals((short) 2, encoded.getShort(4));
+            assertEquals((short) 0, encoded.getShort(6));
+            assertEquals(115, AeronReplicationCheckpoint.ENCODED_BYTES);
         } finally {
             Files.deleteIfExists(path);
         }

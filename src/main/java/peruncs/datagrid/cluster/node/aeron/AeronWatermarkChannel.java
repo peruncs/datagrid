@@ -4,10 +4,10 @@ import io.aeron.Aeron;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import org.agrona.DirectBuffer;
-import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
+import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.Arrays;
@@ -20,9 +20,14 @@ import java.util.concurrent.atomic.AtomicReference;
 /// Small, latest-value Aeron control stream carrying durable reader progress to
 /// the writer. Missing or superseded messages are safe: retention requires the
 /// latest watermark from every active reader and watermarks are monotonic.
+///
+/// The worker idle pacing and the close-wait pacing come from the configured
+/// [AeronRetryPolicy], so a deployment with slow or distant peers can widen
+/// parks instead of burning CPU on Agrona's hard-coded defaults.
 final class AeronWatermarkChannel implements AutoCloseable {
     private final Receiver receiver;
     private final long closeTimeoutNanos;
+    private final AeronRetryPolicy retryPolicy;
     private final Aeron aeron;
     private final byte[] bufferA = new byte[AeronReaderWatermark.ENCODED_LENGTH];
     private final byte[] bufferB = new byte[AeronReaderWatermark.ENCODED_LENGTH];
@@ -50,7 +55,8 @@ final class AeronWatermarkChannel implements AutoCloseable {
             final Publication publication,
             final Subscription subscription,
             final Receiver receiver,
-            final long closeTimeoutNanos
+            final long closeTimeoutNanos,
+            final AeronRetryPolicy retryPolicy
     ) {
         if ((publication == null) == (subscription == null))
             throw new IllegalArgumentException("exactly one Aeron watermark endpoint is required");
@@ -63,19 +69,20 @@ final class AeronWatermarkChannel implements AutoCloseable {
         this.subscription = subscription;
         this.receiver = receiver;
         this.closeTimeoutNanos = closeTimeoutNanos;
+        this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy");
         this.worker = Thread.ofVirtual().name("eclipse-datagrid-aeron-watermarks").unstarted(this::run);
         this.worker.start();
     }
 
     static AeronWatermarkChannel writer(
             final Aeron aeron, final String channel, final int streamId, final Receiver receiver,
-            final long closeTimeoutNanos) {
+            final long closeTimeoutNanos, final AeronRetryPolicy retryPolicy) {
         Objects.requireNonNull(aeron, "aeron");
         Objects.requireNonNull(channel, "channel");
         Objects.requireNonNull(receiver, "receiver");
         final Subscription subscription = aeron.addSubscription(channel, streamId);
         try {
-            return new AeronWatermarkChannel(aeron, null, subscription, receiver, closeTimeoutNanos);
+            return new AeronWatermarkChannel(aeron, null, subscription, receiver, closeTimeoutNanos, retryPolicy);
         } catch (final RuntimeException | Error failure) {
             try {
                 subscription.close();
@@ -87,17 +94,24 @@ final class AeronWatermarkChannel implements AutoCloseable {
     }
 
     static AeronWatermarkChannel writer(
+            final Aeron aeron, final String channel, final int streamId, final Receiver receiver,
+            final long closeTimeoutNanos) {
+        return writer(aeron, channel, streamId, receiver, closeTimeoutNanos, AeronRetryPolicy.Default());
+    }
+
+    static AeronWatermarkChannel writer(
             final Aeron aeron, final String channel, final int streamId, final Receiver receiver) {
         return writer(aeron, channel, streamId, receiver, TimeUnit.SECONDS.toNanos(5));
     }
 
     static AeronWatermarkChannel reader(
-            final Aeron aeron, final String channel, final int streamId, final long closeTimeoutNanos) {
+            final Aeron aeron, final String channel, final int streamId, final long closeTimeoutNanos,
+            final AeronRetryPolicy retryPolicy) {
         Objects.requireNonNull(aeron, "aeron");
         Objects.requireNonNull(channel, "channel");
         final Publication publication = aeron.addPublication(channel, streamId);
         try {
-            return new AeronWatermarkChannel(aeron, publication, null, null, closeTimeoutNanos);
+            return new AeronWatermarkChannel(aeron, publication, null, null, closeTimeoutNanos, retryPolicy);
         } catch (final RuntimeException | Error failure) {
             try {
                 publication.close();
@@ -106,6 +120,11 @@ final class AeronWatermarkChannel implements AutoCloseable {
             }
             throw failure;
         }
+    }
+
+    static AeronWatermarkChannel reader(
+            final Aeron aeron, final String channel, final int streamId, final long closeTimeoutNanos) {
+        return reader(aeron, channel, streamId, closeTimeoutNanos, AeronRetryPolicy.Default());
     }
 
     static AeronWatermarkChannel reader(final Aeron aeron, final String channel, final int streamId) {
@@ -145,7 +164,6 @@ final class AeronWatermarkChannel implements AutoCloseable {
             final long writerEpoch, final long recordingId, final long sequence,
             final long position) {
         this.requireOpen();
-        if (this.pending != null && !this.isReusableBuffer(this.pending)) this.pending = null;
         if (this.pending == null) {
             if (this.reusable == null) {
                 /* Both fixed buffers can only be occupied when the worker is offering
@@ -181,7 +199,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
     }
 
     private void run() {
-        final IdleStrategy idle = new BackoffIdleStrategy(1, 10, 1, 1_000_000);
+        final IdleStrategy idle = this.retryPolicy.idleStrategy();
         try {
             while (this.running.get()) {
                 int work = 0;
@@ -277,7 +295,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
         final long deadline = ReplicationRetry.deadlineNanos(this.closeTimeoutNanos);
         try {
             if (this.publication != null) {
-                final IdleStrategy idle = new BackoffIdleStrategy(1, 10, 1, 1_000_000);
+                final IdleStrategy idle = this.retryPolicy.idleStrategy();
                 while (true) {
                     final boolean pending;
                     final boolean alive;

@@ -6,6 +6,7 @@ import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.nio.ByteOrder;
 import java.util.*;
+import java.util.zip.CRC32C;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 
@@ -36,7 +37,7 @@ public record AeronReaderWatermark(
 
     /// Frame magic (`DGWM`).
     public static final int MAGIC = 0x4447574D;
-    private static final int VERSION = 1;
+    private static final short VERSION = 1;
     private static final int CRC_OFFSET = 88;
         /// Serialized watermark length in bytes.
     public static final int ENCODED_LENGTH = CRC_OFFSET + Integer.BYTES;
@@ -99,8 +100,7 @@ public record AeronReaderWatermark(
         validateFields(readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
         if (target == null || target.length != ENCODED_LENGTH)
             throw new IllegalArgumentException("watermark target must contain exactly %s bytes".formatted(ENCODED_LENGTH));
-        int cursor = putInt(target, 0, MAGIC);
-        cursor = putInt(target, cursor, VERSION);
+        int cursor = putHeader(target, 0, MAGIC, VERSION);
         cursor = putUuid(target, cursor, readerId);
         cursor = putUuid(target, cursor, clusterId);
         cursor = putUuid(target, cursor, storeGeneration);
@@ -120,28 +120,35 @@ public record AeronReaderWatermark(
         if (encoded.length != ENCODED_LENGTH) {
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
         }
+        final var reader = new FrameReader(encoded, 0);
         return decodeFrame(
-                getInt(encoded, 0), getInt(encoded, Integer.BYTES),
-                getUuid(encoded, 8), getUuid(encoded, 24), getUuid(encoded, 40),
-                getLong(encoded, 56), getLong(encoded, 64), getLong(encoded, 72), getLong(encoded, 80),
-                getInt(encoded, CRC_OFFSET), Crc32c.compute(encoded, 0, CRC_OFFSET));
+                reader.readInt(), reader.readShort(), reader.readShort(),
+                reader.readUuid(), reader.readUuid(), reader.readUuid(),
+                reader.readLong(), reader.readLong(), reader.readLong(), reader.readLong(),
+                reader.readInt(), Crc32c.compute(encoded, 0, CRC_OFFSET));
     }
 
         /// Decodes directly from an Aeron/Agrona frame without copying the identity bytes.
     ///
+    /// @param crcReuse caller-owned accumulator used for the CRC32C check;
+    ///                  the watermark worker owns one for its lifetime
     /// @param encoded source frame containing one serialized watermark
     /// @param offset  first byte of the serialized watermark
     /// @param length  serialized watermark length; must be [#ENCODED_LENGTH]
     /// @return decoded watermark
-    public static AeronReaderWatermark decode(final DirectBuffer encoded, final int offset, final int length) {
+    public static AeronReaderWatermark decode(final CRC32C crcReuse, final DirectBuffer encoded,
+                                              final int offset, final int length) {
         Objects.requireNonNull(encoded, "encoded");
+        Objects.requireNonNull(crcReuse, "crcReuse");
         if (offset < 0 || length != ENCODED_LENGTH ||
             offset > encoded.capacity() - length) {
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
         }
+        final int actualCrc = Crc32c.compute(crcReuse, encoded, offset, CRC_OFFSET);
         return decodeFrame(
                 encoded.getInt(offset, ByteOrder.BIG_ENDIAN),
-                encoded.getInt(offset + Integer.BYTES, ByteOrder.BIG_ENDIAN),
+                encoded.getShort(offset + VERSION_OFFSET, ByteOrder.BIG_ENDIAN),
+                encoded.getShort(offset + FLAGS_OFFSET, ByteOrder.BIG_ENDIAN),
                 new UUID(encoded.getLong(offset + 8, ByteOrder.BIG_ENDIAN),
                         encoded.getLong(offset + 16, ByteOrder.BIG_ENDIAN)),
                 new UUID(encoded.getLong(offset + 24, ByteOrder.BIG_ENDIAN),
@@ -153,16 +160,17 @@ public record AeronReaderWatermark(
                 encoded.getLong(offset + 72, ByteOrder.BIG_ENDIAN),
                 encoded.getLong(offset + 80, ByteOrder.BIG_ENDIAN),
                 encoded.getInt(offset + CRC_OFFSET, ByteOrder.BIG_ENDIAN),
-                Crc32c.compute(encoded, offset, CRC_OFFSET));
+                actualCrc);
     }
 
     private static AeronReaderWatermark decodeFrame(
-            final int magic, final int version,
+            final int magic, final short version, final short flags,
             final UUID readerId, final UUID clusterId, final UUID storeGeneration,
             final long epoch, final long recordingId, final long sequence, final long position,
             final int expectedCrc, final int actualCrc) {
         if (magic != MAGIC) throw new IllegalArgumentException("unknown Aeron watermark magic");
         if (version != VERSION) throw new IllegalArgumentException("unsupported Aeron watermark version");
+        if (flags != 0) throw new IllegalArgumentException("unsupported Aeron watermark flags");
         if (expectedCrc != actualCrc) throw new IllegalArgumentException("Aeron watermark CRC32C mismatch");
         return new AeronReaderWatermark(
                 readerId, clusterId, storeGeneration, epoch, recordingId, sequence, position);

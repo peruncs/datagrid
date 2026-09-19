@@ -4,6 +4,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -58,7 +59,7 @@ class AeronReaderWatermarkTest {
         final byte[] framed = new byte[encoded.length + 7];
         System.arraycopy(encoded, 0, framed, 7, encoded.length);
         final AeronReaderWatermark decoded = AeronReaderWatermark.decode(
-                new UnsafeBuffer(framed), 7, encoded.length);
+                new CRC32C(), new UnsafeBuffer(framed), 7, encoded.length);
         assertEquals(READER_ONE, decoded.readerId());
         assertEquals(CLUSTER, decoded.clusterId());
         assertEquals(GENERATION, decoded.storeGeneration());
@@ -69,7 +70,24 @@ class AeronReaderWatermarkTest {
         assertEquals(AeronReaderWatermark.decode(encoded), decoded);
     }
 
-    /// Verifies decoding rejects truncated frames and frames with the wrong magic or version.
+        /// A long-lived caller-owned CRC scratch must compute one independent
+    /// CRC per frame: the second decode of a different watermark with the
+    /// same scratch fails its CRC check if the one-shot path ever stops
+    /// resetting the accumulator.
+    @Test
+    void reusedScratchDecodesConsecutiveWatermarksIndependently() {
+        final CRC32C scratch = new CRC32C();
+        final byte[] first = AeronReaderWatermark.of(
+                READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096).encode();
+        final byte[] second = AeronReaderWatermark.of(
+                READER_ONE, CLUSTER, GENERATION, 3, 17, 43, 4_097).encode();
+
+        assertEquals(42, AeronReaderWatermark.decode(scratch, new UnsafeBuffer(first), 0, first.length).sequence());
+        assertEquals(43, AeronReaderWatermark.decode(scratch, new UnsafeBuffer(second), 0, second.length).sequence());
+        assertEquals(42, AeronReaderWatermark.decode(scratch, new UnsafeBuffer(first), 0, first.length).sequence());
+    }
+
+        /// Verifies decoding rejects truncated frames and frames with the wrong magic, version, or flags.
     @Test
     void decodeRejectsTruncatedFramesAndWrongMagicOrVersion() {
         final byte[] encoded = AeronReaderWatermark.of(
@@ -80,8 +98,24 @@ class AeronReaderWatermarkTest {
         badMagic[0] ^= (byte) 0xFF;
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.decode(badMagic));
         final byte[] badVersion = encoded.clone();
-        badVersion[7] ^= (byte) 0xFF;
+        badVersion[5] ^= (byte) 0xFF;
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.decode(badVersion));
+        /* The shared header stores flags as a short at offset 6; any mutation
+         * there is rejected as an unsupported frame. */
+        final byte[] badFlags = encoded.clone();
+        badFlags[7] ^= (byte) 0xFF;
+        assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.decode(badFlags));
+    }
+
+    /// Pins the shared checkpoint header shape: magic int, version short, zero flags short.
+    @Test
+    void usesSharedCheckpointHeaderShape() {
+        final byte[] encoded = AeronReaderWatermark.of(
+                READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096).encode();
+        final java.nio.ByteBuffer header = java.nio.ByteBuffer.wrap(encoded).order(java.nio.ByteOrder.BIG_ENDIAN);
+        assertEquals(AeronReaderWatermark.MAGIC, header.getInt(0));
+        assertEquals((short) 1, header.getShort(4));
+        assertEquals((short) 0, header.getShort(6));
     }
 
     /// Verifies the validator accepts forward progress while rejecting rollbacks and identity confusion.

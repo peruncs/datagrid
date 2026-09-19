@@ -3,9 +3,8 @@ package peruncs.datagrid.cluster.node.aeron;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
-import peruncs.datagrid.cluster.node.replication.AfterDataMessageConsumedListener;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
+import peruncs.datagrid.cluster.node.replication.DataMessageAppliedListener;
 import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
 import peruncs.datagrid.cluster.storage.types.*;
 
@@ -85,14 +84,14 @@ public final class AeronFullPathBenchmark {
                          readerRoot.resolve("cursor"))) {
                 final EmbeddedStorageFoundation<?> readerFoundation = AeronStoreIntegrationIT.foundation(readerPath);
                 final EmbeddedStorageManager reader = readerFoundation.start();
-                final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                        .foundation(readerFoundation.getConnectionFoundation()).storage(reader.createConnection())
-                        .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                        .cachingTimeoutMs(0L).cachedBinaryLimit(1L)
-                        .applyTimeoutMs(StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS).build());
+                final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
+                final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(new StorageBinaryDataMerger.Configuration(
+                        readerFoundation.getConnectionFoundation(), reader.createConnection(),
+                        ObjectGraphUpdateHandler.PerStore(graphCoordinator),
+                        0L, 1L, 1L << 30, 60_000L, 30_000L, 5_000L, 4096, graphCoordinator));
                 final AtomicLong resolved = new AtomicLong(baseline.logicalSequence());
                 final StorageBinaryDataClient client = readerTransport.client(receiver, "store",
-                        new AfterDataMessageConsumedListener() {
+                        new DataMessageAppliedListener() {
                             @Override
                             public void onApplied(final ReplicationCursor cursor) {
                                 cursorManager.set(cursor);
@@ -152,7 +151,7 @@ public final class AeronFullPathBenchmark {
         Arrays.fill(payload, (byte) iteration);
         root.payload = payload;
         writer.store(root);
-        final long target = transport.positionProvider("store").latestSequence();
+        final long target = transport.positionProvider("store").latest().logicalSequence();
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (resolved.get() < target && System.nanoTime() < deadline) LockSupport.parkNanos(50_000L);
         if (resolved.get() != target) throw new IllegalStateException("reader did not apply sequence %s".formatted(target));

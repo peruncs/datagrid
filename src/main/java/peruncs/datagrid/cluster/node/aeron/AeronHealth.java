@@ -10,7 +10,14 @@ import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 /// Cached health view for one Aeron provider client and storage controller.
+///
+/// The view holds only suppliers: it never closes transport resources and it
+/// is replaced, not reused, when the provider client or storage adapter
+/// changes. A supplier that throws is treated as an unhealthy probe and logged
+/// at debug level, so a monitoring scrape reports FAILED instead of
+/// propagating an exception into the monitoring path.
 final class AeronHealth implements ReplicationHealth {
+    private static final System.Logger LOGGER = System.getLogger(AeronHealth.class.getName());
     private final StorageControllerAdapter storage;
     private final StorageBinaryDataClient client;
     private final BooleanSupplier closed;
@@ -25,6 +32,12 @@ final class AeronHealth implements ReplicationHealth {
     private final LongSupplier appliedSequence;
     private final BooleanSupplier watermarkFailed;
     private volatile boolean active = true;
+    /* First failure of each probe is logged at warning level so a persistent
+     * supplier bug (not a transient network probe) surfaces at the default
+     * log level; repeats stay at debug to keep a degraded-but-known node from
+     * flooding the operator. */
+    private final java.util.Set<String> warnedProbes =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     AeronHealth(final StorageControllerAdapter storage, final StorageBinaryDataClient client,
                 final BooleanSupplier closed, final BooleanSupplier driverFailed, final BooleanSupplier capacityAvailable,
@@ -47,6 +60,11 @@ final class AeronHealth implements ReplicationHealth {
         this.watermarkFailed = Objects.requireNonNull(watermarkFailed, "watermarkFailed");
     }
 
+    /// Reports whether this view belongs to the supplied provider pair.
+    ///
+    /// @param storage storage adapter identity
+    /// @param client  client identity
+    /// @return `true` when this view was created for both
     boolean matches(final StorageControllerAdapter storage, final StorageBinaryDataClient client) {
         return this.storage == storage && this.client == client;
     }
@@ -87,15 +105,20 @@ final class AeronHealth implements ReplicationHealth {
          * most once per evaluation, only on the live path, and the snapshot is
          * cached in a local for every check below. A health object that has
          * already been disposed stays a pure, side-effect-free failure view. */
-        if (!this.active || this.closed.getAsBoolean() || this.watermarkFailed.getAsBoolean()) return false;
-        /* Writer readiness may perform I/O; the single cached snapshot below is
-         * the only invocation for this evaluation. */
-        final boolean writerIsReady = this.writerReady.getAsBoolean();
-        return this.storage.isReady()
-               && !this.driverFailed.getAsBoolean() && this.capacityAvailable.getAsBoolean()
-               && this.checkpointState.get() == null
-               && (writerIsReady || this.client != null && this.client.failure() == null
-                                    && this.client.isRunning() && (!requireLive || this.client.isLive()));
+        try {
+            if (!this.active || this.closed.getAsBoolean() || this.watermarkFailed.getAsBoolean()) return false;
+            /* Writer readiness may perform I/O; the single cached snapshot below is
+             * the only invocation for this evaluation. */
+            final boolean writerIsReady = this.writerReady.getAsBoolean();
+            return this.storage.isReady()
+                   && !this.driverFailed.getAsBoolean() && this.capacityAvailable.getAsBoolean()
+                   && this.checkpointState.get() == null
+                   && (writerIsReady || this.client != null && this.client.failure() == null
+                                       && this.client.isRunning() && (!requireLive || this.client.isLive()));
+        } catch (final RuntimeException probeFailure) {
+            this.logProbeFailure("readiness", probeFailure);
+            return false;
+        }
     }
 
     /// Reports the replication lifecycle state.
@@ -109,6 +132,30 @@ final class AeronHealth implements ReplicationHealth {
     /// @return current replication state
     @Override
     public ReplicationHealth.State state() {
+        try {
+            return this.stateUnchecked();
+        } catch (final RuntimeException probeFailure) {
+            this.logProbeFailure("state", probeFailure);
+            return ReplicationHealth.State.FAILED;
+        }
+    }
+
+        /// Logs one probe failure at warning and every later one at debug.
+    ///
+    /// @param probe probe name used in the message and the once-per-probe set
+    /// @param probeFailure failure thrown by a supplier
+    private void logProbeFailure(final String probe, final RuntimeException probeFailure) {
+        if (this.warnedProbes.add(probe)) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Aeron replication %s probe failed; reporting the degraded state, later failures log at debug"
+                            .formatted(probe), probeFailure);
+            return;
+        }
+        LOGGER.log(System.Logger.Level.DEBUG,
+                "Aeron replication %s probe failed again".formatted(probe), probeFailure);
+    }
+
+    private ReplicationHealth.State stateUnchecked() {
         if (!this.active || this.closed.getAsBoolean() || this.driverFailed.getAsBoolean() ||
             this.watermarkFailed.getAsBoolean()) {
             return ReplicationHealth.State.FAILED;
@@ -139,6 +186,8 @@ final class AeronHealth implements ReplicationHealth {
         return this.client.isLive() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.REPLAYING;
     }
 
+        /// Marks this view inactive so later probes report a stable failure
+        /// without invoking any lifecycle supplier.
     @Override
     public void close() {
         this.active = false;

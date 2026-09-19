@@ -16,7 +16,10 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
-import peruncs.datagrid.cluster.node.replication.*;
+import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
+import peruncs.datagrid.cluster.node.replication.DataMessageAppliedListener;
+import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
+import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
 import peruncs.datagrid.cluster.storage.types.*;
 
 import java.net.ServerSocket;
@@ -41,7 +44,7 @@ class AeronStoreIntegrationIT {
     private static long latestSequence(final ClusterReplicationTransport transport) {
         final ReplicationPositionProvider positionProvider = transport.positionProvider("store");
         positionProvider.init();
-        return positionProvider.latestSequence();
+        return positionProvider.latest().logicalSequence();
     }
 
     static void configureIndexes(final GigaMap<IndexedArticle> articles) {
@@ -123,12 +126,12 @@ class AeronStoreIntegrationIT {
              StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(cursorPath)) {
             final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
             final EmbeddedStorageManager reader = readerFoundation.start();
-            final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(readerFoundation.getConnectionFoundation()).storage(reader.createConnection())
-                    .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()))
-                    .cachingTimeoutMs(0L).cachedBinaryLimit(1L)
-                    .applyTimeoutMs(StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS).build());
-            final StorageBinaryDataClient client = transport.client(receiver, "store", new AfterDataMessageConsumedListener() {
+            final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
+            final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(new StorageBinaryDataMerger.Configuration(
+                    readerFoundation.getConnectionFoundation(), reader.createConnection(),
+                    ObjectGraphUpdateHandler.PerStore(graphCoordinator),
+                    0L, 1L, 1L << 30, 60_000L, 30_000L, 5_000L, 4096, graphCoordinator));
+            final StorageBinaryDataClient client = transport.client(receiver, "store", new DataMessageAppliedListener() {
                         @Override
                         public void onApplied(final ReplicationCursor cursor) {
                             cursorManager.set(cursor);
@@ -330,15 +333,10 @@ class AeronStoreIntegrationIT {
             final String watermarkChannelOverride,
             final int watermarkStreamIdOverride
     ) {
-        return new NodeLibraryPropertiesProvider.Env() {
+        return new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return role;
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override
@@ -1008,11 +1006,10 @@ class AeronStoreIntegrationIT {
         }
 
         private StorageBinaryDataReceiver newReceiver() {
-            return StorageBinaryDataMerger.New(StorageBinaryDataMerger.Configuration.builder()
-                    .foundation(this.foundation.getConnectionFoundation()).storage(this.storage.createConnection())
-                    .objectGraphUpdateHandler(ObjectGraphUpdateHandler.PerStore(this.coordinator))
-                    .cachingTimeoutMs(0L).cachedBinaryLimit(1L)
-                    .applyTimeoutMs(StorageBinaryDataMerger.Defaults.APPLY_TIMEOUT_MS).build());
+            return StorageBinaryDataMerger.New(new StorageBinaryDataMerger.Configuration(
+                    this.foundation.getConnectionFoundation(), this.storage.createConnection(),
+                    ObjectGraphUpdateHandler.PerStore(this.coordinator),
+                    0L, 1L, 1L << 30, 60_000L, 30_000L, 5_000L, 4096, this.coordinator));
         }
 
         StorageGraphCoordinator graphCoordinator() {
@@ -1030,7 +1027,7 @@ class AeronStoreIntegrationIT {
         }
 
         private StorageBinaryDataClient newClient(final ReplicationCursor startingCursor) {
-            return this.transport.client(this.receiver, "store", new AfterDataMessageConsumedListener() {
+            return this.transport.client(this.receiver, "store", new DataMessageAppliedListener() {
                 @Override
                 public void onApplied(final ReplicationCursor cursor) {
                     final long delay = ReaderNode.this.applyDelayMs;
@@ -1155,7 +1152,17 @@ class AeronStoreIntegrationIT {
         void assertHealthy() {
             assertNull(this.client.failure(), "reader reported a terminal failure");
             assertTrue(this.client.isRunning(), "reader stopped while the writer was live");
-            assertTrue(this.client.isLive(), "reader lost its live Aeron image");
+            /* A live image can be replaced transiently during Archive-to-live
+             * handover or channel maintenance; require recovery within one
+             * stall window instead of sampling a single instant. A permanent
+             * loss still fails. */
+            final long deadline = System.nanoTime() + WAIT_STALL_NANOS;
+            while (!this.client.isLive()) {
+                if (System.nanoTime() >= deadline) {
+                    fail("reader lost its live Aeron image");
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+            }
         }
 
         boolean isRunning() {

@@ -219,7 +219,7 @@ class AeronReplicationEnvelopeTest {
     @Test
     void envelopeConstructorOwnsPayload() {
         final byte[] payload = new byte[]{7};
-        final AeronReplicationEnvelope.Envelope envelope = new AeronReplicationEnvelope.Envelope(
+        final AeronReplicationEnvelope.Envelope envelope = AeronReplicationEnvelopeTestSupport.envelope(
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 0, 0, payload);
         payload[0] = 9;
@@ -231,34 +231,57 @@ class AeronReplicationEnvelopeTest {
     void crcSupportsAllByteBufferRepresentations() {
         final byte[] expected = {4, 8, 15, 16, 23, 42};
         final int expectedCrc = AeronReplicationEnvelope.crc32c(expected);
-        AeronReplicationEnvelope.withChecksumContext(new AeronReplicationEnvelope.ChecksumContext(), () -> {
-            final byte[] heapBytes = new byte[expected.length + 4];
-            System.arraycopy(expected, 0, heapBytes, 2, expected.length);
-            assertEquals(expectedCrc,
-                    AeronReplicationEnvelope.crc32c(new UnsafeBuffer(ByteBuffer.wrap(heapBytes)), 2, expected.length));
+        final AeronReplicationEnvelope.ChecksumContext context = new AeronReplicationEnvelope.ChecksumContext();
+        final byte[] heapBytes = new byte[expected.length + 4];
+        System.arraycopy(expected, 0, heapBytes, 2, expected.length);
+        assertEquals(expectedCrc,
+                AeronReplicationEnvelope.crc32c(new UnsafeBuffer(ByteBuffer.wrap(heapBytes)), 2, expected.length, context));
 
-            final ByteBuffer slicedBytes = ByteBuffer.wrap(new byte[]{99, 4, 8, 15, 16, 23, 42, 100}).slice();
-            assertEquals(expectedCrc,
-                    AeronReplicationEnvelope.crc32c(new UnsafeBuffer(slicedBytes), 1, expected.length));
+        final ByteBuffer slicedBytes = ByteBuffer.wrap(new byte[]{99, 4, 8, 15, 16, 23, 42, 100}).slice();
+        assertEquals(expectedCrc,
+                AeronReplicationEnvelope.crc32c(new UnsafeBuffer(slicedBytes), 1, expected.length, context));
 
-            final ByteBuffer directBytes = ByteBuffer.allocateDirect(expected.length + 2);
-            directBytes.position(1);
-            directBytes.put(expected).flip();
-            assertEquals(expectedCrc,
-                    AeronReplicationEnvelope.crc32c(new UnsafeBuffer(directBytes), 1, expected.length));
-            return null;
-        });
+        final ByteBuffer directBytes = ByteBuffer.allocateDirect(expected.length + 2);
+        directBytes.position(1);
+        directBytes.put(expected).flip();
+        assertEquals(expectedCrc,
+                AeronReplicationEnvelope.crc32c(new UnsafeBuffer(directBytes), 1, expected.length, context));
+    }
+
+        /// Verifies a direct-buffer checksum rejects an invalid range and a null context.
+    @Test
+    void directCrcRejectsInvalidRangeAndMissingContext() {
+        final UnsafeBuffer payload = new UnsafeBuffer(new byte[]{1, 2, 3});
+        assertThrows(NullPointerException.class,
+                () -> AeronReplicationEnvelope.crc32c(payload, 0, 3, null));
+        assertThrows(IllegalArgumentException.class,
+                () -> AeronReplicationEnvelope.crc32c(payload, 2, 3, new AeronReplicationEnvelope.ChecksumContext()));
+        assertThrows(IllegalArgumentException.class,
+                () -> AeronReplicationEnvelope.crc32c(payload, -1, 1, new AeronReplicationEnvelope.ChecksumContext()));
     }
 
         /// Verifies the owned form rejects impossible public field combinations.
     @Test
     void ownedEnvelopeValidatesItsPublicFields() {
-        assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
+        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelopeTestSupport.envelope(
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 1, 0, 1, 0, 0, new byte[]{7}));
-        assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
+        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelopeTestSupport.envelope(
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 1, 0, new byte[]{7, 8}));
+    }
+
+        /// Verifies a zero wire nonce is rejected at construction and at encode time.
+    @Test
+    void rejectsZeroWireNonce() {
+        assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
+                CLUSTER, 0L, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                1, 0, 1, 0, 0, new byte[]{7}));
+        final byte[] target = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 1];
+        assertThrows(IllegalArgumentException.class, () -> AeronReplicationEnvelope.encode(
+                new UnsafeBuffer(target), 0, CLUSTER, 1, 1, 0L, 7,
+                AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0, 0,
+                new UnsafeBuffer(new byte[]{1}), 0, 1, new AeronReplicationEnvelope.ChecksumContext()));
     }
 
         /// Verifies the fixed layout: an 84-byte header plus the chunk payload,
@@ -270,11 +293,11 @@ class AeronReplicationEnvelopeTest {
         final byte[] payload = new byte[]{1, 2, 3};
         final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length + 8];
         java.util.Arrays.fill(encoded, (byte) 0x5a);
-        final int length = AeronReplicationEnvelope.withChecksumContext(
-                new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
-                        new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, 7,
-                        AeronReplicationEnvelope.Kind.STORE_BINARY, payload.length, 0, 1, 0, 0,
-                        new UnsafeBuffer(payload), 0, payload.length));
+        final int length = AeronReplicationEnvelope.encode(
+                new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, 7, 7,
+                AeronReplicationEnvelope.Kind.STORE_BINARY, payload.length, 0, 1, 0, 0,
+                new UnsafeBuffer(payload), 0, payload.length,
+                new AeronReplicationEnvelope.ChecksumContext());
         assertEquals(AeronReplicationEnvelope.HEADER_LENGTH + payload.length, length);
         assertArrayEquals(payload, AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, length).payload());
@@ -285,13 +308,10 @@ class AeronReplicationEnvelopeTest {
 
     @Test
     void rejectsAFrameFromAnotherWireNonce() {
-        final long nonce = AeronReplicationEnvelope.defaultWireNonce(CLUSTER);
-        final byte[] encoded = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 1];
-        AeronReplicationEnvelope.withChecksumContext(new AeronReplicationEnvelope.ChecksumContext(), () ->
-                AeronReplicationEnvelope.encode(new UnsafeBuffer(encoded), 0, CLUSTER, 1, 1, nonce + 2,
-                        7, AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0, 0,
-                        new UnsafeBuffer(new byte[]{1}), 0, 1,
-                        AeronReplicationEnvelope.crc32c(new UnsafeBuffer(new byte[]{1}), 0, 1)));
+        final long nonce = AeronReplicationEnvelopeTestSupport.fixtureNonce(CLUSTER);
+        final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
+                CLUSTER, 1, 1, nonce + 2, 7, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                1, 0, 1, 0, 0, new byte[]{1});
         final AeronReplicationEnvelope.EnvelopeView view = AeronReplicationEnvelope.decodeView(
                 new UnsafeBuffer(encoded), 0, encoded.length);
         assertFalse(view.matches(CLUSTER, nonce));
@@ -318,11 +338,11 @@ class AeronReplicationEnvelopeTest {
         final byte[] before = target.clone();
 
         assertThrows(IllegalArgumentException.class, () ->
-                AeronReplicationEnvelope.withChecksumContext(
-                        new AeronReplicationEnvelope.ChecksumContext(), () -> AeronReplicationEnvelope.encode(
-                                new UnsafeBuffer(target), 0, CLUSTER, 1, 1, 7,
-                                AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0,
-                                new UnsafeBuffer(new byte[]{1, 2, 3}), 0, 3)));
+                AeronReplicationEnvelope.encode(
+                        new UnsafeBuffer(target), 0, CLUSTER, 1, 1, 7, 7,
+                        AeronReplicationEnvelope.Kind.STORE_BINARY, 3, 0, 1, 0, 0,
+                        new UnsafeBuffer(new byte[]{1, 2, 3}), 0, 3,
+                        new AeronReplicationEnvelope.ChecksumContext()));
         assertArrayEquals(before, target, "a rejected frame must not partially overwrite its destination");
     }
 
@@ -367,9 +387,8 @@ class AeronReplicationEnvelopeTest {
     }
 
     private static void rewriteHeaderCrc(final byte[] encoded) {
-        final int crc = AeronReplicationEnvelope.withChecksumContext(
-                new AeronReplicationEnvelope.ChecksumContext(),
-                () -> AeronReplicationEnvelope.crc32c(new UnsafeBuffer(encoded), 0, 80));
+        final int crc = AeronReplicationEnvelope.crc32c(
+                new UnsafeBuffer(encoded), 0, 80, new AeronReplicationEnvelope.ChecksumContext());
         ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN).putInt(80, crc);
     }
 }

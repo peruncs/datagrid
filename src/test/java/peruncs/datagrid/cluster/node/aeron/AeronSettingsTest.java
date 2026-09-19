@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -35,7 +36,7 @@ class AeronSettingsTest {
         final UUID cluster = UUID.randomUUID();
         final UUID node = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        return new NodeLibraryPropertiesProvider.Env() {
+        return new TestNodeProperties() {
             @Override
             public boolean isProdMode() {
                 return production;
@@ -44,11 +45,6 @@ class AeronSettingsTest {
             @Override
             public String replicationRole() {
                 return role;
-            }
-
-            @Override
-            public boolean replicationRoleConfigured() {
-                return true;
             }
 
             @Override
@@ -201,9 +197,9 @@ class AeronSettingsTest {
     @Test
     void aeronAuthIsDisabledByDefault() {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
-        assertFalse(settings.authEnabled());
-        assertNull(settings.authPrincipal());
-        assertNull(settings.authCredentials());
+        assertFalse(settings.auth().enabled());
+        assertNull(settings.auth().principal());
+        assertNull(settings.auth().credentials());
         assertNull(settings.authenticatorSupplier());
         assertNull(settings.authorisationServiceSupplier());
         assertNull(settings.credentialsSupplier());
@@ -218,9 +214,9 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(credentials)
         )));
-        assertTrue(settings.authEnabled());
-        assertEquals("datagrid-node", settings.authPrincipal());
-        assertArrayEquals(credentials, settings.authCredentials());
+        assertTrue(settings.auth().enabled());
+        assertEquals("datagrid-node", settings.auth().principal());
+        assertArrayEquals(credentials, settings.auth().credentials());
         final var authenticatorSupplier = settings.authenticatorSupplier();
         assertNotNull(authenticatorSupplier);
         assertNotNull(authenticatorSupplier.get());
@@ -304,8 +300,8 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS_FILE", file.toString()
         )));
 
-        assertTrue(settings.authEnabled());
-        assertArrayEquals(credentials, settings.authCredentials());
+        assertTrue(settings.auth().enabled());
+        assertArrayEquals(credentials, settings.auth().credentials());
         final var credentialsSupplier = settings.credentialsSupplier();
         assertNotNull(credentialsSupplier);
         assertArrayEquals(credentials, credentialsSupplier.encodedCredentials());
@@ -390,7 +386,7 @@ class AeronSettingsTest {
         final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
                 "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true")));
 
-        assertFalse(settings.authEnabled());
+        assertFalse(settings.auth().enabled());
         assertNull(settings.authenticatorSupplier());
     }
 
@@ -413,8 +409,8 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS",
                 Base64.getEncoder().encodeToString("datagrid-reader-secret".getBytes(StandardCharsets.US_ASCII)))));
 
-        assertTrue(settings.authEnabled());
-        assertEquals("datagrid-node", settings.authPrincipal());
+        assertTrue(settings.auth().enabled());
+        assertEquals("datagrid-node", settings.auth().principal());
     }
 
         /// Retention without a reader set stays unconfigured rather than failing:
@@ -423,6 +419,79 @@ class AeronSettingsTest {
     void writerWithoutRetentionReadersLeavesRetentionUnconfigured() {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
         assertTrue(settings.retentionReaders().isEmpty());
+    }
+
+        /// Verifies the Archive control, watermark close, and lease lock budgets
+    /// default independently of the publication offer timeout.
+    @Test
+    void perConcernTimeoutBudgetsDefaultIndependently() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
+        assertEquals(TimeUnit.SECONDS.toNanos(5), settings.archiveControlTimeoutNanos(),
+                "Archive control requests must use their own 5 s budget");
+        assertEquals(TimeUnit.SECONDS.toNanos(5), settings.watermarkCloseTimeoutNanos(),
+                "watermark channel close must use its own 5 s budget");
+        assertEquals(5_000L, settings.leaseAcquireLockTimeoutMillis(),
+                "the writer lease lock wait must have its own bounded default");
+        assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().offerTimeoutNanos(),
+                "offerTimeoutNanos must stay the publication-offer budget");
+    }
+
+        /// Verifies each per-concern timeout can be overridden independently.
+    @Test
+    void perConcernTimeoutBudgetsCanBeOverridden() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS", "123456",
+                "ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS", "654321",
+                "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS", "42"
+        )));
+        assertEquals(123456L, settings.archiveControlTimeoutNanos());
+        assertEquals(654321L, settings.watermarkCloseTimeoutNanos());
+        assertEquals(42L, settings.leaseAcquireLockTimeoutMillis());
+    }
+
+        /// Verifies non-positive per-concern budgets fail configuration validation.
+    @Test
+    void rejectsNonPositivePerConcernTimeouts() {
+        for (final String key : List.of(
+                "ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS",
+                "ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS",
+                "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS")) {
+            assertThrows(IllegalArgumentException.class, () ->
+                    AeronSettings.fromEnvironment(properties(Map.of(key, "0"))), key);
+        }
+    }
+
+        /// Verifies a UDP channel without an endpoint or control is rejected by the
+    /// ChannelUri-based parser rather than a hand-rolled option split.
+    @Test
+    void rejectsUdpChannelWithoutEndpointOrControl() {
+        assertThrows(IllegalArgumentException.class, () -> AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL", "aeron:udp?alias=no-endpoint"
+        ))));
+    }
+
+        /// Verifies reader credentials are cloned on every accessor call so callers
+    /// cannot mutate the settings-held secret.
+    @Test
+    void readerCredentialsAccessorReturnsDefensiveCopies() {
+        final byte[] writerCredentials = "datagrid-auth-secret".getBytes(StandardCharsets.US_ASCII);
+        final byte[] readerCredentials = "datagrid-reader-secret".getBytes(StandardCharsets.US_ASCII);
+        final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", "true",
+                "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
+                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(writerCredentials),
+                "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL", "datagrid-reader",
+                "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS", Base64.getEncoder().encodeToString(readerCredentials)
+        )));
+        final byte[] firstRead = settings.auth().readerCredentials();
+        assertArrayEquals(readerCredentials, firstRead);
+        Arrays.fill(firstRead, (byte) 0);
+        assertArrayEquals(readerCredentials, settings.auth().readerCredentials(),
+                "mutating a returned array must not change the settings-held secret");
+        final byte[] writerRead = settings.auth().credentials();
+        Arrays.fill(writerRead, (byte) 0);
+        assertArrayEquals(writerCredentials, settings.auth().credentials(),
+                "mutating a returned array must not change the settings-held secret");
     }
 
         /// Production-shaped settings with routable endpoints and home-directory paths.

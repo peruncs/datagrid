@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.ByteBuffer;
@@ -25,7 +26,7 @@ final class StorageBinaryDataImporter {
     /// @param storage       destination Store connection
     /// @param sourceBuffers source buffers
     /// @return imported native buffers, owned by the caller
-    public static ByteBuffer[] importOwned(
+    static ByteBuffer[] importOwned(
             final StorageConnection storage,
             final ByteBuffer[] sourceBuffers
     ) {
@@ -44,7 +45,7 @@ final class StorageBinaryDataImporter {
         /* Storage.importData consumes the supplied views synchronously and does not
          * retain them. Reset the owned buffers afterwards because their positions are
          * needed by the deferred materializer. */
-        storage.importData(org.eclipse.serializer.util.X.Enum(importedBuffers));
+        storage.importData(X.Enum(importedBuffers));
         for (final ByteBuffer imported : importedBuffers) imported.position(0);
         return importedBuffers;
     }
@@ -85,7 +86,7 @@ final class StorageBinaryDataImporter {
     /// @return `true` when all buffers were direct and ownership was imported
     /// @throws RuntimeException if import fails; the caller retains ownership and
     ///                          must release the buffers
-    public static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers) {
+    static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers) {
         notNull(storage);
         notNull(buffers);
         for (final ByteBuffer buffer : buffers) {
@@ -114,7 +115,7 @@ final class StorageBinaryDataImporter {
     /// native address would free it twice.
     ///
     /// @param buffers buffers to release
-    public static void release(final ByteBuffer[] buffers) {
+    static void release(final ByteBuffer[] buffers) {
         if (buffers == null) return;
         release(buffers, buffers.length);
     }
@@ -127,7 +128,7 @@ final class StorageBinaryDataImporter {
     ///
     /// @param buffers scratch array holding owned buffers in its prefix
     /// @param length  number of populated prefix slots
-    public static void release(final ByteBuffer[] buffers, final int length) {
+    static void release(final ByteBuffer[] buffers, final int length) {
         if (buffers == null) return;
         if (length < 0 || length > buffers.length) {
             throw new IllegalArgumentException("release length out of range: %s".formatted(length));

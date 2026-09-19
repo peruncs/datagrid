@@ -3,9 +3,9 @@ package peruncs.datagrid.cluster.node.backup;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.replication.ReplicationCursor;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 
 import java.nio.file.Path;
@@ -42,7 +42,8 @@ class StorageBackupManagerTest {
 
     private static BackupMetadata backup(final long timestamp, final boolean manualSlot) {
         return new BackupMetadata(timestamp, manualSlot, null, null,
-                BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
+                BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN,
+                null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
     }
 
     private static ReplicationCursor aeronCursor(
@@ -66,7 +67,7 @@ class StorageBackupManagerTest {
             final long recordingId
     ) {
         return new BackupMetadata(timestamp, manualSlot, clusterId, generation,
-                epoch, recordingId, null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
+                epoch, recordingId, BackupMetadata.UNKNOWN, null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
     }
 
     /// A typed stub keeps this orchestration test independent of Store implementation details.
@@ -134,7 +135,7 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
-        assertThrows(IllegalStateException.class, () -> manager.createStorageBackup(false));
+        assertThrows(NodeLibraryException.class, () -> manager.createStorageBackup(false));
         assertEquals(1, client.stopCalls);
         assertEquals(0, client.resumeCalls);
         assertTrue(backend.created.isEmpty());
@@ -149,8 +150,8 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
-        final IllegalStateException failure = assertThrows(
-                IllegalStateException.class, () -> manager.createStorageBackup(false));
+        final NodeLibraryException failure = assertThrows(
+                NodeLibraryException.class, () -> manager.createStorageBackup(false));
         assertSame(client.failure, failure.getCause());
         assertEquals(0, client.stopCalls);
         assertTrue(backend.created.isEmpty());
@@ -278,6 +279,96 @@ class StorageBackupManagerTest {
                 "the stored manifest must describe the stopped boundary, not the pre-stop position");
     }
 
+    /// Verifies the maintenance path reports unreadable archives without failing the backup.
+    @Test
+    void reportsUnreadableArchivesDuringMaintenance() {
+        final FakeBackend backend = new FakeBackend();
+        backend.unreadable = List.of("broken.identity.zip");
+        final StorageBackupManager manager = manager(backend, new FakeClient(), new FakeRetention(), 1);
+
+        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertEquals(1, backend.unreadableScans,
+                "the prune path must sweep archives that can never be selected");
+        assertNull(manager.maintenanceFailure());
+    }
+
+    /// Verifies a prune failure after a durable publication does not fail the backup,
+    /// is exposed as maintenance failure, and does not skip retention.
+    @Test
+    void pruneFailureDoesNotFailTheBackupAndRetentionStillRuns() {
+        final FakeClient client = new FakeClient();
+        client.running = true;
+        final FakeBackend backend = new FakeBackend();
+        backend.backups.addAll(List.of(backup(1L, false), backup(2L, false)));
+        backend.previousCursor = CURSOR;
+        backend.deleteFailure = new NodeLibraryException("prune failed");
+        final FakeRetention retention = new FakeRetention();
+
+        final StorageBackupManager manager = manager(backend, client, retention, 1);
+
+        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertEquals(1, backend.created.size(), "the durable backup must be reported as successful");
+        assertSame(backend.deleteFailure, manager.maintenanceFailure());
+        assertEquals(1, retention.calls, "a prune failure must not skip retention");
+        assertEquals(1, client.resumeCalls);
+    }
+
+    /// Verifies a retention failure after a durable publication does not fail the
+    /// backup and is exposed as a distinct maintenance failure.
+    @Test
+    void retentionFailureDoesNotFailTheBackup() {
+        final FakeBackend backend = new FakeBackend();
+        backend.backups.add(backup(1L, false));
+        backend.previousCursor = CURSOR;
+        final FakeRetention retention = new FakeRetention();
+        retention.failure = new NodeLibraryException("retention failed");
+
+        final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 2);
+
+        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertSame(retention.failure, manager.maintenanceFailure());
+    }
+
+    /// Verifies a later clean maintenance phase clears the exposed failure.
+    @Test
+    void successfulMaintenanceClearsTheObservable() {
+        final FakeBackend backend = new FakeBackend();
+        backend.backups.add(backup(1L, false));
+        backend.previousCursor = CURSOR;
+        final FakeRetention retention = new FakeRetention();
+        retention.failure = new NodeLibraryException("retention failed");
+        final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 2);
+
+        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertNotNull(manager.maintenanceFailure());
+
+        retention.failure = null;
+        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertNull(manager.maintenanceFailure());
+    }
+
+    /// Verifies an interrupted reader-stop poll raises a domain failure instead of
+    /// leaking an interrupted-sleep wrapper.
+    @Test
+    void interruptedReaderStopRaisesADomainFailure() {
+        final FakeClient client = new FakeClient();
+        client.running = true;
+        client.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
+        final FakeBackend backend = new FakeBackend();
+        final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
+
+        try {
+            Thread.currentThread().interrupt();
+            final NodeLibraryException failure = assertThrows(
+                    NodeLibraryException.class, () -> manager.createStorageBackup(false));
+            assertTrue(failure.getMessage().contains("Interrupted"), failure.getMessage());
+        } finally {
+            Thread.interrupted();
+        }
+        assertTrue(backend.created.isEmpty());
+        assertEquals(0, client.resumeCalls);
+    }
+
     private static final class FakeClient implements StorageBinaryDataClient {
         private boolean running;
         private RuntimeException failure;
@@ -340,10 +431,19 @@ class StorageBackupManagerTest {
         private Function<BackupMetadata, ReplicationCursor> cursorForBackup;
         private int previousCalls;
         private RuntimeException createFailure;
+        private RuntimeException deleteFailure;
+        private List<String> unreadable = List.of();
+        private int unreadableScans;
 
         @Override
         public List<BackupMetadata> listBackups() {
             return List.copyOf(this.backups);
+        }
+
+        @Override
+        public List<String> listUnreadableArchives() {
+            this.unreadableScans++;
+            return this.unreadable;
         }
 
         @Override
@@ -354,6 +454,7 @@ class StorageBackupManagerTest {
 
         @Override
         public void deleteBackup(final BackupMetadata backup) {
+            if (this.deleteFailure != null) throw this.deleteFailure;
             this.deleted.add(backup);
             this.backups.remove(backup);
         }
@@ -391,10 +492,12 @@ class StorageBackupManagerTest {
     private static final class FakeRetention implements ReplicationLogRetention {
         private final Queue<MaintenanceResult> results = new ArrayDeque<>();
         private final List<ReplicationCursor> cursors = new ArrayList<>();
+        private RuntimeException failure;
         private int calls;
 
         @Override
         public MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
+            if (this.failure != null) throw this.failure;
             this.calls++;
             this.cursors.add(cursor);
             return this.results.isEmpty()

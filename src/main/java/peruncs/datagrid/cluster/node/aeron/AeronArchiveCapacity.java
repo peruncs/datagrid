@@ -6,6 +6,12 @@ import java.nio.file.Path;
 import java.util.function.LongSupplier;
 
 /// Cached Archive free-space view and writer admission policy.
+///
+/// Capacity has two consumers: write admission, which must refuse a write when
+/// the embedded Archive volume cannot hold it, and health, which reports the
+/// usable space. Filesystem probes are cached for a short interval so neither
+/// path turns every write into a stat call; [#invalidate] drops the cache when
+/// the Archive directory or policy changes.
 final class AeronArchiveCapacity {
     private static final long CACHE_NANOS = 250_000_000L;
 
@@ -17,7 +23,7 @@ final class AeronArchiveCapacity {
 
     AeronArchiveCapacity(final AeronSettings settings) {
         this(settings.externalArchive(), settings.minimumArchiveFreeBytes(),
-                settings.archiveSegmentFileLength(), () -> queryUsableSpace(settings.archiveDirectory()));
+                settings.archiveSegmentFileLength(), () -> queryUsableSpace(settings.directories().archiveDirectory()));
     }
 
     AeronArchiveCapacity(final boolean externalArchive, final long minimumFreeBytes,
@@ -39,10 +45,22 @@ final class AeronArchiveCapacity {
         }
     }
 
+    /// Reports whether the Archive can accept a write of unknown size.
+    ///
+    /// @return `true` when the configured policy admits a write
     boolean available() {
         return this.available(0L);
     }
 
+        /// Reports whether the Archive can accept one transaction of the given size.
+    ///
+    /// External Archives and a zero minimum reserve admit unconditionally.
+    /// Otherwise the required free space is the configured reserve plus the
+    /// larger of the transaction size and one Archive segment; an unknown
+    /// usable space fails closed and refuses the write.
+    ///
+    /// @param transactionBytes encoded transaction size
+    /// @return `true` when the configured policy admits the write
     boolean available(final long transactionBytes) {
         if (transactionBytes < 0) return false;
         if (this.minimumFreeBytes == 0 || this.externalArchive) return true;
@@ -56,10 +74,20 @@ final class AeronArchiveCapacity {
         return this.usableSpace() >= required;
     }
 
+        /// Returns the last known usable Archive bytes.
+    ///
+    /// An external Archive has no local volume to measure; `-1` is the
+    /// explicit "unknown" value rather than a fake zero.
+    ///
+    /// @return usable bytes, or `-1` when the Archive is external
     long usableSpaceBytes() {
         return this.externalArchive ? -1L : this.usableSpace();
     }
 
+        /// Drops the cached filesystem probe without touching policy.
+    ///
+    /// Called when the runtime (re)starts so the first admission check after
+    /// startup observes a fresh volume reading instead of a pre-startup value.
     void invalidate() {
         final CapacitySnapshot current = this.capacity;
         this.capacity = new CapacitySnapshot(0L, current.usableSpace());

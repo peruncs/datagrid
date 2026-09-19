@@ -3,6 +3,7 @@ package peruncs.datagrid.cluster.node;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -10,20 +11,28 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/// Runs periodic node maintenance on shared daemon threads.
+/// Runs periodic node maintenance on shared daemon platform threads.
 ///
 /// Each node owns one housekeeper. Callers schedule every task first and
 /// start the housekeeper last; close stops future runs and releases the
 /// threads. Tasks run with a fixed delay, so a slow run postpones its own
-/// next run instead of overlapping it. A failing task is logged and the
-/// remaining tasks keep running.
+/// next run instead of overlapping it. A task that throws is logged and the
+/// remaining tasks keep running; a task that fails [#FAILURE_THRESHOLD]
+/// consecutive runs degrades [#failure()] so readiness reports the node
+/// instead of hiding the repeated failure, and the next successful run
+/// clears the degradation — a transient flap degrades health only while it
+/// lasts. A fatal [Error] never clears.
 final class NodeHousekeeper implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(NodeHousekeeper.class.getName());
     private static final int THREADS = 2;
+    /// Runs a task must fail consecutively before health degrades.
+    static final int FAILURE_THRESHOLD = 3;
     private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
 
     private final ScheduledThreadPoolExecutor scheduler;
     private final AtomicReference<Error> fatalFailure = new AtomicReference<>();
+    private final AtomicReference<RuntimeException> degradedFailure = new AtomicReference<>();
+    private final ConcurrentHashMap<String, AtomicInteger> consecutiveFailures = new ConcurrentHashMap<>();
     private final List<ScheduledTask> pending = new ArrayList<>();
     private boolean started;
     private boolean closing;
@@ -32,10 +41,10 @@ final class NodeHousekeeper implements AutoCloseable {
     private NodeHousekeeper() {
         final AtomicInteger threadCount = new AtomicInteger();
         this.scheduler = new ScheduledThreadPoolExecutor(THREADS, task ->
-                Thread.ofVirtual()
+                Thread.ofPlatform()
+                        .daemon()
                         .name("datagrid-housekeeper-%s".formatted(threadCount.incrementAndGet()))
                         .unstarted(task));
-        this.scheduler.setRemoveOnCancelPolicy(true);
         this.scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
@@ -50,9 +59,21 @@ final class NodeHousekeeper implements AutoCloseable {
         LOGGER.log(System.Logger.Level.DEBUG, "Running housekeeper task '%s'".formatted(scheduled.name()));
         try {
             scheduled.task().run();
+            /* A success clears both the streak and any degradation an earlier
+             * streak latched: health must recover when maintenance recovers,
+             * not stay degraded for the node's lifetime. Fatal [Error]s are
+             * never cleared — the node must fail closed until restart. */
+            this.consecutiveFailures.remove(scheduled.name());
+            this.degradedFailure.set(null);
             LOGGER.log(System.Logger.Level.DEBUG, "Finished housekeeper task '%s'".formatted(scheduled.name()));
         } catch (final RuntimeException failure) {
             LOGGER.log(System.Logger.Level.ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
+            final int failures = this.consecutiveFailures
+                    .computeIfAbsent(scheduled.name(), ignored -> new AtomicInteger())
+                    .incrementAndGet();
+            if (failures >= FAILURE_THRESHOLD) {
+                this.degradedFailure.compareAndSet(null, failure);
+            }
         } catch (final Error failure) {
             /* Never let an Error escape scheduleWithFixedDelay: ScheduledExecutorService
              * cancels that task permanently when its runnable throws. Record the fatal
@@ -63,9 +84,13 @@ final class NodeHousekeeper implements AutoCloseable {
         }
     }
 
-        /// Returns the first fatal maintenance failure, or {@code null}.
-    Error failure() {
-        return this.fatalFailure.get();
+        /// Returns the fatal maintenance failure, or the first task failure that
+        /// repeated past the degradation threshold, or `null` while healthy.
+    ///
+    /// @return failure requiring health degradation, or `null`
+    Throwable failure() {
+        final Error fatal = this.fatalFailure.get();
+        return fatal != null ? fatal : this.degradedFailure.get();
     }
 
         /// Registers one periodic task. Tasks must be scheduled before start.
@@ -119,16 +144,20 @@ final class NodeHousekeeper implements AutoCloseable {
             );
         }
         LOGGER.log(System.Logger.Level.INFO, "Started node housekeeper with %s task(s)".formatted(this.pending.size()));
+        this.pending.clear();
     }
 
         /// Stops future runs and releases the threads. A running task is interrupted.
     ///
     /// Only the flag flips hold the monitor; the bounded join runs without
-    /// it so scheduling threads are never blocked behind shutdown.
+    /// it so scheduling threads are never blocked behind shutdown. A timeout
+    /// is logged as a warning and still marks the housekeeper closed: the pool
+    /// was already shut down, so retrying cannot release anything more, and a
+    /// close must not fail the node for a bounded wait.
     @Override
     public void close() {
         synchronized (this) {
-            if (this.closed) {
+            if (this.closed || this.closing) {
                 return;
             }
             this.closing = true;
@@ -137,17 +166,17 @@ final class NodeHousekeeper implements AutoCloseable {
         this.scheduler.shutdownNow();
         try {
             if (!this.scheduler.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                LOGGER.log(System.Logger.Level.WARNING, "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
-                throw new IllegalStateException(
+                LOGGER.log(System.Logger.Level.WARNING,
                         "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while stopping node housekeeper", interrupted);
-        }
-        synchronized (this) {
-            this.closed = true;
-            this.closing = false;
+            LOGGER.log(System.Logger.Level.WARNING, "Interrupted while stopping node housekeeper", interrupted);
+        } finally {
+            synchronized (this) {
+                this.closed = true;
+                this.closing = false;
+            }
         }
     }
 

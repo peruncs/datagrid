@@ -8,6 +8,7 @@ import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.util.BufferSizeProviderIncremental;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -15,6 +16,7 @@ import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -25,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -35,7 +38,7 @@ class AeronReplicationWriteCoordinatorTest {
     void rejectsMultipleCoordinatorsForOnePublisher() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator first = new AeronReplicationWriteCoordinator(publisher);
@@ -48,7 +51,7 @@ class AeronReplicationWriteCoordinatorTest {
     void coordinatorOwnedPublisherRejectsUnfencedPreparation() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -62,7 +65,7 @@ class AeronReplicationWriteCoordinatorTest {
     void rejectsWritesBelowArchiveCapacityThreshold() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -79,7 +82,7 @@ class AeronReplicationWriteCoordinatorTest {
     void capacityAdmissionReceivesPayloadAndDictionaryBytes() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AtomicLong required = new AtomicLong();
@@ -106,7 +109,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<Long> sequences = new ArrayList<>();
         final List<Integer> crcs = new ArrayList<>();
         final UUID cluster = UUID.randomUUID();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, 1024,
                 AeronReplicationConfiguration.builder().chunkSize(256).maxTransactionBytes(512).build(), cluster, 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -117,7 +120,7 @@ class AeronReplicationWriteCoordinatorTest {
             crcs.add(crc);
         });
         final var prepared = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
-        coordinator.commit(prepared);
+        coordinator.commitOrMarkUncertain(prepared);
         final var second = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})));
         coordinator.abort(second);
         assertEquals(List.of(
@@ -143,7 +146,7 @@ class AeronReplicationWriteCoordinatorTest {
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
                 .build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) ->
                 {
                     events.add("archive");
@@ -166,7 +169,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        new AeronStorageBinaryReplicationTarget(local, coordinator)
+        AeronStorageBinaryReplicationTarget.New(local, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{7})));
         assertEquals(List.of("ENQUEUED", "local", "archive", "archive", "COMMITTED"), events);
         assertEquals(List.of(0L, 0L), sequences);
@@ -184,7 +187,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicInteger uncertainLength = new AtomicInteger(-1);
         final AtomicInteger uncertainChunks = new AtomicInteger(-1);
         final AtomicInteger uncertainCrc = new AtomicInteger(-1);
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> offers.getAndIncrement() == 0 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -207,7 +210,7 @@ class AeronReplicationWriteCoordinatorTest {
             }
         };
         coordinator.distributeTypeDictionary("type");
-        assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryReplicationTarget(local, coordinator)
+        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(local, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1, 2, 3}))));
         assertEquals(3, uncertainLength.get());
         assertEquals(1, uncertainChunks.get());
@@ -221,7 +224,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<String> events = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> {
                     events.add("archive");
                     return length;
@@ -238,7 +241,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryReplicationTarget(failing, coordinator)
+        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(List.of("PREPARING", "archive", "archive", "REJECTED"), events);
         coordinator.dispose();
@@ -250,7 +253,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) ->
                 {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
@@ -270,7 +273,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        final AeronStorageBinaryReplicationTarget target = new AeronStorageBinaryReplicationTarget(local, coordinator);
+        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.New(local, coordinator);
         assertThrows(IllegalStateException.class,
                 () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})));
@@ -287,7 +290,7 @@ class AeronReplicationWriteCoordinatorTest {
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
                 .build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -314,7 +317,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryReplicationTarget(failing, coordinator)
+        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(List.of("ENQUEUED:0"), events);
         assertTrue(fenceCleared.get());
@@ -330,7 +333,7 @@ class AeronReplicationWriteCoordinatorTest {
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
                 .build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -350,7 +353,7 @@ class AeronReplicationWriteCoordinatorTest {
             CrashHook.runWithHook((name, ignored) ->
             {
                 if ("AFTER_ENQUEUE_BEFORE_PREPARE".equals(name)) throw failure;
-            }, () -> assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryReplicationTarget(local, coordinator)
+            }, () -> assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(local, coordinator)
                     .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})))));
             assertEquals(List.of(AeronReplicationCheckpoint.State.ENQUEUED,
                     AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
@@ -369,7 +372,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) ->
                 {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
@@ -392,7 +395,7 @@ class AeronReplicationWriteCoordinatorTest {
             CrashHook.runWithHook((name, ignored) ->
             {
                 if ("AFTER_LOCAL_WRITE_BEFORE_COMMIT".equals(name)) throw failure;
-            }, () -> assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryReplicationTarget(local, coordinator)
+            }, () -> assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(local, coordinator)
                     .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})))));
             assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
                     AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
@@ -410,7 +413,7 @@ class AeronReplicationWriteCoordinatorTest {
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
                 .build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final IllegalStateException cleanupFailure = new IllegalStateException("checkpoint cleanup failed");
@@ -448,7 +451,7 @@ class AeronReplicationWriteCoordinatorTest {
             final AtomicInteger commitMarkers = new AtomicInteger();
             final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                     .chunkSize(256).maxTransactionBytes(512).build();
-            final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+            final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                     (buffer, offset, length) -> {
                         offers.incrementAndGet();
                         try {
@@ -461,7 +464,7 @@ class AeronReplicationWriteCoordinatorTest {
                              * terminal marker proves the commit escaped. */
                         }
                         return length;
-                    }, configuration.maxMessageLength(), configuration, java.util.UUID.randomUUID(), 1, 0);
+                    }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final CountDownLatch atGate = new CountDownLatch(1);
         final CountDownLatch releaseGate = new CountDownLatch(1);
         final AtomicBoolean stolen = new AtomicBoolean();
@@ -472,7 +475,13 @@ class AeronReplicationWriteCoordinatorTest {
             }
 
             @Override
-            public long offerUnderOwnership(final java.util.function.LongSupplier offer) {
+            public long offerUnderOwnership(final LongSupplier offer) {
+                if (stolen.get()) throw new WriterFencedException("writer fencing lease lost before commit");
+                return offer.getAsLong();
+            }
+
+            @Override
+            public long offerUnderOwnership(final WriterLeaseGate.OwnedOffer offer) {
                 atGate.countDown();
                 try {
                     assertTrue(releaseGate.await(10, TimeUnit.SECONDS), "gate test timed out");
@@ -481,9 +490,9 @@ class AeronReplicationWriteCoordinatorTest {
                     throw new IllegalStateException(interrupted);
                 }
                 if (stolen.get()) {
-                    throw new IllegalStateException("writer fencing lease lost before commit; this writer is fenced");
+                    throw new WriterFencedException("writer fencing lease lost before commit; this writer is fenced");
                 }
-                return offer.getAsLong();
+                return offer.offer(() -> !stolen.get());
             }
         };
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -496,7 +505,7 @@ class AeronReplicationWriteCoordinatorTest {
             final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
             final Thread committing = Thread.ofVirtual().start(() -> {
                 try {
-                    coordinator.executeWriteAtomically(() -> coordinator.commitOrMarkUncertain(prepared));
+                    coordinator.commitOrMarkUncertain(prepared);
                 } catch (final Throwable failure) {
                     commitFailure.set(failure);
                 }
@@ -507,12 +516,9 @@ class AeronReplicationWriteCoordinatorTest {
                 releaseGate.countDown();
                 committing.join(TimeUnit.SECONDS.toMillis(10));
                 assertFalse(committing.isAlive(), "commit did not finish after the steal");
-                assertNotNull(commitFailure.get(), "a stolen lease must fail the commit");
-                assertTrue(commitFailure.get().getMessage().contains("lease") ||
-                        (commitFailure.get().getCause() != null &&
-                         commitFailure.get().getCause().getMessage().contains("fenced")),
-                        "unexpected failure: " + commitFailure.get());
-                    assertEquals(0, commitMarkers.get(), "a deposed writer must never offer its commit marker");
+                assertInstanceOf(WriterFencedException.class, commitFailure.get(),
+                        "a stolen lease must fail the commit as a fencing loss");
+                assertEquals(0, commitMarkers.get(), "a deposed writer must never offer its commit marker");
                 assertTrue(publisher.isFailed(), "a fenced writer must fail its publisher closed");
             } finally {
                 releaseGate.countDown();
@@ -534,7 +540,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicBoolean leaseValid = new AtomicBoolean(true);
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> {
                     if (AeronReplicationEnvelope.decode(buffer, offset, length).kind()
                             == AeronReplicationEnvelope.Kind.ABORT) abortMarkers.incrementAndGet();
@@ -555,7 +561,7 @@ class AeronReplicationWriteCoordinatorTest {
     void lostLeaseAdmissionFailsClosedWithLeaseError() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -578,7 +584,7 @@ class AeronReplicationWriteCoordinatorTest {
     void capacityExhaustionKeepsDistinctMessageWhileLeaseIsValid() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -603,18 +609,47 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicInteger offers = new AtomicInteger();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
                 publisher, (state, sequence, length, chunks, crc, position) -> states.add(state));
         final var prepared = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING), states);
-        assertThrows(IllegalStateException.class, () -> coordinator.commit(prepared));
-        coordinator.markCommittingUncertain(prepared);
+        assertThrows(IllegalStateException.class, () -> coordinator.commitOrMarkUncertain(prepared));
         assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
-                AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
+                AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states,
+                "a failed commit must record its uncertainty without a second caller step");
         coordinator.dispose();
+    }
+
+        /// A back-pressure timeout during a commit keeps its own failure
+    /// category: it must not be relabeled as fencing loss, and the transaction
+    /// must still be recorded uncertain.
+    @Test
+    void commitTimeoutIsNotRelabeledAsFencingLoss() {
+        final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).offerTimeoutNanos(1_000_000L).build();
+        final AtomicInteger offers = new AtomicInteger();
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.BACK_PRESSURED,
+                configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, (state, sequence, length, chunks, crc, position) -> states.add(state));
+        try {
+            final var prepared = coordinator.prepare(
+                    ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+            final IllegalStateException failure = assertThrows(IllegalStateException.class,
+                    () -> coordinator.commitOrMarkUncertain(prepared));
+            assertFalse(failure instanceof WriterFencedException,
+                    "a back-pressure timeout must not be reported as fencing loss");
+            assertTrue(failure.getMessage().contains("timed out"), failure::getMessage);
+            assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
+                    AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
+        } finally {
+            coordinator.dispose();
+        }
     }
 
         /// Verifies persistence target consumes dictionary from shared distributor.
@@ -623,7 +658,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = new AeronReplicationPublisher((buffer, offset, length) -> {
+        final var publisher = AeronReplicationPublisher.forTests((buffer, offset, length) -> {
             kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
             return length;
         }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
@@ -654,7 +689,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        new AeronStorageBinaryReplicationTarget(local, coordinator, source, ignored -> {
+        AeronStorageBinaryReplicationTarget.New(local, coordinator, source, ignored -> {
         }, () -> true)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(List.of(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY,
@@ -668,7 +703,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = new AeronReplicationPublisher((buffer, offset, length) ->
+        final var publisher = AeronReplicationPublisher.forTests((buffer, offset, length) ->
         {
             kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
             return length;
@@ -702,7 +737,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        final var target = new AeronStorageBinaryReplicationTarget(local, coordinator, source,
+        final var target = AeronStorageBinaryReplicationTarget.New(local, coordinator, source,
                 ignored -> {
                 }, () -> true);
         final var first = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}));
@@ -729,11 +764,11 @@ class AeronReplicationWriteCoordinatorTest {
             channels[channelIndex].complete();
         }
 
-        final List<java.nio.ByteBuffer> buffers = new ArrayList<>();
+        final List<ByteBuffer> buffers = new ArrayList<>();
         channels[0].iterateChannelChunks(channel ->
                 buffers.addAll(Arrays.asList(channel.buffers())));
         assertEquals(channels.length, buffers.size());
-        for (final java.nio.ByteBuffer buffer : buffers) {
+        for (final ByteBuffer buffer : buffers) {
             assertTrue(buffer.remaining() > 0);
         }
     }
@@ -744,7 +779,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicInteger offers = new AtomicInteger();
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = new AeronReplicationPublisher((buffer, offset, length) -> {
+        final var publisher = AeronReplicationPublisher.forTests((buffer, offset, length) -> {
             offers.incrementAndGet();
             return length;
         }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
@@ -759,7 +794,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        new AeronStorageBinaryReplicationTarget(local, coordinator, null, ignored -> {
+        AeronStorageBinaryReplicationTarget.New(local, coordinator, null, ignored -> {
         }, () -> false)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(1, localWrites.get());
@@ -774,7 +809,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicLong committed = new AtomicLong(-1);
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = new AeronReplicationPublisher(
+        final var publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final var coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -786,7 +821,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> new AeronStorageBinaryReplicationTarget(
+        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(
                 local, coordinator, null, committed::set, () -> true).write(
                 ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(-1, committed.get(), "uncertain commit must not advance the local index");
@@ -799,7 +834,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -827,7 +862,7 @@ class AeronReplicationWriteCoordinatorTest {
     void fencedCommitReleasesWriteLockForOtherThreads() throws InterruptedException {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -837,7 +872,10 @@ class AeronReplicationWriteCoordinatorTest {
             coordinator.distributeData(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
             final var admitted = new AtomicBoolean();
             final Thread writer = Thread.ofPlatform().start(() ->
-                    coordinator.executeWriteAtomically(() -> admitted.set(true)));
+                    coordinator.executeWriteAtomically(() -> {
+                        admitted.set(true);
+                        return null;
+                    }));
             writer.join(5_000);
             assertFalse(writer.isAlive(), "commit leaked a write-lock hold; second writer blocked");
             assertTrue(admitted.get());
@@ -846,30 +884,95 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// A commit nested inside a held write lock is rejected immediately
-        /// instead of silently corrupting the lock accounting.
+        /// Concurrent commit and abort threads plus a fault-injected
+        /// acknowledgement must never leak the coordinator write lock.
+    ///
+    /// A leaked hold (for example from an error path that forgets to release)
+    /// would deadlock every later writer, so each phase is followed by a
+    /// bounded acquisition attempt.
     @Test
-    void commitInsideHeldWriteLockIsRejected() {
+    void concurrentCommitAbortAndFaultInjectionNeverLeakTheWriteLock() throws Exception {
+        final CountDownLatch commitWaitEntered = new CountDownLatch(1);
+        final CountDownLatch releaseCommit = new CountDownLatch(1);
+        final AtomicInteger awaits = new AtomicInteger();
+        final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
+        final AtomicReference<Throwable> abortFailure = new AtomicReference<>();
+        final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
-                UUID.randomUUID(), 1, 0);
-        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final var prepared = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+                UUID.randomUUID(), 1, 0, position ->
+                {
+                    if (awaits.incrementAndGet() == 1) {
+                        commitWaitEntered.countDown();
+                        try {
+                            releaseCommit.await(30, TimeUnit.SECONDS);
+                        } catch (final InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                        }
+                        return position;
+                    }
+                    throw new IllegalStateException("injected archive acknowledgement failure");
+                });
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, (state, sequence, length, chunks, crc, position) -> states.add(state));
         try {
-            assertThrows(IllegalStateException.class,
-                    () -> coordinator.executeWriteAtomically(() -> coordinator.commit(prepared)),
-                    "commit must require the write lock to be released");
+            final var prepared = coordinator.prepare(
+                    ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+            final Thread committing = Thread.ofVirtual().start(() ->
+            {
+                try {
+                    coordinator.commitOrMarkUncertain(prepared);
+                } catch (final Throwable failure) {
+                    commitFailure.set(failure);
+                }
+            });
+            assertTrue(commitWaitEntered.await(10, TimeUnit.SECONDS), "the commit never reached its position wait");
+
+            /* The abort races the in-flight commit. It must be refused by the
+             * guard, and its refusal path must leave no hold behind. */
+            final Thread aborting = Thread.ofVirtual().start(() ->
+            {
+                try {
+                    coordinator.abort(prepared);
+                } catch (final Throwable failure) {
+                    abortFailure.set(failure);
+                }
+            });
+            aborting.join(TimeUnit.SECONDS.toMillis(10));
+            assertFalse(aborting.isAlive(), "the refused abort leaked a write-lock hold");
+            assertInstanceOf(IllegalStateException.class, abortFailure.get());
+            assertTrue(abortFailure.get().getMessage().contains("commit is in progress"),
+                    "a concurrent abort must be refused by the commit guard: " + abortFailure.get().getMessage());
+
+            releaseCommit.countDown();
+            committing.join(TimeUnit.SECONDS.toMillis(10));
+            assertFalse(committing.isAlive(), "the commit did not finish after the position was released");
+            assertNull(commitFailure.get(), "the first commit must succeed: " + commitFailure.get());
+
+            /* Fault injection: the next acknowledgement fails after its marker
+             * offer. The commit must be recorded uncertain and still release
+             * every lock before it throws. */
+            final var second = coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})));
+            assertThrows(IllegalStateException.class, () -> coordinator.commitOrMarkUncertain(second));
+            assertEquals(List.of(
+                    AeronReplicationCheckpoint.State.PREPARING,
+                    AeronReplicationCheckpoint.State.COMMITTED,
+                    AeronReplicationCheckpoint.State.PREPARING,
+                    AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states,
+                    "the injected acknowledgement failure must be recorded as uncertain");
+            assertTimeoutPreemptively(Duration.ofSeconds(5),
+                    () -> coordinator.executeWriteAtomically(() -> null),
+                    "a leaked write-lock hold would deadlock the next writer");
         } finally {
-            coordinator.abort(prepared);
+            releaseCommit.countDown();
             coordinator.dispose();
         }
     }
 
         /// While a commit waits for its Archive position, a second writer must
-        /// be refused: the commit guard is set under the caller's lock before
-        /// the lock is released for the slow wait.
+        /// be refused by the commit guard instead of blocking on the lock.
     @Test
     void commitRefusesConcurrentPrepareWhileWaiting() throws Exception {
         final CountDownLatch commitWaitEntered = new CountDownLatch(1);
@@ -877,7 +980,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = new AeronReplicationPublisher(
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0, position ->
                 {
@@ -894,7 +997,7 @@ class AeronReplicationWriteCoordinatorTest {
         final Thread committing = Thread.ofVirtual().start(() ->
         {
             try {
-                coordinator.executeWriteAtomically(() -> coordinator.commitOrMarkUncertain(prepared));
+                coordinator.commitOrMarkUncertain(prepared);
             } catch (final Throwable failure) {
                 commitFailure.set(failure);
             }
