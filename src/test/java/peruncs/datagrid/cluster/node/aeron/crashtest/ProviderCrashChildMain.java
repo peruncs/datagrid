@@ -43,6 +43,11 @@ public final class ProviderCrashChildMain {
             "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
             "AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
             "AFTER_RECOVERY_CHECKPOINT_READ", "NONE");
+    /// Fencing-lease windows whose `sequence` carries the lease token, not a
+    /// transaction sequence; they match by name only and may fire before the
+    /// first transaction or on the heartbeat thread.
+    private static final java.util.Set<String> LEASE_POINTS = java.util.Set.of(
+            "BEFORE_LEASE_RENEWAL_HEARTBEAT", "AFTER_OWNED_OFFER_BEFORE_HEARTBEAT");
     private static final String STREAM = "crash-matrix";
     private static final String WRITER_ROLE = "writer";
     private static final int STREAM_ID = 1001;
@@ -58,7 +63,8 @@ public final class ProviderCrashChildMain {
         Files.createDirectories(control);
         final String mode = System.getProperty("dg.crash.mode", "phase1");
         final String point = System.getProperty("dg.crash.barrier", "NONE");
-        if (!SUPPORTED_POINTS.contains(point) || (!"NONE".equals(point) && !ChildMilestone.supports(point))) {
+        if (!SUPPORTED_POINTS.contains(point) && !LEASE_POINTS.contains(point) ||
+            (!"NONE".equals(point) && !ChildMilestone.supports(point))) {
             throw new IllegalArgumentException("unsupported or unencodable provider crash point: %s".formatted(point));
         }
         final ReplicationDurabilityMode durability = ReplicationDurabilityMode.valueOf(
@@ -85,12 +91,26 @@ public final class ProviderCrashChildMain {
             for (int sequence = 0; sequence < writes; sequence++) {
                 runtime.write(transactionPayload(sequence));
             }
+            /* Lease renewal parks the heartbeat thread, not the write thread.
+             * Wait for that milestone here and then park the whole process, so
+             * the parent's kill provably lands while the renewal is held
+             * instead of a racing clean close. */
+            if (LEASE_POINTS.contains(point)) {
+                final long leaseDeadline = System.nanoTime() +
+                        java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(60_000L);
+                while (!Files.exists(control.resolve("milestone.reached")) &&
+                       System.nanoTime() < leaseDeadline) {
+                    sleep();
+                }
+                awaitParent(control.resolve("release"));
+                return;
+            }
             if (!"NONE".equals(point) && !Files.exists(control.resolve("milestone.reached"))) {
-                writeOutcome(control, "HARNESS_ERROR", runtime.checkpoint(),
+                writeOutcome(control, "HARNESS_ERROR", runtime.checkpoint(), null,
                         "crash barrier was armed but never reached: %s".formatted(point));
                 return;
             }
-            writeOutcome(control, "CONTINUE", runtime.checkpoint(), null);
+            writeOutcome(control, "CONTINUE", runtime.checkpoint(), null, null);
         }
     }
 
@@ -105,12 +125,12 @@ public final class ProviderCrashChildMain {
             if (!containsStorePayload(base.resolve("store.records"), transactionPayload(2))) {
                 runtime.write(transactionPayload(2));
             }
-            writeOutcome(control, "CONTINUE", runtime.checkpoint(), null);
+            writeOutcome(control, "CONTINUE", runtime.checkpoint(), null, null);
         } catch (final RuntimeException | Error failure) {
             final String message = failure.getMessage() == null ? failure.toString() : failure.getMessage();
             final String outcome = message.startsWith("RESEED_REQUIRED:")
                     ? "RESEED_REQUIRED" : "FAIL_CLOSED";
-            writeOutcome(control, outcome, runtime.checkpoint(), message);
+            writeOutcome(control, outcome, runtime.checkpoint(), failure, message);
         }
     }
 
@@ -129,7 +149,8 @@ public final class ProviderCrashChildMain {
     }
 
     private static void writeOutcome(final Path control, final String outcome,
-                                     final AeronReplicationCheckpoint checkpoint, final String error) {
+                                     final AeronReplicationCheckpoint checkpoint,
+                                     final Throwable failure, final String error) {
         final StringBuilder value = new StringBuilder()
                 .append("ROLE=writer\n")
                 .append("PID=").append(ProcessHandle.current().pid()).append('\n')
@@ -142,6 +163,12 @@ public final class ProviderCrashChildMain {
                     .append("CRC32C=").append(Integer.toUnsignedString(checkpoint.resolutionCrc32c())).append('\n');
         }
         if (error != null) value.append("ERROR=").append(error.replace('\n', ' ')).append('\n');
+        /* The parent classifies retryable startup failures by type, never by
+         * message text: an upstream wording change cannot silently turn a real
+         * defect into retried noise. The full cause chain goes out unchanged. */
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            value.append("ERROR_TYPE=").append(current.getClass().getName()).append('\n');
+        }
         value.append("PROOF_STORE_VALID=").append(storeFixtureValid(control.getParent().resolve("store.records"))).append(System.lineSeparator());
         value.append("PROOF_CRC_TXN0=").append(Integer.toUnsignedString(crc(transactionPayload(0)))).append(System.lineSeparator())
                 .append("PROOF_CRC_TXN1=").append(Integer.toUnsignedString(crc(transactionPayload(1)))).append(System.lineSeparator())
@@ -233,6 +260,16 @@ public final class ProviderCrashChildMain {
         final java.util.concurrent.atomic.AtomicInteger chunkCount = new java.util.concurrent.atomic.AtomicInteger();
         return (name, sequence) ->
         {
+            /* Lease windows carry the fencing token as their `sequence` and
+             * can fire on the heartbeat thread or before any transaction; the
+             * target-transaction filter does not apply to them. */
+            if (LEASE_POINTS.contains(point)) {
+                if (point.equals(name)) {
+                    writeMilestone(control.resolve("milestone.reached"), name, sequence);
+                    awaitParent(control.resolve("release"));
+                }
+                return;
+            }
             if ("DATA_CHUNK".equals(name)) {
                 if (budgetChunks > 0 && chunkCount.incrementAndGet() == budgetChunks) {
                     writeMilestone(control.resolve("milestone.reached"), "AFTER_DATA_CHUNKS", sequence);
@@ -545,8 +582,23 @@ public final class ProviderCrashChildMain {
             this.base = base;
             this.durability = durability;
             this.externalArchive = Boolean.getBoolean("dg.crash.externalArchive");
-            this.nodeId = UUID.nameUUIDFromBytes(("node:%s".formatted(base)).getBytes(StandardCharsets.UTF_8));
+            /* A takeover successor deliberately carries a different node id:
+             * while node identity is the fencing principal, a crashed writer
+             * may reclaim its own lease without waiting for staleness. The
+             * successor process must instead steal it after the staleness
+             * bound, proving the cross-process takeover path. */
+            final String nodeSalt = System.getProperty("dg.crash.nodeSalt", "");
+            this.nodeId = UUID.nameUUIDFromBytes(
+                    ("node:%s%s".formatted(base, nodeSalt)).getBytes(StandardCharsets.UTF_8));
             this.generation = UUID.nameUUIDFromBytes(("generation:%s".formatted(base)).getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public Long writerLeaseStalenessMillis() {
+            /* Takeover cells run the lease heartbeat on a sub-second
+             * staleness bound so a successor can take over within the cell
+             * budget; other cells leave the production default standing. */
+            return Long.getLong("dg.crash.leaseStalenessMillis");
         }
 
         @Override

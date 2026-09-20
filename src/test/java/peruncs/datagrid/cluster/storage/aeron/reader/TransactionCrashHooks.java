@@ -26,6 +26,10 @@ public final class TransactionCrashHooks {
 
         /// Runs an action with the chunk observer bound to its dynamic scope.
     ///
+    /// The reader must be CONSTRUCTED inside this scope: scoped-value
+    /// bindings are not inherited by the reader's virtual-thread poller, so
+    /// the assembler captures the binding at construction time.
+    ///
     /// @param observer invoked after each buffered multi-chunk chunk
     /// @param action  action to run with the hook bound
     /// @return the action's result

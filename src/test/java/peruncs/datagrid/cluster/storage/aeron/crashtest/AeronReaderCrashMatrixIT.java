@@ -267,12 +267,304 @@ class AeronReaderCrashMatrixIT {
     /// Kill after rename but before the parent-directory fsync. The rename may
     /// not survive a machine crash — on restart either cursor may be visible
     /// — so the marker must fail closed rather than trust the possibly-lost
-    /// rename. This is the last unsafe window; a kill after the directory
-    /// sync is fully durable and outside this matrix.
+    /// rename. The final window past the sync is covered by
+    /// [#postSyncPreResolveReturnRequiresReseedAndNeverDoubleApplies].
     @Test
     void cursorDirectorySyncWindowLeavesUncertainMarkerAndRequiresReseed() throws Exception {
         this.assertReseed("AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC", true);
     }
+
+    /// Kill after the cursor rename AND its directory sync, but before
+    /// `transactionResolved` returns. The transaction is fully durable here;
+    /// what survives is the uncertainty marker, because the reader deletes it
+    /// only *after* the resolver callback returns. Recovery must therefore
+    /// fail closed with `RESEED_REQUIRED` — it may NOT trust the advanced
+    /// cursor and silently continue, and it must never double-apply the
+    /// already-imported record. This cell pins the current, conservative
+    /// production contract: a fully durable commit killed before marker
+    /// clearance still demands a reseed rather than replay-with-dedupe.
+    @Test
+    void postSyncPreResolveReturnRequiresReseedAndNeverDoubleApplies() throws Exception {
+        this.assertReseed("AFTER_CURSOR_DIRECTORY_SYNC_BEFORE_RETURN", true,
+                new byte[][]{payload(0)});
+    }
+
+    /// Kill inside the AtomicFileWriter mid-write phase of the uncertainty
+    /// marker itself. The rename never happened, so the visible marker file
+    /// is absent and only a torn `reader.reader-inflight.tmp-*` sibling
+    /// remains. Because the marker write always precedes the first import,
+    /// no Store bytes can exist either, and pure Archive replay is the
+    /// provably safe outcome: the fixture must contain both published
+    /// transactions exactly once.
+    @Test
+    void tornInflightMarkerWriteReplaysFromArchiveExactlyOnce() throws Exception {
+        final String point = "DURING_INFLIGHT_MARKER_WRITE";
+        final List<byte[]> payloads = List.of(payload(0), payload(1));
+        final Path base = Files.createTempDirectory("dg-reader-crash-");
+        final int controlPort = freePort();
+        final Path mediaDirectory = base.resolve("archive-aeron");
+        final Path archiveDirectory = base.resolve("archive");
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
+                .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
+        final MediaDriver.Context mediaContext = new MediaDriver.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+        final Archive.Context archiveContext = new Archive.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .archiveDir(archiveDirectory.toFile())
+                .deleteArchiveOnStart(true)
+                .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                .controlChannel(controlChannel)
+                .replicationChannel(REPLAY_CHANNEL);
+        Process child = null;
+        Process recovery = null;
+        try (ArchivingMediaDriver _ = ArchivingMediaDriver.launch(mediaContext, archiveContext);
+             AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
+                     .aeronDirectoryName(mediaDirectory.toString())
+                     .controlRequestChannel(controlChannel)
+                     .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
+                     .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                for (byte[] payload : payloads) {
+                    RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
+                }
+                final long recordingId = awaitRecordingId(publisher);
+                child = launch(base, "phase1", point, recordingId, controlChannel, mediaDirectory);
+                awaitFile(base.resolve("control/ready"), child);
+                final Path milestonePath = base.resolve("control/milestone.reached");
+                awaitFile(milestonePath, child);
+                assertEquals(point, ReaderMilestone.read(milestonePath).point());
+                child.destroyForcibly();
+                assertTrue(child.waitFor(10, TimeUnit.SECONDS), "reader child did not exit after kill");
+                /* The kill landed before the marker's atomic rename: the
+                 * visible marker never appeared, the torn temp sibling is the
+                 * only trace, and no Store import could have started. */
+                assertFalse(Files.exists(base.resolve("reader.reader-inflight")),
+                        "a marker killed mid-write must never become visible");
+                try (var entries = Files.list(base)) {
+                    assertTrue(entries.anyMatch(p -> p.getFileName().toString().startsWith("reader.reader-inflight.tmp-")),
+                            "a torn temp sibling must remain as crash evidence");
+                }
+                assertFalse(Files.exists(base.resolve("reader.store")),
+                        "no import may run before the marker write completed");
+                recovery = launch(base, "phase2", "NONE", recordingId, controlChannel, mediaDirectory);
+                awaitFile(base.resolve("control/outcome"), recovery);
+                assertTrue(recovery.waitFor(15, TimeUnit.SECONDS), "reader recovery child did not exit");
+                final String outcome = Files.readString(base.resolve("control/outcome"));
+                assertTrue(outcome.lines().anyMatch(line -> line.equals("OUTCOME=REPLAY_FROM_ARCHIVE")),
+                        "with neither marker nor fixture, replay is the safe outcome\n%s".formatted(outcome));
+                final List<byte[]> records = readFixtureRecords(base.resolve("reader.store"));
+                assertEquals(payloads.size(), records.size(), "replayed fixture must hold every transaction once");
+                for (int index = 0; index < payloads.size(); index++) {
+                    assertArrayEquals(payloads.get(index), records.get(index),
+                            "replayed record %s does not match the published payload".formatted(index));
+                }
+            }
+        } finally {
+            if (child != null && child.isAlive()) child.destroyForcibly();
+            if (recovery != null && recovery.isAlive()) recovery.destroyForcibly();
+            deleteTree(base);
+        }
+    }
+
+    /// A second crash lands inside the recovery's own marker-parse window:
+    /// the recovery child reads a torn uncertainty marker and dies before it
+    /// can publish a verdict. The subsequent recovery must still fail closed
+    /// (`RESEED_REQUIRED`) over the same torn state — a dead recovery changes
+    /// nothing on disk by construction.
+    @Test
+    void recoveryKilledWhileParsingTornMarkerStillRequiresReseed() throws Exception {
+        final Path base = Files.createTempDirectory("dg-reader-crash-");
+        final int controlPort = freePort();
+        final Path mediaDirectory = base.resolve("archive-aeron");
+        final Path archiveDirectory = base.resolve("archive");
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
+                .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
+        final MediaDriver.Context mediaContext = new MediaDriver.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+        final Archive.Context archiveContext = new Archive.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .archiveDir(archiveDirectory.toFile())
+                .deleteArchiveOnStart(true)
+                .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                .controlChannel(controlChannel)
+                .replicationChannel(REPLAY_CHANNEL);
+        Process phase1 = null;
+        Process crashedRecovery = null;
+        Process recovery = null;
+        try (ArchivingMediaDriver _ = ArchivingMediaDriver.launch(mediaContext, archiveContext);
+             AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
+                     .aeronDirectoryName(mediaDirectory.toString())
+                     .controlRequestChannel(controlChannel)
+                     .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
+                     .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
+                RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
+                final long recordingId = awaitRecordingId(publisher);
+                crashAt(base, "phase1", "REPLAY_BEFORE_FIRST_IMPORT", recordingId, controlChannel, mediaDirectory);
+                assertFalse(Files.exists(base.resolve("reader.store")),
+                        "no import may have run before the first crash");
+                /* Tear the surviving marker into a parse-defeating fragment. */
+                final Path uncertainty = base.resolve("reader.reader-inflight");
+                final byte[] intact = Files.readAllBytes(uncertainty);
+                Files.write(uncertainty, java.util.Arrays.copyOf(intact, intact.length / 2));
+                assertThrows(IOException.class, () -> AeronReplicationCheckpointStore.read(uncertainty),
+                        "the torn marker must defeat parsing");
+                /* The first recovery child reads the torn marker and crashes
+                 * itself inside the parse window: milestone observed, no
+                 * outcome may ever be published. */
+                crashedRecovery = launch(base, "phase2", "DURING_RECOVERY_CURSOR_PARSE",
+                        recordingId, controlChannel, mediaDirectory);
+                final Path milestonePath = base.resolve("control/milestone.reached");
+                awaitFile(milestonePath, crashedRecovery);
+                assertEquals("DURING_RECOVERY_CURSOR_PARSE", ReaderMilestone.read(milestonePath).point());
+                assertTrue(crashedRecovery.waitFor(15, TimeUnit.SECONDS),
+                        "the crashed recovery must terminate itself");
+                assertNotEquals(0, crashedRecovery.exitValue(),
+                        "the crashed recovery must die like a process kill");
+                crashedRecovery = null;
+                assertFalse(Files.exists(base.resolve("control/outcome")),
+                        "a recovery killed mid-parse must not publish a verdict");
+                /* The next recovery over unchanged state must fail closed. */
+                recovery = launch(base, "phase2", "NONE", recordingId, controlChannel, mediaDirectory);
+                awaitFile(base.resolve("control/outcome"), recovery);
+                assertTrue(recovery.waitFor(15, TimeUnit.SECONDS), "reader recovery child did not exit");
+                final String outcome = Files.readString(base.resolve("control/outcome"));
+                assertTrue(outcome.lines().anyMatch(line -> line.equals("OUTCOME=RESEED_REQUIRED")),
+                        "the torn marker must still force a reseed\n%s".formatted(outcome));
+            }
+        } finally {
+            if (phase1 != null && phase1.isAlive()) phase1.destroyForcibly();
+            if (crashedRecovery != null && crashedRecovery.isAlive()) crashedRecovery.destroyForcibly();
+            if (recovery != null && recovery.isAlive()) recovery.destroyForcibly();
+            deleteTree(base);
+        }
+    }
+
+    /// N=4 crash loop with mixed barriers over one writer epoch: the reader
+    /// process is killed at a write-side window, the first recovery is killed
+    /// right after it validated the durable state, and the second recovery
+    /// crashes itself inside its own marker-parse window. The final recovery
+    /// must still reach the documented safe terminal outcome
+    /// (`RESEED_REQUIRED`) with the fixture exactly as of the first crash and
+    /// the surviving marker pinning the uncertain sequence.
+    ///
+    /// Note on the barriers used: a production reader's uncertainty marker
+    /// gates the recovery entry point, so a recovery over marker-present
+    /// state can only ever crash in its *read* window — a recovery can never
+    /// again reach a cursor-write window while uncertainty is unresolved.
+    /// The loop therefore mixes the only reachable combination: one
+    /// write-side window followed by two read-side recovery windows.
+    @Test
+    void repeatedCrashLoopAlwaysTerminatesInFailClosedRecovery() throws Exception {
+        final Path base = Files.createTempDirectory("dg-reader-crash-");
+        final int controlPort = freePort();
+        final Path mediaDirectory = base.resolve("archive-aeron");
+        final Path archiveDirectory = base.resolve("archive");
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
+                .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
+        final MediaDriver.Context mediaContext = new MediaDriver.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+        final Archive.Context archiveContext = new Archive.Context()
+                .aeronDirectoryName(mediaDirectory.toString())
+                .archiveDir(archiveDirectory.toFile())
+                .deleteArchiveOnStart(true)
+                .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
+                .controlChannel(controlChannel)
+                .replicationChannel(REPLAY_CHANNEL);
+        Process recovery = null;
+        try (ArchivingMediaDriver _ = ArchivingMediaDriver.launch(mediaContext, archiveContext);
+             AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
+                     .aeronDirectoryName(mediaDirectory.toString())
+                     .controlRequestChannel(controlChannel)
+                     .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
+                     .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
+                RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
+                final long recordingId = awaitRecordingId(publisher);
+                /* Crash 1: write-side window, import applied, cursor not yet
+                 * durable. The surviving marker names sequence 0. */
+                final ReaderMilestone first = crashAt(base, "phase1", "DURING_CURSOR_FILE_WRITE",
+                        recordingId, controlChannel, mediaDirectory);
+                /* Crash 2: the recovery parsed the marker, validated the
+                 * durable state, and was killed before publishing a verdict. */
+                final ReaderMilestone second = crashAt(base, "phase2", "AFTER_RECOVERY_CURSOR_VALIDATED",
+                        recordingId, controlChannel, mediaDirectory);
+                assertEquals(first.sequence(), second.sequence(),
+                        "both crashes must pin the same uncertain transaction");
+                /* Crash 3: the next recovery died inside its own marker-parse
+                 * window, again without publishing a verdict. */
+                crashAt(base, "phase2", "DURING_RECOVERY_CURSOR_PARSE",
+                        recordingId, controlChannel, mediaDirectory);
+                /* The final recovery over unchanged state must fail closed. */
+                recovery = launch(base, "phase2", "NONE", recordingId, controlChannel, mediaDirectory);
+                awaitFile(base.resolve("control/outcome"), recovery);
+                assertTrue(recovery.waitFor(15, TimeUnit.SECONDS), "reader recovery child did not exit");
+                final String outcome = Files.readString(base.resolve("control/outcome"));
+                assertTrue(outcome.lines().anyMatch(line -> line.equals("OUTCOME=RESEED_REQUIRED")),
+                        "three crashes must still terminate in a fail-closed recovery\n%s".formatted(outcome));
+                /* The on-disk evidence must reflect the first crash exactly:
+                 * the import record applied once, the marker pinning the first
+                 * uncertain transaction, and no cursor advancement. */
+                final List<byte[]> records = readFixtureRecords(base.resolve("reader.store"));
+                assertEquals(1, records.size(), "only the first imported record may exist");
+                assertArrayEquals(payload(0), records.getFirst(), "the surviving fixture record is torn or mutated");
+                final AeronReplicationCheckpoint checkpoint =
+                        AeronReplicationCheckpointStore.read(base.resolve("reader.reader-inflight"));
+                assertEquals(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, checkpoint.state());
+                assertEquals(first.sequence(), checkpoint.transactionSequence());
+                assertEquals(first.position(), checkpoint.recordingPosition());
+                assertFalse(Files.exists(base.resolve("reader.cursor")),
+                        "no durable cursor may exist behind the uncertainty marker");
+            }
+        } finally {
+            if (recovery != null && recovery.isAlive()) recovery.destroyForcibly();
+            deleteTree(base);
+        }
+    }
+
+    /// One crash-loop step: launches the child at `point`, waits for its
+    /// milestone, kills it with SIGKILL semantics, and proves no verdict file
+    /// was left behind. A self-halting child (the recovery parse window) is
+    /// observed identically — `destroyForcibly` on an exiting process is a
+    /// no-op race. Returns the milestone so callers can correlate the pinned
+    /// transaction across crashes.
+    private static ReaderMilestone crashAt(final Path base, final String mode, final String point,
+                                           final long recordingId, final String controlChannel,
+                                           final Path mediaDirectory) throws IOException, InterruptedException {
+        final Path milestonePath = base.resolve("control/milestone.reached");
+        final Process process = launch(base, mode, point, recordingId, controlChannel, mediaDirectory);
+        try {
+            awaitFile(milestonePath, process);
+            final ReaderMilestone milestone = ReaderMilestone.read(milestonePath);
+            assertEquals(point, milestone.point(), "unexpected crash milestone");
+            process.destroyForcibly();
+            assertTrue(process.waitFor(15, TimeUnit.SECONDS), "crashed child did not terminate");
+            assertTrue(process.exitValue() != 0, "a crashed child must exit abnormally");
+            assertFalse(Files.exists(base.resolve("control/outcome")),
+                    "a child killed at %s must not publish a verdict".formatted(point));
+            return milestone;
+        } finally {
+            if (process.isAlive()) process.destroyForcibly();
+        }
+    }
+
 
         /// Same boundary as the cursor-write cell, but after the kill the
     /// parent flips one byte in the middle of the uncertainty marker itself.
@@ -372,7 +664,10 @@ class AeronReaderCrashMatrixIT {
                 }
                 final long recordingId = awaitRecordingId(publisher);
                 child = launch(base, "phase1", point, recordingId, controlChannel, mediaDirectory);
-                awaitFile(base.resolve("control/ready"), child);
+                /* Await the milestone, never `ready`: the
+                 * AFTER_RECOVERY_CURSOR_VALIDATED barrier parks the child's
+                 * main thread before the reader is started, so `ready` may
+                 * legitimately never be written for these cells. */
                 final Path milestonePath = base.resolve("control/milestone.reached");
                 awaitFile(milestonePath, child);
                 final ReaderMilestone milestone = ReaderMilestone.read(milestonePath);
@@ -572,6 +867,18 @@ class AeronReaderCrashMatrixIT {
     ///                          present at this boundary
     private void assertReseed(final String point, final boolean expectStoreRecord)
             throws IOException, InterruptedException {
+        this.assertReseed(point, expectStoreRecord, null);
+    }
+
+    /// Like [#assertReseed(String, boolean)], and additionally asserts the
+    /// exact fixture contents when `expectedFixture` is non-`null` — the
+    /// strongest proof that recovery neither lost nor double-applied records.
+    ///
+    /// @param expectedFixture records the Store fixture must hold, in order,
+    ///                        or `null` to skip the content assertion
+    private void assertReseed(final String point, final boolean expectStoreRecord,
+                              final byte[][] expectedFixture)
+            throws IOException, InterruptedException {
         final Path base = Files.createTempDirectory("dg-reader-crash-");
         final int controlPort = freePort();
         final Path mediaDirectory = base.resolve("archive-aeron");
@@ -626,6 +933,15 @@ class AeronReaderCrashMatrixIT {
                 assertEquals(milestone.sequence(), checkpoint.transactionSequence());
                 assertEquals(milestone.position(), checkpoint.recordingPosition());
                 assertEquals(Files.exists(base.resolve("reader.store")), expectStoreRecord, "unexpected Store fixture state for %s".formatted(point));
+                if (expectedFixture != null) {
+                    final List<byte[]> records = readFixtureRecords(base.resolve("reader.store"));
+                    assertEquals(expectedFixture.length, records.size(),
+                            "fixture record count drifted for %s".formatted(point));
+                    for (int index = 0; index < expectedFixture.length; index++) {
+                        assertArrayEquals(expectedFixture[index], records.get(index),
+                                "fixture record %s is not byte-identical to the published payload".formatted(index));
+                    }
+                }
             }
         } finally {
             if (child != null && child.isAlive())

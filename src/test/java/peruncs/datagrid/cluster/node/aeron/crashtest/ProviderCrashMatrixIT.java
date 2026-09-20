@@ -64,12 +64,27 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// the Store, checkpoint, and Archive fixture. The matrix tests fail closed;
 /// they do not treat a crash before the requested milestone as a valid result.
 class ProviderCrashMatrixIT {
-    private static boolean isActiveDriverRetry(final String outcome) {
-        final String normalized = outcome.toLowerCase(java.util.Locale.ROOT);
-        return normalized.contains("active media driver") ||
-               normalized.contains("active mark file") ||
-               normalized.contains("driver directory remained active");
+    /// Transient startup race the phase-2 recovery may legitimately retry:
+    /// the SIGKILLed phase-1 child left its embedded driver's mark file behind
+    /// and the Aeron client refuses to connect while the driver directory
+    /// still looks active. Classification is by exception type in the child's
+    /// cause chain, never by message text: an upstream wording change (or a
+    /// message-less wrapper) must not silently convert a real recovery defect
+    /// into retried noise. An unparsable outcome is not retryable either.
+    static boolean isActiveDriverRetry(final String outcome) {
+        final CrashOutcome parsed;
+        try {
+            parsed = CrashOutcome.parse(outcome);
+        } catch (final RuntimeException unparseable) {
+            return false;
+        }
+        return parsed.errorTypes().stream().anyMatch(RETRYABLE_STARTUP_TYPES::contains);
     }
+
+    /// Exception types considered evidence of the stale active-driver race.
+    private static final java.util.Set<String> RETRYABLE_STARTUP_TYPES = java.util.Set.of(
+            io.aeron.driver.exceptions.ActiveDriverException.class.getName(),
+            io.aeron.exceptions.DriverTimeoutException.class.getName());
 
     private static void assertNotHarnessError(final CrashOutcome outcome, final String raw) {
         if (outcome.policy() == RecoveryPolicy.HARNESS_ERROR) {
@@ -493,6 +508,13 @@ class ProviderCrashMatrixIT {
     /// continue, but it must never silently extend history.
     private void assertSafeOutcomeAfterMutation(final String point, final ReplicationDurabilityMode durability,
                                                 final ThrowingConsumer<Path> mutator) throws Exception {
+        this.assertSafeOutcomeAfterMutation(point, durability, mutator,
+                java.util.Set.of(RecoveryPolicy.RESEED_REQUIRED, RecoveryPolicy.FAIL_CLOSED));
+    }
+
+    private void assertSafeOutcomeAfterMutation(final String point, final ReplicationDurabilityMode durability,
+                                                final ThrowingConsumer<Path> mutator,
+                                                final java.util.Set<RecoveryPolicy> allowed) throws Exception {
         try (DirectoryLayout layout = DirectoryLayout.create()) {
             final Path base = layout.root();
             final int livePort = layout.livePort();
@@ -531,9 +553,8 @@ class ProviderCrashMatrixIT {
                         "recording never became stopped; attempts=%s outcome=%s".formatted(restartAttempts, outcome));
                 final CrashOutcome result = CrashOutcome.parse(outcome);
                 assertNotHarnessError(result, outcome);
-                assertTrue(result.policy() == RecoveryPolicy.RESEED_REQUIRED
-                                || result.policy() == RecoveryPolicy.FAIL_CLOSED,
-                        "corrupted durable state must fail closed, got %s\n%s".formatted(result.policy(), outcome));
+                assertTrue(allowed.contains(result.policy()),
+                        "corrupted durable state must end in %s, got %s\n%s".formatted(allowed, result.policy(), outcome));
                 assertTrue(result.error() != null && !result.error().isBlank(), outcome);
                 assertTrue(result.storeValid(), outcome);
                 CrashEventLog.append(base.resolve("control"), "outcome",
@@ -550,6 +571,39 @@ class ProviderCrashMatrixIT {
                 }
             }
         }
+    }
+
+    /// Combined failure: a kill right after the commit is recorded under a
+    /// deliberately tiny term, then the final Archive frame is truncated by one
+    /// byte on the stopped recording. Recovery cannot prove the tail boundary,
+    /// so the only safe report is a demanded reseed — never fail-open replay and
+    /// never a generic fail-closed that hides the classification.
+    @Test
+    void truncatedFinalFrameAfterRecordedCommitRequiresReseed() throws Exception {
+        final String previousTerm = System.getProperty("crash.matrix.termLength");
+        System.setProperty("crash.matrix.termLength", "65536");
+        try {
+            this.assertSafeOutcomeAfterMutation("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+                final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
+                        base.resolve("checkpoint/writer.checkpoint"));
+                final List<Path> segments = ArchiveArtifactMutator.segments(
+                        base.resolve("archive"), checkpoint.recordingId());
+                final Path tail = segments.getLast();
+                ArchiveArtifactMutator.truncateFinalFrame(tail, segmentBase(tail),
+                        checkpoint.recordingPosition());
+            }, java.util.Set.of(RecoveryPolicy.RESEED_REQUIRED));
+        } finally {
+            if (previousTerm == null) System.clearProperty("crash.matrix.termLength");
+            else System.setProperty("crash.matrix.termLength", previousTerm);
+        }
+    }
+
+    /// Segment base position encoded into the Archive segment file name.
+    private static long segmentBase(final Path segment) {
+        final String name = segment.getFileName().toString();
+        final int dash = name.indexOf('-');
+        final int dot = name.lastIndexOf('.');
+        return Long.parseLong(name.substring(dash + 1, dot));
     }
 
     /// Asserts the exact committed Store prefix a crash point must leave behind.

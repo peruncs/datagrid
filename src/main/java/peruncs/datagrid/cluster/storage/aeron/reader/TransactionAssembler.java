@@ -119,6 +119,11 @@ final class TransactionAssembler {
         this.lastAppliedSequence.set(initialSequence);
         this.lastResolvedPosition.set(initialPosition);
         this.nextExpectedSequence = initialSequence + 1;
+        /* ScopedValue bindings are not inherited by the virtual-thread poller
+         * (final Scoped Values dropped inheritance), so the hook must be
+         * captured here, on the thread that constructs the assembler, while
+         * the caller's binding is still dynamically visible. */
+        this.chunkObserver = CHUNK_HOOK.isBound() ? CHUNK_HOOK.get() : null;
     }
 
     /// Consumes one fragment from the subscription callback.
@@ -278,7 +283,7 @@ final class TransactionAssembler {
          * natural-memory state of a partially assembled transaction is
          * otherwise unreachable from forked children. The hook fires only for
          * multi-chunk transactions, so single-chunk cells never park on it. */
-        final ChunkObserver observer = CHUNK_HOOK.isBound() ? CHUNK_HOOK.get() : null;
+        final ChunkObserver observer = this.chunkObserver;
         if (observer != null && envelope.chunkCount() > 1) {
             observer.afterChunkBuffered(envelope.sequence(), envelope.chunkIndex(), envelope.chunkCount());
         }
@@ -298,15 +303,22 @@ final class TransactionAssembler {
     }
 
     private static final ScopedValue<ChunkObserver> CHUNK_HOOK = ScopedValue.newInstance();
+    /// Crash-test hook captured at construction; `null` in production.
+    private final ChunkObserver chunkObserver;
 
         /// Runs an action with the chunk observer bound to its dynamic scope.
     ///
-    /// Test bridge only; unbound in production, and the assembler never
-    /// allocates for the hook when it is unbound.
+    /// The binding must surround the reader CONSTRUCTION, not its polling:
+    /// scoped values are captured when the [TransactionAssembler] is built on
+    /// the caller thread, because final [ScopedValue] bindings are not
+    /// inherited by the reader's virtual-thread poller. Test bridge only;
+    /// unbound in production, and the assembler never allocates for the hook
+    /// when it is unbound.
     ///
     /// @param observer hook invoked after each buffered multi-chunk chunk
     /// @param action  action to run with the hook bound
     /// @return the action's result
+    /// @param <T>    action result type
     static <T> T runWithChunkObserver(final ChunkObserver observer, final java.util.concurrent.Callable<T> action) {
         try {
             return ScopedValue.where(CHUNK_HOOK, observer).call(action::call);

@@ -30,7 +30,8 @@ record ChildMilestone(String point, long sequence, long timestampNanos) {
             "BEFORE_CHECKPOINT_TEMP_WRITE", "AFTER_CHECKPOINT_TEMP_WRITE_BEFORE_RENAME",
             "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
             "AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
-            "AFTER_RECOVERY_CHECKPOINT_READ"
+            "AFTER_RECOVERY_CHECKPOINT_READ",
+            "BEFORE_LEASE_RENEWAL_HEARTBEAT", "AFTER_OWNED_OFFER_BEFORE_HEARTBEAT"
     };
 
     static void write(final Path path, final String point, final long sequence) throws IOException {

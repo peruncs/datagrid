@@ -314,13 +314,54 @@ verification:
    bounded-lag checks and mini-censuses; query workers verify ghost-title
    absence, graph bodies/checksums, Lucene hits, and non-sentinel JVector hits.
 3. Run a seeded fixed rotation of single restart, dual restart, slow-reader,
-   CPU/GC burst, cursor corruption, rollback cursor, and live Archive-tail
-   corruption. The first chaos operation is always an abrupt restart. Every
+   CPU/GC burst, forced-GC burst, cursor corruption, rollback cursor, live
+   Archive-tail corruption, writer restart, reseed-and-rejoin, and watermark
+   retention. The first chaos operation is always an abrupt restart. Every
    operation is logged as selected, effective, or skipped with a reason.
 4. Stop writers, converge or explicitly park every reader, then run strict
    samples and an uncapped graph/Lucene/JVector census. A reader may be
-   converged, reseed-parked, or corruption-parked; it may not disappear
-   silently.
+   converged, reseed-parked, corruption-parked, or reseeded-and-rejoined by
+   the chaos thread; it may not disappear silently.
+
+The extended operations assert protocol guarantees, not just survival:
+
+- **writer-restart** restarts the writer transport and Store with the same
+  cluster, node, and generation (abrupt teardown on a seeded coin flip). The
+  restarted writer must mint a strictly greater fencing token, and one
+  post-restart transaction must reach every live reader from its unchanged
+  durable cursor.
+- **reseed** executes the documented manual reseed procedure: with the writer
+  frozen, copy the writer's Store into the victim's home, replace any torn
+  cursor file with the frozen boundary cursor, and restart. Parked readers
+  are preferred victims (this is their recovery); otherwise a live reader is
+  proactively reseeded, never the last live one. Rejoined readers re-enter
+  the chaos victim pool and the final convergence census; `reseedsExecuted`
+  counts them distinctly from demanded reseeds.
+- **gc** churns a seeded 32-256 MB through the heap and calls `System.gc()`,
+  forcing a real pause during checkpoints. It adds no data assertions; the
+  pause evidence lands in `target/soak.jfr`.
+- **retention** runs on the real watermark quorum (all three readers are
+  configured retention readers on the writer). It first proves deletion of
+  history a lagging live reader needs is never reported as deleted, then
+  purges complete segments up to the minimum durable reader cursor. The
+  parked-behind-the-deleted-boundary restart case (must yield
+  RESEED_REQUIRED, never torn data) is documented but not driven
+  deterministically by this op.
+
+Current findings the enhanced soak exposes (product gaps, not soak
+artifacts):
+
+- A writer restart closes the writer-owned Archive from under readers that
+  are mid-replay: their replay surfaces a raw
+  `io.aeron.archive.client.ArchiveException` ("response channel from archive
+  is not connected") instead of reconnecting or failing closed with
+  `RESEED_REQUIRED`. Quarantine with `-Dsoak.reseed=false` while isolating
+  writer restarts is not possible — the writer plugin owns this fix.
+- The continuously-appending soak writer rejects reader watermarks as "ahead
+  of the durable writer boundary" (the terminal checkpoint trails the live
+  publication), so the retention quorum only assembles intermittently; the
+  retention op then skips with `quorum-not-supported` and is not part of the
+  mandatory coverage gate.
 
 The soak fails on worker failures, lost event-log writes, phantom index hits,
 bad checksums, unexpected exceptions, torn-boundary convergence, excessive
@@ -358,6 +399,10 @@ Soak controls are:
 | `soak.fsyncDelayMs` | `3` | Delay injected through the AtomicFileWriter fsync hook |
 | `soak.maxTornReads` | `64` | Maximum classified benign query retries; set to `0` for strict mode |
 | `soak.corrupt` | `true` | Enable cursor, rollback, and Archive-tail corruption operations |
+| `soak.gc` | `true` | Enable the forced-GC burst operation |
+| `soak.writerRestart` | `true` | Enable the writer-restart operation |
+| `soak.reseed` | `true` | Enable the reseed-and-rejoin operation |
+| `soak.retention` | `true` | Enable watermark retention and the retention purge operation |
 | `soak.events` | `target/soak-events.jsonl` | JSONL event-log destination |
 | `soak.jfr.fail` | `false` | Turn calibrated JFR budget warnings into failures |
 

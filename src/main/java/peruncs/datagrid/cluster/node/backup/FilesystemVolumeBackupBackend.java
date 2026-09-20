@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -30,6 +31,28 @@ import static org.eclipse.serializer.util.X.notNull;
 /// lock file, and the backend fails fast when the volume cannot provide atomic
 /// rename and directory synchronization.
 public final class FilesystemVolumeBackupBackend implements StorageBackupBackend {
+    /* Crash-test seam, mirroring AtomicFileWriter: a bound hook observes the
+     * publication windows a forked child can be killed in. Unbound in
+     * production, which costs one scoped-value check per metadata step. */
+    private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
+
+        /// Runs an action with the backup publication crash hook bound.
+    ///
+    /// Test bridge only; a blocking hook is valid solely in a forked child the
+    /// parent can kill.
+    ///
+    /// @param hook   callback receiving the crash point name and involved path
+    /// @param action guarded backup operation
+    static void runWithTestHook(final BiConsumer<String, Path> hook, final Runnable action) {
+        ScopedValue.where(TEST_HOOK, Objects.requireNonNull(hook, "hook"))
+                .run(Objects.requireNonNull(action, "action"));
+    }
+
+    private static void testPoint(final String point, final Path path) {
+        final BiConsumer<String, Path> hook = TEST_HOOK.isBound() ? TEST_HOOK.get() : null;
+        if (hook != null) hook.accept(point, path);
+    }
+
     static final String EXPORT_WORKSPACE_PREFIX = ".backup-export-";
     /// Age after which an abandoned export workspace is reaped on first use.
     /// A crash can leave a `.backup-export-*` directory behind; anything
@@ -303,6 +326,9 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
                 manifestBytes = ReplicationCursorStore.encode(cursor);
                 AtomicFileWriter.writeBytes(
                         exportDirectory.resolve(StorageBackupBackend.MANIFEST_ENTRY), manifestBytes);
+                /* Kill window: the manifest is durable in the workspace but the
+                 * ready marker is not, so the export is provably incomplete. */
+                testPoint("AFTER_MANIFEST_BEFORE_READY", exportDirectory);
                 AtomicFileWriter.write(exportDirectory.resolve(StorageBackupBackend.READY_ENTRY), channel -> {
                 });
             } catch (final IOException failure) {
@@ -484,6 +510,10 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             final byte[] manifestBytes,
             final long digest
     ) throws NodeLibraryException {
+        /* Kill window: the complete archive is compressed in the workspace and
+         * the publication lock is held, but the atomic rename has not run, so
+         * the volume must not expose any selectable archive. */
+        testPoint("BEFORE_PUBLISH_RENAME", destination);
         try {
             /* An atomic rename replaces an existing destination on Unix
              * instead of failing, so the collision must be detected with

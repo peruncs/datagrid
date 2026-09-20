@@ -12,7 +12,10 @@
 /// - `ProviderCrashMatrixIT`/`ProviderCrashChildMain`: writer-side commit,
 ///   checkpoint, and recovery cells.
 /// - `AeronReaderCrashMatrixIT`/`ReaderCrashChildMain`: reader-side
-///   import/cursor/marker cells, including corrupted and deleted cursors.
+///   import/cursor/marker cells, including corrupted and deleted cursors,
+///   a torn in-flight marker write, the post-sync/pre-resolve window,
+///   crashes inside recovery's own parse window, and a four-crash loop of
+///   mixed write-side and read-side barrier windows.
 /// - `AeronCrashMatrixIT`: the original AtomicFileWriter boundary matrix.
 /// - `ArchiveArtifactMutator` and friends: offline evidence manipulation
 ///   (segment truncation, catalog surgery) for corruption cells.

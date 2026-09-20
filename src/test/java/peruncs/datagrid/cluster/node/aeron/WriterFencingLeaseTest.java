@@ -392,7 +392,47 @@ class WriterFencingLeaseTest {
                 "a foreign acquirer must fail closed beyond the future-skew bound, was: " + failure.getMessage());
     }
 
-        /// Verifies a closed lease never writes another heartbeat and rejects offers.
+        /// Verifies clock-skew-equivalent takeover stops exactly at the staleness boundary.
+    ///
+    /// The lease deliberately samples [`System#currentTimeMillis`] directly —
+    /// there is no injectable clock seam to fake a skewed peer, and a foreign
+    /// process would observe the same wall clock anyway. A successor whose
+    /// clock runs ahead of the volume writer's is indistinguishable from a
+    /// successor that compares the same heartbeat against a tighter staleness
+    /// bound, so this cell replays one fixed heartbeat against two bounds:
+    /// below the bound the skewed successor cannot steal and fails closed,
+    /// above it the takeover succeeds with a strictly greater token. One
+    /// heartbeat, two arithmetic comparisons — fully deterministic, no sleep.
+    @Test
+    void clockSkewEquivalentTakeoverStopsExactlyAtTheStalenessBoundary(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final WriterFencingLease holder =
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), Duration.ofSeconds(30));
+        holder.suspendHeartbeatForTest();
+        holder.close();
+        /* Pin the released heartbeat to a fixed past instant; its age defines
+         * the boundary the "skewed" successor's tighter/looser bound
+         * straddles, with wide margins around the test's own runtime. */
+        overwriteHeartbeat(volume, cluster, generation, System.currentTimeMillis() - 10_000L);
+        final long ageMillis = System.currentTimeMillis() - heartbeatAt(volume, cluster, generation);
+        final IllegalStateException rejected = assertThrows(IllegalStateException.class, () ->
+                WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(),
+                        Duration.ofMillis(ageMillis + 5_000L)),
+                "a skewed successor below the staleness boundary must not steal");
+        assertTrue(rejected.getMessage().contains("held by node"),
+                "below the boundary the lease still names its holder: " + rejected.getMessage());
+        try (final WriterFencingLease successor =
+                     WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(),
+                             Duration.ofMillis(ageMillis - 500L))) {
+            /* Past the boundary the same heartbeat is stale and the takeover
+             * mints a strictly greater token, fencing the old writer. */
+            assertEquals(2L, successor.fencingToken());
+            assertTrue(successor.isCurrent());
+        }
+    }
+
+    /// Verifies a closed lease never writes another heartbeat and rejects offers.
     @Test
     void closedLeaseNeverWritesHeartbeatAgain(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();

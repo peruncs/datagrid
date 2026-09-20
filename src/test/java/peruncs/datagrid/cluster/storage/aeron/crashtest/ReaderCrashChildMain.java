@@ -12,6 +12,7 @@ import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
 import peruncs.datagrid.cluster.storage.aeron.reader.TransactionCrashHooks;
 import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
+import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
@@ -51,8 +52,30 @@ public final class ReaderCrashChildMain {
         if ("phase2".equals(mode) && Files.exists(uncertainty)) {
             try {
                 final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(uncertainty);
+                if ("DURING_RECOVERY_CURSOR_PARSE".equals(point)) {
+                    /* A second crash lands in the middle of the recovery's own
+                     * parse window: the read succeeded but the verdict was
+                     * never published. Simulate the SIGKILL with an immediate
+                     * halt — no outcome file may be left behind. */
+                    ReaderMilestone.write(control.resolve("milestone.reached"), point,
+                            checkpoint.transactionSequence(), checkpoint.recordingPosition());
+                    Runtime.getRuntime().halt(137);
+                }
+                if ("AFTER_RECOVERY_CURSOR_VALIDATED".equals(point)) {
+                    /* The recovery validated the durable state (marker parsed,
+                     * uncertainty recognized) but parked before publishing its
+                     * verdict: the parent kills it here. */
+                    barrier(control, point, checkpoint.transactionSequence(), checkpoint.recordingPosition());
+                }
                 writeOutcome(control, "RESEED_REQUIRED", "reader Store import is uncertain at sequence %s: %s".formatted(checkpoint.transactionSequence(), uncertainty));
             } catch (final IOException failure) {
+                if ("DURING_RECOVERY_CURSOR_PARSE".equals(point)) {
+                    /* Same second-crash window, but the marker itself is torn:
+                     * the parse throws and the recovery dies without any
+                     * verdict. */
+                    ReaderMilestone.write(control.resolve("milestone.reached"), point, -1L, -1L);
+                    Runtime.getRuntime().halt(137);
+                }
                 writeOutcome(control, "RESEED_REQUIRED", "cannot read reader uncertainty marker: %s".formatted(failure));
             }
             return;
@@ -87,32 +110,26 @@ public final class ReaderCrashChildMain {
             final boolean replayedFromArchive = cursor == null || cursor.sequence < 1L;
             final AtomicReference<AeronArchiveReader> readerRef = new AtomicReference<>();
             final ReaderFixture fixture = new ReaderFixture(base, point, new AtomicReference<>());
-            final AeronArchiveReader reader = AeronArchiveReader.New(
-                    AeronArchiveReader.Configuration.builder()
-                    .aeron(aeron).archiveContext(archiveContext).recordingId(recordingId)
-                    .startPosition(cursor == null
-                            ? io.aeron.archive.client.PersistentSubscription.FROM_START : cursor.position)
-                    .liveChannel(required("dg.reader.liveChannel")).liveStreamId(LIVE_STREAM_ID)
-                    .replayChannel(required("dg.reader.replayChannel")).replayStreamId(REPLAY_STREAM_ID)
-                    .replicationConfiguration(configuration).clusterId(CLUSTER_ID).epoch(EPOCH)
-                    .initialSequence(cursor == null ? -1 : cursor.sequence)
-                    .initialPosition(cursor == null ? -1 : cursor.position)
-                    .receiver(fixture).transactionResolved(() ->
-                    {
-                        final AeronArchiveReader current = readerRef.get();
-                        if (current != null) {
-                            writeCursor(base.resolve("reader.cursor"),
-                                    current.lastResolvedSequence(), current.lastResolvedPosition(), point, control);
-                        }
-                    }).deliveryListener(new Listener(fixture, uncertainty, point, recordingId)).build());
-            readerRef.set(reader);
-            if ("AFTER_RECOVERY_CURSOR_VALIDATED".equals(point)) {
-                /* Parks with no import started, no marker written, and the
-                 * durable cursor (if any) validated: a kill here must be
-                 * recoverable by pure archive replay. */
-                barrier(control, point, -1L, cursor == null ? -1L : cursor.position);
-            }
             final java.util.concurrent.Callable<Void> runReader = () -> {
+                final AeronArchiveReader reader = AeronArchiveReader.New(
+                        AeronArchiveReader.Configuration.builder()
+                        .aeron(aeron).archiveContext(archiveContext).recordingId(recordingId)
+                        .startPosition(cursor == null
+                                ? io.aeron.archive.client.PersistentSubscription.FROM_START : cursor.position)
+                        .liveChannel(required("dg.reader.liveChannel")).liveStreamId(LIVE_STREAM_ID)
+                        .replayChannel(required("dg.reader.replayChannel")).replayStreamId(REPLAY_STREAM_ID)
+                        .replicationConfiguration(configuration).clusterId(CLUSTER_ID).epoch(EPOCH)
+                        .initialSequence(cursor == null ? -1 : cursor.sequence)
+                        .initialPosition(cursor == null ? -1 : cursor.position)
+                        .receiver(fixture).transactionResolved(() ->
+                        {
+                            final AeronArchiveReader current = readerRef.get();
+                            if (current != null) {
+                                writeCursor(base.resolve("reader.cursor"),
+                                        current.lastResolvedSequence(), current.lastResolvedPosition(), point, control);
+                            }
+                        }).deliveryListener(new Listener(fixture, uncertainty, point, recordingId)).build());
+                readerRef.set(reader);
                 reader.start();
                 atomicText(control.resolve("ready"), "ready");
                 final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L);
@@ -123,10 +140,19 @@ public final class ReaderCrashChildMain {
                 if (System.nanoTime() >= deadline) throw new IllegalStateException("reader did not resolve target sequence");
                 return null;
             };
+            if ("AFTER_RECOVERY_CURSOR_VALIDATED".equals(point)) {
+                /* Parks with no import started, no marker written, and the
+                 * durable cursor (if any) read and validated: a kill here must
+                 * be recoverable by pure archive replay. */
+                barrier(control, point, -1L, cursor == null ? -1L : cursor.position);
+            }
             if ("DURING_CHUNK_ASSEMBLY".equals(point)) {
                 /* Park after the first chunk of a multi-chunk transaction is
                  * buffered: the kill leaves partially assembled natural-memory
-                 * state behind, which recovery must never apply. */
+                 * state behind, which recovery must never apply. The reader is
+                 * CONSTRUCTED inside this scope — scoped values are not
+                 * inherited by the reader's virtual-thread poller, so the
+                 * TransactionAssembler captures the observer at construction. */
                 TransactionCrashHooks.runWithChunkObserver((sequence, chunkIndex, chunkCount) -> {
                     if (chunkIndex == 0) {
                         barrier(control, point, sequence, -1L);
@@ -136,7 +162,7 @@ public final class ReaderCrashChildMain {
                 runReader.call();
             }
             writeOutcome(control, replayedFromArchive ? "REPLAY_FROM_ARCHIVE" : "CONTINUE", null);
-            reader.dispose();
+            readerRef.get().dispose();
         } catch (final RuntimeException | Error failure) {
             writeOutcome(control, failure.getMessage() != null && failure.getMessage().startsWith("RESEED_REQUIRED:")
                     ? "RESEED_REQUIRED" : "FAIL_CLOSED", failure.toString());
@@ -190,6 +216,13 @@ public final class ReaderCrashChildMain {
                 }
                 try (FileChannel directory = FileChannel.open(parent, StandardOpenOption.READ)) {
                     directory.force(true);
+                }
+                if ("AFTER_CURSOR_DIRECTORY_SYNC_BEFORE_RETURN".equals(point)) {
+                    /* The cursor rename is fully durable but the resolver has
+                     * not returned yet, so the uncertainty marker still exists:
+                     * a kill here must recover fail-closed via the marker, and
+                     * must never double-apply the already-imported record. */
+                    barrier(control, point, sequence, position);
                 }
             } finally {
                 Files.deleteIfExists(temporary);
@@ -278,6 +311,12 @@ public final class ReaderCrashChildMain {
 
     private record Listener(ReaderFixture fixture, Path uncertainty, String point, long recordingId)
             implements ReaderDeliveryListener {
+        /// Writes the uncertainty marker, routing checked failures through an
+        /// unchecked wrapper when invoked from the hook-bound lambda.
+        private void writeMarker(final AeronReplicationCheckpoint marker) throws IOException {
+            AeronReplicationCheckpointStore.write(this.uncertainty, marker);
+        }
+
         /// Persists the uncertainty marker before every import, then parks on
         /// the armed barrier for pre-import crash points so the parent can kill.
         @Override
@@ -285,15 +324,36 @@ public final class ReaderCrashChildMain {
                                       final int dataChunkCount, final int crc32c) {
             this.fixture.importBoundary().set(new ImportBoundary(sequence, position));
             try {
-                AeronReplicationCheckpointStore.write(this.uncertainty, new AeronReplicationCheckpoint(
+                final AeronReplicationCheckpoint marker = new AeronReplicationCheckpoint(
                         AeronReplicationCheckpoint.RecordType.READER_CURSOR,
                         ReplicationDurabilityMode.ARCHIVE_FIRST,
                         AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                         CLUSTER_ID, java.util.UUID.nameUUIDFromBytes("reader-crash-node".getBytes(StandardCharsets.UTF_8)),
                         java.util.UUID.nameUUIDFromBytes("reader-crash-generation".getBytes(StandardCharsets.UTF_8)),
-                        this.recordingId, EPOCH, 1L, sequence, position, dataLength, dataChunkCount, crc32c));
+                        this.recordingId, EPOCH, 1L, sequence, position, dataLength, dataChunkCount, crc32c);
+                if ("DURING_INFLIGHT_MARKER_WRITE".equals(this.point)) {
+                    /* Park inside the AtomicFileWriter mid-write phase of the
+                     * uncertainty marker itself: the kill leaves a torn temp
+                     * sibling behind and the visible marker never appears. */
+                    FileStoreCrashHooks.runWithHook((phase, path) -> {
+                        if ("DURING_CURSOR_FILE_WRITE".equals(phase)
+                                && path.getFileName().startsWith("reader.reader-inflight")) {
+                            this.fixture.barrier(this.point, sequence, position);
+                        }
+                    }, () -> {
+                        try {
+                            writeMarker(marker);
+                        } catch (final IOException failure) {
+                            throw new java.io.UncheckedIOException(failure);
+                        }
+                    });
+                } else {
+                    writeMarker(marker);
+                }
             } catch (final IOException failure) {
                 throw new IllegalStateException("cannot persist reader uncertainty marker", failure);
+            } catch (final java.io.UncheckedIOException failure) {
+                throw new IllegalStateException("cannot persist reader uncertainty marker", failure.getCause());
             }
             if ("REPLAY_BEFORE_FIRST_IMPORT".equals(this.point) ||
                 "DURING_STORE_IMPORT".equals(this.point) ||

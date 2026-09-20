@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
+import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 import peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
@@ -330,7 +331,10 @@ final class WriterFencingLease implements AutoCloseable {
 
     private void startHeartbeat() {
         final long period = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(this.checkIntervalNanos));
-        this.heartbeat.scheduleAtFixedRate(() -> {
+        /* The heartbeat runs on its own virtual thread, outside the caller's
+         * scoped bindings. Inherit the crash hook explicitly so forked crash
+         * children can park inside a renewal; unbound in production. */
+        this.heartbeat.scheduleAtFixedRate(CrashHook.inheritCurrent(() -> {
             try {
                 this.renew();
             } catch (final RuntimeException failure) {
@@ -338,7 +342,7 @@ final class WriterFencingLease implements AutoCloseable {
                         "writer lease heartbeat failed; write admission is suspended until renewal succeeds",
                         failure);
             }
-        }, period, period, TimeUnit.MILLISECONDS);
+        }), period, period, TimeUnit.MILLISECONDS);
     }
 
         /// Returns the fencing token this holder publishes with every envelope.
@@ -440,6 +444,9 @@ final class WriterFencingLease implements AutoCloseable {
                     throw new WriterFencedException(
                             "writer lease for token %s was stolen or removed; this writer is fenced".formatted(this.token));
                 }
+                /* Renewal window: the interprocess lock is held and the holder
+                 * was verified, but the new heartbeat is not durable yet. */
+                CrashHook.invoke("BEFORE_LEASE_RENEWAL_HEARTBEAT", this.token);
                 this.refreshHeartbeatLocked();
             } catch (final IOException | RuntimeException failure) {
                 synchronized (this.stateLock) {
@@ -534,6 +541,10 @@ writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
                 this.refreshHeartbeatIfDueLocked();
                 try {
                     final long position = offer.offer(this::isCurrentUncached);
+                    /* Post-offer window: the terminal marker is offered while
+                     * the interprocess lock is still held, but the protecting
+                     * heartbeat refresh has not run yet. */
+                    CrashHook.invoke("AFTER_OWNED_OFFER_BEFORE_HEARTBEAT", this.token);
                     this.refreshHeartbeatIfDueLocked();
                     return position;
                 } catch (final RuntimeException | Error failure) {

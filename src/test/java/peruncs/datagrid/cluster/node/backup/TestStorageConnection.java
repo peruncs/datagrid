@@ -15,7 +15,10 @@ import java.util.function.Predicate;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Minimal typed Store connection for backup orchestration tests.
-final class TestStorageConnection extends org.eclipse.serializer.reference.UsageMarkable.Default
+///
+/// Non-final so the forked backup crash child can subclass it and park inside
+/// [StorageConnection#issueFullBackup] after writing a partial export.
+class TestStorageConnection extends org.eclipse.serializer.reference.UsageMarkable.Default
         implements StorageConnection {
     @Override
     public boolean issueGarbageCollection(final long nanoTimeBudget) {

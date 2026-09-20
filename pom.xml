@@ -276,6 +276,12 @@
 								<ignoredUnusedDeclaredDependency>org.apache.lucene:lucene-queryparser</ignoredUnusedDeclaredDependency>
 								<ignoredUnusedDeclaredDependency>org.junit.jupiter:junit-jupiter-engine</ignoredUnusedDeclaredDependency>
 							</ignoredUnusedDeclaredDependencies>
+							<!-- lucene-core main code reaches only through signature types
+							     (Analyzer etc. appear in reflective layout descriptors); the
+							     bytecode-level usage lives in test indexes. -->
+							<ignoredNonTestScopedDependencies>
+								<ignoredNonTestScopedDependency>org.apache.lucene:lucene-core</ignoredNonTestScopedDependency>
+							</ignoredNonTestScopedDependencies>
 						</configuration>
 					</execution>
 				</executions>
@@ -524,6 +530,8 @@
 							<includes>
 								<include>**/ProviderCrashMatrixIT.java</include>
 								<include>**/ExternalArchiveCrashIT.java</include>
+								<include>**/WriterTakeoverCrashMatrixIT.java</include>
+								<include>**/BackupCrashMatrixIT.java</include>
 								<include>**/AeronStoreIntegrationIT.java</include>
 								<include>**/AeronCrashMatrixIT.java</include>
 								<include>**/AeronReaderCrashMatrixIT.java</include>
@@ -596,6 +604,10 @@
 									<soak.fsyncDelayMs>${soak.fsyncDelayMs}</soak.fsyncDelayMs>
 									<soak.maxTornReads>${soak.maxTornReads}</soak.maxTornReads>
 									<soak.corrupt>${soak.corrupt}</soak.corrupt>
+								<soak.gc>${soak.gc}</soak.gc>
+								<soak.writerRestart>${soak.writerRestart}</soak.writerRestart>
+								<soak.reseed>${soak.reseed}</soak.reseed>
+								<soak.retention>${soak.retention}</soak.retention>
 									<soak.jfr.fail>${soak.jfr.fail}</soak.jfr.fail>
 							</systemPropertyVariables>
 						</configuration>
@@ -623,6 +635,10 @@
 				<soak.fsyncDelayMs>3</soak.fsyncDelayMs>
 				<soak.maxTornReads>64</soak.maxTornReads>
 				<soak.corrupt>true</soak.corrupt>
+				<soak.gc>true</soak.gc>
+				<soak.writerRestart>true</soak.writerRestart>
+				<soak.reseed>true</soak.reseed>
+				<soak.retention>true</soak.retention>
 				<soak.jfr.fail>false</soak.jfr.fail>
 			</properties>
 		</profile>
