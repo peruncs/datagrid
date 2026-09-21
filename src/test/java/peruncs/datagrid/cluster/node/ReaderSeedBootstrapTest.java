@@ -144,7 +144,7 @@ class ReaderSeedBootstrapTest {
     /// lost-cursor gates — the failure belongs to root creation, not to
     /// seeding.
     @Test
-    void backupReaderWithRootlessStoreFilesFailsAtRootCreation(@TempDir final Path root) throws Exception {
+    void backupReaderWithRootlessStoreFilesFailsAtRootCreation(@TempDir final Path root) {
         final Path backupHome = root.resolve("rootless-backup");
         final Path storage = backupHome.resolve("storage");
 

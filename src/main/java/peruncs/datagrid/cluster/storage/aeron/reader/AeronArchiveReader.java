@@ -249,6 +249,10 @@ public final class AeronArchiveReader implements Disposable {
     private final long stopTimeoutNanos;
     private final int fragmentsPerPoll;
     private final IdleStrategy idleStrategy;
+    /* Poller-thread barrier coalescing state: when the first idle poll stamps
+     * it and the idle delay runs out, the staged barrier flushes. */
+    private long barrierIdleSinceNanos;
+    private long barrierIdleFlushNanos;
     private final AtomicBoolean active = new AtomicBoolean();
     private final AtomicLong stopDeadlineNanos = new AtomicLong();
     /* Sliding stop deadline: while a requested stop drains a replay backlog,
@@ -313,6 +317,7 @@ public final class AeronArchiveReader implements Disposable {
             final AeronReplicationConfiguration requiredConfiguration = required.replicationConfiguration();
             this.stopTimeoutNanos = requiredConfiguration.readerStopTimeoutNanos();
             this.fragmentsPerPoll = requiredConfiguration.readerFragmentsPerPoll();
+            this.barrierIdleFlushNanos = requiredConfiguration.readerBarrierIdleFlushNanos();
             this.idleStrategy = requiredConfiguration.retryPolicy().idleStrategy();
             this.assembler = new TransactionAssembler(
                     requiredConfiguration, required.clusterId(), required.epoch(), required.initialSequence(),
@@ -489,6 +494,9 @@ public final class AeronArchiveReader implements Disposable {
                     },
                     this.idleStrategy
             );
+            /* Publish whatever the final polls staged so a stop at the live
+             * tail always ends at a flushed cursor boundary. */
+            this.assembler.flushDeliveries();
             this.completeRun();
         } catch (final RuntimeException e) {
             this.assembler.failure(e);
@@ -526,6 +534,24 @@ public final class AeronArchiveReader implements Disposable {
             this.live = current.isLive();
             this.trackArchiveIncident();
             if (this.stopAtLatest) extendStopDeadline();
+            /* Time-based barrier flush: a replay backlog that drips in one
+             * fragment per poll still fills whole barriers between flushes,
+             * while a quiet live tail gets its cursor after the configured
+             * bounded idle delay. A busy poll never pays for this check. */
+            if (work == 0) {
+                if (this.assembler.unflushedDeliveryCount() > 0) {
+                    if (this.barrierIdleSinceNanos == 0L) {
+                        this.barrierIdleSinceNanos = System.nanoTime();
+                    } else if (System.nanoTime() - this.barrierIdleSinceNanos >= this.barrierIdleFlushNanos) {
+                        this.assembler.flushDeliveries();
+                        this.barrierIdleSinceNanos = 0L;
+                    }
+                } else {
+                    this.barrierIdleSinceNanos = 0L;
+                }
+            } else {
+                this.barrierIdleSinceNanos = 0L;
+            }
             return work;
         } catch (final ArchiveException disconnect) {
             if (!this.active.get() || this.disposeRequested) {
@@ -776,6 +802,18 @@ public final class AeronArchiveReader implements Disposable {
     /// @return `true` after replay reaches the live stream
     public boolean isLive() {
         return this.live;
+    }
+
+        /// Returns the delivered transactions not yet published by a barrier flush.
+    ///
+    /// Cursor callbacks persist their durable boundary only when this is zero:
+    /// every earlier cursor in one delivery barrier is immediately superseded
+    /// by the barrier's tail, so forcing it would cost a pair of fsyncs per
+    /// transaction without advancing the restart point for a live workflow.
+    ///
+    /// @return staged-but-unflushed delivery count
+    public int unflushedDeliveryCount() {
+        return this.assembler.unflushedDeliveryCount();
     }
 
         /// Returns the Archive position of the last resolved commit.

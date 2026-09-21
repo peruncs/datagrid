@@ -483,9 +483,15 @@ public final class AeronClusterReplicationTransportProvider {
                                 /* Aeron has no broker offset to commit. Its cursor is the
                                  * durability boundary for every reader, including ordinary readers;
                                  * the neutral commitPosition flag only controls broker transports. */
-                                if (cursorListener != null) {
+                                if (cursorListener != null && current.unflushedDeliveryCount() == 0) {
                                     /* Persist the local recovery cursor before advertising the same
-                                     * boundary to the writer's retention controller. */
+                                     * boundary to the writer's retention controller. Only the
+                                     * barrier's tail cursor is forced to disk: every earlier cursor
+                                     * in the same delivery barrier is superseded by the tail the
+                                     * moment the barrier completes, so skipping it changes no
+                                     * observable restart boundary. The reader's uncertainty marker
+                                     * spans the whole barrier, keeping the crash contract identical
+                                     * to per-transaction persistence. */
                                     final byte[] position = new AeronReplicationCursor(
                                             this.settings.clusterId(), this.settings.identity().nodeId(), this.settings.identity().storeGeneration(),
                                             this.settings.epoch(), this.currentFencingToken(), recordingId,
@@ -1482,7 +1488,8 @@ public final class AeronClusterReplicationTransportProvider {
             if (failure != null) {
                 this.closing = false;
                 if (failure instanceof Error error) throw error;
-                if (failure instanceof RuntimeException runtime) throw runtime;
+                if (failure instanceof RuntimeException r)
+                    throw r;
                 throw new IllegalStateException("failed to close Aeron transport", failure);
             }
             synchronized (this) {

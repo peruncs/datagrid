@@ -157,7 +157,6 @@ class AeronWatermarkChannelTest {
                 interruptedCloser.join(5_000L);
                 assertInstanceOf(IllegalStateException.class, firstFailure.get());
                 releaseReceiver.countDown();
-                writer.close();
             } finally {
                 releaseReceiver.countDown();
             }

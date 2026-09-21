@@ -11,7 +11,9 @@ import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.CharsetDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -59,8 +61,7 @@ final class TransactionAssembler {
      * assembled direct range with one reused decoder instead of copying it
      * through a per-transaction heap array first. Only the API-required
      * String itself still allocates. */
-    private final java.nio.charset.CharsetDecoder dictionaryDecoder =
-            StandardCharsets.UTF_8.newDecoder();
+    private final CharsetDecoder dictionaryDecoder = StandardCharsets.UTF_8.newDecoder();
     /* The next sequence is reserved while the assembler monitor is held. It
      * closes the gap between accepting a terminal marker and invoking the
      * receiver callback (which deliberately runs outside the monitor). */
@@ -76,6 +77,33 @@ final class TransactionAssembler {
     private int lastResolutionDictionaryLength;
     private int lastResolutionDictionaryChunkCount;
     private Transaction transaction;
+    /* Delivery batching state. Every resolved transaction is staged onto
+     * `pendingDeliveries` and published to cursor/listener callbacks only when
+     * the barrier flushes: at the configured window size, at an idle poll, or
+     * at a lifecycle stop. The barrier turns the per-transaction fsync storm —
+     * one Store import, one uncertainty-marker write, and one forced cursor
+     * write per transaction — into one of each per barrier, which is what
+     * makes backlog replay fast. Durability is unchanged: the marker is
+     * written before the first staged import of the batch can reach the Store
+     * and is deleted only after the barrier's cursor is forced, so a crash
+     * either keeps both (replay resumes at the cursor) or keeps only the
+     * marker (fail-closed reseed). All fields are guarded by the delivery
+     * monitor; only the polling thread ever stages or flushes. */
+    private final ArrayDeque<PendingDelivery> pendingDeliveries = new ArrayDeque<>();
+    private boolean deliveryMarkerOpen;
+    /* Set when any staged entry carries a Store binary; the flush waits for
+     * materialization only then — abort-only barriers enqueue nothing. */
+    private boolean barrierHasData;
+    /* Dedicated monitor for the barrier staging queue. The flush parks in the
+     * receiver's awaitApplied() for the whole batch; it must never hold the
+     * delivery monitor across that park, because dispose() is specified to
+     * return while a delivery is parked (see TransactionAssemblerFailureTest).
+     * The staging lock order is therefore: delivery monitor outside, barrier
+     * monitor inside; the flush only parks on the barrier monitor… no — even
+     * the barrier monitor is released during the await. All producers and the
+     * flush run on the polling thread; only dispose() touches this monitor
+     * from another thread, to drop staged entries. */
+    private final Object barrierLock = new Object();
 
     /// Creates the one production assembler state machine.
     ///
@@ -159,7 +187,14 @@ final class TransactionAssembler {
                     }
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
                 }
-                if (deliver) this.delivery.run();
+                if (deliver) {
+                    this.delivery.stage();
+                    /* Full barrier: flush right after staging. An incomplete
+                     * barrier flushes on the next idle poll or lifecycle stop. */
+                    if (this.unflushedDeliveryCount() >= this.configuration.readerBarrierMaxTransactions()) {
+                        flushDeliveries();
+                    }
+                }
             }
         } catch (final RuntimeException e) {
             this.failure(e);
@@ -509,6 +544,7 @@ final class TransactionAssembler {
     /// An in-flight [Delivery] owns its detached transaction and is unaffected.
     void dispose() {
         this.releaseIncompleteTransaction();
+        this.discardPendingDeliveries();
     }
 
     private void releaseIncompleteTransaction() {
@@ -732,26 +768,42 @@ final class TransactionAssembler {
             this.resolutionKind = resolutionKind;
         }
 
-        /// Delivers the staged transaction, then publishes the resolved cursor.
+        /// Stages the validated transaction for the current delivery barrier.
         ///
-        /// The receiver import and wait run without the assembler monitor, so a
-        /// slow Store never blocks failure latching; the resolved-sequence update
-        /// runs under the monitor afterwards.
-        void run() {
+        /// The dictionary merge and the buffer hand-off run immediately; the
+        /// durability flip — Store backpressure wait, resolved-sequence
+        /// publication, resolved callback, and marker removal — is deferred to
+        /// [TransactionAssembler#flushDeliveries()] so consecutive
+        /// transactions replay in one barrier. The uncertainty marker is
+        /// opened before the first staged import of a barrier and covers every
+        /// later staged import of the same barrier; it is closed only after
+        /// the barrier's cursor callbacks ran. A receiver failure leaves the
+        /// marker open and the barrier unflushed, which restart treats
+        /// fail-closed.
+        ///
+        /// The receiver hand-off runs without the assembler monitor, so a slow
+        /// Store never blocks failure latching; the barrier bookkeeping runs
+        /// under the delivery monitor held by the caller.
+        void stage() {
             boolean dataTransferred = false;
             try {
                 if (this.dictionary != null) receiver.receiveTypeDictionary(this.dictionary);
                 if (this.data != null) {
                     final int dataLength = this.completed.dataLength;
                     final int dataChunkCount = this.completed.dataChunkCount;
-                    if (deliveryListener != null) {
-                        deliveryListener.beforeStoreImport(
-                                this.sequence, this.position, dataLength, dataChunkCount, this.resolutionCrc32c);
+                    synchronized (barrierLock) {
+                        if (deliveryListener != null && !TransactionAssembler.this.deliveryMarkerOpen) {
+                            deliveryListener.beforeStoreImport(
+                                    this.sequence, this.position, dataLength, dataChunkCount, this.resolutionCrc32c);
+                            TransactionAssembler.this.deliveryMarkerOpen = true;
+                        }
+                        TransactionAssembler.this.barrierHasData = true;
                     }
                     final Binary binary = ChunksWrapper.New(this.data);
                     if (receiver.canReceiveDataOwned()) {
                         /* The owned receiver releases the original buffer on every path,
-                         * including a failure thrown from receiveDataOwned or awaitApplied. */
+                         * including a failure thrown from receiveDataOwned or a later
+                         * barrier-flush await. */
                         this.completed.detachDataStorage();
                         dataTransferred = true;
                         receiver.receiveDataOwned(binary);
@@ -759,27 +811,12 @@ final class TransactionAssembler {
                         dataTransferred = receiver.receiveDataOwned(binary);
                         if (dataTransferred) this.completed.detachDataStorage();
                     }
-                    receiver.awaitApplied();
                 }
-                synchronized (TransactionAssembler.this) {
-                    /* An abort resolves the replication cursor but does not materialise a
-                     * Store image.  Keep the two observations distinct so health/lag
-                     * callers never report an aborted sequence as applied data. */
-                    if (this.resolutionKind == AeronReplicationEnvelope.Kind.COMMIT) {
-                        lastAppliedSequence.set(this.sequence);
-                    }
-                    lastResolvedSequence.set(this.sequence);
-                    lastResolvedPosition.set(this.position);
-                    lastResolutionCrc32c = this.resolutionCrc32c;
-                    lastResolutionKind = this.resolutionKind;
-                    lastResolutionDataLength = this.resolutionDataLength;
-                    lastResolutionDataChunkCount = this.resolutionDataChunkCount;
-                    lastResolutionDictionaryLength = this.completed == null ? 0 : this.completed.dictionaryLength;
-                    lastResolutionDictionaryChunkCount = this.completed == null ? 0 : this.completed.dictionaryChunkCount;
-                }
-                transactionResolved.run();
-                if (this.data != null && deliveryListener != null) {
-                    deliveryListener.afterStoreImport();
+                synchronized (barrierLock) {
+                    pendingDeliveries.add(new PendingDelivery(this.sequence, this.position,
+                            this.resolutionKind, this.resolutionCrc32c, this.resolutionDataLength,
+                            this.resolutionDataChunkCount, this.completed == null ? 0 : this.completed.dictionaryLength,
+                            this.completed == null ? 0 : this.completed.dictionaryChunkCount, this.data != null));
                 }
             } finally {
                 if (this.completed != null) this.completed.dispose(dataTransferred);
@@ -788,6 +825,103 @@ final class TransactionAssembler {
                 this.completed = null;
                 this.resolutionKind = null;
             }
+        }
+    }
+
+        /// One resolved transaction staged onto the delivery barrier.
+    ///
+    /// Carries everything the flush needs to publish the transaction: sequence
+    /// and Archive position for the cursor, the terminal kind, and the commit
+    /// witness fields for the terminal-marker replay validation.
+    private record PendingDelivery(
+            long sequence,
+            long position,
+            AeronReplicationEnvelope.Kind kind,
+            int crc32c,
+            int dataLength,
+            int dataChunkCount,
+            int dictionaryLength,
+            int dictionaryChunkCount,
+            boolean hasData
+    ) {
+    }
+
+        /// Flushes every staged transaction of the current delivery barrier.
+    ///
+    /// Called by the polling loop when the window fills (inside
+    /// [TransactionAssembler#onFragment]), when a poll returns no fragments,
+    /// or when the reader stops, so a live transaction is never held back by
+    /// more than one idle poll cycle while a backlog replays at full window
+    /// size. A latched failure makes the flush a no-op: the queued buffers
+    /// belong to the receiver, whose failure path releases them, and the open
+    /// uncertainty marker correctly fails the next start closed.
+    ///
+    /// @throws RuntimeException when the receiver's materialization failed
+    void flushDeliveries() {
+        boolean markerHeld;
+        boolean hasData;
+        synchronized (this.barrierLock) {
+            if (this.pendingDeliveries.isEmpty() || this.failure.get() != null) return;
+            markerHeld = this.deliveryMarkerOpen;
+            hasData = this.barrierHasData;
+        }
+        /* One materialization wait covers the whole barrier: the receiver's
+         * import, materialization, and index maintenance run once for every
+         * staged transaction that has data. Abort-only barriers enqueue nothing
+         * and the receiver's wait returns immediately. This park deliberately
+         * holds no monitor: failure latching and disposal stay lock-free, and a
+         * snapshot of the staged entries is only taken below. */
+        if (hasData) receiver.awaitApplied();
+        while (true) {
+            final PendingDelivery entry;
+            synchronized (this.barrierLock) {
+                entry = this.pendingDeliveries.poll();
+            }
+            if (entry == null) break;
+            synchronized (this) {
+                /* An abort resolves the replication cursor but does not materialise a
+                 * Store image.  Keep the two observations distinct so health/lag
+                 * callers never report an aborted sequence as applied data. */
+                if (entry.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
+                    this.lastAppliedSequence.set(entry.sequence());
+                }
+                this.lastResolvedSequence.set(entry.sequence());
+                this.lastResolvedPosition.set(entry.position());
+                this.lastResolutionCrc32c = entry.crc32c();
+                this.lastResolutionKind = entry.kind();
+                this.lastResolutionDataLength = entry.dataLength();
+                this.lastResolutionDataChunkCount = entry.dataChunkCount();
+                this.lastResolutionDictionaryLength = entry.dictionaryLength();
+                this.lastResolutionDictionaryChunkCount = entry.dictionaryChunkCount();
+            }
+            this.transactionResolved.run();
+        }
+        synchronized (this.barrierLock) {
+            this.deliveryMarkerOpen = false;
+            this.barrierHasData = false;
+        }
+        if (markerHeld && deliveryListener != null) {
+            this.deliveryListener.afterStoreImport();
+        }
+    }
+
+        /// Reports transactions staged but not yet published by a barrier flush.
+    ///
+    /// The cursor callback uses this to persist only the barrier's tail
+    /// cursor: intermediate cursors within one barrier are superseded by the
+    /// tail the moment it flushes, so persisting them would add fsyncs without
+    /// moving the durable boundary further.
+    ///
+    /// @return staged-but-unflushed transaction count
+    int unflushedDeliveryCount() {
+        synchronized (this.barrierLock) {
+            return this.pendingDeliveries.size();
+        }
+    }
+
+    private void discardPendingDeliveries() {
+        synchronized (this.barrierLock) {
+            this.pendingDeliveries.clear();
         }
     }
 }

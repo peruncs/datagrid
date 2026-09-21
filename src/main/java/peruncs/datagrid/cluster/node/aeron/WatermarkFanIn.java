@@ -11,6 +11,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.zip.CRC32C;
 
+import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.WARNING;
 
 /// Owns the reader-watermark channel of one transport: the writer-side
@@ -193,7 +194,19 @@ final class WatermarkFanIn {
     private void noteRejection(final String source, final RuntimeException failure) {
         final long count = this.rejectedWatermarks.incrementAndGet();
         if ((count & (count - 1)) == 0) {
-            LOGGER.log(WARNING, "Rejected %s count=%s".formatted(source, count), failure);
+            LOGGER.log(levelFor(failure), "Rejected %s count=%s".formatted(source, count), failure);
         }
+    }
+
+        /// Rejections caused by an interrupt are shutdown noise, not data
+    /// problems: close interrupts the watermark worker mid-wait (retention
+    /// hands off through a blocking {@code Future#get}), and the surviving
+    /// interrupted-state signal must not surface as a warning that suggests a
+    /// reader progress loss. Real rejections still warn.
+    static System.Logger.Level levelFor(final RuntimeException failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof InterruptedException) return DEBUG;
+        }
+        return WARNING;
     }
 }

@@ -2815,8 +2815,7 @@ class AeronWriterReaderSoakIT {
         /// crash shape); a clean one quiesces the Store first.
         ///
         /// @param abrupt transport-first teardown order
-        /// @throws Exception when the restart cannot complete
-        synchronized void restart(final boolean abrupt) throws Exception {
+        synchronized void restart(final boolean abrupt)  {
             if (abrupt) {
                 this.transport.close();
                 if (this.manager != null) this.manager.shutdown();

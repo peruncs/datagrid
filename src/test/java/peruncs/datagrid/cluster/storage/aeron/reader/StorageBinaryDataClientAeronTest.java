@@ -30,8 +30,7 @@ class StorageBinaryDataClientAeronTest {
             final int maxBytes
     ) {
         return TransactionAssemblerTestSupport.New(
-                AeronReplicationConfiguration.builder()
-                        .termLength(64 * 1024)
+                AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                        .termLength(64 * 1024)
                         .chunkSize(Math.min(256, maxBytes))
                         .maxTransactionBytes(maxBytes)
                         .build(),
@@ -204,7 +203,7 @@ class StorageBinaryDataClientAeronTest {
     void rejectsSequenceRegressionInsteadOfSilentlySkippingData() {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
-                AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
+                AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                         .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, 5, receiver, () -> {
         });
         final byte[] data = {1};
@@ -289,7 +288,7 @@ class StorageBinaryDataClientAeronTest {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler =
                 TransactionAssemblerTestSupport.New(
-                        AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
+                        AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver, callbacks::incrementAndGet);
         final byte[] data = {1, 2};
         accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
@@ -316,7 +315,7 @@ class StorageBinaryDataClientAeronTest {
             }
         };
         final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
-                AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
+                AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                         .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver, () -> {
         },
                 new ReaderDeliveryListener() {
@@ -367,8 +366,7 @@ class StorageBinaryDataClientAeronTest {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler =
                 TransactionAssemblerTestSupport.New(
-                        AeronReplicationConfiguration.builder()
-                                .termLength(64 * 1024)
+                        AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                                .termLength(64 * 1024)
                                 .chunkSize(256)
                                 .maxTransactionBytes(1024)
                                 .build(),
@@ -392,8 +390,7 @@ class StorageBinaryDataClientAeronTest {
     @Test
     void resumesFromPersistedCursorAtTail() {
         final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
-                AeronReplicationConfiguration.builder()
-                        .termLength(64 * 1024)
+                AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                        .termLength(64 * 1024)
                         .chunkSize(256)
                         .maxTransactionBytes(1024)
                         .build(),
@@ -481,7 +478,7 @@ class StorageBinaryDataClientAeronTest {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler =
                 TransactionAssemblerTestSupport.New(
-                        AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
+                        AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver,
                         () -> {
                             throw new IllegalStateException("checkpoint failed");
@@ -594,7 +591,7 @@ class StorageBinaryDataClientAeronTest {
     void receiverFailureIsTerminalAndDoesNotApplyLaterTransactions() {
         final TransactionAssembler assembler =
                 TransactionAssemblerTestSupport.New(
-                        AeronReplicationConfiguration.builder().termLength(64 * 1024).chunkSize(256)
+                        AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1,
                         new StorageBinaryDataReceiver() {
                             public void receiveData(final Binary value) {

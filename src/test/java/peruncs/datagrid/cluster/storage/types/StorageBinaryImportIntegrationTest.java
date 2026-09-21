@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Proves the Store-level replacement contract used by at-least-once replay.
@@ -133,6 +134,78 @@ class StorageBinaryImportIntegrationTest {
             assertTrue(importedRoot.values.containsAll(List.of("one", "two")));
             assertTrue(importedRoot.entries.isEmpty(), "deleted Store objects must remain deleted after import");
             restarted.shutdown();
+        } finally {
+            delete(root);
+        }
+    }
+
+        /// Regression guard for the deferred-import batch: several queued
+    /// transactions enter the Store as ONE importData call when one flush
+    /// drains them together, instead of one import (with its fsync set) per
+    /// transaction.
+    @Test
+    void coalescedReplayImportsQueuedTransactionsAsOneBatch() throws Exception {
+        final Path root = Files.createTempDirectory("datagrid-store-batch-import-");
+        final Path sourcePath = root.resolve("source");
+        final Path readerPath = root.resolve("reader");
+        final CapturingDistributor capture = new CapturingDistributor();
+        try {
+            final Root initialRoot = new Root();
+            initialRoot.values.add("initial");
+            final EmbeddedStorageManager writer = start(sourcePath, initialRoot, capture);
+            writer.storeRoot();
+            writer.shutdown();
+            copyDirectory(sourcePath, readerPath);
+            capture.transactions.clear();
+
+            final EmbeddedStorageManager resumedWriter = startExisting(sourcePath, capture);
+            final Root resumedRoot = resumedWriter.root();
+            for (final String value : java.util.List.of("one", "two", "three")) {
+                resumedRoot.values.add(value);
+                resumedWriter.store(resumedRoot.values);
+            }
+            resumedWriter.shutdown();
+            assertEquals(3, capture.transactions.size(), "fixture must capture three transactions");
+
+            final EmbeddedStorageManager reader = foundation(readerPath).start();
+            final StorageConnection delegate = reader.createConnection();
+            final java.util.concurrent.atomic.AtomicInteger importCalls = new java.util.concurrent.atomic.AtomicInteger();
+            final StorageConnection counting = (StorageConnection) java.lang.reflect.Proxy.newProxyInstance(
+                    StorageConnection.class.getClassLoader(), new Class<?>[]{StorageConnection.class},
+                    (proxy, method, args) ->
+                    {
+                        if (method.getName().equals("importData")) importCalls.incrementAndGet();
+                        return method.invoke(delegate, args);
+                    });
+            final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+                    StorageBinaryDataMergerTestSupport.configuration(
+                            StorageBinaryDataMergerTestSupport.foundation(), counting,
+                            ObjectGraphUpdateHandler.PerStore(coordinator),
+                            0L, 1L << 30, 60_000L, coordinator));
+            try {
+                for (final List<ByteBuffer> transaction : capture.transactions) {
+                    merger.receiveDataOwned(org.eclipse.serializer.persistence.binary.types.ChunksWrapper.New(
+                            copy(transaction).toArray(ByteBuffer[]::new)));
+                }
+                merger.awaitApplied();
+                assertEquals(1, importCalls.get(),
+                        "three queued transactions must enter the Store as one batched import");
+            } finally {
+                merger.dispose();
+                reader.shutdown();
+            }
+
+            final EmbeddedStorageManager restarted = foundation(readerPath).start();
+            try {
+                final Root importedRoot = restarted.root();
+                assertTrue(importedRoot.values.containsAll(java.util.List.of("one", "two", "three")),
+                        "the batched import must apply every transaction");
+                assertEquals(1, importedRoot.values.stream().filter("one"::equals).count(),
+                        "each transaction must be applied exactly once");
+            } finally {
+                restarted.shutdown();
+            }
         } finally {
             delete(root);
         }

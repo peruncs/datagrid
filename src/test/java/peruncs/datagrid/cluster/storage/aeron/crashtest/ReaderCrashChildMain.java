@@ -88,6 +88,10 @@ public final class ReaderCrashChildMain {
                 .chunkSize(16 * 1024)
                 .maxTransactionBytes(256 * 1024)
                 .offerTimeoutNanos(10_000_000_000L)
+                /* Crash cells anchor on exact per-transaction marker/cursor
+                 * interleavings, so the child replays with the strict
+                 * per-transaction barrier instead of the batched default. */
+                .readerBarrierMaxTransactions(1)
                 .build();
         final MediaDriver.Context mediaContext = new MediaDriver.Context()
                 .aeronDirectoryName(aeronDirectory.toString())

@@ -456,7 +456,7 @@ class StorageBinaryDataMergerTest {
     /// instead of by buffer count: three hundred small channel buffers must
     /// not force one synchronous materialization per commit.
     @Test
-    void multiBufferCommitsCoalesceByBytesNotBufferCount() throws Exception {
+    void multiBufferCommitsCoalesceByBytesNotBufferCount()  {
         final AtomicInteger handlerCalls = new AtomicInteger();
         final ObjectGraphUpdateHandler counting = updater -> handlerCalls.incrementAndGet();
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(

@@ -26,8 +26,7 @@ class TransactionAssemblerFencingTest {
 
     private static TransactionAssembler assembler(final StorageBinaryDataReceiver receiver) {
         return TransactionAssemblerTestSupport.New(
-                AeronReplicationConfiguration.builder()
-                        .termLength(64 * 1024)
+                AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                        .termLength(64 * 1024)
                         .chunkSize(256)
                         .maxTransactionBytes(1024)
                         .build(),

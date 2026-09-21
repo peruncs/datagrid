@@ -36,8 +36,7 @@ public final class TransactionCrashHooks {
     /// @param <T>    action result type
     public static <T> T runWithChunkObserver(final ChunkObserver observer, final Callable<T> action) {
         return TransactionAssembler.runWithChunkObserver(
-                (sequence, chunkIndex, chunkCount) ->
-                        observer.afterChunkBuffered(sequence, chunkIndex, chunkCount),
+                observer::afterChunkBuffered,
                 action);
     }
 }

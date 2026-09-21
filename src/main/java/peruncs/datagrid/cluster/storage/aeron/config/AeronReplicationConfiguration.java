@@ -26,6 +26,10 @@ import java.util.Objects;
 /// @param recordingStopTimeoutNanos  bounded wait for an Archive recording to stop
 /// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary
 /// @param readerFragmentsPerPoll     fragments a reader consumes per poll call while replaying
+/// @param readerBarrierMaxTransactions maximum resolved transactions the reader may stage into one
+///                                     durability barrier before it is flushed
+/// @param readerBarrierIdleFlushNanos  how long a partially staged barrier may survive idle polls
+///                                     before it is flushed at the stream tail
 /// @param durabilityMode             local-versus-Archive ordering used by the writer
 /// @param retryPolicy                idle pacing and probe spacing for bounded retry loops
 public record AeronReplicationConfiguration(
@@ -39,6 +43,8 @@ public record AeronReplicationConfiguration(
         long recordingStopTimeoutNanos,
         long readerStopTimeoutNanos,
         int readerFragmentsPerPoll,
+        int readerBarrierMaxTransactions,
+        long readerBarrierIdleFlushNanos,
         ReplicationDurabilityMode durabilityMode,
         AeronRetryPolicy retryPolicy
 ) {
@@ -54,6 +60,26 @@ public record AeronReplicationConfiguration(
     public static final int MAX_SUPPORTED_TRANSACTION_BYTES = AeronReplicationEnvelope.MAX_TRANSACTION_PAYLOAD_BYTES;
         /// Default fragments consumed per reader poll; a replay backlog drains in a few polls instead of thousands.
     public static final int DEFAULT_READER_FRAGMENTS_PER_POLL = 256;
+        /// Default reader durability-barrier window in transactions.
+    ///
+    /// Resolved transactions are staged into one barrier — one Store import,
+    /// one materialization pass, one uncertainty-marker write, and one forced
+    /// cursor write per barrier instead of per transaction. A backlog replay
+    /// therefore amortizes its fsyncs and index maintenance over the window,
+    /// while an idle or live poll flushes immediately, so live-tail latency is
+    /// unchanged apart from one extra poll cycle. The persisted state after a
+    /// crash is identical: mid-barrier crashes are covered by the uncertainty
+    /// marker, completed barriers by the forced cursor.
+    public static final int DEFAULT_READER_BARRIER_MAX_TRANSACTIONS = 64;
+        /// Default barrier idle-flush delay in nanoseconds.
+    ///
+    /// A staged but unflushed barrier publishes its cursor once polling has
+    /// been idle this long: live-tail transactions gain at most this much
+    /// cursor latency (bounded additionally by one poll cycle), while a replay
+    /// backlog — whose fragments keep arriving faster — accumulates whole
+    /// barriers and pays one import, one marker write, and one cursor fsync
+    /// per barrier rather than per transaction.
+    public static final long DEFAULT_READER_BARRIER_IDLE_FLUSH_NANOS = 2_000_000L;
     private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_START_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;
@@ -95,6 +121,12 @@ public record AeronReplicationConfiguration(
         }
         if (readerFragmentsPerPoll <= 0) {
             throw new IllegalArgumentException("readerFragmentsPerPoll must be positive");
+        }
+        if (readerBarrierMaxTransactions <= 0) {
+            throw new IllegalArgumentException("readerBarrierMaxTransactions must be positive");
+        }
+        if (readerBarrierIdleFlushNanos <= 0) {
+            throw new IllegalArgumentException("readerBarrierIdleFlushNanos must be positive");
         }
         final int maxMessageLength = maxMessageLengthForTermLength(termLength);
         if ((long) chunkSize + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength) {
@@ -143,6 +175,8 @@ public record AeronReplicationConfiguration(
         private long recordingStopTimeoutNanos = DEFAULT_RECORDING_STOP_TIMEOUT_NANOS;
         private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
         private int readerFragmentsPerPoll = DEFAULT_READER_FRAGMENTS_PER_POLL;
+        private int readerBarrierMaxTransactions = DEFAULT_READER_BARRIER_MAX_TRANSACTIONS;
+        private long readerBarrierIdleFlushNanos = DEFAULT_READER_BARRIER_IDLE_FLUSH_NANOS;
         private ReplicationDurabilityMode durabilityMode = ReplicationDurabilityMode.ARCHIVE_FIRST;
         private AeronRetryPolicy retryPolicy = AeronRetryPolicy.Default();
 
@@ -244,6 +278,38 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
+                /// Sets the reader durability-barrier window in transactions.
+        ///
+        /// Larger windows amortize reader-side import fsyncs, index
+        /// maintenance, marker writes, and cursor fsyncs over a bigger batch,
+        /// which is what dominates backlog replay. A value of `1` restores the
+        /// strict per-transaction barrier. The window only delays durability
+        /// bookkeeping while polling is busy; an idle poll flushes immediately,
+        /// and the uncertainty-marker protocol keeps the crash contract
+        /// identical regardless of the value.
+        ///
+        /// @param value maximum staged transactions per barrier; must be positive
+        /// @return this builder
+        public Builder readerBarrierMaxTransactions(final int value) {
+            this.readerBarrierMaxTransactions = value;
+            return this;
+        }
+
+                /// Sets how long a partially staged delivery barrier may survive idle polls.
+        ///
+        /// The poller flushes a staged barrier when the window is full, when it
+        /// stops, or when polling has been idle this long; at the live tail a
+        /// single transaction therefore gains at most this much cursor latency
+        /// (plus one poll cycle), while a backlog that drips slower than this
+        /// still joints into full barriers.
+        ///
+        /// @param value idle flush delay in nanoseconds; must be positive
+        /// @return this builder
+        public Builder readerBarrierIdleFlushNanos(final long value) {
+            this.readerBarrierIdleFlushNanos = value;
+            return this;
+        }
+
                 /// Sets the local-versus-Archive ordering used by the writer.
         ///
         /// @param value durability mode
@@ -279,6 +345,8 @@ public record AeronReplicationConfiguration(
                     this.recordingStopTimeoutNanos,
                     this.readerStopTimeoutNanos,
                     this.readerFragmentsPerPoll,
+                    this.readerBarrierMaxTransactions,
+                    this.readerBarrierIdleFlushNanos,
                     this.durabilityMode,
                     this.retryPolicy
             );

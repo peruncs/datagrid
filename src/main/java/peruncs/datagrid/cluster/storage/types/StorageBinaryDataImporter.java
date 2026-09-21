@@ -50,6 +50,18 @@ final class StorageBinaryDataImporter {
         return importedBuffers;
     }
 
+    /// Copies the source buffers into distinctly owned native buffers without
+    /// importing them. Used by the merger's deferred-import path: the borrowed
+    /// binary is released by the transport as soon as its buffers are safely
+    /// copied, and the actual Store import runs later, once per drained batch.
+    ///
+    /// @param sourceBuffers normalized source buffers
+    /// @return distinctly owned native copies
+    static ByteBuffer[] copyOwned(final ByteBuffer[] sourceBuffers) {
+        notNull(sourceBuffers);
+        return copyBuffers(sourceBuffers);
+    }
+
     private static ByteBuffer[] copyBuffers(final ByteBuffer[] sourceBuffers) {
         final ByteBuffer[] ownedBuffers = new ByteBuffer[sourceBuffers.length];
         try {

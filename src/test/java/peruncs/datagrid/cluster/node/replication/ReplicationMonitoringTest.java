@@ -11,9 +11,6 @@ class ReplicationMonitoringTest {
     @Test
     void exposesAeronTransportStateLagAndReadinessAsRawValues() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {
-            public boolean isWriter() {
-                return false;
-            }
 
             public long currentSequence() {
                 return 7;
@@ -69,16 +66,9 @@ class ReplicationMonitoringTest {
     @Test
     void unknownWriterBoundaryReportsUnknownLag() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {
-            public boolean isWriter() {
-                return false;
-            }
 
             public long currentSequence() {
                 return 7;
-            }
-
-            public long latestSequence() {
-                return -1;
             }
 
             public String replicationTransport() {

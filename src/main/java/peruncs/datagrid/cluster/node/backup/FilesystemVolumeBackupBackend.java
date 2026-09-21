@@ -191,10 +191,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
                 .filter(BackupArchive::isBackupFileName)
                 .map(this::resolveListedBackup)
                 .filter(Objects::nonNull)
-                .map(cached -> {
-                    currentNames.add(cached.name());
-                    return cached;
-                })
+                .peek(cached -> currentNames.add(cached.name()))
                 .map(CachedArchive::metadata)
                 .filter(Objects::nonNull)
                 .sorted(BackupMetadata.OLDEST_FIRST)

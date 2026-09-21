@@ -12,9 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -565,8 +563,7 @@ class AeronArchiveRetentionTest {
              * bounded wait races the two identical deadlines against each
              * other, so the wait is bounded on its own calling thread while
              * the retention timeout comfortably exceeds the whole test. */
-            final java.util.concurrent.ExecutorService caller =
-                    java.util.concurrent.Executors.newSingleThreadExecutor();
+            final ExecutorService caller =  Executors.newSingleThreadExecutor();
             try {
                 assertTrue(entered.await(30, TimeUnit.SECONDS), "agent did not start the blocking command");
                 final java.util.concurrent.Future<Boolean> waiting = caller.submit(retention::isSupported);
@@ -645,14 +642,14 @@ class AeronArchiveRetentionTest {
         assertNull(background.get(), "unexpected background failure " + background.get());
     }
 
-    private static java.util.concurrent.ExecutorService retentionAgent(
+    private static ExecutorService retentionAgent(
             final AeronArchiveRetention retention) throws Exception {
         /* White-box lifecycle probe: termination has no public observable —
          * post-shutdown submissions are rejected whether the executor is idle
          * or terminated — so the test reads the agent directly. */
         final java.lang.reflect.Field agent = AeronArchiveRetention.class.getDeclaredField("agent");
         agent.setAccessible(true);
-        return (java.util.concurrent.ExecutorService) agent.get(retention);
+        return (ExecutorService) agent.get(retention);
     }
 
     /// Verifies a retirement persistence failure reinstates the reader so the quorum still requires it.

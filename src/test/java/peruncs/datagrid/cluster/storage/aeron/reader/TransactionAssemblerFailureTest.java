@@ -25,8 +25,7 @@ class TransactionAssemblerFailureTest {
 
     private static TransactionAssembler assembler(final StorageBinaryDataReceiver receiver) {
         return TransactionAssemblerTestSupport.New(
-                AeronReplicationConfiguration.builder()
-                        .termLength(64 * 1024)
+                AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                        .termLength(64 * 1024)
                         .chunkSize(256)
                         .maxTransactionBytes(1024)
                         .build(),
@@ -183,8 +182,7 @@ class TransactionAssemblerFailureTest {
     /// Proves a zero wire nonce is rejected by the canonical constructor.
     @Test
     void zeroWireNonceIsRejectedByTheCanonicalConstructor() {
-        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
-                .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
         final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
             @Override
             public void receiveData(final Binary value) {

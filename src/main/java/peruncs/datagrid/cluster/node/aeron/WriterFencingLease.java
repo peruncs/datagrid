@@ -471,8 +471,7 @@ final class WriterFencingLease implements AutoCloseable {
     /// write. The wall heartbeat and the writing process's monotonic timestamp
     /// are stored together for [#ownLeaseFresh].
     ///
-    /// @throws IOException when the lease file cannot be persisted
-    private void refreshHeartbeatLocked() throws IOException {
+    private void refreshHeartbeatLocked() {
         final long writeMillis = System.currentTimeMillis();
         final long writeNanos = System.nanoTime();
         synchronized (this.stateLock) {
@@ -555,7 +554,7 @@ writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
                      * refresh failure mask the original offer failure. */
                     try {
                         this.refreshHeartbeatLocked();
-                    } catch (final IOException | RuntimeException refreshFailure) {
+                    } catch (final RuntimeException refreshFailure) {
                         failure.addSuppressed(refreshFailure);
                     }
                     throw failure;
@@ -607,8 +606,7 @@ writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
             Thread.currentThread().interrupt();
         }
         final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
-        try (final FileChannel lockChannel = FileChannel.open(
-                rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try (final FileChannel lockChannel = FileChannel.open(rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
              final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
             /* Nothing to write: the file intentionally survives release.
              * Holding the interprocess lock here proves that a renewal or

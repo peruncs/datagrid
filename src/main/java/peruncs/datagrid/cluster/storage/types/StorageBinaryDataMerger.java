@@ -24,10 +24,12 @@ import static org.eclipse.serializer.util.X.notNull;
 
 /// Applies committed Store binary data on a reader node.
 ///
-/// Incoming buffers are imported into the local Store immediately and then
-/// coalesced for object-graph updates on a bounded single-thread executor.
-/// Providers must call this merger only after their transport-specific commit
-/// validation has completed.
+/// Incoming buffers are copied to owned native memory and queued immediately;
+/// the Store import itself is deferred into the drained batch so a replay
+/// backlog applies as a few large imports instead of one import per
+/// transaction. Object-graph materialization is coalesced the same way on a
+/// bounded single-thread executor. Providers must call this merger only after
+/// their transport-specific commit validation has completed.
 ///
 /// # Delivery threading
 ///
@@ -205,6 +207,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
          * mutate the graph out of order. */
         private final ReentrantLock queueLock = new ReentrantLock();
         private final Condition flushCondition = this.queueLock.newCondition();
+        /* Backpressure signal: the worker posts it after every drained batch,
+         * so an over-limit delivery waits only until the queue drops back under
+         * the limit — not until the worker exits, which would serialize the
+         * delivery thread against the whole backlog on every trigger. */
+        private final Condition drainedCondition = this.queueLock.newCondition();
         private final LockedExecutor materialization = LockedExecutor.New();
         private final BinaryPersistenceFoundation<?> foundation;
         private final StorageConnection storage;
@@ -243,6 +250,13 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
          * grows with data size. Only touched under the materialization lock,
          * so a plain long needs no atomics. */
         private long materializedAtNanos;
+        /* Set when the worker or an await-thread enters applyData and cleared
+         * when it leaves: backpressure waits against an over-limit queue must
+         * keep the previous fail-fast semantics of the completed-future wait,
+         * where a wedged materialization batch failed the delivery within the
+         * bounded, retried apply budget instead of parking on a queue that had
+         * already been pulled from. */
+        private volatile long batchActiveSinceNanos;
         /* One parsing foundation serves every dictionary message: rebuilding a
          * BinaryPersistenceFoundation per message re-created its handler graph
          * inside the materialization lock. A non-caching provider reads the
@@ -304,12 +318,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
             final ByteBuffer[] sourceBuffers = StorageBinaryBuffers
                     .importArray(data);
-            /* Serialize the Store import with deferred materialization: both
-             * mutate the same persistence and type-handler state, and importing
-             * during a materialization can expose a partially imported
-             * transaction. This is the same exclusion the dictionary path uses. */
-            final ByteBuffer[] ownedBuffers = this.materialization.write(
-                    () -> StorageBinaryDataImporter.importOwned(this.storage, sourceBuffers));
+            /* The Store import is deferred into the batch drain (see
+             * receiveDataOwned): the borrowed views are copied to owned native
+             * memory first, because the caller's binary is released after this
+             * callback returns. The copy failure path must not leak. */
+            final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.copyOwned(sourceBuffers);
             /* scheduleMaterialization owns cleanup on every rejection.  Releasing here
              * as well would double-free buffers when the worker has already drained its
              * queue after a terminal failure. */
@@ -339,13 +352,15 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 if (this.disposed) {
                     throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
                 }
-                /* Same exclusion as the borrowed-copy path: the Store import must
-                 * not interleave with a deferred materialization. */
-                final ByteBuffer[] imported = buffers;
-                this.materialization.write(() ->
-                {
-                    StorageBinaryDataImporter.importDirect(this.storage, imported);
-                });
+                /* The Store import is deliberately NOT done here. It is deferred
+                 * into the batch drain in applyData so a backlog replays as a few
+                 * large imports — one Store commit, one import fsync set, one index
+                 * maintenance pass per batch — instead of one per transaction. The
+                 * drain runs under the same materialization exclusion as the former
+                 * inline import, and the transport's uncertainty marker still covers
+                 * data queued but not yet imported, so the crash contract is
+                 * unchanged: only the crash window's granularity moves from one
+                 * transaction to one barrier batch. */
             } catch (final RuntimeException | Error failure) {
                 /* Ownership has not transferred to the deferred-materialization
                  * queue on any of these paths. The Aeron callback contract still
@@ -467,33 +482,19 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 }
 
                 if (queuedBytes > this.cacheBytesLimit) {
-                    try {
-                        /* The worker is signalled before this wait when it is still in its
-                         * coalescing delay. The wait is bounded and retried a small number
-                         * of times: a hung materializer must fail the merger instead of
-                         * hanging the delivery thread forever, while a merely slow one is
-                         * given the retry budget before the reader is failed. The metric is
-                         * payload bytes, not buffer count: a single multi-buffer
-                         * transaction must not bypass coalescing merely because it
-                         * carries many small channel buffers. */
-                        this.awaitMaterialization(this.updateFuture, "import data task");
-                    } catch (final InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new StorageBinaryDataLifecycleException(
-                                "Interrupted while waiting for import data task", e);
-                    } catch (final TimeoutException e) {
-                        /* The batch is already queued, so the worker still owns it:
-                         * release nothing here. Latch the terminal failure so no
-                         * further batches are admitted; the worker drains or fails
-                         * on its own while dispose() still joins it. */
-                        throw this.recordLifecycleFailure("Timed out waiting for import data task", e);
-                    } catch (final ExecutionException e) {
-                        final RuntimeException mergerFailure = this.failure.get();
-                        if (mergerFailure != null) {
-                            throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
-                        }
-                        throw new IllegalStateException("Storage binary merger task failed", e.getCause());
-                    }
+                    /* Backpressure: wait only until the worker has drained the
+                     * queue back under the limit. Waiting for the worker task
+                     * itself would stall until the queue is fully empty and the
+                     * worker exited, serializing the delivery thread against the
+                     * entire backlog on every trigger. The worker is signalled
+                     * first when it is still in its coalescing delay. The wait is
+                     * bounded and retried: a hung materializer must fail the
+                     * merger instead of hanging the delivery thread forever,
+                     * while a merely slow one is given the retry budget. The
+                     * metric is payload bytes, not buffer count: a single
+                     * multi-buffer transaction must not bypass coalescing merely
+                     * because it carries many small channel buffers. */
+                    this.awaitQueueDrainedBelowLimit();
                 }
             } catch (final RuntimeException | Error failure) {
                 if (!queued) {
@@ -586,6 +587,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         this.cachedBytes = Math.subtractExact(this.cachedBytes, next.remaining());
                         this.drainBuffers[index] = next;
                     }
+                    /* The batch just left the queue: a waiter parked on the
+                     * byte limit may now fit again. Signalling while nobody
+                     * waits costs an uncontended signal only. */
+                    this.drainedCondition.signalAll();
                 } finally {
                     this.queueLock.unlock();
                 }
@@ -602,17 +607,30 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * wait and reports the pinned buffers instead of freeing them
                  * underneath the Store. */
                 final long startedNanos = System.nanoTime();
+                this.batchActiveSinceNanos = startedNanos;
                 this.materializedAtNanos = 0L;
                 try {
                     this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
                     {
                         /* One coordinator write section covers the batch end
-                         * to end: materialization, validation, and index
-                         * refresh. Application reads joining the read side
-                         * observe either the pre-batch or the post-batch
+                         * to end: Store import, materialization, validation,
+                         * and index refresh. Application reads joining the read
+                         * side observe either the pre-batch or the post-batch
                          * boundary — never a materialized graph with stale
                          * search views. */
-                        /* Reader-side index maintenance FIRST: imports
+                        /* The deferred import runs here, once for the whole
+                         * batch: every drained transaction's buffers enter the
+                         * Store as one import, so a backlog replays with one
+                         * Store commit (and one fsync set) per batch instead
+                         * of one per transaction. It runs inside the same
+                         * materialization exclusion the delivery-time import
+                         * used, so it can never interleave with a dictionary
+                         * merge or a materialization. */
+                        StorageBinaryDataImporter.importDirect(this.storage,
+                                this.drainBuffers.length == pending
+                                        ? this.drainBuffers
+                                        : Arrays.copyOf(this.drainBuffers, pending));
+                        /* Reader-side index maintenance follows the import: imports
                          * materialize entities without the map API, so no
                          * index group observes them and both search views
                          * freeze at the first query. Retirement runs before
@@ -652,6 +670,15 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     }
                     throw failure;
                 } finally {
+                    this.batchActiveSinceNanos = 0L;
+                    this.queueLock.lock();
+                    try {
+                        /* The batch is over: any producer parked on the
+                         * over-limit wait must re-watch both conditions. */
+                        this.drainedCondition.signalAll();
+                    } finally {
+                        this.queueLock.unlock();
+                    }
                     StorageBinaryDataImporter.release(this.drainBuffers, pending);
                     Arrays.fill(this.drainBuffers, 0, pending, null);
                 }
@@ -716,6 +743,59 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                             "Storage graph update worker was interrupted", interrupted);
                 }
                 this.flushRequested = false;
+            } finally {
+                this.queueLock.unlock();
+            }
+        }
+
+                /// Bounded backpressure wait until the queue drops back at or under the
+        /// configured byte limit.
+        ///
+        /// The worker signals [drainedCondition] after every drained batch, so
+        /// this returns as soon as enough bytes left the queue — not when the
+        /// queue is empty. A latched worker failure fails immediately, and an
+        /// over-limit queue that the worker cannot drain within the bounded,
+        /// retried budget latches the lifecycle failure exactly like the
+        /// previous future-based wait did.
+        private void awaitQueueDrainedBelowLimit() {
+            this.queueLock.lock();
+            try {
+                int retries = APPLY_TIMEOUT_RETRIES;
+                long remaining = TimeUnit.MILLISECONDS.toNanos(this.applyTimeoutMs);
+                /* Same wait-set as before the deferred import: an over-limit
+                 * queue blocks its producer until the worker is idle AND the
+                 * queue is back under the limit. The batch-active check keeps
+                 * the bounded wait on a wedged materialization (fail-closed
+                 * within the retry budget); the queue check applies the byte
+                 * backpressure. Both signals arrive via drainedCondition. */
+                while (this.cachedBytes > this.cacheBytesLimit || this.batchActiveSinceNanos != 0L) {
+                    if (this.failure.get() != null) {
+                        throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
+                    }
+                    if (this.disposed) {
+                        throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                    }
+                    if (remaining <= 0L) {
+                        /* Slices of one apply timeout with the shared retry
+                         * budget: a slow-but-progressing batch finishes within
+                         * the budget (the completed-future wait behaved the
+                         * same), a wedged worker fails after it. */
+                        if (retries-- <= 0) {
+                            throw this.recordLifecycleFailure("Timed out waiting for import data task",
+                                    new TimeoutException(
+                                            "queue stayed over the %s byte limit for %d slices"
+                                                    .formatted(this.cacheBytesLimit, APPLY_TIMEOUT_RETRIES + 1)));
+                        }
+                        remaining = TimeUnit.MILLISECONDS.toNanos(this.applyTimeoutMs);
+                    }
+                    try {
+                        remaining = this.drainedCondition.awaitNanos(remaining);
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new StorageBinaryDataLifecycleException(
+                                "Interrupted while waiting for import data task", interrupted);
+                    }
+                }
             } finally {
                 this.queueLock.unlock();
             }

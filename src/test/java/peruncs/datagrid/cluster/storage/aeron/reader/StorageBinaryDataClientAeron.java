@@ -74,7 +74,15 @@ public final class StorageBinaryDataClientAeron implements Disposable {
             AeronReaderLifecycle.runPollingLoop(
                     this.active,
                     () -> false,
-                    () -> this.subscription.poll(this.fragmentAssembler, this.fragmentsPerPoll),
+                    () ->
+                    {
+                        final int work = this.subscription.poll(this.fragmentAssembler, this.fragmentsPerPoll);
+                        /* Same delivery-barrier flush point as the production
+                         * Archive reader: an idle poll publishes staged
+                         * transactions so live-tail latency stays bounded. */
+                        if (work == 0) this.assembler.flushDeliveries();
+                        return work;
+                    },
                     () -> false,
                     () -> false,
                     () -> {
