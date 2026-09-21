@@ -59,6 +59,33 @@ class AeronStoreIntegrationIT {
         return articles.index().get(LuceneIndex.class);
     }
 
+    /// Waits until the writer's durable boundary has advanced past `previous`
+    /// AND settled: the checkpoint-confirmed boundary trails each commit (and
+    /// can also advance on internal records like dictionary publications), so
+    /// a single greater read does not prove the transaction is covered. The
+    /// boundary must be strictly greater and then unchanged across a settle
+    /// window before it counts.
+    private static ReplicationCursor awaitLatestBeyond(final ClusterReplicationTransport transport,
+                                                       final long previous) {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        final long settleNanos = TimeUnit.MILLISECONDS.toNanos(500);
+        ReplicationCursor settled = null;
+        long settledAtNanos = 0L;
+        while (System.nanoTime() < deadline) {
+            final ReplicationCursor cursor = latest(transport);
+            if (settled == null || cursor.logicalSequence() != settled.logicalSequence()) {
+                settled = cursor;
+                settledAtNanos = System.nanoTime();
+            } else if (settled.logicalSequence() > previous
+                    && System.nanoTime() - settledAtNanos >= settleNanos) {
+                return settled;
+            }
+            java.util.concurrent.locks.LockSupport.parkNanos(50_000_000L);
+        }
+        throw new AssertionError(
+                "writer boundary did not settle past " + previous + " within 30s");
+    }
+
     static EmbeddedStorageManager startIndex(
             final Path path,
             final IndexRoot root,
@@ -535,6 +562,157 @@ class AeronStoreIntegrationIT {
                     clusterId, generation, postRetentionStart, postRetentionTarget, controlPort, livePort, watermarkPort,
                     retentionReaders, "post-retention-update", false);
             writer.shutdown();
+        } finally {
+            delete(root);
+        }
+    }
+
+    /// Deterministic parked-reader-behind-a-purged-segment case: a reader
+    /// drained from the cluster is retired from the retention quorum, the
+    /// purge then physically deletes the Archive segment its frozen durable
+    /// cursor points into, and its restart MUST fail closed with the typed
+    /// reseed signal — health reports RESEED_REQUIRED — never replay torn
+    /// history, never converge silently, never move its durable cursor. This
+    /// is the retire-then-purge production shape the soak only hits
+    /// nondeterministically through its generic restart ops.
+    @Test
+    void readerRestartBehindAPurgedSegmentDemandsAReseed() throws Exception {
+        final Path root = Files.createTempDirectory("dg-aeron-retention-reseed-");
+        final UUID clusterId = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final int controlPort = freePort();
+        final int livePort = freePort();
+        final int watermarkPort = freePort();
+        final UUID laggingReaderId = UUID.randomUUID();
+        final UUID currentReaderId = UUID.randomUUID();
+        final Set<UUID> retentionReaders = Set.of(laggingReaderId, currentReaderId);
+        final Path writerStore = root.resolve("writer-store");
+        final Path laggingStore = root.resolve("lagging-store");
+        final Path currentStore = root.resolve("current-store");
+        /* Payload-driven transactions: the frozen boundary's bytes must sit
+         * in a 64 KiB Archive segment that the later purge physically
+         * detaches, so ~3/4 MiB of durable history separates freeze from head. */
+        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+                properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
+                        controlPort, livePort, watermarkPort, retentionReaders))) {
+            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final Root initial = new Root();
+            initial.values.add("baseline");
+            final EmbeddedStorageManager seeded = start(writerStore, initial, distributor,
+                    writerTransport.persistenceTargetFactory("store", distributor));
+            seeded.storeRoot();
+            seeded.shutdown();
+            final ReplicationCursor baseline = latest(writerTransport);
+            copyDirectory(writerStore, laggingStore);
+            copyDirectory(writerStore, currentStore);
+            final EmbeddedStorageManager writer = startExisting(writerStore, distributor,
+                    writerTransport.persistenceTargetFactory("store", distributor));
+            final Root writerRoot = writer.root();
+            try {
+                /* Freeze boundary T1: the lagging reader is parked exactly
+                 * here, and this transaction's bytes must be purgeable later. */
+                writerRoot.values.add("lagging-frozen");
+                writerRoot.payload = new byte[256 * 1024];
+                java.util.Arrays.fill(writerRoot.payload, (byte) 0x31);
+                writer.storeAll(List.of(writerRoot, writerRoot.values, writerRoot.payload));
+                final ReplicationCursor frozen = latest(writerTransport);
+
+                /* Park the lagging reader at the frozen boundary with a FULL
+                 * shutdown: a merely stopped client keeps its Aeron image
+                 * attached, and writer flow control would back-pressure every
+                 * following payload store against an image that never consumes.
+                 * The helper stops at the resolved boundary and disposes the
+                 * transport, so the writer below writes into one live image. */
+                replicateAndVerify(root.resolve("lagging-reader"), laggingStore, "reader", laggingReaderId,
+                        clusterId, generation, baseline, frozen, controlPort, livePort, watermarkPort,
+                        retentionReaders, "lagging-frozen", false);
+
+                /* The live half of the quorum walks on with two more payload
+                 * transactions. Every changed instance must be stored
+                 * explicitly: storing only the root re-saves its references,
+                 * never the mutated list or payload behind them. The latest()
+                 * boundary is checkpoint-confirmed and trails each commit, so
+                 * each transaction waits for the published boundary to move. */
+                writerRoot.values.add("post-park-1");
+                java.util.Arrays.fill(writerRoot.payload, (byte) 0x32);
+                writer.storeAll(List.of(writerRoot, writerRoot.values, writerRoot.payload));
+                final ReplicationCursor postParkOne = awaitLatestBeyond(writerTransport, frozen.logicalSequence());
+                writerRoot.values.add("post-park-2");
+                java.util.Arrays.fill(writerRoot.payload, (byte) 0x33);
+                writer.storeAll(List.of(writerRoot, writerRoot.values, writerRoot.payload));
+                final ReplicationCursor head = awaitLatestBeyond(writerTransport,
+                        postParkOne.logicalSequence());
+                    replicateAndVerify(root.resolve("current-reader"), currentStore, "reader", currentReaderId,
+                            clusterId, generation, baseline, head, controlPort, livePort, watermarkPort,
+                            retentionReaders, "post-park-2", false);
+
+                    final long quorumDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (!writerTransport.retention().isSupported() && System.nanoTime() < quorumDeadline) {
+                        java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+                    }
+                    assertTrue(writerTransport.retention().isSupported(),
+                            "writer did not assemble the reader watermark quorum");
+
+                    /* Drained from the cluster: retire the lagging reader from
+                     * the quorum, then purge through the live head. The purge
+                     * must physically delete the segment holding the frozen
+                     * cursor — any weaker outcome makes the restart below a
+                     * replay from live history and voids the test. */
+                    writerTransport.retention().retireReader(laggingReaderId);
+                    assertEquals(
+                            peruncs.datagrid.cluster.node.replication.ReplicationLogRetention.MaintenanceResult.Status.DELETED,
+                            writerTransport.retention().deleteThrough(head).status(),
+                            "purge through the quorum head must delete the segment holding the frozen cursor");
+
+                /* Restart the drained reader from its frozen durable cursor —
+                 * a fresh process-equivalent node on the retained Store. The
+                 * only acceptable outcomes are the typed reseed signals —
+                 * thrown eagerly by transport creation, or latched
+                 * asynchronously as the reader agent's terminal client failure.
+                 * Silent convergence past deleted history is the bug on trial. */
+                final Path laggingNode = root.resolve("lagging-reader");
+                final ReplicationCursor parked;
+                try (StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(
+                        laggingNode.resolve("cursor"))) {
+                    parked = cursorManager.get();
+                }
+                assertEquals(frozen.logicalSequence(), parked.logicalSequence(),
+                        "the parked reader must freeze exactly at the requested boundary");
+                RuntimeException failure = null;
+                try (ReaderNode lagging = ReaderNode.open(laggingNode, laggingStore, "reader",
+                        laggingReaderId, clusterId, generation, parked,
+                        controlPort, livePort, watermarkPort)) {
+                    lagging.start();
+                    final long reseedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+                    while (lagging.clientFailure() == null && !lagging.isLive()
+                            && System.nanoTime() < reseedDeadline) {
+                        java.util.concurrent.locks.LockSupport.parkNanos(10_000_000L);
+                    }
+                    if (lagging.clientFailure() == null) {
+                        fail(lagging.isLive()
+                                ? "a reader restarted from a purged cursor silently rejoined the live stream"
+                                : "a reader restarted from a purged cursor neither failed closed nor rejoined within 60s");
+                    }
+                    failure = lagging.clientFailure();
+                    assertTrue(failure instanceof ReseedRequiredException
+                                    || failure instanceof StorageBinaryDataReseedException,
+                            "expected the typed reseed signal (health RESEED_REQUIRED), got: " + failure);
+                    /* Fail-closed also means untouched durable state: the
+                     * cursor never advanced past the frozen boundary and the
+                     * graph carries none of the post-park writes. */
+                    assertEquals(frozen.logicalSequence(), lagging.persistedCursor().logicalSequence(),
+                            "a parked-then-refused reader must never move its durable cursor");
+                    final Root imported = (Root) lagging.rootObject();
+                    assertTrue(imported.values.contains("lagging-frozen"),
+                            "the frozen graph lost the pre-park transaction");
+                    assertFalse(imported.values.contains("post-park-1"),
+                            "torn history landed in the parked reader's graph");
+                    assertFalse(imported.values.contains("post-park-2"),
+                            "torn history landed in the parked reader's graph");
+                }
+            } finally {
+                writer.shutdown();
+            }
         } finally {
             delete(root);
         }

@@ -594,7 +594,9 @@
 							<systemPropertyVariables>
 									<soak.seconds>${soak.seconds}</soak.seconds>
 									<soak.seed>${soak.seed}</soak.seed>
+									<soak.readers>${soak.readers}</soak.readers>
 									<soak.writer.threads>${soak.writer.threads}</soak.writer.threads>
+									<soak.payloadBytes>${soak.payloadBytes}</soak.payloadBytes>
 									<soak.query.threads>${soak.query.threads}</soak.query.threads>
 									<soak.restarts>${soak.restarts}</soak.restarts>
 									<soak.lagSlots>${soak.lagSlots}</soak.lagSlots>
@@ -625,7 +627,9 @@
 			<properties>
 				<soak.seconds>30</soak.seconds>
 				<soak.seed>1</soak.seed>
+				<soak.readers>3</soak.readers>
 				<soak.writer.threads>3</soak.writer.threads>
+				<soak.payloadBytes>0</soak.payloadBytes>
 				<soak.query.threads>2</soak.query.threads>
 				<soak.restarts>10</soak.restarts>
 				<soak.lagSlots>100</soak.lagSlots>

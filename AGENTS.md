@@ -1,5 +1,9 @@
 Review @README.md and its module-info.java record for the general outline of the Aeron datagrid implementation
 
+## Code and documentation navigation
+For code intelligence (symbols, call chains, architecture, impact), use the codebase-memory-mcp - check `http://localhost:7995/mcp`.
+
+
 ## General code rules - items to investigate or fix:
 
 1. Use all modern Java features for the java version specified in the build framework, including preview features such as: Virtual threads, Patern matching, ScopedValue, StructuredTaskScope, LazyConstant

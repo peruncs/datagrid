@@ -198,10 +198,14 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// Nothing is deleted unless the complete configured reader set has
     /// acknowledged at least the requested sequence, the watermark recording
     /// matches the active writer, and the watermark stays within the durable
-    /// writer boundary. Deletion stops at complete segment boundaries; when a
-    /// live replay still uses a selected segment the request defers instead.
-    /// Any Archive failure fails closed. A cursor that has not crossed a full
-    /// segment reports nothing to delete rather than deleting partially.
+    /// writer boundary: the terminal commit checkpoint, extended by the
+    /// Archive's durably recorded position so a truthful reader acknowledgement
+    /// is not refused just because the checkpoint fsync trails the live
+    /// recording (see [#requireWithinDurableBoundary]). Deletion stops at
+    /// complete segment boundaries; when a live replay still uses a selected
+    /// segment the request defers instead. Any Archive failure fails closed.
+    /// A cursor that has not crossed a full segment reports nothing to delete
+    /// rather than deleting partially.
     ///
     /// @param cursor durable boundary to delete through
     /// @return deletion outcome with the boundary position
@@ -233,11 +237,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 throw new IllegalStateException("Aeron reader quorum has not reached the requested sequence");
             final long targetPosition = Math.min(quorumWatermark.position(), requested.position());
             this.ensureWriter.run();
-            final AeronWriterBoundary terminal = this.writerBoundary.get();
-            if (terminal == null || terminal.sequence() < 0 || terminal.position() < 0 ||
-                requested.sequence() > terminal.sequence() || targetPosition > terminal.position()) {
-                throw new IllegalStateException("reader watermark is ahead of the durable writer boundary");
-            }
+            this.requireWithinDurableBoundary(requested.sequence(), targetPosition);
             final long activeRecordingId = this.recordingId.getAsLong();
             if (requested.recordingId() != activeRecordingId || quorumWatermark.recordingId() != activeRecordingId)
                 throw new IllegalArgumentException("retention watermark recording does not match the active writer");
@@ -248,9 +248,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 return new MaintenanceResult(MaintenanceResult.Status.NOTHING_TO_DELETE, start,
                         "reader quorum has not crossed a complete Archive segment");
             }
-            final long stop = this.recordingPositions.stopPosition().applyAsLong(activeRecordingId);
-            final long recorded = stop < 0
-                    ? this.recordingPositions.recordingPosition().applyAsLong(activeRecordingId) : stop;
+            final long recorded = this.recordedDurablePosition(activeRecordingId);
             if (recorded < 0) throw new IllegalStateException("Aeron recording has no durable position");
             if (boundary > recorded)
                 throw new IllegalArgumentException("retention watermark does not cover a complete Archive segment");
@@ -365,11 +363,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         if (watermark.recordingId() != this.recordingId.getAsLong()) {
             throw new IllegalArgumentException("reader watermark recording does not match the active writer");
         }
-        final AeronWriterBoundary terminal = this.writerBoundary.get();
-        if (terminal == null || terminal.sequence() < watermark.sequence() ||
-            terminal.sequence() == watermark.sequence() && terminal.position() < watermark.position()) {
-            throw new IllegalStateException("reader watermark is ahead of the durable writer boundary");
-        }
+        this.requireWithinDurableBoundary(watermark.sequence(), watermark.position());
         final AeronReaderWatermark previous = this.quorum.latest(watermark.readerId());
         this.quorum.accept(watermark);
         final AeronReaderWatermark completeBoundary = this.completeBoundary(this.quorum);
@@ -419,6 +413,43 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         /* Published only after both steps succeed: a quorum.close() failure
          * stays retryable like a termination failure. */
         this.cleanupComplete = true;
+    }
+
+    /// Validates reader-claimed progress against the writer's durable boundary.
+    ///
+    /// The boundary is the terminal commit checkpoint extended by the Archive's
+    /// durably recorded position. Progress at or below the terminal checkpoint
+    /// is trivially covered. Progress past it is still admissible on a
+    /// continuously appending writer: a reader resolves a commit from the live
+    /// stream while the writer is between the commit's Archive acknowledgement
+    /// and the checkpoint fsync, so a truthful watermark can name a sequence
+    /// the checkpoint file has not reached yet. Such progress is accepted only
+    /// when it occupies new bytes — strictly beyond the checkpoint position —
+    /// that already lie inside the durably recorded region of the active
+    /// recording. A future sequence without new bytes, and any position beyond
+    /// the recorded position, is genuinely impossible for a reader to know and
+    /// fails closed.
+    private void requireWithinDurableBoundary(final long sequence, final long position) {
+        final AeronWriterBoundary terminal = this.writerBoundary.get();
+        if (terminal == null || terminal.sequence() < 0 || terminal.position() < 0 ||
+            sequence < terminal.sequence() ||
+            sequence == terminal.sequence() && position <= terminal.position()) {
+            return;
+        }
+        /* Past the terminal checkpoint. The recording question below runs only
+         * in this slow path, so a watermark accepted at or below the checkpoint
+         * never pays for an Archive control round-trip. */
+        final long recorded = this.recordedDurablePosition(this.recordingId.getAsLong());
+        if (position <= terminal.position() || recorded < 0 || position > recorded) {
+            throw new IllegalStateException("reader watermark is ahead of the durable writer boundary");
+        }
+    }
+
+    /// Returns the durably recorded position of one recording: the stop
+    /// position of a finished recording, otherwise its live recording position.
+    private long recordedDurablePosition(final long recordingId) {
+        final long stop = this.recordingPositions.stopPosition().applyAsLong(recordingId);
+        return stop >= 0 ? stop : this.recordingPositions.recordingPosition().applyAsLong(recordingId);
     }
 
     private AeronWriterBoundary requestedBoundary(final ReplicationCursor cursor) {

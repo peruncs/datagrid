@@ -3,6 +3,7 @@ package peruncs.datagrid.cluster.node.aeron;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport.StorageControllerAdapter;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReseedException;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
@@ -180,6 +181,12 @@ final class AeronHealth implements ReplicationHealth {
              * subscription yet.  This is the normal state between provider creation
              * and ClusterFoundation's client wiring. */
             return ReplicationHealth.State.STARTING;
+        }
+        if (this.client.failure() instanceof StorageBinaryDataReseedException) {
+            /* The reader proved its durable cursor unusable or could not
+             * reattach within its reconnect budget; retrying the same cursor
+             * would fail again, so report the typed reseed signal. */
+            return ReplicationHealth.State.RESEED_REQUIRED;
         }
         if (this.client.failure() != null) return ReplicationHealth.State.FAILED;
         if (!this.client.isRunning()) return ReplicationHealth.State.STARTING;

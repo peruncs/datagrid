@@ -37,14 +37,16 @@ import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Soak test: one writer, three readers, threaded load with jitter, index
-/// queries served while replication lands, and seeded multi-op chaos.
+/// Soak test: one writer, `-Dsoak.readers` readers (default three), threaded
+/// load with jitter, index queries served while replication lands, and seeded
+/// multi-op chaos.
 ///
 /// This is deliberately heavy and lives outside the default gate: it only
 /// runs under `-Psoak` (see the `soak` profile in peruncs-cluster/pom.xml),
-/// tuned with `-Dsoak.seconds=`, `-Dsoak.seed=`, `-Dsoak.writer.threads=`,
-/// `-Dsoak.query.threads=`, `-Dsoak.restarts=`, `-Dsoak.lagSlots=`,
-/// `-Dsoak.miniCensus=`, `-Dsoak.pollDelayMs=`, `-Dsoak.pollStallMs=`,
+/// tuned with `-Dsoak.seconds=`, `-Dsoak.seed=`, `-Dsoak.readers=`,
+/// `-Dsoak.writer.threads=`, `-Dsoak.query.threads=`, `-Dsoak.payloadBytes=`,
+/// `-Dsoak.restarts=`, `-Dsoak.lagSlots=`, `-Dsoak.miniCensus=`,
+/// `-Dsoak.pollDelayMs=`, `-Dsoak.pollStallMs=`,
 /// `-Dsoak.fsyncDelayMs=`, `-Dsoak.maxTornReads=`, `-Dsoak.corrupt=`,
 /// `-Dsoak.gc=`, `-Dsoak.writerRestart=`, `-Dsoak.reseed=`,
 /// `-Dsoak.retention=`, `-Dsoak.events=`, and
@@ -70,7 +72,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// The scenario has four phases:
 ///
 /// 1. Seed one writer Store with ordinary indexed articles plus three stable
-///    sentinel vectors. Copy that Store to three reader directories and record
+///    sentinel vectors. Copy that Store to every reader directory and record
 ///    the writer's baseline replication sequence.
 /// 2. Run concurrent writer, reader-query, audit, and chaos workers. Writers
 ///    add, update, and remove articles under the one-writer lock. Query workers
@@ -80,10 +82,19 @@ import static org.junit.jupiter.api.Assertions.*;
 /// 3. Dispatch a seeded, fixed rotation of single restart, dual restart,
 ///    slow-reader, CPU/GC, forced-GC burst, cursor-corruption,
 ///    rollback-cursor, live Archive-tail-corruption, writer-restart,
-///    reseed-and-rejoin, and watermark-retention operations. The first
-///    operation is always an abrupt restart. Each operation is accounted
-///    exactly once as effective or skipped with a reason; parked-victim skips
-///    may waive coverage only when the causal quorum condition is recorded.
+///    reseed-and-rejoin, and watermark-retention operations. There is no
+///    privileged first operation: heavy ops (including writer-restart) are
+///    schedulable from the first draw, and transport interruption stays
+///    guaranteed because the first restart-capable op dealt is forced abrupt.
+/// Coverage is gated per op type, not per full rotation: every ENABLED op
+///    must close the run with at least one effective execution or one
+///    park-caused skip (parked-victim or quorum-guard, where the parks
+///    themselves are the evidence). An op disabled via its knob is absent
+///    from the required set. Any other skip reason parked in the ledger is a
+///    coverage gap and fails the run. When a deep op (an abrupt dual restart
+///    replaying a long backlog) eats most of the workload window, the rotation
+///    continues past it: in-window ops exercise load, tail ops exercise the
+///    protocol, and coverage — not the clock — decides when chaos stops.
 /// 4. Stop writers, converge or explicitly park every reader, then run strict
 ///    sampled checks and an uncapped graph/Lucene/JVector census. A run is green
 ///    only when all workers completed, the event log stayed writable, the
@@ -107,12 +118,11 @@ import static org.junit.jupiter.api.Assertions.*;
 /// reader's home, restart) driven by the chaos thread — the production library
 /// has no automatic reseed, and the soak does not pretend otherwise.
 ///
-/// Known exposures this harness currently surfaces (they fail the run
-/// honestly rather than being laundered into skips): a writer restart closes
-/// the writer-owned Archive from under mid-replay readers, which then die on
-/// a raw ArchiveException instead of reconnecting or demanding a reseed; and
-/// the continuously-appending writer rejects reader watermarks as ahead of
-/// its durable checkpoint, so retention-quorum assembly is intermittent.
+/// The deterministic parked-reader-behind-a-purged-segment case (restart must
+/// demand RESEED_REQUIRED, never torn data) lives as a first-class
+/// integration test on [AeronStoreIntegrationIT]; the retention op here keeps
+/// the chaos-driven variant: it proves a deletion boundary ahead of a live
+/// reader is refused, then purges through the quorum minimum.
 class AeronWriterReaderSoakIT {
     private static final String[] WORDS = {
             "alpha", "bravo", "cargo", "delta", "ember", "frost", "granite", "harbor", "ivory", "jungle",
@@ -172,6 +182,17 @@ class AeronWriterReaderSoakIT {
     private final ConcurrentHashMap<String, AtomicLong> chaosEffective = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> chaosSkipped = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> chaosSkippedParkCaused = new ConcurrentHashMap<>();
+    /// Per-op skip ledger keyed `op/reason`: the end-of-run gate and the
+    /// failure diagnostics both read skip causes from here, never from logs.
+    private final ConcurrentHashMap<String, AtomicLong> chaosSkippedByReason = new ConcurrentHashMap<>();
+    /// The enabled op list captured by the chaos thread before its first
+    /// dispatch; the coverage gate iterates exactly this set, so an op
+    /// disabled via its knob is never required.
+    private volatile List<String> enabledChaosOps = List.of();
+    /// Set once the first restart-capable op claimed the guaranteed abrupt
+    /// restart for this run. Replaces the old forced-first-op shape.
+    private final java.util.concurrent.atomic.AtomicBoolean guaranteedAbruptUsed =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final AtomicLong chaosIterations = new AtomicLong();
     private final AtomicLong chaosBusyNanos = new AtomicLong();
     private volatile long lastWriterSeq = -1L;
@@ -189,18 +210,20 @@ class AeronWriterReaderSoakIT {
     private boolean writerRestartEnabled = true;
     private boolean reseedEnabled = true;
     private boolean retentionEnabled = true;
+    private int payloadBytes = 0;
     private volatile long eventStartNanos;
 
-    /// Exercises one writer against three readers under seeded threaded load
-    /// with query traffic, slow-reader/fsync/CPU chaos, transport restarts,
-    /// and cursor/Archive corruption, then requires every reader to converge
-    /// or park fail-closed with a fully verified Store and index state.
+    /// Exercises one writer against `-Dsoak.readers` readers under seeded
+    /// threaded load with query traffic, slow-reader/fsync/CPU chaos, transport
+    /// restarts, and cursor/Archive corruption, then requires every reader to
+    /// converge or park fail-closed with a fully verified Store and index state.
     @Test
     @Timeout(value = 8, unit = TimeUnit.MINUTES)
-    void oneWriterThreeReadersSurviveThreadedLoadJitterAndRestarts() throws Exception {
+    void oneWriterManyReadersSurviveThreadedLoadJitterAndRestarts() throws Exception {
         final long startNanos = System.nanoTime();
         final int soakSeconds = Integer.getInteger("soak.seconds", 30);
         final long seed = Long.getLong("soak.seed", 1L);
+        final int readerCount = Integer.getInteger("soak.readers", 3);
         final int writerThreads = Integer.getInteger("soak.writer.threads", 3);
         final int queryThreads = Integer.getInteger("soak.query.threads", 2);
         final int restarts = Integer.getInteger("soak.restarts", 10);
@@ -210,6 +233,9 @@ class AeronWriterReaderSoakIT {
         this.pollStallMs = Long.getLong("soak.pollStallMs", 800L);
         this.fsyncDelayMs = Long.getLong("soak.fsyncDelayMs", 3L);
         this.maxTornReads = Long.getLong("soak.maxTornReads", 64L);
+        this.payloadBytes = Integer.getInteger("soak.payloadBytes", 0);
+        if (readerCount < 1) throw new IllegalArgumentException("soak.readers must be at least 1");
+        if (this.payloadBytes < 0) throw new IllegalArgumentException("soak.payloadBytes must be non-negative");
         if (this.maxTornReads < 0L) throw new IllegalArgumentException("soak.maxTornReads must be non-negative");
         this.corruptEnabled = Boolean.parseBoolean(System.getProperty("soak.corrupt", "true"));
         this.gcEnabled = Boolean.parseBoolean(System.getProperty("soak.gc", "true"));
@@ -218,10 +244,11 @@ class AeronWriterReaderSoakIT {
         this.retentionEnabled = Boolean.parseBoolean(System.getProperty("soak.retention", "true"));
         this.runId = UUID.randomUUID().toString().substring(0, 8);
         this.eventStartNanos = startNanos;
-        audit(startNanos, "start seed=%d seconds=%d writerThreads=%d queryThreadsPerReader=%d restarts=%d lagSlots=%d miniCensus=%d corrupt=%s"
-                .formatted(seed, soakSeconds, writerThreads, queryThreads, restarts,
+        audit(startNanos, "start seed=%d seconds=%d readers=%d writerThreads=%d queryThreadsPerReader=%d payloadBytes=%d restarts=%d lagSlots=%d miniCensus=%d corrupt=%s"
+                .formatted(seed, soakSeconds, readerCount, writerThreads, queryThreads, this.payloadBytes, restarts,
                         this.lagSlots, this.miniCensus, this.corruptEnabled));
-        event(startNanos, "start", "seed=%d seconds=%d restarts=%d".formatted(seed, soakSeconds, restarts));
+        event(startNanos, "start", "seed=%d seconds=%d readers=%d writerThreads=%d queryThreadsPerReader=%d payloadBytes=%d restarts=%d"
+                .formatted(seed, soakSeconds, readerCount, writerThreads, queryThreads, this.payloadBytes, restarts));
 
         final Path root = java.nio.file.Files.createTempDirectory("dg-aeron-soak-");
         final UUID clusterId = UUID.randomUUID();
@@ -230,11 +257,14 @@ class AeronWriterReaderSoakIT {
         final int livePort = AeronStoreIntegrationIT.freePort();
         final int watermarkPort = AeronStoreIntegrationIT.freePort();
         final Path writerStore = root.resolve("writer-store");
-        final Path[] readerStores = {
-                root.resolve("reader-1-store"), root.resolve("reader-2-store"), root.resolve("reader-3-store")};
-        final Path[] readerNodes = {
-                root.resolve("reader-1"), root.resolve("reader-2"), root.resolve("reader-3")};
-        final UUID[] readerIds = {UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID()};
+        final Path[] readerStores = new Path[readerCount];
+        final Path[] readerNodes = new Path[readerCount];
+        final UUID[] readerIds = new UUID[readerCount];
+        for (int i = 0; i < readerCount; i++) {
+            readerStores[i] = root.resolve("reader-%d-store".formatted(i + 1));
+            readerNodes[i] = root.resolve("reader-%d".formatted(i + 1));
+            readerIds[i] = UUID.randomUUID();
+        }
         final UUID writerNodeId = UUID.randomUUID();
         /* Watermark quorum for the retention chaos op: the writer authenticates
          * every soak reader, so deleteThrough is gated on all of them. */
@@ -342,45 +372,31 @@ class AeronWriterReaderSoakIT {
                  * injections), so the firing bar meters effort, not count: the
                  * chaos thread either finished its whole program or stayed
                  * busy for a substantial share of wall time. A dead or
-                 * starved chaos thread satisfies neither. The first op is
-                 * always an abrupt restart by construction. */
+                 * starved chaos thread satisfies neither. Transport
+                 * interruption is guaranteed separately: the first
+                 * restart-capable op dealt is forced abrupt. */
                 if (restarts > 0) {
                     final long elapsedNanos = Math.max(1L, System.nanoTime() - startNanos);
                     final double busyFraction = (double) this.chaosBusyNanos.get() / elapsedNanos;
-                    final long rotatedIterations = Math.max(0L, this.chaosIterations.get() - 1L);
-                    final boolean rotationComplete = this.chaosRotationSize > 0
-                            && rotatedIterations >= this.chaosRotationSize;
-                    /* A full rotation is required independently of weighted
-                     * progress — but only from runs long enough to achieve one.
-                     * At ~10-15 s per iteration under load, sub-120 s runs
-                     * physically cannot guarantee seven heavy iterations, so
-                     * demanding it there would fail healthy runs for being
-                     * short. Short runs prove effort below; long runs must
-                     * additionally prove full-schedule coverage. */
-                    if (soakSeconds >= 120) {
-                        assertTrue(rotationComplete,
-                                "long run never completed a chaos rotation: rotations=%d/%d iterations=%d".formatted(
-                                        rotatedIterations, this.chaosRotationSize, this.chaosIterations.get()));
-                    }
                     final boolean programComplete = this.chaosOps.get() >= restarts;
                     assertTrue(programComplete || busyFraction >= 0.30,
-                            "chaos thread neither finished its program nor stayed busy: ops=%d restarts=%d rotations=%d/%d busy=%.0f%%".formatted(
-                                    this.chaosOps.get(), restarts, rotatedIterations, this.chaosRotationSize,
+                            "chaos thread neither finished its program nor stayed busy: ops=%d restarts=%d iterations=%d/%d busy=%.0f%%".formatted(
+                                    this.chaosOps.get(), restarts, this.chaosIterations.get(), this.chaosRotationSize,
                                     busyFraction * 100.0));
                     assertTrue(this.abruptRestarts.get() >= 1, "no abrupt restart executed; soak ran without transport interruption");
-                    /* Per-type effective coverage: once a full rotation cycle
-                     * completes, every enabled injection must have landed
-                     * effectively — dealt is not enough, and a run of pure
-                     * skips must fail here rather than pass quietly. Short or
-                     * heavy-op-starved runs that never complete a cycle keep
-                     * only the aggregate bars above. A hot-chaos run that
-                     * parked 2+ readers waives a type that was still
-                     * attempted: the parks themselves are the coverage. */
-                    /* Coverage accounting invariant: every dealt op ended
-                     * effective or skipped once the chaos thread joined.
-                     * A mismatch means a code path forgot its mark. */
+                    /* Coverage gate, per op type and independent of run length:
+                     * the coverage loop stopped either at the time bound or
+                     * after every ENABLED op resolved at least once, so the
+                     * gate below fires on short runs exactly as on long ones.
+                     * Two invariants per op: dealt == effective + skipped
+                     * (a missing account means a code path forgot its mark),
+                     * and effective >= 1 or park-caused skipped >= 1 (an op
+                     * that only ever skipped for environmental reasons never
+                     * landed, and the soak must not launder that into green).
+                     * Ops disabled via their knobs are absent from
+                     * enabledChaosOps and are never required. */
                     final List<String> gaps = new ArrayList<>();
-                    for (final String op : CHAOS_ROTATION) {
+                    for (final String op : this.enabledChaosOps) {
                         final long dealtCount = this.chaosDealt.getOrDefault(op, new AtomicLong()).get();
                         final long effectiveCount =
                                 this.chaosEffective.getOrDefault(op, new AtomicLong()).get();
@@ -390,36 +406,21 @@ class AeronWriterReaderSoakIT {
                             gaps.add("%s accounting violated: dealt=%d effective=%d skipped=%d".formatted(
                                     op, dealtCount, effectiveCount, skippedCount));
                         }
-                    }
-                    final long fullCycles = this.chaosRotationSize == 0 ? 0
-                            : rotatedIterations / this.chaosRotationSize;
-                    if (fullCycles >= 1) {
-                        final long parkedReaders = this.reseedsDemanded.get()
-                                + Arrays.stream(readerCorruptionParks).mapToLong(AtomicLong::get).sum();
-                        requireEffectiveOp(startNanos, "single", true, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "dual", true, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "slow", true, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "cpu", true, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "gc", this.gcEnabled, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "cursor", this.corruptEnabled, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "rollback", this.corruptEnabled, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "segment", this.corruptEnabled, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "writer-restart", this.writerRestartEnabled, parkedReaders, gaps);
-                        requireEffectiveOp(startNanos, "reseed", this.reseedEnabled, parkedReaders, gaps);
-                        /* Retention is deliberately not coverage-gated: the
-                         * continuously-appending soak topology currently
-                         * defeats watermark quorum assembly (see the
-                         * retentionPurge javadoc), so "skipped" is a known
-                         * outcome, not a gap. When it does land, the op
-                         * still asserts the fail-closed direction. */
-                        if (!gaps.isEmpty()) {
-                            throw new AssertionError("chaos coverage gaps after %d full rotation(s): %s [%s]"
-                                    .formatted(fullCycles, gaps, chaosBreakdown()));
+                        if (effectiveCount >= 1) continue;
+                        if (this.chaosSkippedParkCaused.getOrDefault(op, new AtomicLong()).get() >= 1) {
+                            audit(startNanos, "chaos-coverage-park-waived op=%s dealt=%d skipped=%d"
+                                    .formatted(op, dealtCount, skippedCount));
+                            continue;
                         }
-                        audit(startNanos, "chaos-coverage cycles=%d [%s]".formatted(fullCycles, chaosBreakdown()));
-                    } else {
-                        audit(startNanos, "chaos-coverage partial (no full rotation) [%s]".formatted(chaosBreakdown()));
+                        gaps.add("%s never landed: dealt=%d effective=0 skipped=%d".formatted(
+                                op, dealtCount, skippedCount));
                     }
+                    if (!gaps.isEmpty()) {
+                        throw new AssertionError("chaos coverage incomplete: %s [%s]"
+                                .formatted(gaps, chaosBreakdown()));
+                    }
+                    audit(startNanos, "chaos-coverage iterations=%d [%s]"
+                            .formatted(this.chaosIterations.get(), chaosBreakdown()));
                 }
 
                 /* Resolve the writer pair through the handle, never through
@@ -470,6 +471,10 @@ class AeronWriterReaderSoakIT {
                  * failure. One surviving reader is no longer enough. */
                 assertTrue(converged >= 1, "no reader survived the soak to converge; reseeds demanded=%d".formatted(this.reseedsDemanded.get()));
                 assertEquals(holders.length, converged + parked, "every reader must reach a planned outcome (converged=%d parked=%d)".formatted(converged, parked));
+                /* Convergence ledger: per-reader fates live on their own
+                 * events; this row is the machine-checkable total. */
+                event(startNanos, "converge-summary", "readers=%d converged=%d parked=%d"
+                        .formatted(holders.length, converged, parked));
 
                 final List<ArticleState> present = samplePresent(seed);
                 final List<String> absent = sampleAbsent(seed);
@@ -549,8 +554,8 @@ class AeronWriterReaderSoakIT {
              * simply never happened. */
             final String result = !this.failures.isEmpty() ? "failed"
                     : ("ok".equals(this.soakOutcome) ? "ok" : "cancelled");
-            event(startNanos, "outcome", "result=%s tx=%d queries=%d verified=%d torn=%d restarts=%d abrupt=%d corruption=%d reseeds=%d rejoined=%d eventLogFailures=%d".formatted(
-                    result, this.publishedTransactions.get(), this.servedQueries.get(),
+            event(startNanos, "outcome", "result=%s readers=%d tx=%d queries=%d verified=%d torn=%d restarts=%d abrupt=%d corruption=%d reseeds=%d rejoined=%d eventLogFailures=%d".formatted(
+                    result, readerCount, this.publishedTransactions.get(), this.servedQueries.get(),
                     this.verifiedQueries.get(), this.tornReads.get(), this.completedRestarts.get(), this.abruptRestarts.get(),
                     this.corruptionFired.get(), this.reseedsDemanded.get(), this.reseedsExecuted.get(), this.eventLogFailures.get()));
             /* Cleanup must never mask the result: on a failed run, readers can
@@ -674,10 +679,25 @@ class AeronWriterReaderSoakIT {
         }
     }
 
+    /// Builds one transaction body sized toward `soak.payloadBytes` (0 keeps
+    /// the compact default). The pad is deterministic word noise: the title
+    /// stays the exact Lucene key, and the checksum covers title+body either
+    /// way, so strict verification is unchanged at any payload size.
+    private String transactionBody(final Random random, final long sequence) {
+        final String base = WORDS[random.nextInt(WORDS.length)] + "s" + sequence;
+        if (this.payloadBytes <= 0) return base;
+        final StringBuilder padded = new StringBuilder(this.payloadBytes);
+        padded.append(base).append(' ');
+        while (padded.length() < this.payloadBytes) {
+            padded.append(WORDS[random.nextInt(WORDS.length)]).append(' ');
+        }
+        return padded.toString();
+    }
+
     private void addBatch(final IndexRoot writerRoot, final Random random, final int count) {
         for (int i = 0; i < count; i++) {
             final String title = "soakt" + this.titleSequence.incrementAndGet();
-            final String body = WORDS[random.nextInt(WORDS.length)] + "s" + this.titleSequence.get();
+            final String body = transactionBody(random, this.titleSequence.get());
             final float[] vector = randomVector(random);
             final long id = writerRoot.articles.add(new IndexedArticle(title, body, vector));
             final ArticleState state = new ArticleState(title, body, vector,
@@ -693,7 +713,7 @@ class AeronWriterReaderSoakIT {
         final long id = ids[random.nextInt(ids.length)];
         final ArticleState current = this.live.get(id);
         if (current == null || isSentinel(current.title())) return;
-        final String body = WORDS[random.nextInt(WORDS.length)] + "s" + this.titleSequence.incrementAndGet();
+        final String body = transactionBody(random, this.titleSequence.incrementAndGet());
         final float[] vector = randomVector(random);
         writerRoot.articles.update(id, article -> {
             article.body = body;
@@ -921,7 +941,6 @@ class AeronWriterReaderSoakIT {
                            final long soakEndNanos, final int restarts,
                            final AtomicLong[] readerRestarts, final AtomicLong[] readerReseeds,
                            final AtomicLong[] readerCorruptionParks, final Random random) throws Exception {
-        boolean firstOp = true;
         final List<String> rotation = new ArrayList<>(CHAOS_ROTATION);
         if (!this.corruptEnabled) {
             rotation.removeIf(op -> op.equals("cursor") || op.equals("rollback") || op.equals("segment"));
@@ -932,28 +951,39 @@ class AeronWriterReaderSoakIT {
         if (!this.reseedEnabled) rotation.remove("reseed");
         if (!this.retentionEnabled) rotation.remove("retention");
         this.chaosRotationSize = rotation.size();
+        this.enabledChaosOps = List.copyOf(rotation);
         int rotationPos = random.nextInt(rotation.size());
         /* Complete one full rotated schedule independently of weighted work:
          * dual/corruption injections may count two units of progress, but they
-         * must not make the remaining chaos types disappear from a run. */
+         * must not make the remaining chaos types disappear from a run. While
+         * coverage is still incomplete the inter-op pause stays sub-second:
+         * the end-of-run gate requires every enabled op dealt and resolved
+         * exactly once as effective-or-park-skipped, even on short runs, so
+         * the heavy ops (writer-restart included) must be schedulable EARLY
+         * rather than waiting out a full rotation. Once every enabled op has
+         * landed, the pause stretches for load spread. */
+        boolean tailAnnounced = false;
         while (restarts > 0 && (this.chaosOps.get() < restarts
-                || this.chaosIterations.get() <= this.chaosRotationSize)
-                && System.nanoTime() < soakEndNanos) {
+                || !coverageComplete())) {
             beat(Thread.currentThread().getName(), "sleep");
-            Thread.sleep(500L + random.nextInt(2_500));
+            Thread.sleep(coverageComplete() ? 500L + random.nextInt(2_500)
+                    : 100L + random.nextInt(400));
             markActivity();
-            if (System.nanoTime() >= soakEndNanos) return;
-            /* The first op is always an abrupt restart by construction, so a
-             * green run provably exercised transport interruption instead of
-             * relying on the rotation reaching one. */
-            if (firstOp) {
-                firstOp = false;
-                dealt("single");
-                this.chaosIterations.incrementAndGet();
-                event(startNanos, "op-selected", "op=single pos=0 forced=true");
-                accountOp(startNanos, "single", runOp(() -> restartSingleAbrupt(startNanos, holders, gates,
-                        baseline, readerRestarts, readerReseeds, random)));
-                continue;
+            /* Coverage is per-op, not per-window: when one deep op eats most
+             * of the workload window (a replaying abrupt dual-restart can take
+             * tens of seconds), the remaining enabled ops still must land, so
+             * the rotation continues into the post-workload tail where ops
+             * are fast without load. In-window ops exercise load; tail ops
+             * exercise protocol. A run that can never finish coverage fails at
+             * the test timeout, not here. */
+            if (System.nanoTime() >= soakEndNanos && !coverageComplete()) {
+                if (!tailAnnounced) {
+                    tailAnnounced = true;
+                    audit(startNanos, "chaos-coverage-tail (workload over; finishing op coverage unloaded)");
+                    event(startNanos, "coverage-tail", "ops=%d".formatted(this.chaosOps.get()));
+                }
+            } else if (System.nanoTime() >= soakEndNanos) {
+                return;
             }
             final String selected = rotation.get(rotationPos % rotation.size());
             rotationPos++;
@@ -1026,65 +1056,65 @@ class AeronWriterReaderSoakIT {
         /* Only quorum-guard and parked-victim skips are park-caused: they prove
          * no eligible victim existed because readers were already parked. Every
          * other reason is an injection that never landed. */
+        this.chaosSkippedByReason.computeIfAbsent(op + "/" + reason, ignored -> new AtomicLong()).incrementAndGet();
         if (reason.equals("quorum-guard") || reason.equals("parked-victim")) {
             this.chaosSkippedParkCaused.computeIfAbsent(op, ignored -> new AtomicLong()).incrementAndGet();
         }
         event(startNanos, "op-skipped", "op=%s reason=%s".formatted(op, reason));
     }
 
-    /// Requires one effective execution of a chaos type once a full rotation
-    /// cycle completed. Types the run never enabled are ignored; a type the
-    /// hot chaos kept skipping (2+ readers already parked) is waived with a
-    /// logged reason instead of failing a run that already proved recovery.
-    private void requireEffectiveOp(final long startNanos, final String op, final boolean enabled,
-                                    final long parkedReaders, final List<String> gaps) {
-        if (!enabled) return;
-        final long effective = this.chaosEffective.getOrDefault(op, new AtomicLong()).get();
-        if (effective >= 1) return;
-        final long dealt = this.chaosDealt.getOrDefault(op, new AtomicLong()).get();
-        final long skippedCount = this.chaosSkipped.getOrDefault(op, new AtomicLong()).get();
-        final long parkCaused =
-                this.chaosSkippedParkCaused.getOrDefault(op, new AtomicLong()).get();
-        /* Waived only with a causal link: this type was skipped because no
-         * eligible victim existed while readers were parked — never merely
-         * because unrelated chaos parked readers elsewhere. */
-        if (parkedReaders >= 2 && parkCaused >= 1) {
-            audit(startNanos, "chaos-coverage-waived op=%s dealt=%d skipped=%d park-caused=%d parked-readers=%d"
-                    .formatted(op, dealt, skippedCount, parkCaused, parkedReaders));
-            return;
-        }
-        gaps.add("%s dealt=%d effective=0 skipped=%d".formatted(op, dealt, skippedCount));
-    }
-
-    /// One-line dealt/effective/skipped breakdown across chaos types.
+    /// One-line per-op ledger: `dealt/effective/skipped`, disabled ops marked
+    /// `off`, and — when a type skipped at all — the reason counts behind it,
+    /// so a coverage failure diagnosably names the blocking cause.
     private String chaosBreakdown() {
         final StringBuilder breakdown = new StringBuilder();
         for (final String op : CHAOS_ROTATION) {
             if (!breakdown.isEmpty()) breakdown.append(' ');
+            if (!this.enabledChaosOps.contains(op)) {
+                breakdown.append(op).append("=off");
+                continue;
+            }
             breakdown.append("%s=%d/%d/%d".formatted(op,
                     this.chaosDealt.getOrDefault(op, new AtomicLong()).get(),
                     this.chaosEffective.getOrDefault(op, new AtomicLong()).get(),
                     this.chaosSkipped.getOrDefault(op, new AtomicLong()).get()));
+            final List<String> reasons = new ArrayList<>();
+            for (final Map.Entry<String, AtomicLong> reason : this.chaosSkippedByReason.entrySet()) {
+                if (reason.getKey().startsWith(op + "/")) {
+                    reasons.add("%s:%d".formatted(reason.getKey().substring(op.length() + 1), reason.getValue().get()));
+                }
+            }
+            if (!reasons.isEmpty()) breakdown.append(reasons.stream().sorted().toList());
         }
         return breakdown.toString();
     }
 
-    /// First chaos op: a forced abrupt restart, so the run provably covers
-    /// transport interruption regardless of the seeded draw that follows.
-    private OpOutcome restartSingleAbrupt(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                              final ReplicationCursor baseline, final AtomicLong[] readerRestarts,
-                                              final AtomicLong[] readerReseeds, final Random random) {
-        final int readerIndex = random.nextInt(holders.length);
-        this.abruptRestarts.incrementAndGet();
-        return restartSingleAt(startNanos, holders, gates, baseline, readerIndex, true,
-                readerRestarts, readerReseeds);
+    /// Abruptness draw shared by every restart-capable op: the FIRST such op
+    /// dealt in a run is forced abrupt, so transport interruption is covered
+    /// by construction no matter where the rotation starts; later ops coin-flip.
+    private boolean drawAbrupt(final Random random) {
+        if (this.guaranteedAbruptUsed.compareAndSet(false, true)) return true;
+        return random.nextBoolean();
+    }
+
+    /// True when every enabled op has been dealt and resolved at least once
+    /// — effective, or skipped for a park-caused reason. This is the tempo
+    /// signal for the chaos loop; the hard gate with diagnostics runs once
+    /// workers have joined.
+    private boolean coverageComplete() {
+        for (final String op : this.enabledChaosOps) {
+            if (this.chaosEffective.getOrDefault(op, new AtomicLong()).get() >= 1) continue;
+            if (this.chaosSkippedParkCaused.getOrDefault(op, new AtomicLong()).get() >= 1) continue;
+            return false;
+        }
+        return true;
     }
 
     private OpOutcome restartSingle(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
                                         final ReplicationCursor baseline, final AtomicLong[] readerRestarts,
                                         final AtomicLong[] readerReseeds, final Random random) {
         final int readerIndex = random.nextInt(holders.length);
-        final boolean abrupt = random.nextBoolean();
+        final boolean abrupt = drawAbrupt(random);
         if (abrupt) this.abruptRestarts.incrementAndGet();
         if (!abrupt) {
             final ReaderNode peeked = holders[readerIndex];
@@ -1168,9 +1198,9 @@ class AeronWriterReaderSoakIT {
         final int high = Math.max(first, second);
         if (holders[low] == null && holders[high] == null) {
             audit(startNanos, "dual-restart-skipped readers=%d,%d (both awaiting reseed)".formatted(low, high));
-            return OpOutcome.skipped("parked-victims");
+            return OpOutcome.skipped("parked-victim");
         }
-        final boolean abrupt = random.nextBoolean();
+        final boolean abrupt = drawAbrupt(random);
         if (abrupt) this.abruptRestarts.incrementAndGet();
         if (!abrupt) {
             final ReaderNode peekLow = holders[low];
@@ -1313,7 +1343,7 @@ class AeronWriterReaderSoakIT {
         final ReplicationCursor target;
         synchronized (this.writeLock) {
             final long tokenBefore = currentFencingToken(checkpointFile);
-            final boolean abrupt = random.nextBoolean();
+            final boolean abrupt = drawAbrupt(random);
             audit(startNanos, "writer-restart-start abrupt=%s token=%d".formatted(abrupt, tokenBefore));
             try {
                 writer.restart(abrupt);
@@ -1462,23 +1492,26 @@ class AeronWriterReaderSoakIT {
     /// durable cursor they left — their last published watermark bounds safe
     /// deletion exactly.
     ///
-    /// Known topology gap: in this continuously-appending soak the writer
-    /// rejects reader watermarks as "ahead of the durable writer boundary"
-    /// (the terminal checkpoint trails the live publication the readers ride),
-    /// so the quorum may never assemble mid-soak. The op therefore waits only
-    /// boundedly and WITHOUT holding the writer lock (holding it starved the
-    /// appends that would advance the durable boundary), and skips with
-    /// "quorum-not-supported" when the quorum stays unassembled — retention is
-    /// deliberately not part of the mandatory end-of-soak coverage gate. When
-    /// the quorum does assemble, deleteThrough asserts fail-closed: the
-    /// deferral probe uses a non-head boundary strictly ahead of a lagging
-    /// reader, and refusal — whether a status or the provider's
-    /// IllegalStateException vocabulary — is the pass. The
+    /// Watermark validation accepts progress past the terminal commit
+    /// checkpoint when the Archive has durably recorded its bytes (see
+    /// AeronArchiveRetention.requireWithinDurableBoundary), so the quorum
+    /// assembles on this continuously-appending writer. The op still waits
+    /// only boundedly and WITHOUT holding the writer lock (holding it starves
+    /// the appends that feed the readers), and skips with
+    /// "quorum-not-supported" when the quorum stays unassembled — that now
+    /// means genuinely missing readers, not checkpoint-cadence rejections.
+    /// Retention IS coverage-gated like every enabled op: a purge that never
+    /// lands and never had a park-caused skip fails the run. When the quorum
+    /// assembles, deleteThrough asserts fail-closed: the deferral probe uses a
+    /// non-head boundary strictly ahead of a lagging reader, and refusal —
+    /// whether a status or the provider's IllegalStateException vocabulary —
+    /// is the pass, EXCEPT a refusal complaining about the durable writer
+    /// boundary, which is the fixed soak bug surfacing again. The
     /// parked-behind-the-deleted-boundary restart case (a reader resumed from
     /// a cursor below deleteThrough must be answered RESEED_REQUIRED, never
-    /// torn data) is not covered here: it needs a reader frozen before the
-    /// purge boundary with the purge then crossing it, which the generic
-    /// restart ops only hit nondeterministically.
+    /// torn data) is covered deterministically by AeronStoreIntegrationIT's
+    /// `readerRestartBehindAPurgedSegmentDemandsAReseed`; here it only
+    /// surfaces as a side effect of the generic restart ops.
     private OpOutcome retentionPurge(final long startNanos, final WriterHandle writer,
                                      final ReaderNode[] holders, final ReadWriteLock[] gates,
                                      final ReaderSpec[] readers, final Random random) {
@@ -1552,7 +1585,13 @@ class AeronWriterReaderSoakIT {
                             "retention deleted history a lagging live reader still needed: %s"
                                     .formatted(deferred));
                 } catch (final IllegalStateException refused) {
-                    audit(startNanos, "retention-defer-refused (%s)".formatted(refused.getMessage()));
+                    final String message = String.valueOf(refused.getMessage());
+                    if (message.contains("ahead of the durable writer boundary")) {
+                        throw new AssertionError(
+                                "legitimate watermark refused against the durable writer boundary: %s"
+                                        .formatted(message), refused);
+                    }
+                    audit(startNanos, "retention-defer-refused (%s)".formatted(message));
                 }
                 audit(startNanos, "retention-defer-ok boundary=%d".formatted(maxLiveSequence));
             }
@@ -1570,6 +1609,11 @@ class AeronWriterReaderSoakIT {
                 try {
                     purged = retention.deleteThrough(minCursor);
                 } catch (final IllegalStateException refused) {
+                    if (String.valueOf(refused.getMessage()).contains("ahead of the durable writer boundary")) {
+                        throw new AssertionError(
+                                "legitimate purge boundary refused against the durable writer boundary: %s"
+                                        .formatted(refused.getMessage()), refused);
+                    }
                     /* Quorum watermark below our local minimum cursor: parked
                      * readers can lag the file view. The retries absorb it. */
                     LockSupport.parkNanos(250_000_000L);
@@ -2083,7 +2127,8 @@ class AeronWriterReaderSoakIT {
 
     private void auditLoop(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
                            final long soakEndNanos, final AtomicLong[] readerLagStrikes) throws Exception {
-        final boolean[] wasLive = {true, true, true};
+        final boolean[] wasLive = new boolean[holders.length];
+        Arrays.fill(wasLive, true);
         int iteration = 0;
         while (System.nanoTime() < soakEndNanos) {
             Thread.sleep(5_000L);

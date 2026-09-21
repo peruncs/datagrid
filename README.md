@@ -296,7 +296,8 @@ processes at named durability boundaries and checks exact recovery outcomes.
 
 ### Writer/reader soak
 
-`AeronWriterReaderSoakIT` runs one writer Store with three reader Stores. The
+`AeronWriterReaderSoakIT` runs one writer Store with `-Dsoak.readers` reader
+Stores (three by default; tested with five and six). The
 writer performs adds, updates, and removals while reader query threads access
 the graph, Lucene, and JVector indexes. The test keeps a transaction model of
 the expected title, body, vector, and title/body checksum. A reader is only
@@ -316,8 +317,16 @@ verification:
 3. Run a seeded fixed rotation of single restart, dual restart, slow-reader,
    CPU/GC burst, forced-GC burst, cursor corruption, rollback cursor, live
    Archive-tail corruption, writer restart, reseed-and-rejoin, and watermark
-   retention. The first chaos operation is always an abrupt restart. Every
-   operation is logged as selected, effective, or skipped with a reason.
+   retention. There is no privileged first operation — heavy operations such as
+   writer restart are schedulable from the first draw — and transport
+   interruption is still guaranteed because the first restart-capable
+   operation dealt is forced abrupt. Every operation is logged as selected,
+   effective, or skipped with a reason. Coverage is gated per operation type
+   on every run, short or long: each enabled operation must close the run with
+   at least one effective execution or one park-caused skip (parked-victim or
+   quorum-guard, where the parks are themselves the evidence); any other skip
+   ledger fails the run. An operation disabled by its knob never appears in
+   the required set.
 4. Stop writers, converge or explicitly park every reader, then run strict
    samples and an uncapped graph/Lucene/JVector census. A reader may be
    converged, reseed-parked, corruption-parked, or reseeded-and-rejoined by
@@ -340,28 +349,36 @@ The extended operations assert protocol guarantees, not just survival:
 - **gc** churns a seeded 32-256 MB through the heap and calls `System.gc()`,
   forcing a real pause during checkpoints. It adds no data assertions; the
   pause evidence lands in `target/soak.jfr`.
-- **retention** runs on the real watermark quorum (all three readers are
-  configured retention readers on the writer). It first proves deletion of
+- **retention** runs on the real watermark quorum (every soak reader is a
+  configured retention reader on the writer). It first proves deletion of
   history a lagging live reader needs is never reported as deleted, then
   purges complete segments up to the minimum durable reader cursor. The
   parked-behind-the-deleted-boundary restart case (must yield
-  RESEED_REQUIRED, never torn data) is documented but not driven
-  deterministically by this op.
+  RESEED_REQUIRED, never torn data) is a first-class deterministic test:
+  `AeronStoreIntegrationIT#readerRestartBehindAPurgedSegmentDemandsAReseed`
+  parks a reader at a frozen cursor, retires it from the retention quorum,
+  purges the segment holding that cursor, restarts the reader, and asserts
+  the typed reseed signal with the durable cursor and graph untouched.
 
 Current findings the enhanced soak exposes (product gaps, not soak
 artifacts):
 
-- A writer restart closes the writer-owned Archive from under readers that
-  are mid-replay: their replay surfaces a raw
-  `io.aeron.archive.client.ArchiveException` ("response channel from archive
-  is not connected") instead of reconnecting or failing closed with
-  `RESEED_REQUIRED`. Quarantine with `-Dsoak.reseed=false` while isolating
-  writer restarts is not possible — the writer plugin owns this fix.
-- The continuously-appending soak writer rejects reader watermarks as "ahead
-  of the durable writer boundary" (the terminal checkpoint trails the live
-  publication), so the retention quorum only assembles intermittently; the
-  retention op then skips with `quorum-not-supported` and is not part of the
-  mandatory coverage gate.
+- Resolved: a writer restart closing the writer-owned Archive from under
+  readers mid-replay is now absorbed by the reader's bounded reconnect. An
+  Archive loss reported by the subscription (escaped `ArchiveException` or
+  the client-side self-heal loop surfacing through the persistent
+  subscription listener) opens a reconnect incident bounded by the reader
+  stop timeout; resolved progress or reaching the live stream closes it, and
+  a channel that stays down past the budget latches a typed
+  `StorageBinaryDataReseedException` (health reports `RESEED_REQUIRED`)
+  instead of dying on a raw transport stack or stalling forever.
+- Resolved: the continuously-appending soak writer used to reject reader
+  watermarks as "ahead of the durable writer boundary" because the terminal
+  checkpoint trails the live recording. Retention now validates watermarks
+  against the Archive's durably recorded position (commit progress past the
+  checkpoint is admissible when it occupies recorded bytes; fabricated or
+  unrecorded progress still fails closed), so the quorum assembles
+  mid-soak and a `quorum-not-supported` skip means genuinely missing readers.
 
 The soak fails on worker failures, lost event-log writes, phantom index hits,
 bad checksums, unexpected exceptions, torn-boundary convergence, excessive
@@ -389,8 +406,10 @@ Soak controls are:
 | --- | ---: | --- |
 | `soak.seed` | `1` | Workload values and chaos-rotation start offset |
 | `soak.seconds` | `30` | Concurrent workload duration before convergence |
+| `soak.readers` | `3` | Reader count; every per-reader gate, gate lock, and event ledger scales with it (tested with 5-6) |
 | `soak.writer.threads` | `3` | Writer workload threads, serialized by the one-writer test lock |
 | `soak.query.threads` | `2` | Query threads per reader |
+| `soak.payloadBytes` | `0` | Target padded size of each add/update transaction body; `0` keeps the compact default |
 | `soak.restarts` | `10` | Effective chaos-work budget; heavy operations may count as two |
 | `soak.lagSlots` | `100` | Reader lag-SLO allowance in replication slots |
 | `soak.miniCensus` | `20` | Entities checked by each mid-soak mini-census |
@@ -411,10 +430,12 @@ sliding reader-stop deadline is probed only when it is configured near
 `ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
 
 `-Dsoak.corrupt=false` removes cursor, rollback, and Archive-tail corruption
-from the rotation; it does not turn off restart or load chaos. A short run may
-waive a chaos type only when parked readers caused the skip and that causal
-reason is present in the event log. Use independent seeds rather than one very
-long run: duration increases load, while seeds increase schedule coverage.
+from the rotation; it does not turn off restart or load chaos. The per-op
+coverage gate fires on every run regardless of duration, so even a 25-second
+run must show every enabled op landed effectively (or was skipped only because
+its victim was parked); a disabled op is simply absent from the required set.
+Use independent seeds rather than one very long run: duration increases load,
+while seeds increase schedule coverage.
 
 ### Forked crash matrix
 

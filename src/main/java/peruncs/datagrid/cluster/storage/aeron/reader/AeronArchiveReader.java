@@ -1,8 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.reader;
 
 import io.aeron.Aeron;
-import io.aeron.archive.client.AeronArchive;
-import io.aeron.archive.client.PersistentSubscription;
+import io.aeron.archive.client.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
@@ -12,6 +11,7 @@ import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReseedException;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -27,6 +27,18 @@ import java.util.concurrent.atomic.AtomicReference;
 /// only after replay catches up, so a restart needs no separate snapshot path.
 /// The subscription belongs to this reader; the caller remains responsible for
 /// the shared Aeron and Archive clients.
+///
+/// A lost Archive control channel (writer restart of its embedded Archive) is
+/// treated as recoverable. An escaping [ArchiveException] swaps the
+/// subscription for a fresh one resuming at the last resolved position; a
+/// silent loss — this Aeron client self-heals by retrying forever, reporting
+/// every failed attempt through [PersistentSubscriptionListener#onError] —
+/// is bounded by a per-incident budget of the configured reader stop timeout:
+/// while the incident lasts the replay makes no resolved progress, and once
+/// the budget expires the reader latches a typed [StorageBinaryDataReseedException]
+/// so the node fails closed with a RESEED_REQUIRED diagnosis instead of
+/// stalling silently or dying on a raw transport stack. Resolved progress or
+/// reaching the live stream clears the incident and resets the budget.
 public final class AeronArchiveReader implements Disposable {
     /// Immutable setup for one Archive replay and live reader.
     ///
@@ -225,7 +237,13 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-    private final PersistentSubscription subscription;
+    /* The subscription is replaced when the Archive control channel is lost
+     * mid-replay: the polling thread closes the dead one and creates a fresh
+     * PersistentSubscription resuming at the last resolved position. Only the
+     * polling thread and the disposal path (after the polling thread exited)
+     * ever touch this field. */
+    private volatile PersistentSubscription subscription;
+    private final Configuration configuration;
     private final TransactionAssembler assembler;
     private final ControlledFragmentHandler fragmentHandler;
     private final long stopTimeoutNanos;
@@ -263,16 +281,35 @@ public final class AeronArchiveReader implements Disposable {
      * including disposal, may downgrade it to a success.  All transitions go
      * through the atomic reference so a polling-thread timeout cannot race a
      * concurrent disposal into the wrong final state. */
-    private final AtomicReference<StorageBinaryDataClient.StopOutcome> stopOutcome =
+     private final AtomicReference<StorageBinaryDataClient.StopOutcome> stopOutcome =
             new AtomicReference<>(StorageBinaryDataClient.StopOutcome.NOT_STARTED);
+    /* Reconnect book-keeping, touched only by the polling thread. A zero
+     * deadline means no disconnect incident is in flight; each incident gets
+     * one full reconnect budget, and confirmed recovery (resolved progress or
+     * reaching the live stream) resets deadline, baseline, cause, and
+     * attempts. `incidentBaseline` is the resolved sequence at the moment the
+     * incident started, so recovery is proven by the assembler advancing past
+     * it. */
+    private long reconnectDeadlineNanos;
+    private long reconnectAttempts;
+    private long incidentBaselineSequence = -1L;
+    private Exception reconnectCause;
+    /* Set from the subscription listener (which runs on the polling thread
+     * inside controlledPoll) and consumed by pollSubscription: a non-null
+     * value means the Archive client signalled a control-channel problem.
+     * Shared with every replacement subscription created on reconnect. */
+    private final AtomicReference<Exception> archiveIncidentSignal;
 
 
     AeronArchiveReader(
             final PersistentSubscription subscription,
-            final Configuration configuration) {
+            final Configuration configuration,
+            final AtomicReference<Exception> incidentSignal) {
         this.subscription = Objects.requireNonNull(subscription, "subscription");
         try {
             final Configuration required = Objects.requireNonNull(configuration, "configuration");
+            this.configuration = required;
+            this.archiveIncidentSignal = Objects.requireNonNull(incidentSignal, "incidentSignal");
             final AeronReplicationConfiguration requiredConfiguration = required.replicationConfiguration();
             this.stopTimeoutNanos = requiredConfiguration.readerStopTimeoutNanos();
             this.fragmentsPerPoll = requiredConfiguration.readerFragmentsPerPoll();
@@ -303,22 +340,13 @@ public final class AeronArchiveReader implements Disposable {
     /// @return a reader that owns its subscription
     public static AeronArchiveReader New(final Configuration configuration) {
         final Configuration settings = Objects.requireNonNull(configuration, "configuration");
-        final Aeron aeron = settings.aeron();
-        final AeronArchive.Context subscriptionArchiveContext = settings.archiveContext().clone().aeron(aeron);
-        final PersistentSubscription.Context subscriptionContext = new PersistentSubscription.Context()
-                .aeron(aeron)
-                .ownsAeronClient(false)
-                .recordingId(settings.recordingId())
-                .startPosition(settings.startPosition())
-                .liveChannel(settings.liveChannel())
-                .liveStreamId(settings.liveStreamId())
-                .replayChannel(settings.replayChannel())
-                .replayStreamId(settings.replayStreamId())
-                .aeronArchiveContext(subscriptionArchiveContext);
+        final AtomicReference<Exception> incidentSignal = new AtomicReference<>();
+        final PersistentSubscription.Context subscriptionContext = subscriptionContext(
+                settings, settings.startPosition(), incidentListener(incidentSignal));
         PersistentSubscription subscription = null;
         try {
             subscription = PersistentSubscription.create(subscriptionContext);
-            return new AeronArchiveReader(subscription, settings);
+            return new AeronArchiveReader(subscription, settings, incidentSignal);
         } catch (final RuntimeException | Error failure) {
             if (subscription != null) {
                 try {
@@ -335,6 +363,57 @@ public final class AeronArchiveReader implements Disposable {
             }
             throw failure;
         }
+    }
+
+        /// Builds the subscription context for one replay attempt.
+    ///
+    /// Shared by the initial create and by a mid-replay reconnect so both
+    /// paths wire identical channels, stream ids, and Archive settings; only
+    /// the start position moves (to the last resolved boundary on a
+    /// reconnect).
+    private static PersistentSubscription.Context subscriptionContext(
+            final Configuration settings, final long startPosition,
+            final PersistentSubscriptionListener listener) {
+        final AeronArchive.Context subscriptionArchiveContext =
+                settings.archiveContext().clone().aeron(settings.aeron());
+        return new PersistentSubscription.Context()
+                .aeron(settings.aeron())
+                .ownsAeronClient(false)
+                .recordingId(settings.recordingId())
+                .startPosition(startPosition)
+                .liveChannel(settings.liveChannel())
+                .liveStreamId(settings.liveStreamId())
+                .replayChannel(settings.replayChannel())
+                .replayStreamId(settings.replayStreamId())
+                .listener(listener)
+                .aeronArchiveContext(subscriptionArchiveContext);
+    }
+
+        /// Reports Archive control-channel problems into the incident signal.
+    ///
+    /// The Archive client inside a [PersistentSubscription] self-heals a lost
+    /// control channel by reconnecting forever; it never throws and only
+    /// reports each failed attempt here. The reader consumes the signal on
+    /// the polling thread (the only poller of the subscription, hence the
+    /// only invoker of this listener) and bounds the heal window with the
+    /// reconnect budget.
+    private static PersistentSubscriptionListener incidentListener(
+            final AtomicReference<Exception> incidentSignal) {
+        return new PersistentSubscriptionListener()
+        {
+            @Override
+            public void onLiveJoined() {
+            }
+
+            @Override
+            public void onLiveLeft() {
+            }
+
+            @Override
+            public void onError(final Exception error) {
+                incidentSignal.compareAndSet(null, error);
+            }
+        };
     }
 
         /// Sets the next stop outcome unless a terminal outcome already won.
@@ -374,6 +453,13 @@ public final class AeronArchiveReader implements Disposable {
         this.stopProgressSequence.set(-1L);
         this.stopProgressApplied.set(-1L);
         this.live = false;
+        /* A new polling run starts with a full reconnect budget: the previous
+         * run's disconnect incident must not eat into this one's. */
+        this.reconnectDeadlineNanos = 0L;
+        this.reconnectAttempts = 0L;
+        this.reconnectCause = null;
+        this.incidentBaselineSequence = -1L;
+        this.archiveIncidentSignal.set(null);
         /* Preserve any terminal outcome: a restart after STOPPED/RESOLVED_BOUNDARY
          * becomes RUNNING, but a failed or timed-out reader never looks healthy. */
         this.updateOutcome(StorageBinaryDataClient.StopOutcome.RUNNING);
@@ -387,14 +473,12 @@ public final class AeronArchiveReader implements Disposable {
         try {
             AeronReaderLifecycle.runPollingLoop(
                     this.active,
-                    () -> this.subscription.hasFailed() || this.assembler.failure() != null,
                     () ->
                     {
-                        final int work = this.subscription.controlledPoll(this.fragmentHandler, this.fragmentsPerPoll);
-                        this.live = this.subscription.isLive();
-                        if (this.stopAtLatest) extendStopDeadline();
-                        return work;
+                        final PersistentSubscription current = this.subscription;
+                        return current != null && current.hasFailed() || this.assembler.failure() != null;
                     },
+                    this::pollSubscription,
                     () -> this.stopAtLatest && this.live && !this.assembler.hasIncompleteTransaction(),
                     () -> this.stopAtLatest && ReplicationRetry.expired(this.stopDeadlineNanos.get()),
                     () ->
@@ -416,15 +500,175 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
+        /// Polls the current subscription, reconnecting once per Archive loss.
+    ///
+    /// An [ArchiveException] escaping [PersistentSubscription#controlledPoll]
+    /// never carries a replay-protocol verdict (those arrive through the
+    /// listener and set `hasFailed`); it means the Archive control channel
+    /// itself dropped, typically because the writer process restarted its
+    /// embedded Archive mid-replay. That is recoverable: the recording is the
+    /// durable source, so the reader swaps in a fresh subscription resuming at
+    /// the last resolved position instead of dying on a raw transport stack.
+    ///
+    /// @return fragments consumed by this poll, or `0` while reconnecting
+    private int pollSubscription() {
+        final PersistentSubscription current = this.subscription;
+        if (current == null) {
+            /* A previous reconnect attempt could not even create the
+             * subscription (channel still unresolved). Stay in reconnect mode
+             * until either create succeeds or the reconnect budget expires. */
+            this.reconnectAfterArchiveLoss();
+            return 0;
+        }
+        this.failIfReconnectBudgetExpired();
+        try {
+            final int work = current.controlledPoll(this.fragmentHandler, this.fragmentsPerPoll);
+            this.live = current.isLive();
+            this.trackArchiveIncident();
+            if (this.stopAtLatest) extendStopDeadline();
+            return work;
+        } catch (final ArchiveException disconnect) {
+            if (!this.active.get() || this.disposeRequested) {
+                /* Stopping or disposing: keep the historical behavior of letting
+                 * the transport failure surface as-is instead of reconnecting a
+                 * reader that is about to go away. */
+                throw disconnect;
+            }
+            this.tearDownReconnectableSubscription(current, disconnect);
+            this.reconnectAfterArchiveLoss();
+            return 0;
+        }
+    }
+
+        /// Tracks Archive control-channel incidents signalled by the subscription
+    /// listener and clears them on confirmed recovery.
+    ///
+    /// The Archive client self-heals a lost channel silently, so an incident
+    /// is only observable as listener errors plus absent resolved progress.
+    /// The incident opens at the first signal; a signal after the live stream
+    /// joined is harmless (the live image no longer needs the Archive), and
+    /// resolved progress or reaching live proves the channel recovered and
+    /// closes the incident with the full budget restored.
+    private void trackArchiveIncident() {
+        final Exception signalled = this.archiveIncidentSignal.getAndSet(null);
+        if (this.reconnectDeadlineNanos == 0L) {
+            if (signalled != null && !this.live) {
+                this.reconnectDeadlineNanos = ReplicationRetry.deadlineNanos(this.stopTimeoutNanos);
+                this.incidentBaselineSequence = this.assembler.lastResolvedSequence();
+                this.reconnectCause = signalled;
+            }
+            return;
+        }
+        if (this.live ||
+            this.assembler.lastResolvedSequence() != this.incidentBaselineSequence) {
+            this.reconnectDeadlineNanos = 0L;
+            this.incidentBaselineSequence = -1L;
+            this.reconnectAttempts = 0L;
+            this.reconnectCause = null;
+        }
+    }
+
+        /// Latches the typed reseed failure once an incident outlives its budget.
+    private void failIfReconnectBudgetExpired() {
+        if (this.reconnectDeadlineNanos != 0L && ReplicationRetry.expired(this.reconnectDeadlineNanos)) {
+            throw new StorageBinaryDataReseedException(
+                    ("Aeron Archive response channel stayed disconnected past the %dns reconnect budget " +
+                     "after %d attempts; recording %d cannot be replayed further from position %d without a reseed")
+                            .formatted(this.stopTimeoutNanos, this.reconnectAttempts,
+                                    this.configuration.recordingId(), this.assembler.lastResolvedPosition()),
+                    this.reconnectCause);
+        }
+    }
+
+        /// Retires the dead subscription and clears incomplete native state.
+    ///
+    /// Runs on the polling thread, so closing here never races a fragment
+    /// callback. A partially assembled transaction is dropped — its native
+    /// buffers are released — because the replacement replay restarts that
+    /// transaction from the last resolved position.
+    private void tearDownReconnectableSubscription(
+            final PersistentSubscription current, final ArchiveException disconnect) {
+        this.subscription = null;
+        this.live = false;
+        this.assembler.dispose();
+        this.reconnectCause = disconnect;
+        try {
+            current.close();
+        } catch (final RuntimeException closeFailure) {
+            disconnect.addSuppressed(closeFailure);
+        }
+    }
+
+        /// Attempts one reconnect, or fails closed once the reconnect budget is spent.
+    ///
+    /// The budget is the configured reader stop timeout: a writer restart —
+    /// the only healthy cause of an Archive disconnect — completes in seconds,
+    /// while a channel that is still down after the full stop budget is not a
+    /// restart but an operator problem, and a fresh reader from the durable
+    /// cursor has no better odds of succeeding. Each attempt is paced by the
+    /// retry policy's idle strategy so a dead Archive is not hammered in a
+    /// tight loop. Expiry latches a typed [StorageBinaryDataReseedException]
+    /// so the node reports RESEED_REQUIRED instead of an anonymous transport
+    /// stack.
+    private void reconnectAfterArchiveLoss() {
+        if (this.reconnectDeadlineNanos == 0L) {
+            this.reconnectDeadlineNanos = ReplicationRetry.deadlineNanos(this.stopTimeoutNanos);
+            this.incidentBaselineSequence = this.assembler.lastResolvedSequence();
+        }
+        this.failIfReconnectBudgetExpired();
+        try {
+            final long resolvedPosition = this.assembler.lastResolvedPosition();
+            final long resumePosition = resolvedPosition >= 0
+                    ? resolvedPosition : this.configuration.startPosition();
+            this.subscription = PersistentSubscription.create(subscriptionContext(
+                    this.configuration, resumePosition, incidentListener(this.archiveIncidentSignal)));
+            /* The replacement needs its own close-once domain: after a dispose
+             * raced a reconnect, the old guard value may already be set. The
+             * incident budget survives creation: the replacement still has to
+             * prove recovery with resolved progress within the same budget. */
+            this.subscriptionClosed.set(false);
+        } catch (final RuntimeException createFailure) {
+            if (this.reconnectCause == null) {
+                this.reconnectCause = createFailure;
+            } else if (this.reconnectCause != createFailure) {
+                this.reconnectCause.addSuppressed(createFailure);
+            }
+        }
+        this.reconnectAttempts++;
+        this.idleStrategy.idle(0);
+    }
+
+        /// Maps a terminal subscription failure to a reader failure type.
+    ///
+    /// A replay that can no longer start because the recording no longer covers
+    /// the reader's position — or no longer exists at all — is unrecoverable
+    /// from this node's local state: the durable cursor points into deleted
+    /// history. Surface it as a typed reseed signal instead of a generic
+    /// failure so the node health view reports RESEED_REQUIRED.
+    private RuntimeException classifySubscriptionFailure(final PersistentSubscription current) {
+        final Exception reason = current.failureReason();
+        if (reason instanceof PersistentSubscriptionException subscriptionFailure &&
+            (subscriptionFailure.reason() == PersistentSubscriptionException.Reason.INVALID_START_POSITION ||
+             subscriptionFailure.reason() == PersistentSubscriptionException.Reason.RECORDING_NOT_FOUND)) {
+            return new StorageBinaryDataReseedException(
+                    ("Aeron recording %d no longer covers this reader's durable cursor (position %d, " +
+                     "sequence %d); reseed required: %s").formatted(
+                            this.configuration.recordingId(), this.assembler.lastResolvedPosition(),
+                            this.assembler.lastResolvedSequence(), subscriptionFailure.getMessage()),
+                    subscriptionFailure);
+        }
+        return new IllegalStateException("PersistentSubscription failed", reason);
+    }
+
     private synchronized void completeRun() {
         final StorageBinaryDataClient.StopOutcome current = this.stopOutcome.get();
         if (current == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
             current == StorageBinaryDataClient.StopOutcome.CLOSED) {
             return;
         }
-        if (this.subscription.hasFailed()) {
-            this.assembler.failure(new IllegalStateException(
-                    "PersistentSubscription failed", this.subscription.failureReason()));
+        final PersistentSubscription currentSubscription = this.subscription;
+        if (currentSubscription != null && currentSubscription.hasFailed()) {
+            this.assembler.failure(this.classifySubscriptionFailure(currentSubscription));
         }
         if (this.assembler.failure() != null) {
             this.updateOutcome(StorageBinaryDataClient.StopOutcome.FAILED);
@@ -646,7 +890,11 @@ public final class AeronArchiveReader implements Disposable {
             pollingThread = this.thread;
         }
         AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscriptionClosed,
-                this.subscription::close, this.stopTimeoutNanos);
+                () ->
+                {
+                    final PersistentSubscription current = this.subscription;
+                    if (current != null) current.close();
+                }, this.stopTimeoutNanos);
         synchronized (this) {
             this.assembler.dispose();
             this.thread = null;

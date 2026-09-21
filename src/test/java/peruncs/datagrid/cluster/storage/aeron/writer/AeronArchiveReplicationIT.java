@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
+import io.aeron.Aeron;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.ArchivingMediaDriver;
@@ -14,7 +15,9 @@ import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.RecordingInspector;
 import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReseedException;
 
 import java.io.File;
 import java.net.ServerSocket;
@@ -463,6 +466,200 @@ class AeronArchiveReplicationIT {
         }
     }
 
+    /// Verifies a mid-replay Archive restart is absorbed by the reader's bounded
+    /// reconnect: the lost response channel swaps for a fresh subscription
+    /// resuming at the last resolved position, and replay completes instead of
+    /// dying on a raw ArchiveException (soak finding #1).
+    @Test
+    void archiveRestartMidReplayTriggersBoundedReconnect() throws Exception {
+        final int controlPort = freePort();
+        final String directory = Files.createTempDirectory("datagrid-aeron-reconnect-").toString();
+        final File archiveDirectory = new File(directory, "archive");
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
+        final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
+                .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
+        final UUID clusterId = UUID.randomUUID();
+        /* Enough history that replay is still in flight when the Archive goes
+         * away, so the disconnect lands mid-replay rather than on a live
+         * subscription. */
+        final int transactions = 256;
+        /* Standalone MediaDriver and Archive, so the Archive can restart like
+         * the writer's embedded one while the MediaDriver stays up. */
+        final MediaDriver.Context mediaContext = new MediaDriver.Context()
+                .aeronDirectoryName(directory).threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+        final AeronArchive.Context archiveClientContext = new AeronArchive.Context()
+                .aeronDirectoryName(directory).controlRequestChannel(controlChannel)
+                .controlResponseChannel(CONTROL_RESPONSE_CHANNEL).messageTimeoutNs(2_000_000_000L);
+        try (MediaDriver mediaDriver = MediaDriver.launch(mediaContext)) {
+            final Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(directory));
+            try (aeron;
+                 Archive archive = Archive.launch(
+                         archiveContext(directory, archiveDirectory, controlChannel, true));
+                 AeronArchive archiveClient = connectArchive(
+                         archiveClientContext.clone().aeron(aeron).ownsAeronClient(false))) {
+                final AeronArchiveReplicationPublisher publisher;
+                final long recordingId;
+                {
+                    publisher = AeronArchiveReplicationPublisher.New(
+                            archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0);
+                    try {
+                        await(publisher.publication()::isConnected, 10_000);
+                        for (int i = 0; i < transactions; i++) {
+                            publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[32 * 1024])});
+                        }
+                        recordingId = awaitRecordingId(publisher);
+                    } finally {
+                        publisher.close();
+                    }
+                    await(() -> archiveClient.getStopPosition(recordingId) >= 0, 10_000);
+                    final CountingReceiver receiver = new CountingReceiver();
+                    final AeronArchiveReader reader = AeronArchiveReader.New(
+                            AeronArchiveReader.Configuration.builder()
+                                    .aeron(aeron)
+                                    .archiveContext(archiveClientContext)
+                                    .recordingId(recordingId)
+                                    .startPosition(PersistentSubscription.FROM_START)
+                                    .liveChannel(liveChannel).liveStreamId(1001)
+                                    .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
+                                    .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                                    .initialSequence(-1).receiver(receiver).build());
+                    try {
+                        reader.start();
+                        /* Wait until replay demonstrably started, then restart
+                         * the Archive mid-replay like the writer's embedded
+                         * Archive restart that killed readers in the soak. */
+                        await(() -> reader.lastResolvedSequence() >= 4 || reader.failure() != null, 15_000);
+                        assertNull(reader.failure());
+                        archive.close();
+                        /* The reader is now inside its bounded reconnect budget;
+                         * bring the Archive back so the replacement subscription
+                         * can attach to the same recording and catalog. */
+                        try (Archive restarted = Archive.launch(
+                                archiveContext(directory, archiveDirectory, controlChannel, false))) {
+                            await(() -> reader.lastResolvedSequence() == transactions - 1 ||
+                                        reader.failure() != null, 30_000);
+                            assertNull(reader.failure(),
+                                    "a mid-replay Archive restart must stay within the bounded reconnect path");
+                            assertEquals(transactions, receiver.count(),
+                                    "reconnect must resume exactly at the last resolved boundary");
+                            assertEquals(StorageBinaryDataClient.StopOutcome.RUNNING, reader.stopOutcome());
+                        }
+                    } finally {
+                        reader.dispose();
+                    }
+                }
+            }
+        } finally {
+            delete(archiveDirectory);
+            delete(new File(directory));
+        }
+    }
+
+    /// Verifies an Archive response channel that never returns within the
+    /// reader's reconnect budget fails closed with a typed RESEED_REQUIRED
+    /// signal instead of surfacing a raw ArchiveException.
+    @Test
+    void archiveGoneBeyondReconnectBudgetLatchesTypedReseedFailure() throws Exception {
+        final int controlPort = freePort();
+        final String directory = Files.createTempDirectory("datagrid-aeron-reseed-").toString();
+        final File archiveDirectory = new File(directory, "archive");
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
+        final String liveChannel = "aeron:ipc?term-length=1048576|mtu=1408";
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
+                .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L)
+                .readerStopTimeoutNanos(1_000_000_000L).build();
+        final UUID clusterId = UUID.randomUUID();
+        /* Short control timeouts so each reconnect attempt fails fast while
+         * the Archive is down and the 1s reconnect budget expires quickly. */
+        final AeronArchive.Context archiveClientContext = new AeronArchive.Context()
+                .aeronDirectoryName(directory).controlRequestChannel(controlChannel)
+                .controlResponseChannel(CONTROL_RESPONSE_CHANNEL).messageTimeoutNs(500_000_000L);
+        final MediaDriver.Context mediaContext = new MediaDriver.Context()
+                .aeronDirectoryName(directory).threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+        try (MediaDriver mediaDriver = MediaDriver.launch(mediaContext)) {
+            final Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(directory));
+            try (aeron;
+                 Archive archive = Archive.launch(
+                         archiveContext(directory, archiveDirectory, controlChannel, true));
+                 AeronArchive archiveClient =
+                         connectArchive(archiveClientContext.clone().aeron(aeron).ownsAeronClient(false))) {
+                final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+                        archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0);
+                final long recordingId;
+                try {
+                    await(publisher.publication()::isConnected, 10_000);
+                    /* Enough history that replay is still in flight when the
+                     * Archive goes away, so the disconnect lands mid-replay. */
+                    for (int i = 0; i < 128; i++) {
+                        publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[32 * 1024])});
+                    }
+                    recordingId = awaitRecordingId(publisher);
+                } finally {
+                    publisher.close();
+                }
+                await(() -> archiveClient.getStopPosition(recordingId) >= 0, 10_000);
+                final AeronArchiveReader reader = AeronArchiveReader.New(
+                        AeronArchiveReader.Configuration.builder()
+                                .aeron(aeron)
+                                .archiveContext(archiveClientContext)
+                                .recordingId(recordingId)
+                                .startPosition(PersistentSubscription.FROM_START)
+                                .liveChannel(liveChannel).liveStreamId(1001)
+                                .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
+                                .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                                .initialSequence(-1).receiver(new CountingReceiver()).build());
+                try {
+                    reader.start();
+                    await(() -> reader.lastResolvedSequence() >= 2 || reader.failure() != null, 15_000);
+                    assertNull(reader.failure());
+                    /* The Archive goes away and never returns: the reconnect
+                     * budget must expire into the typed reseed signal. */
+                    archive.close();
+                    await(() -> reader.failure() != null, 15_000);
+                    assertInstanceOf(StorageBinaryDataReseedException.class, reader.failure(),
+                            "an unrecoverable Archive loss must surface as RESEED_REQUIRED, not a raw ArchiveException");
+                    assertEquals(StorageBinaryDataClient.StopOutcome.FAILED, reader.stopOutcome());
+                } finally {
+                    reader.dispose();
+                }
+            }
+        } finally {
+            delete(archiveDirectory);
+            delete(new File(directory));
+        }
+    }
+
+    /// Connects an Archive control client with bounded retries, since an
+    /// Archive launched in-process publishes its control endpoint
+    /// asynchronously after `Archive.launch` returns.
+    private static AeronArchive connectArchive(final AeronArchive.Context context) {
+        final long deadline = System.nanoTime() + 10_000_000_000L;
+        while (true) {
+            try {
+                return AeronArchive.connect(context);
+            } catch (final RuntimeException connectFailure) {
+                if (System.nanoTime() >= deadline) throw connectFailure;
+                LockSupport.parkNanos(50_000_000L);
+            }
+        }
+    }
+
+    private static Archive.Context archiveContext(
+            final String aeronDirectory,
+            final File archiveDirectory,
+            final String controlChannel,
+            final boolean deleteOnStart) {
+        return new Archive.Context()
+                .aeronDirectoryName(aeronDirectory).archiveDir(archiveDirectory)
+                .deleteArchiveOnStart(deleteOnStart).threadingMode(ArchiveThreadingMode.SHARED)
+                .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
+    }
+
     @FunctionalInterface
     private interface Check {
         boolean value();
@@ -478,6 +675,23 @@ class AeronArchiveReplicationIT {
             long startPosition,
             long stopPosition
     ) {
+    }
+
+    private static final class CountingReceiver implements StorageBinaryDataReceiver {
+        private final java.util.concurrent.atomic.AtomicInteger applied = new java.util.concurrent.atomic.AtomicInteger();
+
+        @Override
+        public void receiveData(final Binary value) {
+            this.applied.incrementAndGet();
+        }
+
+        @Override
+        public void receiveTypeDictionary(final String value) {
+        }
+
+        int count() {
+            return this.applied.get();
+        }
     }
 
     private static final class RecordingReceiver implements StorageBinaryDataReceiver {

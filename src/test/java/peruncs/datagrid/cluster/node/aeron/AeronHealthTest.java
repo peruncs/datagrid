@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport.StorageControllerAdapter;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReseedException;
 
 import java.lang.reflect.Proxy;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -217,6 +218,19 @@ class AeronHealthTest {
         assertFalse(health.isReady(), "readiness requires the live boundary");
         assertTrue(health.isHealthy());
         assertEquals(ReplicationHealth.State.REPLAYING, health.state());
+    }
+
+        /// A reader whose bounded reconnect budget expired reports RESEED_REQUIRED.
+    @Test
+    void reseedReaderClientRequiresReseed() {
+        final Fixture fixture = new Fixture();
+        fixture.clientRunning = false;
+        fixture.clientFailure = new StorageBinaryDataReseedException("archive response channel lost");
+        final AeronHealth health = fixture.health(fixture.client());
+
+        assertFalse(health.isReady());
+        assertFalse(health.isHealthy());
+        assertEquals(ReplicationHealth.State.RESEED_REQUIRED, health.state());
     }
 
         /// A failed reader client fails the view.

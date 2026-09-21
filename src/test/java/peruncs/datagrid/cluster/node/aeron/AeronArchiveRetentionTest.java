@@ -81,6 +81,26 @@ class AeronArchiveRetentionTest {
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, null, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
+    /* A live writer behind its terminal checkpoint: the Archive has durably
+     * recorded up to `recordedPosition` while the checkpoint file still names
+     * sequence 4 at position 8192, as happens between the commit's Archive
+     * acknowledgement and the checkpoint fsync on a continuously appending
+     * writer. */
+    private static AeronArchiveRetention retentionWithRecordedPosition(final long recordedPosition) {
+        return retentionWithRecordedPosition(recordedPosition, ignored -> 0L);
+    }
+
+    private static AeronArchiveRetention retentionWithRecordedPosition(
+            final long recordedPosition, final java.util.function.LongUnaryOperator purger) {
+        return new AeronArchiveRetention(Set.of(READER), () -> {
+        },
+                new AeronArchiveRetention.RecordingPositions(
+                        ignored -> 0L, ignored -> -1L, ignored -> recordedPosition), () -> 17,
+                () -> new AeronWriterBoundary(4, 17, 8_192), purger,
+                CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, null,
+                AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
+    }
+
     private static ReplicationCursor deletionCursor(final long position) {
         return ReplicationCursor.of("aeron", GENERATION, 4, new AeronReplicationCursor(
                 CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, position, 4).encode());
@@ -230,6 +250,70 @@ class AeronArchiveRetentionTest {
         final IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> retention.deleteThrough(deletionCursor(acknowledgedPosition)));
         assertInstanceOf(ArchiveException.class, failure.getCause());
+        retention.close();
+    }
+
+    /// Reproduces the soak finding: a truthful watermark that resolves a commit
+    /// from the live stream while the writer is still between the commit's
+    /// Archive acknowledgement and the checkpoint fsync names a sequence and
+    /// position the terminal checkpoint has not reached yet. It is admissible
+    /// because every byte it claims is already durably recorded in the Archive.
+    @Test
+    void watermarkWithinRecordedPositionAheadOfTerminalCheckpointIsAccepted() {
+        final AeronArchiveRetention retention = retentionWithRecordedPosition(16L * 1_024 * 1_024);
+        retention.recordReaderWatermark(AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 5, 12_288));
+        assertTrue(retention.isSupported(),
+                "a watermark covered by the recorded Archive position must assemble the quorum");
+        retention.close();
+    }
+
+    /// Verifies retention through a boundary beyond the terminal checkpoint is
+    /// authorized by the recorded Archive position and purges full segments.
+    @Test
+    void deletionAheadOfTerminalCheckpointUsesTheRecordedPosition() {
+        final long purged = 8L * 1_024 * 1_024;
+        final AtomicReference<Long> purgedAt = new AtomicReference<>();
+        final AeronArchiveRetention retention = retentionWithRecordedPosition(16L * 1_024 * 1_024, boundary -> {
+            purgedAt.set(boundary);
+            return 0L;
+        });
+        retention.recordReaderWatermark(AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 5, 9L * 1_024 * 1_024));
+        final byte[] requestedPosition = new AeronReplicationCursor(
+                CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, 9L * 1_024 * 1_024, 5).encode();
+        final ReplicationLogRetention.MaintenanceResult result =
+                retention.deleteThrough(ReplicationCursor.of("aeron", GENERATION, 5, requestedPosition));
+        assertEquals(ReplicationLogRetention.MaintenanceResult.Status.DELETED, result.status(),
+                "the quorum minimum position 9MiB crosses exactly one complete 8MiB segment");
+        assertEquals(purged, purgedAt.get(),
+                "the purge must run through the segment boundary, not the raw watermark position");
+        retention.close();
+    }
+
+    /// Verifies a fabricated future sequence without new Archive bytes stays rejected:
+    /// progress past the terminal checkpoint must occupy bytes beyond it.
+    @Test
+    void fabricatedFutureSequenceWithoutNewBytesIsRejected() {
+        final AeronArchiveRetention retention = retentionWithRecordedPosition(16L * 1_024 * 1_024);
+        final IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> retention.recordReaderWatermark(AeronReaderWatermark.of(
+                        READER, CLUSTER, GENERATION, 1, 17, 5, 4_096)));
+        assertEquals("reader watermark is ahead of the durable writer boundary", failure.getMessage());
+        assertFalse(retention.isSupported());
+        retention.close();
+    }
+
+    /// Verifies a watermark beyond the durably recorded Archive position stays rejected:
+    /// no commit marker can be durable at a position the Archive has not recorded.
+    @Test
+    void watermarkBeyondRecordedPositionIsRejected() {
+        final AeronArchiveRetention retention = retentionWithRecordedPosition(9_728);
+        final IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> retention.recordReaderWatermark(AeronReaderWatermark.of(
+                        READER, CLUSTER, GENERATION, 1, 17, 5, 16L * 1_024 * 1_024)));
+        assertEquals("reader watermark is ahead of the durable writer boundary", failure.getMessage());
+        assertFalse(retention.isSupported());
         retention.close();
     }
 
