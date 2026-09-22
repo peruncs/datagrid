@@ -9,9 +9,9 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.exceptions.StorageException;
 import org.eclipse.store.storage.types.*;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider.Env.EnvKeys;
 import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
-import peruncs.datagrid.cluster.node.aeron.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.backup.*;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
@@ -39,32 +39,15 @@ public interface ClusterFoundation extends AutoCloseable {
         /// Creates a mutable builder for one immutable node configuration.
     ///
     /// @return a new builder
-    static Builder New() {
+    static Builder create() {
         return new Builder();
     }
 
         /// Builds the collaborators used by one node before lifecycle starts.
     final class Builder {
-        private StorageBackupBackend backupBackend;
-        private StorageTaskExecutor storageTaskExecutor;
-        private StorageBackupTaskExecutor storageBackupTaskExecutor;
-        private ClusterReplicationTransport replicationTransport;
-        private StorageBinaryDataMerger dataMerger;
-        private DataMessageAppliedListener dataMessageAppliedListener;
-        private StoredReplicationCursorManager storedReplicationCursorManager;
-        private StorageBackupManager storageBackupManager;
         private Supplier<Object> rootSupplier;
-        private ObjectGraphUpdateHandler graphUpdateHandler;
         private EmbeddedStorageFoundation<?> embeddedStorageFoundation;
-        private BackupNodeManager backupNodeManager;
-        private StorageBinaryDataClient dataClient;
-        private StorageBinaryDataDistributor dataDistributor;
-        private StorageNodeHealthCheck healthCheck;
         private NodeLibraryPropertiesProvider propertiesProvider;
-        private StorageDiskSpaceReader storageDiskSpaceReader;
-        private StorageNodeManager storageNodeManager;
-        private ReplicationPositionProvider positionProvider;
-        private ReplicationLogRetention replicationRetention;
 
         /// Creates an empty builder whose collaborators are supplied by setters.
         public Builder() {
@@ -107,15 +90,7 @@ public interface ClusterFoundation extends AutoCloseable {
         ///
         /// @return configured cluster foundation
         public ClusterFoundation build() {
-            return new Node(new NodeConfiguration(
-                    this.backupBackend, this.storageTaskExecutor, this.storageBackupTaskExecutor,
-                    this.replicationTransport, this.dataMerger,
-                    this.dataMessageAppliedListener, this.storedReplicationCursorManager,
-                    this.storageBackupManager, this.rootSupplier, this.graphUpdateHandler,
-                    this.embeddedStorageFoundation, this.backupNodeManager, this.dataClient,
-                    this.dataDistributor, this.healthCheck, this.propertiesProvider,
-                    this.storageDiskSpaceReader, this.storageNodeManager,
-                    this.positionProvider, this.replicationRetention));
+            return new Node(this.rootSupplier, this.embeddedStorageFoundation, this.propertiesProvider);
         }
     }
 
@@ -217,29 +192,30 @@ public interface ClusterFoundation extends AutoCloseable {
         private volatile boolean closing;
         private volatile Throwable closeFailure;
 
-        private Node(final NodeConfiguration configuration) {
-            this.backupBackend = lazy(configuration.backupBackend(), this::ensureBackupBackend);
-            this.storageTaskExecutor = lazy(configuration.storageTaskExecutor(), this::ensureStorageTaskExecutor);
-            this.storageBackupTaskExecutor = lazy(configuration.storageBackupTaskExecutor(), this::ensureStorageBackupTaskExecutor);
+        private Node(final Supplier<Object> configuredRoot,
+                     final EmbeddedStorageFoundation<?> configuredFoundation,
+                     final NodeLibraryPropertiesProvider configuredProperties) {
+            this.backupBackend = LazyConstant.of(this::ensureBackupBackend);
+            this.storageTaskExecutor = LazyConstant.of(this::ensureStorageTaskExecutor);
+            this.storageBackupTaskExecutor = LazyConstant.of(this::ensureStorageBackupTaskExecutor);
             this.housekeeper = LazyConstant.of(this::ensureNodeHousekeeper);
             this.storageLimitGate = LazyConstant.of(this::ensureStorageLimitGate);
-            this.replicationTransport = lazy(configuration.replicationTransport(), this::ensureClusterReplicationTransport);
-            this.dataMerger = lazy(configuration.dataMerger(), this::ensureStorageBinaryDataMerger);
-            this.dataMessageAppliedListener = lazy(configuration.dataMessageAppliedListener(), this::ensureDataMessageAppliedListener);
-            this.storedReplicationCursorManager = configuration.storedReplicationCursorManager();
-            this.storageBackupManager = lazy(configuration.storageBackupManager(), this::ensureStorageBackupManager);
-            this.rootSupplier = lazy(configuration.rootSupplier(), this::ensureRootSupplier);
-            this.graphUpdateHandler = lazy(configuration.graphUpdateHandler(), this::ensureGraphUpdateHandler);
-            this.embeddedStorageFoundation = lazy(configuration.embeddedStorageFoundation(), this::ensureEmbeddedStorageFoundation);
-            this.backupNodeManager = lazy(configuration.backupNodeManager(), this::ensureBackupNodeManager);
-            this.dataClient = lazy(configuration.dataClient(), this::ensureStorageBinaryDataClient);
-            this.dataDistributor = lazy(configuration.dataDistributor(), this::ensureDataDistributor);
-            this.healthCheck = lazy(configuration.healthCheck(), this::ensureStorageNodeHealthCheck);
-            this.propertiesProvider = lazy(configuration.propertiesProvider(), this::ensureNodeLibraryPropertiesProvider);
-            this.storageDiskSpaceReader = lazy(configuration.storageDiskSpaceReader(), this::ensureStorageDiskSpaceReader);
-            this.storageNodeManager = lazy(configuration.storageNodeManager(), this::ensureStorageNodeManager);
-            this.positionProvider = lazy(configuration.positionProvider(), this::ensureReplicationPositionProvider);
-            this.replicationRetention = lazy(configuration.replicationRetention(), this::ensureReplicationLogRetention);
+            this.replicationTransport = LazyConstant.of(this::ensureClusterReplicationTransport);
+            this.dataMerger = LazyConstant.of(this::ensureStorageBinaryDataMerger);
+            this.dataMessageAppliedListener = LazyConstant.of(this::ensureDataMessageAppliedListener);
+            this.storageBackupManager = LazyConstant.of(this::ensureStorageBackupManager);
+            this.rootSupplier = lazy(configuredRoot, this::ensureRootSupplier);
+            this.graphUpdateHandler = LazyConstant.of(this::ensureGraphUpdateHandler);
+            this.embeddedStorageFoundation = lazy(configuredFoundation, this::ensureEmbeddedStorageFoundation);
+            this.backupNodeManager = LazyConstant.of(this::ensureBackupNodeManager);
+            this.dataClient = LazyConstant.of(this::ensureStorageBinaryDataClient);
+            this.dataDistributor = LazyConstant.of(this::ensureDataDistributor);
+            this.healthCheck = LazyConstant.of(this::ensureStorageNodeHealthCheck);
+            this.propertiesProvider = lazy(configuredProperties, this::ensureNodeLibraryPropertiesProvider);
+            this.storageDiskSpaceReader = LazyConstant.of(this::ensureStorageDiskSpaceReader);
+            this.storageNodeManager = LazyConstant.of(this::ensureStorageNodeManager);
+            this.positionProvider = LazyConstant.of(this::ensureReplicationPositionProvider);
+            this.replicationRetention = LazyConstant.of(this::ensureReplicationLogRetention);
             this.backupRestorePolicy = LazyConstant.of(this::ensureBackupRestorePolicy);
             this.nodeRole = this.propertiesProvider.get().nodeRole();
         }
@@ -285,7 +261,7 @@ public interface ClusterFoundation extends AutoCloseable {
         ///
         /// @return backup backend
         private StorageBackupBackend ensureBackupBackend() {
-            return FilesystemVolumeBackupBackend.New(
+            return FilesystemVolumeBackupBackend.create(
                     backupVolumePath(this.getNodeLibraryPropertiesProvider())
             );
         }
@@ -297,28 +273,28 @@ public interface ClusterFoundation extends AutoCloseable {
             if (this.getNodeLibraryPropertiesProvider().nodeRole() == NodeRole.BACKUP_READER) {
                 return this.getStorageBackupTaskExecutor();
             }
-            return StorageTaskExecutor.New(this.clusterStorageManager);
+            return StorageTaskExecutor.create(this.clusterStorageManager);
         }
 
                 /// Creates the backup task executor.
         ///
         /// @return backup task executor
         private StorageBackupTaskExecutor ensureStorageBackupTaskExecutor() {
-            return StorageBackupTaskExecutor.New(this.clusterStorageManager, this.getStorageBackupManager());
+            return StorageBackupTaskExecutor.create(this.clusterStorageManager, this.getStorageBackupManager());
         }
 
                 /// Creates the node maintenance housekeeper.
         ///
         /// @return housekeeper
         private NodeHousekeeper ensureNodeHousekeeper() {
-            return NodeHousekeeper.New();
+            return NodeHousekeeper.create();
         }
 
                 /// Creates the storage limit gate.
         ///
         /// @return limit gate
         private StorageLimitGate ensureStorageLimitGate() {
-            return StorageLimitGate.New(
+            return StorageLimitGate.create(
                     requiredPositive(
                             this.getNodeLibraryPropertiesProvider().storageLimitGB(),
                             EnvKeys.STORAGE_LIMIT_GB
@@ -419,7 +395,7 @@ public interface ClusterFoundation extends AutoCloseable {
 
             final Supplier<ReplicationCursor> cursorProvider = this.getStorageBinaryDataClient()::cursor;
 
-            return StorageBackupManager.New(
+            return StorageBackupManager.create(
                     this.clusterStorageManager,
                     maxBackupCount,
                     this.getStorageBackupBackend(),
@@ -460,7 +436,7 @@ public interface ClusterFoundation extends AutoCloseable {
         ///
         /// @return backup node manager
         private BackupNodeManager ensureBackupNodeManager() {
-            return BackupNodeManager.New(
+            return BackupNodeManager.create(
                     this.getStorageBackupTaskExecutor(),
                     this.getStorageBinaryDataClient(),
                     this.clusterStorageManager,
@@ -491,7 +467,7 @@ public interface ClusterFoundation extends AutoCloseable {
         ///
         /// @return storage health check
         private StorageNodeHealthCheck ensureStorageNodeHealthCheck() {
-            return StorageNodeHealthCheck.New(
+            return StorageNodeHealthCheck.create(
                     this.clusterStorageManager,
                     this.getClusterReplicationTransport().health(
                             () -> this.clusterStorageManager.isRunning() && !this.clusterStorageManager.isStartingUp(),
@@ -512,7 +488,7 @@ public interface ClusterFoundation extends AutoCloseable {
         ///
         /// @return disk-space reader
         private StorageDiskSpaceReader ensureStorageDiskSpaceReader() {
-            return StorageDiskSpaceReader.New(
+            return StorageDiskSpaceReader.create(
                     this.getEmbeddedStorageFoundation().getConfiguration().fileProvider().baseDirectory()
             );
         }
@@ -528,7 +504,7 @@ public interface ClusterFoundation extends AutoCloseable {
             final String transport = this.getClusterReplicationTransport().id();
             final boolean writer =
                     this.getNodeLibraryPropertiesProvider().nodeRole() == NodeRole.WRITER;
-            return StorageNodeManager.New(new StorageNodeManager.Configuration(
+            return StorageNodeManager.create(new StorageNodeManager.Configuration(
                     this.getStorageBinaryDataDistributor(),
                     this.getStorageTaskExecutor(),
                     this.getStorageBinaryDataClient(),
@@ -562,7 +538,7 @@ public interface ClusterFoundation extends AutoCloseable {
                 throw new NodeLibraryException(
                         "cannot create the replication merger before embedded storage has started");
             }
-            final var configuration = StorageBinaryDataMerger.Configuration.New(
+            final var configuration = StorageBinaryDataMerger.Configuration.create(
                     this.getEmbeddedStorageFoundation().getConnectionFoundation(),
                     replicationStorage,
                     this.getObjectGraphUpdateHandler(),
@@ -575,9 +551,9 @@ public interface ClusterFoundation extends AutoCloseable {
             final Long cachedBytesLimit = this.getNodeLibraryPropertiesProvider().dataMergerCachedDataLimit();
             final Long applyTimeoutMs = this.getNodeLibraryPropertiesProvider().dataMergerApplyTimeoutMs();
             if (cachingTimeoutMs == null && cachedBytesLimit == null && applyTimeoutMs == null) {
-                return StorageBinaryDataMerger.New(configuration);
+                return StorageBinaryDataMerger.create(configuration);
             }
-            return StorageBinaryDataMerger.New(new StorageBinaryDataMerger.Configuration(
+            return StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
                     configuration.foundation(),
                     configuration.storage(),
                     configuration.objectGraphUpdateHandler(),
@@ -805,7 +781,8 @@ public interface ClusterFoundation extends AutoCloseable {
                     if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
                 }
                 if (failure instanceof Error error) throw error;
-                throw (RuntimeException) failure;
+                if (failure instanceof RuntimeException runtime) throw runtime;
+                throw new NodeLibraryException("Cluster node startup failed", failure);
             }
         }
 
@@ -1027,7 +1004,7 @@ public interface ClusterFoundation extends AutoCloseable {
              * only the node-owned merger receives the raw manager. */
             final boolean writer = this.getNodeLibraryPropertiesProvider().nodeRole() == NodeRole.WRITER;
             this.clusterStorageManager = writer
-                    ? ClusterStorageManager.New(
+                    ? ClusterStorageManager.create(
                             embeddedStorageManager,
                             limitGate::limitReached,
                             () -> this.closeHousekeeperAndReplication(housekeeper),
@@ -1201,7 +1178,7 @@ public interface ClusterFoundation extends AutoCloseable {
             this.embeddedStorageManager = storage;
             this.initializeRoot(storage, true);
 
-            this.clusterStorageManager = ClusterStorageManager.New(
+            this.clusterStorageManager = ClusterStorageManager.create(
                     storage,
                     ClusterStorageManager.StorageSizeValidation.notReached(),
                     this::closeReplicationTransportAndPositionProvider,

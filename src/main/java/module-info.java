@@ -11,10 +11,11 @@
 /// Store binary movement lives in
 /// `...cluster.storage.types`, carried by
 /// `...cluster.storage.aeron.*`, which also carries the embedded
-/// Lucene/JVector index policy. The exported packages
-/// contain the public contracts and errors used at those boundaries.
+/// Lucene/JVector index policy. The exported `cluster.api` package contains
+/// the contracts embedding applications use; internal failures are translated
+/// at that boundary.
 /// Aeron is the only transport. Each provider owns its embedded MediaDriver
-/// and Archive lifecycle, closed from the storage-manager shutdown callback.
+/// and Archive lifecycle, closed by the node lifecycle after maintenance stops.
 ///
 /// # Trusted network boundary
 ///
@@ -134,8 +135,7 @@
 /// atomically moved into the volume only after export completes. Archive
 /// extraction validates names, links, entry uniqueness, size limits, and the
 /// required metadata before atomically installing Store files. User-uploaded
-/// storage uses `user-uploaded-storage.zip` and does not use the removed HTTP
-/// backup transport.
+/// storage uses `user-uploaded-storage.zip` as its local restore input.
 ///
 /// # Indexes live inside the object graph
 ///

@@ -1,10 +1,11 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import peruncs.datagrid.cluster.errors.WriterFencedException;
-import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 import peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.PathSecurity;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.io.IOException;
@@ -13,7 +14,10 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
@@ -146,9 +150,7 @@ final class WriterFencingLease implements AutoCloseable {
         final Path canonicalVolume = volumeDirectory.toAbsolutePath().normalize();
         try {
             Files.createDirectories(canonicalVolume);
-            if (Files.isSymbolicLink(canonicalVolume)) {
-                throw new IOException("writer lease directory must not be a symbolic link");
-            }
+            PathSecurity.ensureNoSymbolicLinks(canonicalVolume);
         } catch (final IOException failure) {
             throw new IllegalStateException("cannot create writer lease directory %s".formatted(canonicalVolume), failure);
         }
@@ -714,9 +716,7 @@ final class WriterFencingLease implements AutoCloseable {
     }
 
     private static Path rejectSymbolicLink(final Path path) throws IOException {
-        if (Files.isSymbolicLink(path)) {
-            throw new IOException("writer lease lock path must not be a symbolic link: %s".formatted(path));
-        }
+        PathSecurity.ensureNoSymbolicLinks(path);
         return path;
     }
 
@@ -729,33 +729,7 @@ final class WriterFencingLease implements AutoCloseable {
                 .putLong(lease.heartbeatMillis());
         buffer.putInt(Crc32c.compute(bytes, 0, ENCODED_BYTES - Integer.BYTES));
         try {
-            final Path temporary = Files.createTempFile(path.toAbsolutePath().getParent(), "lease-", ".tmp");
-            try {
-                /* Force the temporary file to disk before the move so a crash
-                 * cannot leave the lease moved but its content unwritten: a
-                 * corrupt lease fails closed, which would suspend write
-                 * admission on every node sharing the volume. */
-                try (final FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
-                    final ByteBuffer source = ByteBuffer.wrap(bytes);
-                    while (source.hasRemaining()) {
-                        if (channel.write(source) == 0) {
-                            throw new IOException("writer lease write made no progress");
-                        }
-                    }
-                    channel.force(true);
-                }
-                try {
-                    Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                } catch (final AtomicMoveNotSupportedException fallback) {
-                    /* Best effort without rename atomicity: a torn file is
-                     * rejected by validation, so the lease fails closed rather
-                     * than resetting the token series. */
-                    Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
-                }
-                StorageFileOperations.forceDirectory(path.toAbsolutePath().getParent());
-            } finally {
-                Files.deleteIfExists(temporary);
-            }
+            AtomicFileWriter.writeBytes(path, bytes);
         } catch (final IOException failure) {
             throw new IllegalStateException("cannot persist writer lease at %s".formatted(path), failure);
         }

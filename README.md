@@ -111,8 +111,9 @@ Clusters may share a VPN or other routed network, but each cluster must have
 its own Aeron traffic namespace. Configure distinct live-channel control
 endpoints, distinct replay and watermark endpoints when those channels are
 shared, and distinct stream IDs for every cluster. Every cluster must also use
-a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID` and, when explicitly configured,
-the same `ECLIPSE_DATAGRID_AERON_WIRE_NONCE` on every participant. (Why namespaces can't be shared
+a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID` and the same non-zero
+`ECLIPSE_DATAGRID_AERON_WIRE_NONCE` on every production participant. Development
+may derive the nonce from the cluster id for local fixtures only. (Why namespaces can't be shared
 is a design constraint; see the module documentation.)
 
 Network policy must still restrict which nodes can publish to
@@ -124,7 +125,7 @@ The development live-channel default is a dynamic MDC loopback channel
 so multiple readers can attach. The replay default points at the same local
 control endpoint with a dynamic response stream. Production deployments must
 configure routable control and replay endpoints.
-The default wire tuning is a 16 MiB term, 1 MiB Store chunk, 1,408-byte MTU,
+The default wire tuning is a 16 MiB term, 128 KiB Store chunk, 1,408-byte MTU,
 and 64 MiB transaction limit; override with the full environment keys
 `ECLIPSE_DATAGRID_AERON_TERM_LENGTH`,
 `ECLIPSE_DATAGRID_AERON_MTU_LENGTH`,
@@ -147,6 +148,9 @@ Replication must run on an isolated network
 (VPN, firewall rules, or Kubernetes NetworkPolicies): any host that can reach
 the live channel can publish well-formed frames; the nonce only rejects
 accidental cross-wiring and is not authentication. Every writer and reader must
+set `ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK=true` in production to acknowledge
+that boundary. Without that acknowledgement startup fails, and an untrusted
+development topology cannot enable quorum-based Archive deletion. Every participant must
 use the same cluster id, epoch, and fencing lineage; a mismatch fails closed
 before Store data is applied. Writer lease freshness uses shared wall-clock
 timestamps, so all writer hosts must run synchronized NTP/chrony clocks. A
@@ -233,7 +237,13 @@ coordinated restart.
 A writer requires a shared `ECLIPSE_DATAGRID_BACKUP_PATH` for its fencing
 lease; manual promotion and automated failover remain
 deployment responsibilities, and the lease directory must not sit inside the
-Aeron driver, archive, or checkpoint tree.
+Aeron driver, archive, or checkpoint tree. Provision this path before startup
+on a filesystem whose advisory locks and atomic replacement work across every
+writer host. Local disks, host-local container volumes, and separately mounted
+copies do not provide cross-host fencing. Validate takeover on the exact
+production filesystem before enabling failover, then set
+`ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true`. Production writers fail
+startup without that explicit deployment assertion.
 
 ## Filesystem backups
 
@@ -287,7 +297,7 @@ ordering are design decisions; see the module documentation.) A writer should us
 `AeronStorageBinaryReplicationTarget` with an
 `AeronReplicationWriteCoordinator`.
 
-Readers use `AeronArchiveReader.New(...)` for replay, live
+Readers use `AeronArchiveReader.Configuration.builder()` for replay, live
 join, and reconnect. Persist the DataGrid cursor/checkpoint after each
 completed commit. `AeronReplicationCheckpointStore` is provided for
 deployments that persist the Aeron-specific identity and replay boundary.

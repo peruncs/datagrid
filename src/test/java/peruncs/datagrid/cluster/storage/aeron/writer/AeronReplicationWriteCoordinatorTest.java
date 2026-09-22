@@ -203,7 +203,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        AeronStorageBinaryReplicationTarget.New(local, coordinator)
+        AeronStorageBinaryReplicationTarget.create(local, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{7})));
         assertEquals(List.of("PREPARING", "archive", "local", "archive", "COMMITTED"), events);
         assertEquals(List.of(0L, 0L), sequences);
@@ -233,7 +233,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(failing, coordinator)
+        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(List.of("PREPARING", "archive", "archive", "REJECTED"), events);
         coordinator.dispose();
@@ -265,7 +265,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.New(local, coordinator);
+        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(local, coordinator);
         assertThrows(IllegalStateException.class,
                 () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})));
@@ -309,7 +309,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(failing, coordinator)
+        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(List.of("PREPARING:0", "REJECTED:0"), events);
         assertFalse(fenceCleared.get());
@@ -347,7 +347,7 @@ class AeronReplicationWriteCoordinatorTest {
             CrashHook.runWithHook((name, ignored) ->
             {
                 if ("AFTER_LOCAL_WRITE_BEFORE_COMMIT".equals(name)) throw failure;
-            }, () -> assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(local, coordinator)
+            }, () -> assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(local, coordinator)
                     .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})))));
             assertEquals(List.of(AeronReplicationCheckpoint.State.PREPARING,
                     AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN), states);
@@ -610,7 +610,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        AeronStorageBinaryReplicationTarget.New(local, coordinator, source, ignored -> {
+        AeronStorageBinaryReplicationTarget.create(local, coordinator, source, ignored -> {
         }, () -> true)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(List.of(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY,
@@ -658,7 +658,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        final var target = AeronStorageBinaryReplicationTarget.New(local, coordinator, source,
+        final var target = AeronStorageBinaryReplicationTarget.create(local, coordinator, source,
                 ignored -> {
                 }, () -> true);
         final var first = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}));
@@ -715,7 +715,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        AeronStorageBinaryReplicationTarget.New(local, coordinator, null, ignored -> {
+        AeronStorageBinaryReplicationTarget.create(local, coordinator, null, ignored -> {
         }, () -> false)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(1, localWrites.get());
@@ -742,7 +742,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.New(
+        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(
                 local, coordinator, null, committed::set, () -> true).write(
                 ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(-1, committed.get(), "uncertain commit must not advance the local index");

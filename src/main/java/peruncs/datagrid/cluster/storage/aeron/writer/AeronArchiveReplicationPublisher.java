@@ -70,7 +70,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @param epoch           writer epoch
     /// @param initialSequence first sequence to publish
     /// @return a publisher that owns the publication and recording
-    public static AeronArchiveReplicationPublisher New(
+    public static AeronArchiveReplicationPublisher create(
             final AeronArchive archive,
             final String channel,
             final int streamId,
@@ -79,15 +79,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long epoch,
             final long initialSequence
     ) {
-        return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+        return create(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.LOCAL, AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 
-    public static AeronArchiveReplicationPublisher New(
+    public static AeronArchiveReplicationPublisher create(
             final AeronArchive archive, final String channel, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
             final long epoch, final long initialSequence, final long wireNonce) {
-        return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+        return create(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.LOCAL, wireNonce);
     }
 
@@ -103,7 +103,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @param epoch           writer epoch
     /// @param initialSequence first sequence to publish
     /// @return a publisher that owns the publication and recording
-    public static AeronArchiveReplicationPublisher NewRemote(
+    public static AeronArchiveReplicationPublisher createRemote(
             final AeronArchive archive,
             final String channel,
             final int streamId,
@@ -112,19 +112,19 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long epoch,
             final long initialSequence
     ) {
-        return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+        return create(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.REMOTE, AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 
-    public static AeronArchiveReplicationPublisher NewRemote(
+    public static AeronArchiveReplicationPublisher createRemote(
             final AeronArchive archive, final String channel, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
             final long epoch, final long initialSequence, final long wireNonce) {
-        return New(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
+        return create(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.REMOTE, wireNonce);
     }
 
-    private static AeronArchiveReplicationPublisher New(
+    private static AeronArchiveReplicationPublisher create(
             final AeronArchive archive,
             final String channel,
             final int streamId,
@@ -189,7 +189,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @throws IllegalArgumentException if the recording is unknown, uses another
     ///                                  stream, or has different framing
     /// @throws IllegalStateException    if the recording is still active
-    public static AeronArchiveReplicationPublisher Extend(
+    public static AeronArchiveReplicationPublisher extend(
             final AeronArchive archive,
             final long recordingId,
             final int streamId,
@@ -198,15 +198,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long epoch,
             final long initialSequence
     ) {
-        return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+        return extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.LOCAL, AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 
-    public static AeronArchiveReplicationPublisher Extend(
+    public static AeronArchiveReplicationPublisher extend(
             final AeronArchive archive, final long recordingId, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
             final long epoch, final long initialSequence, final long wireNonce) {
-        return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+        return extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.LOCAL, wireNonce);
     }
 
@@ -220,7 +220,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @param epoch           writer epoch
     /// @param initialSequence first sequence to publish
     /// @return a publisher that owns the extended publication and recording
-    public static AeronArchiveReplicationPublisher ExtendRemote(
+    public static AeronArchiveReplicationPublisher extendRemote(
             final AeronArchive archive,
             final long recordingId,
             final int streamId,
@@ -229,19 +229,19 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long epoch,
             final long initialSequence
     ) {
-        return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+        return extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.REMOTE, AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 
-    public static AeronArchiveReplicationPublisher ExtendRemote(
+    public static AeronArchiveReplicationPublisher extendRemote(
             final AeronArchive archive, final long recordingId, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
             final long epoch, final long initialSequence, final long wireNonce) {
-        return Extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
+        return extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
                 SourceLocation.REMOTE, wireNonce);
     }
 
-    private static AeronArchiveReplicationPublisher Extend(
+    private static AeronArchiveReplicationPublisher extend(
             final AeronArchive archive,
             final long recordingId,
             final int streamId,
@@ -340,9 +340,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
 
         /// Builds the archive-await idle strategy from the configured retry policy.
     ///
-    /// The recording start/stop/recorded awaits previously used Aeron defaults
-    /// while the offer path used the configured policy; one construction keeps
-    /// them consistent.
+    /// Recording and offer waits use the same configured retry policy.
     private static BackoffIdleStrategy idleStrategy(final AeronReplicationConfiguration configuration) {
         final var policy = configuration.retryPolicy();
         return new BackoffIdleStrategy(

@@ -25,7 +25,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     /// @param connection    Store connection
     /// @param backupManager backup manager
     /// @return task executor
-    static StorageBackupTaskExecutor New(final StorageConnection connection, final StorageBackupManager backupManager) {
+    static StorageBackupTaskExecutor create(final StorageConnection connection, final StorageBackupManager backupManager) {
         return new Default(notNull(connection), notNull(backupManager));
     }
 
@@ -105,7 +105,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         private boolean backupClosed;
 
         private Default(final StorageConnection connection, final StorageBackupManager backupManager) {
-            this.storageChecks = StorageTaskExecutor.New(connection);
+            this.storageChecks = StorageTaskExecutor.create(connection);
             this.backupManager = backupManager;
             this.backupExecutor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
                     .name("EclipseStore-StorageBackup", 0L)

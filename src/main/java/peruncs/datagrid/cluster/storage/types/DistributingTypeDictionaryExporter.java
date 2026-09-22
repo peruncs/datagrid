@@ -22,7 +22,7 @@ final class DistributingTypeDictionaryExporter implements PersistenceTypeDiction
     /// @param delegate    local dictionary exporter
     /// @param distributor destination for the dictionary
     /// @return distributing exporter
-    static DistributingTypeDictionaryExporter New(
+    static DistributingTypeDictionaryExporter create(
             final PersistenceTypeDictionaryExporter delegate,
             final StorageBinaryDataDistributor distributor) {
         return new DistributingTypeDictionaryExporter(notNull(delegate), ASSEMBLER, notNull(distributor));

@@ -53,7 +53,7 @@ public record AeronReplicationConfiguration(
         /// Default publication MTU in bytes.
     public static final int DEFAULT_MTU_LENGTH = 1408;
         /// Default logical Store-data chunk size in bytes.
-    public static final int DEFAULT_CHUNK_SIZE = 1024 * 1024;
+    public static final int DEFAULT_CHUNK_SIZE = 128 * 1024;
         /// Default largest accepted transaction in bytes.
     public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
         /// Hard upper bound for the largest accepted transaction in bytes.

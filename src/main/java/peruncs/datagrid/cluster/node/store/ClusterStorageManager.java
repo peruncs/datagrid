@@ -8,8 +8,8 @@ import org.eclipse.serializer.persistence.types.*;
 import org.eclipse.serializer.persistence.types.PersistenceStorer.Creator;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.store.storage.types.*;
+import peruncs.datagrid.cluster.errors.ReaderWriteRejectedException;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.exceptions.ReaderWriteRejectedException;
 import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
 import peruncs.datagrid.cluster.storage.types.RejectingPersistenceTarget;
 import peruncs.datagrid.cluster.storage.types.StorageGraphCoordinator;
@@ -44,12 +44,12 @@ public interface ClusterStorageManager<T> extends StorageManager {
     /// @param storageSizeValidation size validation policy
     /// @param shutdownCallback      shutdown callback
     /// @return cluster storage manager
-    static <T> ClusterStorageManager<T> New(
+    static <T> ClusterStorageManager<T> create(
             final StorageManager delegate,
             final StorageSizeValidation storageSizeValidation,
             final ShutdownCallback shutdownCallback
     ) {
-        return New(delegate, storageSizeValidation, shutdownCallback, new StorageGraphCoordinator());
+        return create(delegate, storageSizeValidation, shutdownCallback, new StorageGraphCoordinator());
     }
 
         /// Creates a manager sharing the Store graph coordinator with replication.
@@ -60,7 +60,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
     /// @param shutdownCallback shutdown callback
     /// @param graphCoordinator graph coordinator shared with replication
     /// @return cluster storage manager
-    static <T> ClusterStorageManager<T> New(
+    static <T> ClusterStorageManager<T> create(
             final StorageManager delegate,
             final StorageSizeValidation storageSizeValidation,
             final ShutdownCallback shutdownCallback,
@@ -131,7 +131,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
                 /// Creates a callback that does nothing.
         ///
         /// @return no-op callback
-        static ShutdownCallback NoOp() {
+        static ShutdownCallback noOp() {
             return new NoOp();
         }
 
@@ -388,6 +388,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
             }
             if (failure instanceof Error error) throw error;
             if (failure instanceof RuntimeException runtime) throw runtime;
+            if (failure != null) throw new IllegalStateException("Cluster Store shutdown failed", failure);
             return result;
         }
 
@@ -887,7 +888,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
         @Override
         PersistenceTarget<Binary> gateTarget(final PersistenceTarget<Binary> raw) {
-            return RejectingPersistenceTarget.New(raw);
+            return RejectingPersistenceTarget.create(raw);
         }
 
         @Override

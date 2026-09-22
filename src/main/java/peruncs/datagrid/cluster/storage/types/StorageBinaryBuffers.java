@@ -3,6 +3,7 @@ package peruncs.datagrid.cluster.storage.types;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -34,16 +35,16 @@ final class StorageBinaryBuffers {
         try {
             data.iterateChannelChunks(chunk ->
             {
-                if (chunk == null) throw new StorageBinaryDataException("binary contains a null channel");
+                if (chunk == null) throw new CorruptReplicationDataException("binary contains a null channel");
                 for (final ByteBuffer source : chunk.buffers()) {
                     if (source == null) {
-                        throw new StorageBinaryDataException("binary contains a null channel buffer");
+                        throw new CorruptReplicationDataException("binary contains a null channel buffer");
                     }
                     final ByteBuffer view = source.duplicate();
                     if (wrapped) {
                         final int logicalLength = logicalLength(data, view);
                         if (logicalLength < 0 || logicalLength > view.capacity()) {
-                            throw new StorageBinaryDataException("invalid wrapped binary buffer length");
+                            throw new CorruptReplicationDataException("invalid wrapped binary buffer length");
                         }
                         view.clear();
                         view.limit(logicalLength);
@@ -75,14 +76,14 @@ final class StorageBinaryBuffers {
         try {
             data.iterateChannelChunks(channel ->
             {
-                if (channel == null) throw new StorageBinaryDataException("binary contains a null channel");
+                if (channel == null) throw new CorruptReplicationDataException("binary contains a null channel");
                 for (final ByteBuffer buffer : channel.buffers()) {
                     if (buffer == null || !buffer.isDirect()) {
-                        throw new StorageBinaryDataException("owned binary contains a non-direct buffer");
+                        throw new CorruptReplicationDataException("owned binary contains a non-direct buffer");
                     }
                     final int logicalLength = logicalLength(data, buffer);
                     if (logicalLength < 0 || logicalLength > buffer.capacity()) {
-                        throw new StorageBinaryDataException("owned binary contains an invalid buffer length");
+                        throw new CorruptReplicationDataException("owned binary contains an invalid buffer length");
                     }
                     buffer.clear();
                     buffer.limit(logicalLength);

@@ -200,7 +200,7 @@ class StorageBinaryImportIntegrationTest {
                         return method.invoke(delegate, args);
                     });
             final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(
                     StorageBinaryDataMergerTestSupport.configuration(
                             readerFoundation.getConnectionFoundation(), counting,
                             ObjectGraphUpdateHandler.PerStore(coordinator),

@@ -17,7 +17,7 @@ class ClusterFoundationLifecycleTest {
     /// Verifies closing an unstarted foundation is idempotent and permanently prevents starting the storage manager.
     @Test
     void closeIsIdempotentAndPreventsRestart() {
-        final ClusterFoundation foundation = ClusterFoundation.New().build();
+        final ClusterFoundation foundation = ClusterFoundation.create().build();
         foundation.close();
         foundation.close();
 
@@ -27,7 +27,7 @@ class ClusterFoundationLifecycleTest {
     /// Verifies a started node closes idempotently and rejects any later storage-manager start.
     @Test
     void startedNodeClosesOnceAndPreventsRestart(@TempDir final Path storagePath) {
-        final ClusterFoundation foundation = ClusterFoundation.New()
+        final ClusterFoundation foundation = ClusterFoundation.create()
                 .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
                         .setConfiguration(StorageConfiguration.Builder()
                                 .setStorageFileProvider(Storage.FileProvider(storagePath))
@@ -47,7 +47,7 @@ class ClusterFoundationLifecycleTest {
     /// opened before the failure is shut down rather than leaked.
     @Test
     void failedStartClosesTheFoundationPermanently(@TempDir final Path storagePath) {
-        final ClusterFoundation foundation = ClusterFoundation.New()
+        final ClusterFoundation foundation = ClusterFoundation.create()
                 .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
                         .setConfiguration(StorageConfiguration.Builder()
                                 .setStorageFileProvider(Storage.FileProvider(storagePath))
@@ -74,13 +74,13 @@ class ClusterFoundationLifecycleTest {
     /// read beyond the role itself, so a start-first order cannot pass.
     @Test
     void wrongRoleAccessorRejectsBeforeStarting() {
-        try (final ClusterFoundation storageProbe = ClusterFoundation.New()
+        try (final ClusterFoundation storageProbe = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(unstartable("backup-reader"))
                 .build();
-             final ClusterFoundation backupProbe = ClusterFoundation.New()
+             final ClusterFoundation backupProbe = ClusterFoundation.create()
                      .setNodeLibraryPropertiesProvider(unstartable("writer"))
                      .build();
-             final ClusterFoundation devProbe = ClusterFoundation.New().build()) {
+             final ClusterFoundation devProbe = ClusterFoundation.create().build()) {
             assertThrows(IllegalStateException.class, storageProbe::storageNodeManager);
             assertThrows(IllegalStateException.class, backupProbe::backupNodeManager);
             assertThrows(IllegalStateException.class, devProbe::storageNodeManager);
@@ -91,6 +91,7 @@ class ClusterFoundationLifecycleTest {
     private static NodeLibraryPropertiesProvider unstartable(final String role) {
         return new NodeLibraryPropertiesProvider.Env(Map.of(
                 "ECLIPSE_DATAGRID_PROD_MODE", "true",
+                "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK", "true",
                 "ECLIPSE_DATAGRID_REPLICATION_ROLE", role)) {
             @Override
             public String replicationProperty(final String name) {
@@ -103,7 +104,7 @@ class ClusterFoundationLifecycleTest {
     /// instead of manufacturing a manager the started node never created.
     @Test
     void devNodeExposesNoRoleManagers(@TempDir final Path storagePath) {
-        try (final ClusterFoundation foundation = ClusterFoundation.New()
+        try (final ClusterFoundation foundation = ClusterFoundation.create()
                 .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
                         .setConfiguration(StorageConfiguration.Builder()
                                 .setStorageFileProvider(Storage.FileProvider(storagePath))
@@ -120,7 +121,7 @@ class ClusterFoundationLifecycleTest {
     /// Verifies builder configuration carries into the built node, which then starts the storage manager cleanly on repeated starts.
     @Test
     void builderConfigurationIsCopiedIntoTheNode(@TempDir final Path storagePath) {
-        final ClusterFoundation.Builder builder = ClusterFoundation.New()
+        final ClusterFoundation.Builder builder = ClusterFoundation.create()
                 .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
                         .setConfiguration(StorageConfiguration.Builder()
                                 .setStorageFileProvider(Storage.FileProvider(storagePath))

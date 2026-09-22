@@ -61,7 +61,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// @param delegate    local Store target
     /// @param coordinator Aeron transaction coordinator
     /// @return target that replicates every write
-    static AeronStorageBinaryReplicationTarget New(final PersistenceTarget<Binary> delegate,
+    static AeronStorageBinaryReplicationTarget create(final PersistenceTarget<Binary> delegate,
                                                    final AeronReplicationWriteCoordinator coordinator) {
         return new AeronStorageBinaryReplicationTarget(delegate, coordinator, null, ignored -> {
         }, () -> true, null);
@@ -76,7 +76,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// @param committedSequence   callback for the committed sequence
     /// @param distributionEnabled predicate that enables replication
     /// @return target using the supplied callbacks
-    static AeronStorageBinaryReplicationTarget New(final PersistenceTarget<Binary> delegate,
+    static AeronStorageBinaryReplicationTarget create(final PersistenceTarget<Binary> delegate,
                                                    final AeronReplicationWriteCoordinator coordinator,
                                                    final StorageBinaryDataDistributor dictionarySource,
                                                    final LongConsumer committedSequence,

@@ -7,7 +7,7 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.exceptions.ReaderWriteRejectedException;
+import peruncs.datagrid.cluster.errors.ReaderWriteRejectedException;
 import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
 
 import java.nio.file.Path;
@@ -25,7 +25,7 @@ class StorageWriteGatingTest {
     void writesAreRejectedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.New(delegate, () -> true, ClusterStorageManager.ShutdownCallback.NoOp());
+                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp());
 
             assertThrows(StorageLimitReachedException.class, () -> manager.store(new Payload("a")));
             assertThrows(StorageLimitReachedException.class, () -> manager.storeAll(new Payload("b")));
@@ -39,7 +39,7 @@ class StorageWriteGatingTest {
     void everyFluentStorerPathIsGatedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.New(delegate, () -> true, ClusterStorageManager.ShutdownCallback.NoOp());
+                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp());
 
             assertThrows(StorageLimitReachedException.class, () -> {
                 final var storer = manager.createStorer().reinitialize();
@@ -85,7 +85,7 @@ class StorageWriteGatingTest {
             delegate.setRoot(new Payload("root"));
             delegate.storeRoot();
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.ReadOnly(delegate, ClusterStorageManager.ShutdownCallback.NoOp());
+                    ClusterStorageManager.ReadOnly(delegate, ClusterStorageManager.ShutdownCallback.noOp());
 
             assertThrows(ReaderWriteRejectedException.class, () -> manager.store(new Payload("a")));
             assertThrows(ReaderWriteRejectedException.class, () -> manager.storeAll(new Payload("c")));
@@ -134,7 +134,7 @@ class StorageWriteGatingTest {
     void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.New(delegate, () -> true, ClusterStorageManager.ShutdownCallback.NoOp());
+                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp());
 
             assertThrows(UnsupportedOperationException.class, () -> manager.importData(X.Enum()));
             assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("c")));
@@ -147,7 +147,7 @@ class StorageWriteGatingTest {
     void persistenceManagerViewDoesNotOwnTheStore(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.New(delegate, () -> false, ClusterStorageManager.ShutdownCallback.NoOp());
+                    ClusterStorageManager.create(delegate, () -> false, ClusterStorageManager.ShutdownCallback.noOp());
 
             manager.persistenceManager().close();
 

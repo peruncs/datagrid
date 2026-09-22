@@ -38,7 +38,7 @@ public final class ClusterNode<T> implements AutoCloseable {
     @SuppressWarnings("unchecked")
     public static <T> ClusterNode<T> open(final NodeOptions<T> options) {
         Objects.requireNonNull(options, "options");
-        final ClusterFoundation.Builder builder = ClusterFoundation.New()
+        final ClusterFoundation.Builder builder = ClusterFoundation.create()
                 .setRootSupplier(options.rootSupplier()::get);
         final ClusterFoundation foundation = builder.build();
         try {
@@ -63,16 +63,27 @@ public final class ClusterNode<T> implements AutoCloseable {
     }
 
     /// Starts periodic storage checks.
+    ///
+    /// This operation is valid for writer and reader nodes. A backup-reader
+    /// does not run the ordinary storage-check scheduler.
     public void startStorageChecks() {
         this.control().startStorageChecks();
     }
 
     /// Stops a backup-reader at a durable boundary and creates a scheduled-slot backup.
+    ///
+    /// Only a backup-reader may call this method. Concurrent backup requests
+    /// are rejected as busy. Replication pauses at a resolved cursor, resumes
+    /// after the snapshot finishes, and remains failed closed if resume fails.
     public void createScheduledBackup() {
         this.foundation.backupNodeManager().createStorageBackup(false);
     }
 
     /// Stops a backup-reader at a durable boundary and creates a retained manual backup.
+    ///
+    /// Only a backup-reader may call this method. Concurrent backup requests
+    /// are rejected as busy. Replication pauses at a resolved cursor, resumes
+    /// after the snapshot finishes, and remains failed closed if resume fails.
     public void createManualBackup() {
         this.foundation.backupNodeManager().createStorageBackup(true);
     }

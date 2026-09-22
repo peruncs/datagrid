@@ -24,7 +24,7 @@ class ClusterStorageManagerShutdownTest {
                     }
                     throw new UnsupportedOperationException(method.getName());
                 });
-        final ClusterStorageManager<Object> manager = ClusterStorageManager.New(store, () -> true, () -> {
+        final ClusterStorageManager<Object> manager = ClusterStorageManager.create(store, () -> true, () -> {
             if (callbacks.incrementAndGet() == 1) throw new IllegalStateException("retry me");
         });
         assertThrows(IllegalStateException.class, manager::shutdown);

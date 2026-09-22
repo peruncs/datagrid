@@ -36,7 +36,7 @@ class StorageBackupManagerTest {
             final int maxBackupCount,
             final Supplier<ReplicationCursor> cursor
     ) {
-        return StorageBackupManager.New(
+        return StorageBackupManager.create(
                 storageConnection(), maxBackupCount, backend, cursor, client, retention);
     }
 

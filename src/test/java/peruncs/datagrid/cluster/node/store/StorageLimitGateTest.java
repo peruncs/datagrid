@@ -9,7 +9,7 @@ class StorageLimitGateTest {
         /// Usage must fall below the hysteresis release point before writes reopen.
     @Test
     void releasesOnlyAfterUsageLeavesHysteresisBand() {
-        final StorageLimitGate gate = StorageLimitGate.New(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10);
 
         gate.updateUsage(10_000_000_000L);
         assertTrue(gate.limitReached());
@@ -24,13 +24,13 @@ class StorageLimitGateTest {
         /// A fresh gate accepts writes.
     @Test
     void startsBelowLimit() {
-        assertFalse(StorageLimitGate.New(10).limitReached());
+        assertFalse(StorageLimitGate.create(10).limitReached());
     }
 
         /// Usage below the limit never trips the gate.
     @Test
     void ignoresUsageBelowLimit() {
-        final StorageLimitGate gate = StorageLimitGate.New(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10);
 
         gate.updateUsage(9_999_999_999L);
 
@@ -40,7 +40,7 @@ class StorageLimitGateTest {
         /// The gate exposes its configured limit for log messages.
     @Test
     void exposesConfiguredLimit() {
-        final StorageLimitGate gate = StorageLimitGate.New(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10);
 
         assertEquals(10, gate.limitGb());
         assertEquals(10_000_000_000L, gate.limitBytes());
@@ -49,7 +49,7 @@ class StorageLimitGateTest {
         /// A non-positive limit is rejected.
     @Test
     void rejectsNonPositiveLimit() {
-        assertThrows(IllegalArgumentException.class, () -> StorageLimitGate.New(0));
-        assertThrows(IllegalArgumentException.class, () -> StorageLimitGate.New(-5));
+        assertThrows(IllegalArgumentException.class, () -> StorageLimitGate.create(0));
+        assertThrows(IllegalArgumentException.class, () -> StorageLimitGate.create(-5));
     }
 }

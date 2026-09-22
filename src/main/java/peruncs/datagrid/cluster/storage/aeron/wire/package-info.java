@@ -8,11 +8,9 @@
 /// # Explicit checksum context, no thread-local state
 ///
 /// The CRC32C checksum context is passed through encode/decode as an explicit
-/// parameter. An earlier revision bound it through a `ScopedValue` on every
-/// encoded chunk and decoded frame; the scoped bind/unbind bought nothing
-/// (the context is always the same instance per publisher or assembler) and
-/// cost setup on the hottest path. Do not restore a thread-local or scoped
-/// binding here: the context belongs to the operation that owns the buffers.
+/// parameter because the context belongs to the publisher or assembler that
+/// owns the buffers. The hot path therefore needs no thread-local or dynamic
+/// scope.
 ///
 /// @since 1.0
 package peruncs.datagrid.cluster.storage.aeron.wire;

@@ -71,14 +71,14 @@ final class BackupCrashMatrixIT {
             /* Observation through the production API: listing is the only
              * selection input for backups, so any archive a crash leaked would
              * be selectable here. */
-            final FilesystemVolumeBackupBackend verifier = FilesystemVolumeBackupBackend.New(volume);
+            final FilesystemVolumeBackupBackend verifier = FilesystemVolumeBackupBackend.create(volume);
             assertTrue(verifier.listBackups().isEmpty(),
                     "a killed export must never be a selectable backup at point %s: %s".formatted(
                             point, verifier.listBackups()));
             assertTrue(verifier.listUnreadableArchives().isEmpty(),
                     "a killed export must not surface as an unreadable archive at point %s".formatted(point));
 
-            final BackupMetadata complete = BackupMetadata.New(42L, false, CURSOR);
+            final BackupMetadata complete = BackupMetadata.create(42L, false, CURSOR);
             verifier.createBackup(new TestStorageConnection(), CURSOR, complete);
             final List<BackupMetadata> listed = verifier.listBackups();
             assertEquals(1, listed.size(), "exactly one complete backup must be selectable");

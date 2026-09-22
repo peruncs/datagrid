@@ -15,6 +15,7 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.node.replication.DataMessageAppliedListener;
@@ -154,7 +155,7 @@ class AeronStoreIntegrationIT {
             final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
             final EmbeddedStorageManager reader = readerFoundation.start();
             final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
-            final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.New(new StorageBinaryDataMerger.Configuration(
+            final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
                     readerFoundation.getConnectionFoundation(), reader.createConnection(),
                     ObjectGraphUpdateHandler.PerStore(graphCoordinator),
                     0L, 1L, 1L << 30, 60_000L, 30_000L, 5_000L, 4096, graphCoordinator));
@@ -694,7 +695,7 @@ class AeronStoreIntegrationIT {
                     }
                     final RuntimeException failure = lagging.clientFailure();
                     assertTrue(failure instanceof ReseedRequiredException
-                                    || failure instanceof StorageBinaryDataReseedException,
+                                    || failure instanceof ReseedRequiredException,
                             "expected the typed reseed signal (health RESEED_REQUIRED), got: " + failure);
                     /* Fail-closed also means untouched durable state: the
                      * cursor never advanced past the frozen boundary and the
@@ -1183,7 +1184,7 @@ class AeronStoreIntegrationIT {
         }
 
         private StorageBinaryDataReceiver newReceiver() {
-            return StorageBinaryDataMerger.New(new StorageBinaryDataMerger.Configuration(
+            return StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
                     this.foundation.getConnectionFoundation(), this.storage.createConnection(),
                     ObjectGraphUpdateHandler.PerStore(this.coordinator),
                     0L, 1L, 1L << 30, 60_000L, 30_000L, 5_000L, 4096, this.coordinator));

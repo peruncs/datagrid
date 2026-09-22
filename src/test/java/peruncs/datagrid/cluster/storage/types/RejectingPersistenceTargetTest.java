@@ -3,7 +3,7 @@ package peruncs.datagrid.cluster.storage.types;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.ReaderWriteRejectedException;
+import peruncs.datagrid.cluster.errors.ReaderWriteRejectedException;
 
 import java.lang.reflect.Proxy;
 
@@ -34,7 +34,7 @@ class RejectingPersistenceTargetTest {
                     if (method.getName().equals("isWritable")) return true;
                     return null;
                 });
-        final RejectingPersistenceTarget target = RejectingPersistenceTarget.New(delegate);
+        final RejectingPersistenceTarget target = RejectingPersistenceTarget.create(delegate);
 
         assertDoesNotThrow(target::validateIsWritable,
                 "Store's default validator must accept the always-writable target");

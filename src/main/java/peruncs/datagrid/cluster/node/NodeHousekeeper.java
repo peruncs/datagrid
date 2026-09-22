@@ -50,7 +50,7 @@ final class NodeHousekeeper implements AutoCloseable {
         /// Creates a housekeeper with two daemon threads.
     ///
     /// @return a housekeeper ready for scheduling
-    public static NodeHousekeeper New() {
+    public static NodeHousekeeper create() {
         return new NodeHousekeeper();
     }
 

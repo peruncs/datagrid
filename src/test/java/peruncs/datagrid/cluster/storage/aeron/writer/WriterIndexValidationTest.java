@@ -126,7 +126,7 @@ class WriterIndexValidationTest {
         });
         try {
             final List<String> localWrites = new ArrayList<>();
-            final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.New(
+            final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(
                     recordingTarget(localWrites), coordinator, null, ignored -> {
             }, () -> true);
             assertDoesNotThrow(target::validateWriterState,

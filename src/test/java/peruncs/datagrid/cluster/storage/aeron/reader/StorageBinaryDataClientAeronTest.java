@@ -4,10 +4,10 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
-import peruncs.datagrid.cluster.storage.aeron.wire.ReplicationWireException;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
@@ -645,7 +645,7 @@ class StorageBinaryDataClientAeronTest {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler = assembler(receiver, 1024);
         final byte[] malformed = new byte[AeronReplicationEnvelope.HEADER_LENGTH];
-        assertThrows(ReplicationWireException.class,
+        assertThrows(CorruptReplicationDataException.class,
                 () -> accept(assembler, malformed));
         assertEquals(0, receiver.dataCalls);
         final byte[] later = AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 0,

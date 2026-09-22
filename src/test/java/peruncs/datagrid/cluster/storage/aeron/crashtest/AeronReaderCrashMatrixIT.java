@@ -327,7 +327,7 @@ class AeronReaderCrashMatrixIT {
                      .controlRequestChannel(controlChannel)
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
-            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
                 for (byte[] payload : payloads) {
                     RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
@@ -405,7 +405,7 @@ class AeronReaderCrashMatrixIT {
                      .controlRequestChannel(controlChannel)
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
-            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
@@ -491,7 +491,7 @@ class AeronReaderCrashMatrixIT {
                      .controlRequestChannel(controlChannel)
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
-            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
@@ -655,7 +655,7 @@ class AeronReaderCrashMatrixIT {
                      .controlRequestChannel(controlChannel)
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
-            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
                 for (byte[] payload : payloads) {
                     RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
@@ -807,7 +807,7 @@ class AeronReaderCrashMatrixIT {
                      .controlRequestChannel(controlChannel)
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
-            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
@@ -904,7 +904,7 @@ class AeronReaderCrashMatrixIT {
                      .controlRequestChannel(controlChannel)
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
-            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});

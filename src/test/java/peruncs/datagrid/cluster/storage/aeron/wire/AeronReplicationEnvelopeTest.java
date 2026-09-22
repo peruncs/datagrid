@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.wire;
 
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -50,7 +51,7 @@ class AeronReplicationEnvelopeTest {
         );
         encoded[AeronReplicationEnvelope.HEADER_LENGTH] = 8;
 
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length
         ));
     }
@@ -62,14 +63,14 @@ class AeronReplicationEnvelopeTest {
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 1, 0, 1, 0, AeronReplicationEnvelope.crc32c(new byte[]{7}), new byte[0]);
         encoded[6] = 4;
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length));
     }
 
         /// Verifies rejection of truncated and unknown version.
     @Test
     void rejectsTruncatedAndUnknownVersion() {
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(new byte[AeronReplicationEnvelope.HEADER_LENGTH - 1]),
                 0,
                 AeronReplicationEnvelope.HEADER_LENGTH - 1
@@ -80,7 +81,7 @@ class AeronReplicationEnvelopeTest {
                 0, 0, 1, 0, 0, new byte[0]
         );
         encoded[5] = 6;
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length
         ));
     }
@@ -101,11 +102,11 @@ class AeronReplicationEnvelopeTest {
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 0, 0, 1, 0, 0, new byte[0]
         );
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 1, encoded.length
         ));
         encoded[7] = 1;
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length
         ));
     }
@@ -148,7 +149,7 @@ class AeronReplicationEnvelopeTest {
                 1, 0, 1, 0, 0, new byte[]{7}
         );
         java.nio.ByteBuffer.wrap(encoded).putInt(24, 0);
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length
         ));
 
@@ -156,7 +157,7 @@ class AeronReplicationEnvelopeTest {
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT, 0, 0, 1, 0, 0, new byte[0]
         );
         reserved[7] = 1;
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(reserved), 0, reserved.length
         ));
     }
@@ -169,7 +170,7 @@ class AeronReplicationEnvelopeTest {
                 1, 0, 1, 0, 0, new byte[]{7}
         );
         java.nio.ByteBuffer.wrap(encoded).putInt(24, 10);
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, encoded.length - 1
         ));
     }
@@ -187,7 +188,7 @@ class AeronReplicationEnvelopeTest {
                 AeronReplicationEnvelope.decode(new UnsafeBuffer(framed), 3, encoded.length));
         assertEquals(8, result.sequence());
         assertArrayEquals(new byte[]{3, 4, 5}, result.payload());
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(framed), 3, encoded.length + 1
         ));
     }
@@ -198,7 +199,7 @@ class AeronReplicationEnvelopeTest {
         final byte[] encoded = AeronReplicationEnvelopeTestSupport.encode(
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 0, 0, 1, 0, 0, new byte[0]);
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelope.decode(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelope.decode(
                 new UnsafeBuffer(encoded), 0, Integer.MAX_VALUE));
     }
 
@@ -263,10 +264,10 @@ class AeronReplicationEnvelopeTest {
         /// Verifies the owned form rejects impossible public field combinations.
     @Test
     void ownedEnvelopeValidatesItsPublicFields() {
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelopeTestSupport.envelope(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelopeTestSupport.envelope(
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.COMMIT,
                 1, 0, 1, 0, 0, new byte[]{7}));
-        assertThrows(ReplicationWireException.class, () -> AeronReplicationEnvelopeTestSupport.envelope(
+        assertThrows(CorruptReplicationDataException.class, () -> AeronReplicationEnvelopeTestSupport.envelope(
                 CLUSTER, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 1, 0, new byte[]{7, 8}));
     }
@@ -274,7 +275,7 @@ class AeronReplicationEnvelopeTest {
         /// Verifies a zero wire nonce is rejected at construction and at encode time.
     @Test
     void rejectsZeroWireNonce() {
-        assertThrows(ReplicationWireException.class, () -> new AeronReplicationEnvelope.Envelope(
+        assertThrows(CorruptReplicationDataException.class, () -> new AeronReplicationEnvelope.Envelope(
                 CLUSTER, 0L, 1, 9, 1, AeronReplicationEnvelope.Kind.STORE_BINARY,
                 1, 0, 1, 0, 0, new byte[]{7}));
         final byte[] target = new byte[AeronReplicationEnvelope.HEADER_LENGTH + 1];
@@ -373,16 +374,16 @@ class AeronReplicationEnvelopeTest {
             final byte[] damaged = encoded.clone();
             mutation.accept(damaged);
             rewriteHeaderCrc(damaged);
-            assertThrows(ReplicationWireException.class,
+            assertThrows(CorruptReplicationDataException.class,
                     () -> AeronReplicationEnvelope.decode(new UnsafeBuffer(damaged), 0, damaged.length));
         }
 
         final byte[] zeroed = new byte[encoded.length];
-        assertThrows(ReplicationWireException.class,
+        assertThrows(CorruptReplicationDataException.class,
                 () -> AeronReplicationEnvelope.decode(new UnsafeBuffer(zeroed), 0, zeroed.length));
         final byte[] sticky = new byte[encoded.length];
         Arrays.fill(sticky, (byte) 0xff);
-        assertThrows(ReplicationWireException.class,
+        assertThrows(CorruptReplicationDataException.class,
                 () -> AeronReplicationEnvelope.decode(new UnsafeBuffer(sticky), 0, sticky.length));
     }
 

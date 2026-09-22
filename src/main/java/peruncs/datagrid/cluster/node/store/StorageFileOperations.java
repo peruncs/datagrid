@@ -16,6 +16,8 @@ import java.util.Objects;
 /// This class is public only because backup and node packages share it;
 /// it is not application API.
 public final class StorageFileOperations {
+    private static final boolean WINDOWS = System.getProperty("os.name", "")
+            .toLowerCase(Locale.ROOT).startsWith("windows");
     private static final System.Logger LOGGER = System.getLogger(StorageFileOperations.class.getName());
 
     private StorageFileOperations() {
@@ -218,7 +220,7 @@ public final class StorageFileOperations {
     /// @param directory directory to force
     /// @throws IOException if the filesystem refuses
     public static void forceDirectory(final Path directory) throws IOException {
-        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
+        if (WINDOWS) {
             return;
         }
         try (final FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {

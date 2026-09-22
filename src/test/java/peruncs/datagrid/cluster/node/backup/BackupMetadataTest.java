@@ -29,7 +29,7 @@ class BackupMetadataTest {
     /// Verifies backup identity fields derive from the Aeron cursor while the content digest stays unknown until publication.
     @Test
     void derivesGenerationFromAnAeronCursor() {
-        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+        final BackupMetadata backup = BackupMetadata.create(100L, false, aeronCursor(7L));
 
         assertEquals(100L, backup.timestamp());
         assertFalse(backup.manualSlot());
@@ -46,7 +46,7 @@ class BackupMetadataTest {
     /// Verifies missing cursors leave generation identity unknown while a corrupt Aeron position is rejected.
     @Test
     void leavesIdentityUnknownWithoutACursor() {
-        final BackupMetadata missing = BackupMetadata.New(100L, true, null);
+        final BackupMetadata missing = BackupMetadata.create(100L, true, null);
         assertTrue(missing.manualSlot());
         assertNull(missing.clusterId());
         assertNull(missing.storeGeneration());
@@ -56,14 +56,14 @@ class BackupMetadataTest {
         assertNotNull(missing.backupId());
 
         final BackupMetadata plain =
-                BackupMetadata.New(100L, false, new ReplicationCursor("none", null, -1L, ""));
+                BackupMetadata.create(100L, false, new ReplicationCursor("none", null, -1L, ""));
         assertNull(plain.clusterId());
         assertNull(plain.storeGeneration());
 
         /* A corrupt Aeron provider position cannot identify the Store image;
          * publishing it would create a backup that a configured reader could
          * mistake for a compatible generation. */
-        assertThrows(IllegalArgumentException.class, () -> BackupMetadata.New(
+        assertThrows(IllegalArgumentException.class, () -> BackupMetadata.create(
                 100L, false, new ReplicationCursor("aeron", GENERATION, 7L, "deadbeef")));
     }
 
@@ -72,14 +72,14 @@ class BackupMetadataTest {
     void everyPublicationGetsADistinctBackupId() {
         final ReplicationCursor cursor = aeronCursor(7L);
 
-        assertNotEquals(BackupMetadata.New(100L, false, cursor).backupId(),
-                BackupMetadata.New(100L, false, cursor).backupId());
+        assertNotEquals(BackupMetadata.create(100L, false, cursor).backupId(),
+                BackupMetadata.create(100L, false, cursor).backupId());
     }
 
     /// Verifies compatibility rejects only known identity contradictions and accepts unknown node identities.
     @Test
     void compatibilityRejectsOnlyKnownContradictions() {
-        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+        final BackupMetadata backup = BackupMetadata.create(100L, false, aeronCursor(7L));
 
         assertTrue(backup.isCompatibleWith(BackupMetadata.Identity.unknown()),
                 "unknown node identity must accept every backup");
@@ -89,7 +89,7 @@ class BackupMetadataTest {
         assertFalse(backup.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, GENERATION, 6L, 42L)));
         assertFalse(backup.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, GENERATION, 5L, 43L)));
 
-        final BackupMetadata unknown = BackupMetadata.New(100L, false, null);
+        final BackupMetadata unknown = BackupMetadata.create(100L, false, null);
         assertFalse(unknown.isCompatibleWith(new BackupMetadata.Identity(CLUSTER, GENERATION, 5L, 42L)),
                 "a configured replicated node must reject an unidentifiable backup");
         assertTrue(unknown.isCompatibleWith(BackupMetadata.Identity.unknown()),
@@ -113,7 +113,7 @@ class BackupMetadataTest {
     /// Verifies the archive file name round-trips all backup selection fields through formatting and parsing.
     @Test
     void fileNameRoundTripsTheSelectionFields(@TempDir final Path volume) {
-        final BackupMetadata backup = BackupMetadata.New(1700000000000L, true, aeronCursor(7L));
+        final BackupMetadata backup = BackupMetadata.create(1700000000000L, true, aeronCursor(7L));
         final String name = BackupArchive.toArchiveFileName(backup);
 
         assertTrue(BackupArchive.isBackupFileName(name));
@@ -132,7 +132,7 @@ class BackupMetadataTest {
     @Test
     void consistentMetadataAndCursorPass() {
         final ReplicationCursor cursor = aeronCursor(7L);
-        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         BackupMetadata.requireConsistentWithCursor(backup, cursor);
     }
 
@@ -140,7 +140,7 @@ class BackupMetadataTest {
     @Test
     void rejectsClusterMismatchBetweenMetadataAndCursor() {
         final ReplicationCursor cursor = aeronCursor(7L);
-        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(UUID.randomUUID(), NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
         assertThrows(NodeLibraryException.class,
@@ -151,7 +151,7 @@ class BackupMetadataTest {
     @Test
     void rejectsGenerationMismatchBetweenMetadataAndCursor() {
         final ReplicationCursor cursor = aeronCursor(7L);
-        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final UUID otherGeneration = UUID.randomUUID();
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", otherGeneration, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, otherGeneration, 5L, 7L, 42L, 0L, 7L).encode());
@@ -163,7 +163,7 @@ class BackupMetadataTest {
     @Test
     void rejectsRecordingMismatchWhenRecordingUnconfigured() {
         final ReplicationCursor cursor = aeronCursor(7L);
-        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 43L, 0L, 7L).encode());
         assertThrows(NodeLibraryException.class,
@@ -174,7 +174,7 @@ class BackupMetadataTest {
     @Test
     void rejectsEpochMismatchBetweenMetadataAndCursor() {
         final ReplicationCursor cursor = aeronCursor(7L);
-        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 6L, 7L, 42L, 0L, 7L).encode());
         assertThrows(NodeLibraryException.class,
@@ -185,7 +185,7 @@ class BackupMetadataTest {
     @Test
     void rejectsOuterSequenceMismatchWithEncodedPosition() {
         final ReplicationCursor cursor = aeronCursor(7L);
-        final BackupMetadata backup = BackupMetadata.New(100L, false, cursor);
+        final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor drifted = ReplicationCursor.of("aeron", GENERATION, 8L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
         assertThrows(NodeLibraryException.class,
@@ -195,7 +195,7 @@ class BackupMetadataTest {
     /// Verifies an undecodable Aeron cursor is rejected by the consistency check.
     @Test
     void rejectsUndecodableAeronCursor() {
-        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+        final BackupMetadata backup = BackupMetadata.create(100L, false, aeronCursor(7L));
         final ReplicationCursor corrupt =
                 new ReplicationCursor("aeron", GENERATION, 7L, "deadbeef");
         assertThrows(NodeLibraryException.class,
@@ -245,7 +245,7 @@ class BackupMetadataTest {
     /// Verifies backup compatibility is exactly the single identity match rule.
     @Test
     void compatibilityDelegatesToTheIdentityMatchRule() {
-        final BackupMetadata backup = BackupMetadata.New(100L, false, aeronCursor(7L));
+        final BackupMetadata backup = BackupMetadata.create(100L, false, aeronCursor(7L));
         final List<BackupMetadata.Identity> identities = List.of(
                 BackupMetadata.Identity.unknown(),
                 new BackupMetadata.Identity(CLUSTER, GENERATION, 5L, 42L),

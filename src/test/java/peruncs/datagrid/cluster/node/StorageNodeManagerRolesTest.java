@@ -41,7 +41,7 @@ class StorageNodeManagerRolesTest {
     @Test
     void readerReportsClientSequence() {
         final StorageBinaryDataClient client = stub(StorageBinaryDataClient.class);
-        final StorageNodeManager manager = StorageNodeManager.New(new StorageNodeManager.Configuration(
+        final StorageNodeManager manager = StorageNodeManager.create(new StorageNodeManager.Configuration(
                 stub(StorageBinaryDataDistributor.class),
                 stub(StorageTaskExecutor.class),
                 client,
@@ -66,7 +66,7 @@ class StorageNodeManagerRolesTest {
     }
 
     private static StorageNodeManager manager(final StorageNodeManager.Role role, final String transport) {
-        return StorageNodeManager.New(new StorageNodeManager.Configuration(
+        return StorageNodeManager.create(new StorageNodeManager.Configuration(
                 stub(StorageBinaryDataDistributor.class),
                 stub(StorageTaskExecutor.class),
                 stub(StorageBinaryDataClient.class),

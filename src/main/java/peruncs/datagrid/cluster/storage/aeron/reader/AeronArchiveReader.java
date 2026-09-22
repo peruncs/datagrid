@@ -5,14 +5,12 @@ import io.aeron.archive.client.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
-import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReseedException;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -37,7 +35,7 @@ import java.util.function.Consumer;
 /// every failed attempt through [PersistentSubscriptionListener#onError] —
 /// is bounded by a per-incident budget of the configured reader stop timeout:
 /// while the incident lasts the replay makes no resolved progress, and once
-/// the budget expires the reader latches a typed [StorageBinaryDataReseedException]
+/// the budget expires the reader latches a typed [ReseedRequiredException]
 /// so the node fails closed with a RESEED_REQUIRED diagnosis instead of
 /// stalling silently or dying on a raw transport stack. Resolved progress or
 /// reaching the live stream clears the incident and resets the budget.
@@ -182,10 +180,7 @@ public final class AeronArchiveReader implements Disposable {
             public Builder clusterId(final UUID value) { this.clusterId = value; return this; }
             /// Sets the accidental-cross-wiring nonce shared with the writer.
             ///
-            /// When no nonce is set, the reader derives the same documented
-            /// default as {@link AeronClusterReplicationTransportProvider} from the
-            /// cluster identity; setting it explicitly keeps peers pinned to a
-            /// deployment-chosen value. An explicit zero is rejected.
+            /// Every reader must receive a deployment-chosen nonzero value.
             ///
             /// @param value shared deployment nonce
             /// @return this builder
@@ -229,12 +224,12 @@ public final class AeronArchiveReader implements Disposable {
             ///
             /// @return immutable reader configuration
             public Configuration build() {
-                final long effectiveNonce = this.wireNonceSet
-                        ? this.wireNonce
-                        : AeronReplicationEnvelope.defaultWireNonce(this.clusterId);
+                if (!this.wireNonceSet) {
+                    throw new IllegalStateException("wireNonce must be configured explicitly");
+                }
                 return new Configuration(aeron, archiveContext, recordingId, startPosition, liveChannel,
                         liveStreamId, replayChannel, replayStreamId, replicationConfiguration, clusterId,
-                        effectiveNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
+                        this.wireNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
             }
         }
     }
@@ -328,7 +323,9 @@ public final class AeronArchiveReader implements Disposable {
             );
             this.fragmentHandler = (buffer, offset, length, header) -> {
                 this.assembler.onFragment(buffer, offset, length, header);
-                return ControlledFragmentHandler.Action.CONTINUE;
+                return this.assembler.deliveryBarrierFull()
+                        ? ControlledFragmentHandler.Action.BREAK
+                        : ControlledFragmentHandler.Action.CONTINUE;
             };
         } catch (final RuntimeException | Error failure) {
             try {
@@ -345,7 +342,7 @@ public final class AeronArchiveReader implements Disposable {
     ///
     /// @param configuration immutable reader configuration
     /// @return a reader that owns its subscription
-    public static AeronArchiveReader New(final Configuration configuration) {
+    public static AeronArchiveReader create(final Configuration configuration) {
         final Configuration settings = Objects.requireNonNull(configuration, "configuration");
         final AtomicReference<Exception> incidentSignal = new AtomicReference<>();
         final PersistentSubscription.Context subscriptionContext = subscriptionContext(
@@ -602,7 +599,7 @@ public final class AeronArchiveReader implements Disposable {
         /// Latches the typed reseed failure once an incident outlives its budget.
     private void failIfReconnectBudgetExpired() {
         if (this.reconnectDeadlineNanos != 0L && ReplicationRetry.expired(this.reconnectDeadlineNanos)) {
-            throw new StorageBinaryDataReseedException(
+            throw new ReseedRequiredException(
                     ("Aeron Archive response channel stayed disconnected past the %dns reconnect budget " +
                      "after %d attempts; recording %d cannot be replayed further from position %d without a reseed")
                             .formatted(this.stopTimeoutNanos, this.reconnectAttempts,
@@ -643,7 +640,7 @@ public final class AeronArchiveReader implements Disposable {
     /// restart but an operator problem, and a fresh reader from the durable
     /// cursor has no better odds of succeeding. Each attempt is paced by the
     /// retry policy's idle strategy so a dead Archive is not hammered in a
-    /// tight loop. Expiry latches a typed [StorageBinaryDataReseedException]
+    /// tight loop. Expiry latches a typed [ReseedRequiredException]
     /// so the node reports RESEED_REQUIRED instead of an anonymous transport
     /// stack.
     private void reconnectAfterArchiveLoss() {
@@ -686,7 +683,7 @@ public final class AeronArchiveReader implements Disposable {
         if (reason instanceof PersistentSubscriptionException subscriptionFailure &&
             (subscriptionFailure.reason() == PersistentSubscriptionException.Reason.INVALID_START_POSITION ||
              subscriptionFailure.reason() == PersistentSubscriptionException.Reason.RECORDING_NOT_FOUND)) {
-            return new StorageBinaryDataReseedException(
+            return new ReseedRequiredException(
                     ("Aeron recording %d no longer covers this reader's durable cursor (position %d, " +
                      "sequence %d); reseed required: %s").formatted(
                             this.configuration.recordingId(), this.assembler.lastResolvedPosition(),

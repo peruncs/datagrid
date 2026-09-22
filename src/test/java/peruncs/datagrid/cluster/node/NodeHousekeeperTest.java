@@ -68,7 +68,7 @@ class NodeHousekeeperTest {
     @Test
     void limitCheckWorkUpdatesGate() {
         final AtomicLong usedBytes = new AtomicLong(10_000_000_000L);
-        final StorageLimitGate gate = StorageLimitGate.New(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10);
         final Runnable task = gate.createScheduledWork(usedBytes::get);
 
         task.run();
@@ -86,7 +86,7 @@ class NodeHousekeeperTest {
         /// Invalid registrations are rejected before anything runs.
     @Test
     void rejectsInvalidSchedule() {
-        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             assertThrows(
                     IllegalArgumentException.class,
                     () -> housekeeper.schedule(" ", () -> {
@@ -122,7 +122,7 @@ class NodeHousekeeperTest {
         /// Registration ends once the housekeeper has started.
     @Test
     void rejectsScheduleAfterStart() {
-        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             housekeeper.schedule("task", () -> {
             }, Duration.ofMillis(50));
             housekeeper.start();
@@ -140,7 +140,7 @@ class NodeHousekeeperTest {
     @Test
     void firesPeriodicallyAndStopsOnClose() throws InterruptedException {
         final AtomicInteger runs = new AtomicInteger();
-        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             housekeeper.schedule("counter", runs::incrementAndGet, Duration.ofMillis(50));
             housekeeper.start();
             awaitCondition(() -> runs.get() >= 2, 5_000L, "periodic task did not run");
@@ -155,7 +155,7 @@ class NodeHousekeeperTest {
     @Test
     void failingTaskDoesNotStopOthers() throws InterruptedException {
         final AtomicInteger runs = new AtomicInteger();
-        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             housekeeper.schedule("failing", () ->
             {
                 throw new IllegalStateException("boom");
@@ -172,7 +172,7 @@ class NodeHousekeeperTest {
     void fatalTaskFailureDoesNotCancelMaintenanceSchedule() throws InterruptedException {
         final AtomicBoolean first = new AtomicBoolean(true);
         final AtomicInteger runs = new AtomicInteger();
-        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             housekeeper.schedule("fatal", () -> {
                 runs.incrementAndGet();
                 if (first.getAndSet(false)) throw new AssertionError("fatal maintenance failure");
@@ -193,7 +193,7 @@ class NodeHousekeeperTest {
          * without the gate, the clearing run could race the observation and
          * the first await would miss the latched window. */
         final AtomicBoolean degradedObserved = new AtomicBoolean(false);
-        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             housekeeper.schedule("flap", () -> {
                 if (!degradedObserved.get()) {
                     runs.incrementAndGet();
@@ -217,7 +217,7 @@ class NodeHousekeeperTest {
     void slowRunDoesNotOverlapItself() throws InterruptedException {
         final AtomicInteger concurrent = new AtomicInteger();
         final AtomicInteger maxConcurrent = new AtomicInteger();
-        try (final NodeHousekeeper housekeeper = NodeHousekeeper.New()) {
+        try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             housekeeper.schedule("slow", () ->
             {
                 final int active = concurrent.incrementAndGet();

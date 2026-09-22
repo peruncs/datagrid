@@ -14,6 +14,8 @@ import java.util.Locale;
 /// aliases for `/tmp`, `/var`, and `/etc`, which require root privileges to
 /// create and are otherwise ubiquitous.
 public final class PathSecurity {
+    private static final boolean MAC_OS = System.getProperty("os.name", "")
+            .toLowerCase(Locale.ROOT).contains("mac");
     private PathSecurity() {
     }
 
@@ -61,6 +63,6 @@ public final class PathSecurity {
     ///
     /// @return `true` on macOS
     public static boolean isMacOs() {
-        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac");
+        return MAC_OS;
     }
 }

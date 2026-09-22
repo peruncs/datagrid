@@ -2,8 +2,10 @@ package peruncs.datagrid.cluster.storage.aeron.wire;
 
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Objects;
@@ -60,11 +62,28 @@ public final class AeronReplicationEnvelope {
     /// never shared across threads and never retained by a platform thread.
     public static final class ChecksumContext {
         private final CRC32C crc = new CRC32C();
+        private ByteBuffer source;
+        private ByteBuffer view;
 
         private int compute(final DirectBuffer payload, final int offset, final int length) {
             final CRC32C checksum = this.crc;
             checksum.reset();
-            Crc32c.update(checksum, payload, offset, length);
+            final byte[] array = payload.byteArray();
+            if (array != null) {
+                checksum.update(array, payload.wrapAdjustment() + offset, length);
+            } else {
+                final ByteBuffer buffer = payload.byteBuffer();
+                if (buffer == null) {
+                    throw new IllegalArgumentException("Agrona buffer has no accessible backing storage");
+                }
+                if (buffer != this.source) {
+                    this.source = buffer;
+                    this.view = buffer.duplicate();
+                }
+                final int start = payload.wrapAdjustment() + offset;
+                this.view.clear().position(start).limit(start + length);
+                checksum.update(this.view);
+            }
             return (int) checksum.getValue();
         }
     }
@@ -294,7 +313,7 @@ public final class AeronReplicationEnvelope {
     /// @param length frame length including the fixed header
     /// @param view reusable decode target that owns its checksum state
     /// @return the supplied view, populated from the frame
-    /// @throws ReplicationWireException when the frame is malformed or corrupt
+    /// @throws CorruptReplicationDataException when the frame is malformed or corrupt
     public static EnvelopeView decodeView(
             final DirectBuffer source,
             final int offset,
@@ -317,29 +336,29 @@ public final class AeronReplicationEnvelope {
         view.clear();
         if (source == null || offset < 0 || length < HEADER_LENGTH || length > source.capacity() ||
             offset > source.capacity() - length) {
-            throw new ReplicationWireException("truncated envelope");
+            throw new CorruptReplicationDataException("truncated envelope");
         }
         if (source.getInt(offset, ByteOrder.BIG_ENDIAN) != MAGIC ||
             source.getShort(offset + 4, ByteOrder.BIG_ENDIAN) != VERSION) {
-            throw new ReplicationWireException("unknown DataGrid envelope");
+            throw new CorruptReplicationDataException("unknown DataGrid envelope");
         }
         if (source.getInt(offset + HEADER_CRC_OFFSET, ByteOrder.BIG_ENDIAN) !=
             crc32c(source, offset, HEADER_CRC_OFFSET, view.checksumContext)) {
-            throw new ReplicationWireException("envelope header CRC32C mismatch");
+            throw new CorruptReplicationDataException("envelope header CRC32C mismatch");
         }
         final int kindCode = source.getByte(offset + 6) & 0xff;
         if (source.getByte(offset + 7) != 0) {
-            throw new ReplicationWireException("unknown envelope flags");
+            throw new CorruptReplicationDataException("unknown envelope flags");
         }
         final Kind kind = Kind.fromCode(kindCode);
         final long epoch = source.getLong(offset + 8, ByteOrder.BIG_ENDIAN);
         final long fencingToken = source.getLong(offset + 64, ByteOrder.BIG_ENDIAN);
         final long wireNonce = source.getLong(offset + WIRE_NONCE_OFFSET, ByteOrder.BIG_ENDIAN);
         if (fencingToken <= 0) {
-            throw new ReplicationWireException("envelope carries no writer fencing token");
+            throw new CorruptReplicationDataException("envelope carries no writer fencing token");
         }
         if (wireNonce == 0L) {
-            throw new ReplicationWireException("envelope carries no wire nonce");
+            throw new CorruptReplicationDataException("envelope carries no wire nonce");
         }
         final long sequence = source.getLong(offset + 16, ByteOrder.BIG_ENDIAN);
         final int payloadLength = source.getInt(offset + 24, ByteOrder.BIG_ENDIAN);
@@ -354,32 +373,32 @@ public final class AeronReplicationEnvelope {
             (kind != Kind.COMMIT && kind != Kind.ABORT &&
              (payloadOnWire > payloadLength ||
               (chunkIndex == chunkCount - 1 && (long) chunkOffset + payloadOnWire != payloadLength)))) {
-            throw new ReplicationWireException("invalid envelope bounds");
+            throw new CorruptReplicationDataException("invalid envelope bounds");
         }
         if ((kind == Kind.COMMIT || kind == Kind.ABORT) && length != HEADER_LENGTH) {
-            throw new ReplicationWireException("marker carries a payload");
+            throw new CorruptReplicationDataException("marker carries a payload");
         }
         if ((kind == Kind.COMMIT || kind == Kind.ABORT) &&
             (chunkIndex != 0 || chunkOffset != 0 || (kind == Kind.ABORT && source.getInt(offset + 44,
                     ByteOrder.BIG_ENDIAN) != 0))) {
-            throw new ReplicationWireException("non-canonical terminal marker");
+            throw new CorruptReplicationDataException("non-canonical terminal marker");
         }
         if (kind != Kind.COMMIT && kind != Kind.ABORT &&
             ((long) chunkOffset + payloadOnWire > payloadLength)) {
-            throw new ReplicationWireException("chunk exceeds logical payload length");
+            throw new CorruptReplicationDataException("chunk exceeds logical payload length");
         }
         if (kind != Kind.COMMIT && kind != Kind.ABORT && payloadLength == 0 &&
             (chunkIndex != 0 || chunkCount != 1 || chunkOffset != 0)) {
             /* payloadOnWire is already known to be 0 here: a positive wire
              * length with a zero logical length fails the bounds check above. */
-            throw new ReplicationWireException("empty payload must use one canonical chunk");
+            throw new CorruptReplicationDataException("empty payload must use one canonical chunk");
         }
         if (kind != Kind.COMMIT && kind != Kind.ABORT && payloadLength > 0 && payloadOnWire == 0) {
-            throw new ReplicationWireException("non-empty payload chunks must carry bytes");
+            throw new CorruptReplicationDataException("non-empty payload chunks must carry bytes");
         }
         if (source.getInt(offset + 40, ByteOrder.BIG_ENDIAN) !=
             crc32c(source, offset + HEADER_LENGTH, payloadOnWire, view.checksumContext)) {
-            throw new ReplicationWireException("payload CRC32C mismatch");
+            throw new CorruptReplicationDataException("payload CRC32C mismatch");
         }
         view.set(source, offset + HEADER_LENGTH, payloadOnWire,
                 source.getLong(offset + 48, ByteOrder.BIG_ENDIAN),
@@ -437,7 +456,7 @@ public final class AeronReplicationEnvelope {
                 case 2 -> STORE_BINARY;
                 case 3 -> COMMIT;
                 case 4 -> ABORT;
-                default -> throw new ReplicationWireException("unknown envelope kind=%s".formatted(code));
+                default -> throw new CorruptReplicationDataException("unknown envelope kind=%s".formatted(code));
             };
         }
     }
@@ -612,24 +631,24 @@ public final class AeronReplicationEnvelope {
             Objects.requireNonNull(payload, "payload");
             payload = payload.clone();
             if (wireNonce == 0L) {
-                throw new ReplicationWireException("owned envelope carries no wire nonce");
+                throw new CorruptReplicationDataException("owned envelope carries no wire nonce");
             }
             if (payloadLength < 0 || payloadLength > MAX_TRANSACTION_PAYLOAD_BYTES ||
                 chunkIndex < 0 || chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||
                 chunkIndex >= chunkCount || chunkOffset < 0) {
-                throw new ReplicationWireException("invalid owned envelope bounds");
+                throw new CorruptReplicationDataException("invalid owned envelope bounds");
             }
             if (kind == Kind.COMMIT || kind == Kind.ABORT) {
                 if (chunkIndex != 0 || chunkOffset != 0 || payload.length != 0 ||
                     (kind == Kind.ABORT && commitCrc32c != 0)) {
-                    throw new ReplicationWireException("invalid owned terminal envelope");
+                    throw new CorruptReplicationDataException("invalid owned terminal envelope");
                 }
             } else if (payloadLength == 0) {
                 if (chunkIndex != 0 || chunkCount != 1 || chunkOffset != 0 || payload.length != 0) {
-                    throw new ReplicationWireException("invalid owned empty payload envelope");
+                    throw new CorruptReplicationDataException("invalid owned empty payload envelope");
                 }
             } else if (payload.length == 0 || (long) chunkOffset + payload.length > payloadLength) {
-                throw new ReplicationWireException("owned envelope payload exceeds logical bounds");
+                throw new CorruptReplicationDataException("owned envelope payload exceeds logical bounds");
             }
         }
 

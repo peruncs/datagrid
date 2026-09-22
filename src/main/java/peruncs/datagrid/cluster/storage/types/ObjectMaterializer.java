@@ -1,10 +1,10 @@
 package peruncs.datagrid.cluster.storage.types;
 
-
 import org.eclipse.serializer.collections.Set_long;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataAcceptor;
 import org.eclipse.serializer.persistence.types.*;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 
 /// This acceptor collects remote object ids and materializes them as one batch.
 ///
@@ -32,17 +32,17 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
     ///
     /// A truncated header means the containing batch is corrupt: the entity
     /// data cannot be skipped without silently dropping the rest of the
-    /// buffer, so it fails with [StorageBinaryDataException] instead of
+    /// buffer, so it fails with [CorruptReplicationDataException] instead of
     /// stopping iteration.
     ///
     /// @param entityStartAddress entity header start address
     /// @param dataBoundAddress   end of the available entity data
     /// @return always `true`; a truncated header throws
-    /// @throws StorageBinaryDataException if the entity header is truncated
+    /// @throws CorruptReplicationDataException if the entity header is truncated
     @Override
     public boolean acceptEntityData(final long entityStartAddress, final long dataBoundAddress) {
         if (entityStartAddress + Binary.entityHeaderLength() > dataBoundAddress) {
-            throw new StorageBinaryDataException(
+            throw new CorruptReplicationDataException(
                     "truncated entity header at %s: %s bytes available, %s required"
                             .formatted(entityStartAddress, dataBoundAddress - entityStartAddress,
                                     Binary.entityHeaderLength()));
@@ -52,7 +52,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
                 Binary.getEntityTypeIdRawValue(entityStartAddress)
         );
         if (ptd == null) {
-            throw new StorageBinaryDataException("Cannot materialize persisted entity with unknown type id %s".formatted(Binary.getEntityTypeIdRawValue(entityStartAddress)));
+            throw new CorruptReplicationDataException("Cannot materialize persisted entity with unknown type id %s".formatted(Binary.getEntityTypeIdRawValue(entityStartAddress)));
         }
         if (PersistenceRoots.class.isAssignableFrom(ptd.type()) || PersistenceRootReference.class.isAssignableFrom(ptd.type())) {// don't overwrite local roots
             return true;

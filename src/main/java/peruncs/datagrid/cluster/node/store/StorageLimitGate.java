@@ -33,8 +33,8 @@ public final class StorageLimitGate {
     ///
     /// @param limitGb the limit in decimal gigabytes
     /// @return a gate that has not reached its limit yet
-    public static StorageLimitGate New(final int limitGb) {
-        return New(limitGb, DEFAULT_RELEASE_PERMILLE);
+    public static StorageLimitGate create(final int limitGb) {
+        return create(limitGb, DEFAULT_RELEASE_PERMILLE);
     }
 
         /// Creates a gate with an explicit release hysteresis.
@@ -43,7 +43,7 @@ public final class StorageLimitGate {
     /// @param releasePermille hysteresis below the limit, in tenths of a
     ///                        percent (100 = release ten percent below)
     /// @return a gate that has not reached its limit yet
-    public static StorageLimitGate New(final int limitGb, final int releasePermille) {
+    public static StorageLimitGate create(final int limitGb, final int releasePermille) {
         if (limitGb <= 0) {
             throw new IllegalArgumentException("Storage limit must be a positive number of gigabytes");
         }

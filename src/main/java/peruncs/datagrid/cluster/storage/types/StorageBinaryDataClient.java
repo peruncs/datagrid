@@ -17,7 +17,7 @@ public interface StorageBinaryDataClient extends Disposable {
     ///
     /// @param startingCursor initial cursor, or `null` for the fixed `none` cursor
     /// @return neutral client
-    static StorageBinaryDataClient NoOp(final ReplicationCursor startingCursor) {
+    static StorageBinaryDataClient noOp(final ReplicationCursor startingCursor) {
         final ReplicationCursor cursor = startingCursor == null
                 ? ReplicationCursor.NONE
                 : startingCursor;

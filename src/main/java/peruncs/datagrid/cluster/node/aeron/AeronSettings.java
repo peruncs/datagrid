@@ -252,6 +252,13 @@ record AeronSettings(
          * fails here, before any gate reads it. */
         final NodeRole role = properties.nodeRole();
         final boolean productionMode = properties.isProdMode();
+        final boolean trustedNetwork = Boolean.parseBoolean(value(
+                properties, "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK", "false"));
+        if (productionMode && !trustedNetwork) {
+            throw new IllegalArgumentException(
+                    "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK=true is required in production; "
+                            + "the replication protocol is not authenticated");
+        }
         final AeronReplicationConfiguration replication = replication(properties);
         final String cluster = value(properties, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", null);
         if (cluster == null) throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_CLUSTER_ID is required");
@@ -278,7 +285,7 @@ record AeronSettings(
         final ArchivePolicy archivePolicy = archivePolicy(properties, productionMode);
         final Channels channels = channels(properties, cluster, replication, role,
                 archivePolicy.externalArchive(), productionMode);
-        final Set<UUID> retentionReaders = retentionReaders(properties);
+        final Set<UUID> retentionReaders = trustedNetwork ? retentionReaders(properties) : Set.of();
         final Authentication authentication = authentication(properties, role, productionMode,
                 archivePolicy.externalArchive());
         final RuntimeSettings runtime = runtimeSettings(properties, streamId, replication);
@@ -429,7 +436,8 @@ record AeronSettings(
          * and are rejected below when they do not. */
         final String channelAlias = "datagrid-%s".formatted(cluster);
         final String liveChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
-                "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=%s".formatted(channelAlias));
+                "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=%d|mtu=%d|alias=%s"
+                        .formatted(replication.termLength(), replication.mtuLength(), channelAlias));
         final String replayChannel = channel(properties, "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
                 "aeron:udp?endpoint=localhost:0|control=localhost:40123|control-mode=dynamic");
         final String archiveReplicationChannel = channel(properties,

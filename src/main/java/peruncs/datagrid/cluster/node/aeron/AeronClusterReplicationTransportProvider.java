@@ -10,9 +10,11 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.errors.WriterFencedException;
 import peruncs.datagrid.cluster.node.CloseSequencer;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeRole;
 import peruncs.datagrid.cluster.node.backup.BackupMetadata;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.*;
@@ -98,7 +100,7 @@ public final class AeronClusterReplicationTransportProvider {
     public ClusterReplicationTransport create(final NodeLibraryPropertiesProvider properties) {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties);
         final Path leaseDirectory = leaseDirectory(properties);
-        validateLeaseDirectory(settings, leaseDirectory);
+        validateLeaseDirectory(settings, leaseDirectory, properties);
         final Transport transport = new Transport(settings, leaseDirectory,
                 properties.writerLeaseStalenessMillis());
         /* Probe metadata durability before any synchronized runtime startup path. */
@@ -115,9 +117,16 @@ public final class AeronClusterReplicationTransportProvider {
     ///
     /// @param settings       resolved Aeron settings
     /// @param leaseDirectory resolved lease directory, or `null` when unset
-    private static void validateLeaseDirectory(final AeronSettings settings, final Path leaseDirectory) {
+    private static void validateLeaseDirectory(final AeronSettings settings, final Path leaseDirectory,
+                                               final NodeLibraryPropertiesProvider properties) {
         if (leaseDirectory == null) {
             return;
+        }
+        if (settings.productionMode() && settings.role() == NodeRole.WRITER && !Boolean.parseBoolean(
+                properties.replicationProperty("ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM"))) {
+            throw new IllegalArgumentException(
+                    "ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true is required for a production writer; "
+                            + "the lease path must be one pre-provisioned shared filesystem with cross-host locks and atomic replacement");
         }
         if (overlaps(leaseDirectory, settings.directories().aeronDirectory()) ||
             overlaps(leaseDirectory, settings.directories().archiveDirectory()) ||
@@ -341,7 +350,7 @@ public final class AeronClusterReplicationTransportProvider {
                      * the replication import path, which bypasses this target.
                      * Any locally originated write is rejected instead of
                      * persisting an unreplicated divergence. */
-                    return RejectingPersistenceTarget::New;
+                    return RejectingPersistenceTarget::create;
                 }
             }
             final AeronReplicationWriteCoordinator coordinator = this.ensureCoordinator();
@@ -406,7 +415,7 @@ public final class AeronClusterReplicationTransportProvider {
                  * through the writer's health path. Configure a separate reader/backup-reader
                  * node when replay is required. */
                 if (this.settings.role().isWriter()) {
-                    return StorageBinaryDataClient.NoOp(startingCursor);
+                    return StorageBinaryDataClient.noOp(startingCursor);
                 }
             }
             Objects.requireNonNull(receiver, "receiver");
@@ -455,7 +464,7 @@ public final class AeronClusterReplicationTransportProvider {
                 /* Re-check under the slot lock: close() may have started after
                  * the lock-free prologue above. */
                 this.ensureOpen();
-                final AeronArchiveReader created = AeronArchiveReader.New(
+                final AeronArchiveReader created = AeronArchiveReader.create(
                         AeronArchiveReader.Configuration.builder()
                         .aeron(this.aeron())
                         .archiveContext(archiveContext())
@@ -913,10 +922,10 @@ public final class AeronClusterReplicationTransportProvider {
                     this.validateRecordingBoundary(recordingId, checkpoint);
                     try {
                         candidate = (this.settings.externalArchive()
-                                ? AeronArchiveReplicationPublisher.ExtendRemote(this.archive(), recordingId,
+                                ? AeronArchiveReplicationPublisher.extendRemote(this.archive(), recordingId,
                                 this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
                                 this.settings.epoch(), initialSequence, this.settings.wireNonce())
-                                : AeronArchiveReplicationPublisher.Extend(this.archive(), recordingId,
+                                : AeronArchiveReplicationPublisher.extend(this.archive(), recordingId,
                                 this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
                                 this.settings.epoch(), initialSequence, this.settings.wireNonce()));
                     } catch (final RuntimeException failure) {
@@ -927,10 +936,10 @@ public final class AeronClusterReplicationTransportProvider {
                         throw reseedRequired("writer checkpoint has no recording identity", null);
                     }
                     candidate = (this.settings.externalArchive()
-                            ? AeronArchiveReplicationPublisher.NewRemote(this.archive(), this.settings.channels().live(),
+                            ? AeronArchiveReplicationPublisher.createRemote(this.archive(), this.settings.channels().live(),
                             this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
                             this.settings.epoch(), initialSequence, this.settings.wireNonce())
-                            : AeronArchiveReplicationPublisher.New(this.archive(), this.settings.channels().live(),
+                            : AeronArchiveReplicationPublisher.create(this.archive(), this.settings.channels().live(),
                             this.settings.streamId(), this.settings.replication(), this.settings.clusterId(),
                             this.settings.epoch(), initialSequence, this.settings.wireNonce()));
                 }
@@ -1272,9 +1281,6 @@ public final class AeronClusterReplicationTransportProvider {
                 final AeronReplicationCheckpoint.State state, final long sequence,
                 final int dataLength, final int dataChunkCount, final int dataCrc32c,
                 final long position) {
-            final AeronArchiveReplicationPublisher current = this.writer;
-            final long discoveredRecordingId = current == null ? Aeron.NULL_VALUE : current.recordingId();
-            if (discoveredRecordingId >= 0) this.writerRecordingId.set(discoveredRecordingId);
             final long writerRecordingId = this.writerRecordingId.get();
             final long recordingId = writerRecordingId >= 0 ? writerRecordingId : this.settings.recordingId();
             return new AeronReplicationCheckpoint(

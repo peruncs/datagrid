@@ -88,7 +88,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     ///
     /// @param backupVolumePath backup volume path
     /// @return filesystem backup backend
-    public static FilesystemVolumeBackupBackend New(final Path backupVolumePath) {
+    public static FilesystemVolumeBackupBackend create(final Path backupVolumePath) {
         return new FilesystemVolumeBackupBackend(notNull(backupVolumePath).toAbsolutePath().normalize(),
                 BackupArchiveLimits.defaults(), DEFAULT_PUBLICATION_LOCK_TIMEOUT);
     }
@@ -98,7 +98,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// @param backupVolumePath backup volume path
     /// @param limits           extraction and entry budgets
     /// @return filesystem backup backend
-    public static FilesystemVolumeBackupBackend New(
+    public static FilesystemVolumeBackupBackend create(
             final Path backupVolumePath,
             final BackupArchiveLimits limits
     ) {
@@ -113,7 +113,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// @param limits extraction and entry budgets
     /// @param publicationLockTimeout maximum wait for a peer publisher
     /// @return filesystem backup backend
-    public static FilesystemVolumeBackupBackend New(
+    public static FilesystemVolumeBackupBackend create(
             final Path backupVolumePath,
             final BackupArchiveLimits limits,
             final Duration publicationLockTimeout

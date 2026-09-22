@@ -104,7 +104,7 @@ class StorageBinaryDataDistributorTest {
     @Test
     void incrementalAfterQueuedSnapshotIsDropped() {
         final StorageBinaryDataDistributor caching =
-                StorageBinaryDataDistributor.Caching(StorageBinaryDataDistributor.NoOp());
+                StorageBinaryDataDistributor.Caching(StorageBinaryDataDistributor.noOp());
         caching.queueTypeDictionaryForNextTransaction("full-restart-dictionary");
         caching.distributeTypeDictionary("stale-incremental");
         assertEquals("full-restart-dictionary", caching.consumeTypeDictionary());

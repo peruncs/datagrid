@@ -1,21 +1,12 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.collections.types.XGettingCollection;
-import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
-import org.eclipse.serializer.persistence.binary.types.BinaryLoader;
-import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
-import org.eclipse.serializer.persistence.binary.types.LoadItemsChain;
-import org.eclipse.serializer.persistence.types.PersistenceIdSet;
-import org.eclipse.serializer.persistence.types.PersistenceManager;
-import org.eclipse.serializer.persistence.types.Persister;
-import org.eclipse.serializer.persistence.types.PersistenceSource;
-import org.eclipse.serializer.persistence.types.PersistenceSourceSupplier;
-import org.eclipse.serializer.persistence.types.PersistenceTypeHandlerLookup;
+import org.eclipse.serializer.persistence.binary.types.*;
+import org.eclipse.serializer.persistence.types.*;
 import org.eclipse.serializer.util.X;
-import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageConnectionFoundation;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
@@ -67,7 +58,7 @@ final class StorageBinaryDataMaterializer {
         for (int index = offset; index < end; index++) {
             final ByteBuffer buffer = buffers[index];
             if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
-                throw new StorageBinaryDataException("materializer requires direct buffers at position zero");
+                throw new CorruptReplicationDataException("materializer requires direct buffers at position zero");
             }
             if (buffer.limit() == 0) continue;
             final long address = getDirectByteBufferAddress(buffer);

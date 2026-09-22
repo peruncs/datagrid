@@ -6,6 +6,7 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;

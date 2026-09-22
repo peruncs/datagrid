@@ -1,5 +1,7 @@
 package peruncs.datagrid.cluster.storage.types;
 
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
+
 /// The only supported ordering between a Store write and its replication log.
 ///
 /// The codes are persisted in replication checkpoints, so they are stable:
@@ -25,12 +27,12 @@ public enum ReplicationDurabilityMode {
     ///
     /// @param code persisted code
     /// @return durability mode
-    /// @throws StorageBinaryDataException if the persisted code is unknown,
+    /// @throws CorruptReplicationDataException if the persisted code is unknown,
     ///                                    which marks the file as corrupt
     public static ReplicationDurabilityMode fromCode(final int code) {
         return switch (code) {
             case 1 -> ARCHIVE_FIRST;
-            default -> throw new StorageBinaryDataException("unknown replication durability mode: %s".formatted(code));
+            default -> throw new CorruptReplicationDataException("unknown replication durability mode: %s".formatted(code));
         };
     }
 }

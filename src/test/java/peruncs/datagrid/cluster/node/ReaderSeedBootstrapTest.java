@@ -5,8 +5,8 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.aeron.ReseedRequiredException;
-import peruncs.datagrid.cluster.node.exceptions.ReaderWriteRejectedException;
+import peruncs.datagrid.cluster.errors.ReaderWriteRejectedException;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -91,7 +91,7 @@ class ReaderSeedBootstrapTest {
         final Path writerHome = root.resolve("writer-home");
         final Path readerHome = root.resolve("reader-home");
 
-        try (final ClusterFoundation writer = ClusterFoundation.New()
+        try (final ClusterFoundation writer = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(
                         new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -103,7 +103,7 @@ class ReaderSeedBootstrapTest {
             manager.storeRoot();
         }
 
-        try (final ClusterFoundation reader = ClusterFoundation.New()
+        try (final ClusterFoundation reader = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(
                         new TestProperties(readerHome, root.resolve("reader-backups"), NodeLibraryPropertiesProvider.READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -124,7 +124,7 @@ class ReaderSeedBootstrapTest {
         Files.createDirectories(storage);
         Files.writeString(storage.resolve("orphaned-channel.dat"), "unaddressable history");
 
-        try (final ClusterFoundation reader = ClusterFoundation.New()
+        try (final ClusterFoundation reader = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(new AeronReaderProperties(
                         readerHome, root.resolve("lost-cursor-backups"), root.resolve("lost-cursor-aeron")))
                 .setRootSupplier(ArrayList<String>::new)
@@ -162,7 +162,7 @@ class ReaderSeedBootstrapTest {
         image.shutdown();
         assertTrue(Files.isDirectory(storage), "the rootless image must hold Store files");
 
-        try (final ClusterFoundation backup = ClusterFoundation.New()
+        try (final ClusterFoundation backup = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(new TestProperties(
                         backupHome, root.resolve("rootless-backups"),
                         NodeLibraryPropertiesProvider.BACKUP_READER_ROLE))
@@ -181,7 +181,7 @@ class ReaderSeedBootstrapTest {
         final Path writerHome = root.resolve("writer-home");
         final Path readerHome = root.resolve("reader-home");
 
-        try (final ClusterFoundation writer = ClusterFoundation.New()
+        try (final ClusterFoundation writer = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(
                         new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -198,7 +198,7 @@ class ReaderSeedBootstrapTest {
 
         copyDirectory(writerHome.resolve("storage"), readerHome.resolve("storage"));
 
-        try (final ClusterFoundation reader = ClusterFoundation.New()
+        try (final ClusterFoundation reader = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(
                         new TestProperties(readerHome, root.resolve("reader-backups"), NodeLibraryPropertiesProvider.READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -215,7 +215,7 @@ class ReaderSeedBootstrapTest {
     void seededReaderAndBackupReaderRejectLocalWrites(@TempDir final Path root) throws Exception {
         final Path writerHome = root.resolve("writer-home");
 
-        try (final ClusterFoundation writer = ClusterFoundation.New()
+        try (final ClusterFoundation writer = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(
                         new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -232,7 +232,7 @@ class ReaderSeedBootstrapTest {
             final Path readerHome = root.resolve("seeded-" + role);
             copyDirectory(writerHome.resolve("storage"), readerHome.resolve("storage"));
 
-            try (final ClusterFoundation reader = ClusterFoundation.New()
+            try (final ClusterFoundation reader = ClusterFoundation.create()
                     .setNodeLibraryPropertiesProvider(
                             new TestProperties(readerHome, root.resolve("backups-" + role), role))
                     .setRootSupplier(ArrayList<String>::new)
@@ -273,6 +273,7 @@ class ReaderSeedBootstrapTest {
             return switch (name) {
                 case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID" -> "11111111-1111-1111-1111-111111111111";
                 case "ECLIPSE_DATAGRID_AERON_WIRE_NONCE" -> "731947";
+                case "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK" -> "true";
                 case "ECLIPSE_DATAGRID_AERON_NODE_ID" -> "22222222-2222-2222-2222-222222222222";
                 case "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> "33333333-3333-3333-3333-333333333333";
                 case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> this.aeronHome.resolve("driver").toString();

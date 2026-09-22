@@ -22,6 +22,10 @@ public final class ClusterStore<T> {
 
     /// Reads the materialized root under the replication graph boundary.
     ///
+    /// The callback and all traversal of live Store objects must finish before
+    /// this method returns. Do not retain the root or another live graph object
+    /// in the returned value; copy the data needed outside the boundary.
+    ///
     /// @param <R> query result type
     /// @param query query evaluated inside the read boundary
     /// @return the query result
@@ -31,6 +35,11 @@ public final class ClusterStore<T> {
 
     /// Persists one changed object on the writer; reader roles reject the call.
     ///
+    /// A fenced writer or unavailable replication service rejects the write
+    /// before local acceptance. An uncertain-commit failure is not safe to
+    /// retry blindly: inspect node status and reconcile or reseed first.
+    /// Capacity failures are retryable after Archive space is restored.
+    ///
     /// @param value changed object to publish
     /// @return the publication sequence
     public long store(final Object value) {
@@ -38,6 +47,9 @@ public final class ClusterStore<T> {
     }
 
     /// Persists changed objects on the writer; reader roles reject the call.
+    ///
+    /// The same fencing, capacity, and uncertain-commit rules as [#store]
+    /// apply to the complete batch.
     ///
     /// @param values changed objects to publish
     /// @return publication sequences in input order
@@ -47,6 +59,9 @@ public final class ClusterStore<T> {
     }
 
     /// Persists the current root on the writer; reader roles reject the call.
+    ///
+    /// The same fencing, capacity, and uncertain-commit rules as [#store]
+    /// apply.
     ///
     /// @return the publication sequence
     public long storeRoot() {

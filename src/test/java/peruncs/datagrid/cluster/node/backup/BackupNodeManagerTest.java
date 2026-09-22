@@ -32,7 +32,7 @@ class BackupNodeManagerTest {
                         default -> null;
                     };
                 });
-        return BackupNodeManager.New(tasks, client, controller, () -> 1L, "test");
+        return BackupNodeManager.create(tasks, client, controller, () -> 1L, "test");
     }
 
     /// Verifies a backup node with a running replication reader reports healthy and ready.

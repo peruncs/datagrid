@@ -65,9 +65,9 @@ class BackupRestoreCompatibilityTest {
             final ReplicationCursor backupCursor,
             final long timestamp
     ) {
-        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(volume);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(volume);
         backend.createBackup(
-                noOpStorageConnection(), backupCursor, BackupMetadata.New(timestamp, false, backupCursor));
+                noOpStorageConnection(), backupCursor, BackupMetadata.create(timestamp, false, backupCursor));
     }
 
     private static void writeOffset(final Path storageParent, final ReplicationCursor offset) {
@@ -99,7 +99,7 @@ class BackupRestoreCompatibilityTest {
         final Path volume = root.resolve("shared-volume");
         final ReplicationCursor local = cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 9L);
 
-        try (final ClusterFoundation node = ClusterFoundation.New()
+        try (final ClusterFoundation node = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(properties(
                         home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -118,7 +118,7 @@ class BackupRestoreCompatibilityTest {
         publishBackup(volume, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 5L), 100L);
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation restarted = ClusterFoundation.New()
+        try (final ClusterFoundation restarted = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(properties(
                         home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -132,7 +132,7 @@ class BackupRestoreCompatibilityTest {
 
         assertEquals(local, readOffset(home),
                 "the local replication boundary must not move to the unrelated generation");
-        assertEquals(2, FilesystemVolumeBackupBackend.New(volume).listBackups().size(),
+        assertEquals(2, FilesystemVolumeBackupBackend.create(volume).listBackups().size(),
                 "the unrelated backup must be left alone on the volume");
     }
 
@@ -149,7 +149,7 @@ class BackupRestoreCompatibilityTest {
         publishBackup(volume, generationOne, 100L);
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation node = ClusterFoundation.New()
+        try (final ClusterFoundation node = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(properties(
                         home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -160,7 +160,7 @@ class BackupRestoreCompatibilityTest {
 
         assertEquals(generationOne, readOffset(home),
                 "the restored boundary must come from the compatible backup, not the newest one");
-        assertEquals(2, FilesystemVolumeBackupBackend.New(volume).listBackups().size());
+        assertEquals(2, FilesystemVolumeBackupBackend.create(volume).listBackups().size());
     }
 
     /// Verifies a fresh node with only incompatible backups fails fast with a compatibility error and installs no Store image.
@@ -172,7 +172,7 @@ class BackupRestoreCompatibilityTest {
         writeOffset(home, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 3L));
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation node = ClusterFoundation.New()
+        try (final ClusterFoundation node = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(properties(
                         home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -195,7 +195,7 @@ class BackupRestoreCompatibilityTest {
         final Path volume = root.resolve("shared-volume");
         final ReplicationCursor local = cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 9L);
 
-        try (final ClusterFoundation writer = ClusterFoundation.New()
+        try (final ClusterFoundation writer = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(properties(
                         writerHome, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
@@ -212,7 +212,7 @@ class BackupRestoreCompatibilityTest {
         publishBackup(volume, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 5L), 100L);
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation reader = ClusterFoundation.New()
+        try (final ClusterFoundation reader = ClusterFoundation.create()
                 .setNodeLibraryPropertiesProvider(properties(
                         readerHome, volume, NodeLibraryPropertiesProvider.READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)

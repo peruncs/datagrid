@@ -504,6 +504,12 @@ final class TransactionAssembler {
         return this.lastResolvedPosition.get();
     }
 
+    /// Returns whether the current delivery barrier has reached either limit.
+    synchronized boolean deliveryBarrierFull() {
+        return this.unflushedDeliveryCount() >= this.configuration.readerBarrierMaxTransactions()
+                || this.unflushedDeliveryBytes() >= this.configuration.maxTransactionBytes();
+    }
+
         /// Returns an atomic sequence and position snapshot for cursor persistence.
     ///
     /// @return consistent cursor snapshot under the assembler monitor

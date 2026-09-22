@@ -151,8 +151,8 @@ public final class AeronReplayBenchmark {
                                 return true;
                             }
                         }
-                        : StorageBinaryDataMerger.New(
-                        StorageBinaryDataMerger.Configuration.New(
+                        : StorageBinaryDataMerger.create(
+                        StorageBinaryDataMerger.Configuration.create(
                                 readerFoundation.getConnectionFoundation(), reader.createConnection(),
                                 ObjectGraphUpdateHandler.PerStore(graphCoordinator), graphCoordinator));
                 final long[] appliedAt = new long[transactions + 64];

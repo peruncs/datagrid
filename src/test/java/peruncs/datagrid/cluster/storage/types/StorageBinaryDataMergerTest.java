@@ -14,6 +14,7 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
@@ -93,7 +94,7 @@ class StorageBinaryDataMergerTest {
         /// A disposed merger refuses both data and dictionary updates.
     @Test
     void disposedMergerRejectsDataAndDictionary() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
 
         merger.dispose();
 
@@ -120,13 +121,13 @@ class StorageBinaryDataMergerTest {
                 Thread.currentThread().interrupt();
             }
         };
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), blockingHandler, 0L, 1L, 50L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), blockingHandler, 0L, 1L, 50L));
         try {
             assertThrows(IllegalStateException.class, () -> merger.receiveData(binary(2)),
                     "a materialization timeout must fail the delivery call");
             assertTrue(handlerEntered.await(10, TimeUnit.SECONDS), "the worker never entered the handler");
             assertNotNull(merger.failure(), "the timeout must latch a terminal merger failure");
-            assertInstanceOf(StorageBinaryDataLifecycleException.class, merger.failure(),
+            assertInstanceOf(ReplicationUnavailableException.class, merger.failure(),
                     "a wait timeout is a lifecycle failure, not corrupt assembled data");
             assertTrue(merger.failure().getMessage().contains("Timed out"),
                     "a timeout must say timed out: " + merger.failure().getMessage());
@@ -149,7 +150,7 @@ class StorageBinaryDataMergerTest {
         {
             throw boom;
         };
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), failingHandler, 0L, 1_000_000L, 60_000L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), failingHandler, 0L, 1_000_000L, 60_000L));
         try {
             merger.receiveDataOwned(binary(1));
             final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
@@ -187,7 +188,7 @@ class StorageBinaryDataMergerTest {
                 Thread.currentThread().interrupt();
             }
         };
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), slowHandler, 0L, 1L, 200L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), slowHandler, 0L, 1L, 200L));
         try {
             final Thread delivering = Thread.ofVirtual().start(() ->
             {
@@ -219,7 +220,7 @@ class StorageBinaryDataMergerTest {
     @Test
     void disposeRacingAcceptFailsCleanly() throws Exception {
         for (int iteration = 0; iteration < 8; iteration++) {
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
             final AtomicReference<Throwable> unexpected = new AtomicReference<>();
             final CountDownLatch start = new CountDownLatch(1);
             final Thread disposing = Thread.ofVirtual().start(() ->
@@ -251,7 +252,7 @@ class StorageBinaryDataMergerTest {
         /// exactly once and reports the refusal.
     @Test
     void receiveDataOwnedOnDisposedMergerFailsCleanly() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
 
         merger.dispose();
 
@@ -293,7 +294,7 @@ class StorageBinaryDataMergerTest {
                                 return defaultValue(method.getReturnType());
                         }
                     });
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), connection, updater ->
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), connection, updater ->
             {
                 /* The synthetic batch carries no valid entity header; this case
                  * observes the import/dictionary exclusion, not materialization. */
@@ -369,7 +370,7 @@ class StorageBinaryDataMergerTest {
             coordinator.write(updater);
         };
         try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), reader.createConnection(), recording, 0L, 1L, 60_000L, coordinator));
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), reader.createConnection(), recording, 0L, 1L, 60_000L, coordinator));
             try {
                 merger.receiveTypeDictionary(dictionary);
                 assertTrue(handlerUsed.get(),
@@ -401,7 +402,7 @@ class StorageBinaryDataMergerTest {
             coordinator.write(updater);
         };
         try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), reader.createConnection(), recording, 0L, 1L, 60_000L, coordinator));
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundationWithDictionaryLoader(), reader.createConnection(), recording, 0L, 1L, 60_000L, coordinator));
             try {
                 final CountDownLatch readHeld = new CountDownLatch(1);
                 final CountDownLatch releaseRead = new CountDownLatch(1);
@@ -459,7 +460,7 @@ class StorageBinaryDataMergerTest {
     void multiBufferCommitsCoalesceByBytesNotBufferCount()  {
         final AtomicInteger handlerCalls = new AtomicInteger();
         final ObjectGraphUpdateHandler counting = updater -> handlerCalls.incrementAndGet();
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(
                 StorageBinaryDataMergerTestSupport.configuration(
                         foundation(), connection(), counting, 60_000L, 64L << 20, 60_000L));
         try {

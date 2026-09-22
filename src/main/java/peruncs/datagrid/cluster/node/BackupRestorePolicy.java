@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.aeron.ReseedRequiredException;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.backup.BackupMetadata;
 import peruncs.datagrid.cluster.node.backup.StorageBackupBackend;
 import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;

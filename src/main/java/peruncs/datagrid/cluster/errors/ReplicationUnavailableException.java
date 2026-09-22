@@ -4,6 +4,10 @@ package peruncs.datagrid.cluster.errors;
 public class ReplicationUnavailableException extends ReplicationException {
     private final int errorCode;
 
+    public ReplicationUnavailableException(final String message) {
+        this(message, null, 0);
+    }
+
     public ReplicationUnavailableException(final String message, final Throwable cause) {
         this(message, cause, 0);
     }

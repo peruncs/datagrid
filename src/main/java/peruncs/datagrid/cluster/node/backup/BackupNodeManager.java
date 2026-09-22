@@ -29,7 +29,7 @@ public interface BackupNodeManager extends StorageNodeControl, BackupNodeControl
     /// @param storageDiskSpaceReader    storage space reader
     /// @param replicationTransport      selected transport id for monitoring
     /// @return backup manager
-    static BackupNodeManager New(
+    static BackupNodeManager create(
             final StorageBackupTaskExecutor storageBackupTaskExecutor,
             final StorageBinaryDataClient dataClient,
             final StorageController storageController,

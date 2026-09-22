@@ -10,6 +10,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.RecordingInspector;
@@ -17,7 +18,6 @@ import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReseedException;
 
 import java.io.File;
 import java.net.ServerSocket;
@@ -76,7 +76,7 @@ class AeronArchiveReplicationIT {
         long stopPosition;
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(media, archiveContext);
              AeronArchive archive = AeronArchive.connect(client)) {
-            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, liveChannel, 1001, configuration, clusterId, 2, 0);
             await(publisher.publication()::isConnected, 10_000);
             publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
@@ -148,7 +148,7 @@ class AeronArchiveReplicationIT {
                     .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
             try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
                  AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
-                try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+                try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                         archive, liveChannel, 1001, configuration, clusterId, 2, 0)) {
                     await(publisher.publication()::isConnected, 10_000);
                     publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
@@ -323,7 +323,7 @@ class AeronArchiveReplicationIT {
 
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
              AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
-            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, liveChannel, 1001, configuration, clusterId, 2, 0
             );
             await(publisher.publication()::isConnected, 10_000);
@@ -341,16 +341,16 @@ class AeronArchiveReplicationIT {
             assertTrue(publisher.publication().position() > 0, "writer publication must progress with zero external readers");
             publisher.close();
             await(() -> archive.getStopPosition(recordingId) >= firstStop, 10_000);
-            assertThrows(IllegalArgumentException.class, () -> AeronArchiveReplicationPublisher.Extend(
+            assertThrows(IllegalArgumentException.class, () -> AeronArchiveReplicationPublisher.extend(
                     archive, recordingId, 1002, configuration, clusterId, 2, 1));
             final byte[] resumedData = new byte[]{8, 6, 7, 5};
-            final AeronArchiveReplicationPublisher resumed = AeronArchiveReplicationPublisher.Extend(
+            final AeronArchiveReplicationPublisher resumed = AeronArchiveReplicationPublisher.extend(
                     archive, recordingId, 1001, configuration, clusterId, 2, 1
             );
             await(resumed.publication()::isConnected, 10_000);
             resumed.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(resumedData)});
             assertEquals(recordingId, awaitRecordingId(resumed));
-            final AeronArchiveReader client = AeronArchiveReader.New(
+            final AeronArchiveReader client = AeronArchiveReader.create(
                     AeronArchiveReader.Configuration.builder()
                     .aeron(archive.context().aeron())
                     .archiveContext(new AeronArchive.Context()
@@ -377,7 +377,7 @@ class AeronArchiveReplicationIT {
             final long restartSequence = client.lastResolvedSequence();
             client.dispose();
             final RecordingReceiver restartedReceiver = new RecordingReceiver();
-            final AeronArchiveReader restarted = AeronArchiveReader.New(
+            final AeronArchiveReader restarted = AeronArchiveReader.create(
                     AeronArchiveReader.Configuration.builder()
                     .aeron(archive.context().aeron())
                     .archiveContext(new AeronArchive.Context().aeronDirectoryName(directory)
@@ -442,7 +442,7 @@ class AeronArchiveReplicationIT {
                 .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext)) {
             final AeronArchive archive = AeronArchive.connect(archiveClientContext);
-            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                     archive, liveChannel, 1001, configuration, UUID.randomUUID(), 1, 0);
             try {
                 await(publisher.publication()::isConnected, 10_000);
@@ -503,7 +503,7 @@ class AeronArchiveReplicationIT {
                 final AeronArchiveReplicationPublisher publisher;
                 final long recordingId;
                 {
-                    publisher = AeronArchiveReplicationPublisher.New(
+                    publisher = AeronArchiveReplicationPublisher.create(
                             archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0);
                     try {
                         await(publisher.publication()::isConnected, 10_000);
@@ -516,7 +516,7 @@ class AeronArchiveReplicationIT {
                     }
                     await(() -> archiveClient.getStopPosition(recordingId) >= 0, 10_000);
                     final CountingReceiver receiver = new CountingReceiver();
-                    final AeronArchiveReader reader = AeronArchiveReader.New(
+                    final AeronArchiveReader reader = AeronArchiveReader.create(
                             AeronArchiveReader.Configuration.builder()
                                     .aeron(aeron)
                                     .archiveContext(archiveClientContext)
@@ -588,7 +588,7 @@ class AeronArchiveReplicationIT {
                          archiveContext(directory, archiveDirectory, controlChannel, true));
                  AeronArchive archiveClient =
                          connectArchive(archiveClientContext.clone().aeron(aeron).ownsAeronClient(false))) {
-                final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.New(
+                final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
                         archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0);
                 final long recordingId;
                 try {
@@ -603,7 +603,7 @@ class AeronArchiveReplicationIT {
                     publisher.close();
                 }
                 await(() -> archiveClient.getStopPosition(recordingId) >= 0, 10_000);
-                final AeronArchiveReader reader = AeronArchiveReader.New(
+                final AeronArchiveReader reader = AeronArchiveReader.create(
                         AeronArchiveReader.Configuration.builder()
                                 .aeron(aeron)
                                 .archiveContext(archiveClientContext)
@@ -621,7 +621,7 @@ class AeronArchiveReplicationIT {
                      * budget must expire into the typed reseed signal. */
                     archive.close();
                     await(() -> reader.failure() != null, 15_000);
-                    assertInstanceOf(StorageBinaryDataReseedException.class, reader.failure(),
+                    assertInstanceOf(ReseedRequiredException.class, reader.failure(),
                             "an unrecoverable Archive loss must surface as RESEED_REQUIRED, not a raw ArchiveException");
                     assertEquals(StorageBinaryDataClient.StopOutcome.FAILED, reader.stopOutcome());
                 } finally {

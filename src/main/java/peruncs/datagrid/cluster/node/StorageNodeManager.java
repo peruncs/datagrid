@@ -75,7 +75,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
     ///
     /// @param configuration immutable manager configuration
     /// @return storage node manager
-    static StorageNodeManager New(final Configuration configuration) {
+    static StorageNodeManager create(final Configuration configuration) {
         return new Default(Objects.requireNonNull(configuration, "configuration"));
     }
 

@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 
 import static org.junit.jupiter.api.Assertions.*;
 

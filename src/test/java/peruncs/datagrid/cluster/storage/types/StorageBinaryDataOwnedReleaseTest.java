@@ -5,6 +5,7 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 
 import java.lang.reflect.Field;
 import java.nio.Buffer;
@@ -37,7 +38,7 @@ class StorageBinaryDataOwnedReleaseTest {
     }
 
     private static StorageBinaryDataMerger merger() {
-        return StorageBinaryDataMerger.New(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), StorageBinaryDataMergerTestSupport.connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+        return StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), StorageBinaryDataMergerTestSupport.connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
     }
 
     private static ByteBuffer direct(final int bytes) {
@@ -74,8 +75,8 @@ class StorageBinaryDataOwnedReleaseTest {
         try {
             final SwappableBinary binary = new SwappableBinary(direct(64), direct(64));
             binary.backing[1] = ByteBuffer.allocate(64);
-            final StorageBinaryDataException failure =
-                    assertThrows(StorageBinaryDataException.class, () -> merger.receiveDataOwned(binary));
+            final CorruptReplicationDataException failure =
+                    assertThrows(CorruptReplicationDataException.class, () -> merger.receiveDataOwned(binary));
             assertTrue(failure.getMessage().contains("non-direct"),
                     "unexpected message: " + failure.getMessage());
             assertEquals(0, failure.getSuppressed().length,
@@ -94,8 +95,8 @@ class StorageBinaryDataOwnedReleaseTest {
             final ByteBuffer victim = direct(64);
             corruptPosition(victim, 1 << 20);
             final Binary binary = ChunksWrapper.New(direct(64), victim);
-            final StorageBinaryDataException failure =
-                    assertThrows(StorageBinaryDataException.class, () -> merger.receiveDataOwned(binary));
+            final CorruptReplicationDataException failure =
+                    assertThrows(CorruptReplicationDataException.class, () -> merger.receiveDataOwned(binary));
             assertTrue(failure.getMessage().contains("invalid buffer length"),
                     "unexpected message: " + failure.getMessage());
             assertEquals(0, failure.getSuppressed().length,
@@ -118,11 +119,11 @@ class StorageBinaryDataOwnedReleaseTest {
                 final SwappableBinary heapSmuggled = new SwappableBinary(
                         direct(SOAK_BUFFER_BYTES), direct(SOAK_BUFFER_BYTES));
                 heapSmuggled.backing[1] = ByteBuffer.allocate(SOAK_BUFFER_BYTES);
-                assertThrows(StorageBinaryDataException.class, () -> merger.receiveDataOwned(heapSmuggled));
+                assertThrows(CorruptReplicationDataException.class, () -> merger.receiveDataOwned(heapSmuggled));
 
                 final ByteBuffer corrupted = direct(SOAK_BUFFER_BYTES);
                 corruptPosition(corrupted, 1 << 20);
-                assertThrows(StorageBinaryDataException.class,
+                assertThrows(CorruptReplicationDataException.class,
                         () -> merger.receiveDataOwned(ChunksWrapper.New(direct(16), corrupted)));
             }
             assertNull(merger.failure(), "refused deliveries must not fail the merger");

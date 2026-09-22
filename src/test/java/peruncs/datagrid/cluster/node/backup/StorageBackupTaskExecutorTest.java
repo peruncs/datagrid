@@ -76,7 +76,7 @@ class StorageBackupTaskExecutorTest {
     void rejectsAConcurrentBackupWithBusy() throws Exception {
         final BlockingManager manager = new BlockingManager();
         try (final StorageBackupTaskExecutor executor =
-                     StorageBackupTaskExecutor.New(new TestStorageConnection(), manager)) {
+                     StorageBackupTaskExecutor.create(new TestStorageConnection(), manager)) {
             assertEquals(StorageBackupTaskExecutor.BackupStartResult.STARTED, executor.runBackup(false));
             assertTrue(manager.entered.await(1, TimeUnit.MINUTES));
 
@@ -100,7 +100,7 @@ class StorageBackupTaskExecutorTest {
             }
         };
         try (final StorageBackupTaskExecutor executor =
-                     StorageBackupTaskExecutor.New(new TestStorageConnection(), failing)) {
+                     StorageBackupTaskExecutor.create(new TestStorageConnection(), failing)) {
             assertEquals(StorageBackupTaskExecutor.BackupStartResult.STARTED, executor.runBackup(false));
             await(() -> !executor.isRunningBackup());
             assertNotNull(executor.backupFailure());
@@ -111,7 +111,7 @@ class StorageBackupTaskExecutorTest {
     @Test
     void rejectsBackupsAfterCloseAndClosesIdempotently() {
         final StorageBackupTaskExecutor executor =
-                StorageBackupTaskExecutor.New(new TestStorageConnection(), new BlockingManager());
+                StorageBackupTaskExecutor.create(new TestStorageConnection(), new BlockingManager());
         executor.close();
         assertThrows(IllegalStateException.class, () -> executor.runBackup(false));
         executor.close();

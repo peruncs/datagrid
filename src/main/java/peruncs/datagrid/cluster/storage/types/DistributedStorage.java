@@ -81,10 +81,10 @@ public final class DistributedStorage {
                      * preserve both contracts in one adapter. */
                         (T) new TargetAndDictionaryExporter(
                                 this.targetFactory.apply((PersistenceTarget<Binary>) target),
-                                DistributingTypeDictionaryExporter.New(dictionaryExporter, this.distributor)
+                                DistributingTypeDictionaryExporter.create(dictionaryExporter, this.distributor)
                         );
                 case PersistenceTarget<?> target -> (T) this.targetFactory.apply((PersistenceTarget<Binary>) target);
-                case PersistenceTypeDictionaryExporter persistenceTypeDictionaryExporter -> (T) DistributingTypeDictionaryExporter.New(
+                case PersistenceTypeDictionaryExporter persistenceTypeDictionaryExporter -> (T) DistributingTypeDictionaryExporter.create(
                         persistenceTypeDictionaryExporter,
                         this.distributor
                 );

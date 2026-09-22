@@ -1,5 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+import peruncs.datagrid.cluster.errors.ReseedRequiredException;
+
 /// Immutable writer terminal boundary published after its checkpoint is durable.
 ///
 /// @param sequence    durable replication sequence

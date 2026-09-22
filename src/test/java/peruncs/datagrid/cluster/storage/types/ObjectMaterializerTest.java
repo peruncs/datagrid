@@ -4,6 +4,7 @@ import org.eclipse.serializer.collections.Set_long;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.types.*;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
@@ -180,7 +181,7 @@ class ObjectMaterializerTest {
         final ObjectMaterializer materializer = fixture.materializer();
         final long address = fixture.entityAddress(7L, 42L);
 
-        final StorageBinaryDataException failure = assertThrows(StorageBinaryDataException.class,
+        final CorruptReplicationDataException failure = assertThrows(CorruptReplicationDataException.class,
                 () -> materializer.acceptEntityData(address, address + 8));
         assertTrue(failure.getMessage().contains("truncated entity header"),
                 "a truncated header must be named as truncation: " + failure.getMessage());
@@ -193,7 +194,7 @@ class ObjectMaterializerTest {
         final ObjectMaterializer materializer = fixture.materializer();
         final long address = fixture.entityAddress(99L, 42L);
 
-        assertThrows(StorageBinaryDataException.class,
+        assertThrows(CorruptReplicationDataException.class,
                 () -> materializer.acceptEntityData(address, address + 24));
     }
 }

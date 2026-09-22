@@ -41,7 +41,7 @@ public interface StorageBinaryDataDistributor extends Disposable {
     /// ignore flag are per-distributor lifecycle state.
     ///
     /// @return neutral distributor
-    static StorageBinaryDataDistributor NoOp() {
+    static StorageBinaryDataDistributor noOp() {
         return new StorageBinaryDataDistributor() {
             private long index = -1;
             private boolean ignored;

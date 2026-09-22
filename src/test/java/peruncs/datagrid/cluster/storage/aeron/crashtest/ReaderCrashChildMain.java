@@ -115,7 +115,7 @@ public final class ReaderCrashChildMain {
             final AtomicReference<AeronArchiveReader> readerRef = new AtomicReference<>();
             final ReaderFixture fixture = new ReaderFixture(base, point, new AtomicReference<>());
             final java.util.concurrent.Callable<Void> runReader = () -> {
-                final AeronArchiveReader reader = AeronArchiveReader.New(
+                final AeronArchiveReader reader = AeronArchiveReader.create(
                         AeronArchiveReader.Configuration.builder()
                         .aeron(aeron).archiveContext(archiveContext).recordingId(recordingId)
                         .startPosition(cursor == null

@@ -10,6 +10,8 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryProvider;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 
 import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
@@ -115,7 +117,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         /// @param objectGraphUpdateHandler graph update handler
         /// @param graphCoordinator         per-Store graph coordinator, or `null`
         /// @return configuration using the default limits
-        public static Configuration New(
+        public static Configuration create(
                 final BinaryPersistenceFoundation<?> foundation,
                 final StorageConnection storage,
                 final ObjectGraphUpdateHandler objectGraphUpdateHandler,
@@ -140,7 +142,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
     ///
     /// @param configuration immutable merger configuration
     /// @return binary merger
-    static StorageBinaryDataMerger New(final Configuration configuration) {
+    static StorageBinaryDataMerger create(final Configuration configuration) {
         return new Default(notNull(configuration));
     }
 
@@ -328,7 +330,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 /* A disposed receiver must not acknowledge data. Returning normally
                  * would let the Aeron assembler advance its cursor even though the Store
                  * binary was discarded. */
-                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                throw new ReplicationUnavailableException("Storage binary merger is disposed");
             }
             final ByteBuffer[] sourceBuffers = StorageBinaryBuffers
                     .importArray(data);
@@ -349,7 +351,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         /// the binary over, a validation throw must still release the native
         /// buffers instead of leaking them. A `null` binary fails with
         /// [NullPointerException]; malformed buffers fail with
-        /// [StorageBinaryDataException].
+        /// [CorruptReplicationDataException].
         ///
         /// @param data complete binary whose direct buffers may be transferred
         /// @return always `true`; the receiver owns the buffers after return
@@ -362,7 +364,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
                 }
                 if (this.disposed) {
-                    throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                    throw new ReplicationUnavailableException("Storage binary merger is disposed");
                 }
                 /* Import is deferred to the drained batch so replay amortizes
                  * Store commits, fsyncs, materialization, and index refresh. */
@@ -394,7 +396,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
             if (this.disposed) {
                 StorageBinaryDataImporter.release(ownedBuffers);
-                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                throw new ReplicationUnavailableException("Storage binary merger is disposed");
             }
 
             final long incomingBytes;
@@ -444,12 +446,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
                     }
                     if (this.disposed) {
-                        throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                        throw new ReplicationUnavailableException("Storage binary merger is disposed");
                     }
                     final long queuedAfterAdmission = Math.addExact(this.cachedBytes, incomingBytes);
                     final long residentAfterAdmission = Math.addExact(queuedAfterAdmission, this.inFlightBytes);
                     if (residentAfterAdmission > this.maxCachedBytes) {
-                        throw new StorageBinaryDataLifecycleException(
+                        throw new ReplicationUnavailableException(
                                 "Storage binary materialization cache is full: %s queued plus %s in-flight bytes with a %s byte limit"
                                         .formatted(this.cachedBytes, this.inFlightBytes, this.maxCachedBytes));
                     }
@@ -481,7 +483,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                              * documented disposal refusal, not a raw executor
                              * rejection. */
                             if (failure instanceof RejectedExecutionException && this.disposed) {
-                                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed", failure);
+                                throw new ReplicationUnavailableException("Storage binary merger is disposed", failure);
                             }
                             throw failure;
                         }
@@ -741,7 +743,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 final long elapsedMs =
                         TimeUnit.NANOSECONDS.toMillis(materializedAt - startedNanos);
                 if (elapsedMs > this.materializationBudgetMs) {
-                    final StorageBinaryDataLifecycleException terminal = new StorageBinaryDataLifecycleException(
+                    final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
                             "Timed out while applying Store data: batch took %s ms with a budget of %s ms"
                                     .formatted(elapsedMs, this.materializationBudgetMs));
                     this.noteFailure(terminal.getMessage(), terminal);
@@ -764,7 +766,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
 
         private void onMaterializationBudgetExpired(final long startedNanos) {
             if (this.batchActiveSinceNanos != startedNanos) return;
-            final StorageBinaryDataLifecycleException terminal = new StorageBinaryDataLifecycleException(
+            final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
                     "Timed out while applying Store data after %s ms; the Store callback is still running"
                             .formatted(this.materializationBudgetMs));
             if (this.failure.compareAndSet(null, terminal)) {
@@ -794,7 +796,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     }
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    throw new StorageBinaryDataLifecycleException(
+                    throw new ReplicationUnavailableException(
                             "Storage graph update worker was interrupted", interrupted);
                 }
                 this.flushRequested = false;
@@ -828,7 +830,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
                     }
                     if (this.disposed) {
-                        throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                        throw new ReplicationUnavailableException("Storage binary merger is disposed");
                     }
                     if (remaining <= 0L) {
                         /* Slices of one apply timeout with the shared retry
@@ -847,7 +849,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         remaining = this.drainedCondition.awaitNanos(remaining);
                     } catch (final InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
-                        throw new StorageBinaryDataLifecycleException(
+                        throw new ReplicationUnavailableException(
                                 "Interrupted while waiting for import data task", interrupted);
                     }
                 }
@@ -898,7 +900,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
             }
             if (this.disposed) {
-                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                throw new ReplicationUnavailableException("Storage binary merger is disposed");
             }
             final ArrayList<PersistenceTypeDefinition> remoteTypes =
                     this.parseRemoteTypeDefinitions(Objects.requireNonNull(typeDictionaryData, "typeDictionaryData"));
@@ -958,7 +960,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 /// Filters remote definitions against the local dictionary.
         ///
         /// Read-only: unknown remote types are collected, structurally
-        /// conflicting types fail with [StorageBinaryDataException]. Runs on
+        /// conflicting types fail with [CorruptReplicationDataException]. Runs on
         /// the coordinator's read side when one is wired.
         ///
         /// @param remoteTypes parsed remote definitions
@@ -977,7 +979,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         LOGGER.log(Level.DEBUG, "New type: %s".formatted(remoteType.typeName()));
                         pending.add(remoteType);
                     } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
-                        throw new StorageBinaryDataException(
+                        throw new CorruptReplicationDataException(
                                 "Remote type definition conflicts with local definition: %s <> %s"
                                         .formatted(localType, remoteType));
                     }
@@ -1009,7 +1011,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     if (localType == null) {
                         this.foundation.getTypeHandlerManager().ensureTypeHandler(remoteType);
                     } else if (!PersistenceTypeDescription.equalStructure(localType, remoteType)) {
-                        throw new StorageBinaryDataException(
+                        throw new CorruptReplicationDataException(
                                 "Remote type definition conflicts with local definition: %s <> %s"
                                         .formatted(localType, remoteType));
                     }
@@ -1053,14 +1055,14 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     this.executor.shutdownNow();
                     terminated = this.executor.awaitTermination(this.disposeInterruptTimeoutMs, TimeUnit.MILLISECONDS);
                     if (!terminated) {
-                        throw new StorageBinaryDataLifecycleException(
+                        throw new ReplicationUnavailableException(
                                 "Storage graph update worker did not terminate; native buffers remain owned by it");
                     }
                 }
             } catch (final InterruptedException e) {
                 this.executor.shutdownNow();
                 Thread.currentThread().interrupt();
-                throw new StorageBinaryDataLifecycleException("Interrupted while waiting for storage graph updates", e);
+                throw new ReplicationUnavailableException("Interrupted while waiting for storage graph updates", e);
             } finally {
                 this.watchdog.shutdownNow();
                 if (terminated || this.executor.isTerminated()) this.releaseCachedData();
@@ -1088,7 +1090,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
             }
             if (this.disposed) {
-                throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
+                throw new ReplicationUnavailableException("Storage binary merger is disposed");
             }
             /*
              * The normal merger deliberately delays materialization to coalesce updates.
@@ -1131,7 +1133,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 Thread.currentThread().interrupt();
                 this.noteFailure("Interrupted while waiting for imported Store data materialization", e);
                 this.releaseCachedData();
-                throw new StorageBinaryDataLifecycleException(
+                throw new ReplicationUnavailableException(
                         "Interrupted while waiting for imported Store data materialization", e);
             } catch (final ExecutionException e) {
                 final RuntimeException mergerFailure = this.failure.get();
@@ -1193,11 +1195,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
 
         /* Records the first wait/interrupt/timeout failure and returns it; later
          * failures are dropped so concurrent paths cannot overwrite the root
-         * cause. Lifecycle outcomes carry [StorageBinaryDataLifecycleException]
+         * cause. Lifecycle outcomes carry [ReplicationUnavailableException]
          * so callers can distinguish an unusable-but-healthy transport message
          * from a corrupt/unusable assembled one. */
         private RuntimeException recordLifecycleFailure(final String message, final Throwable cause) {
-            this.failure.compareAndSet(null, new StorageBinaryDataLifecycleException(message, cause));
+            this.failure.compareAndSet(null, new ReplicationUnavailableException(message, cause));
             return this.failure.get();
         }
 

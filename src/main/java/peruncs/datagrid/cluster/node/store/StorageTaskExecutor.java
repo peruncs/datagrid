@@ -16,7 +16,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
     ///
     /// @param connection Store connection
     /// @return task executor
-    static StorageTaskExecutor New(final StorageConnection connection) {
+    static StorageTaskExecutor create(final StorageConnection connection) {
         return new Default(Objects.requireNonNull(connection, "connection"));
     }
 

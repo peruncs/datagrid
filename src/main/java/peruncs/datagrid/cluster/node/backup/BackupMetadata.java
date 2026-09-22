@@ -90,7 +90,7 @@ public record BackupMetadata(
     /// @param manualSlot whether the backup uses the manual slot
     /// @param cursor     replication cursor stored with the backup, or `null`
     /// @return new backup metadata with a random backup id
-    public static BackupMetadata New(final long timestamp, final boolean manualSlot, final ReplicationCursor cursor) {
+    public static BackupMetadata create(final long timestamp, final boolean manualSlot, final ReplicationCursor cursor) {
         final AeronReplicationCursor aeron = decodeAeron(cursor);
         if (cursor != null && "aeron".equalsIgnoreCase(cursor.transport()) && aeron == null) {
             throw new IllegalArgumentException(

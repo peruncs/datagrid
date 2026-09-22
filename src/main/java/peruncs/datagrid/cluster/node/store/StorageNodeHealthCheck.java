@@ -15,11 +15,11 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
     /// @param storageController Store controller
     /// @param replicationHealth replication health
     /// @return health check
-    static StorageNodeHealthCheck New(
+    static StorageNodeHealthCheck create(
             final StorageController storageController,
             final ReplicationHealth replicationHealth
     ) {
-        return New(storageController, replicationHealth, () -> true);
+        return create(storageController, replicationHealth, () -> true);
     }
 
         /// Creates a health check that also observes node maintenance health.
@@ -28,7 +28,7 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
     /// @param replicationHealth replication health
     /// @param maintenanceHealthy maintenance-health predicate
     /// @return health check
-    static StorageNodeHealthCheck New(
+    static StorageNodeHealthCheck create(
             final StorageController storageController,
             final ReplicationHealth replicationHealth,
             final BooleanSupplier maintenanceHealthy

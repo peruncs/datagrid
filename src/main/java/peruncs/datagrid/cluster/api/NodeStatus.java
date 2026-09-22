@@ -2,6 +2,13 @@ package peruncs.datagrid.cluster.api;
 
 /// Tells an operator whether this node can serve traffic and keep up with replication.
 ///
+/// `FAILED` means stop serving and inspect the terminal cause. `DEGRADED`
+/// means the node may still serve but an Archive or maintenance dependency
+/// needs attention. `RESEED_REQUIRED` means stop the node and restore a
+/// compatible Store image before restarting. Replication lag is
+/// `latestSequence - currentSequence` when both values are non-negative;
+/// negative sentinel values mean that metric is unavailable.
+///
 /// @param writer whether this node owns the writer role
 /// @param ready whether it may serve requests
 /// @param healthy whether it has no terminal failure

@@ -34,7 +34,7 @@ public interface StorageBackupManager {
     /// @param dataClient           replication client
     /// @param retention            log retention policy
     /// @return backup manager
-    static StorageBackupManager New(
+    static StorageBackupManager create(
             final StorageConnection storageConnection,
             final int maxBackupCount,
             final StorageBackupBackend storageBackupBackend,
@@ -191,7 +191,7 @@ public interface StorageBackupManager {
              * and recording. The backup id is random, so concurrent
              * publishers never share an archive name. */
             final ReplicationCursor cursor = this.cursorSupplier.get();
-            final var newBackup = BackupMetadata.New(timestamp, useManualSlot, cursor);
+            final var newBackup = BackupMetadata.create(timestamp, useManualSlot, cursor);
             final var localIdentity = BackupMetadata.Identity.of(cursor);
 
             Throwable operationFailure = null;

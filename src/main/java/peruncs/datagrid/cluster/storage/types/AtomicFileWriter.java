@@ -29,6 +29,8 @@ public final class AtomicFileWriter {
     }
 
     private static final Logger LOGGER = System.getLogger(AtomicFileWriter.class.getName());
+    private static final boolean WINDOWS = System.getProperty("os.name", "")
+            .toLowerCase(Locale.ROOT).startsWith("windows");
     private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
     private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY = PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
 
@@ -252,7 +254,7 @@ public final class AtomicFileWriter {
         if (parent == null) {
             return;
         }
-        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
+        if (WINDOWS) {
             /* Windows cannot open a directory as a channel; NTFS does not
              * expose an equivalent directory-flush operation. */
             return;

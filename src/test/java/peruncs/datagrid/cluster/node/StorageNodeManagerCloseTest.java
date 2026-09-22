@@ -72,7 +72,7 @@ class StorageNodeManagerCloseTest {
             final StorageNodeManager.Role role,
             final CountingHandler distributor, final CountingHandler client,
             final CountingHandler health, final CountingHandler position) {
-        return StorageNodeManager.New(new StorageNodeManager.Configuration(
+        return StorageNodeManager.create(new StorageNodeManager.Configuration(
                 tracked(StorageBinaryDataDistributor.class, distributor),
                 tracked(StorageTaskExecutor.class, new CountingHandler()),
                 tracked(StorageBinaryDataClient.class, client),

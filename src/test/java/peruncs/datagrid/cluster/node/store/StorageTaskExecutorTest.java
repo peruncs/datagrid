@@ -49,7 +49,7 @@ class StorageTaskExecutorTest {
     @Test
     void concurrentRunChecksRunsOnce() throws Exception {
         final GatedConnection gated = new GatedConnection();
-        try (final StorageTaskExecutor executor = StorageTaskExecutor.New(gated.connection)) {
+        try (final StorageTaskExecutor executor = StorageTaskExecutor.create(gated.connection)) {
             executor.runChecks();
             await(gated.entered, "check task did not start");
             assertTrue(executor.isRunningChecks());
@@ -67,7 +67,7 @@ class StorageTaskExecutorTest {
     @Test
     void closeDuringRunCancelsTheCheck() throws Exception {
         final GatedConnection gated = new GatedConnection();
-        final StorageTaskExecutor executor = StorageTaskExecutor.New(gated.connection);
+        final StorageTaskExecutor executor = StorageTaskExecutor.create(gated.connection);
         executor.runChecks();
         await(gated.entered, "check task did not start");
         executor.close();
@@ -79,7 +79,7 @@ class StorageTaskExecutorTest {
     @Test
     void runChecksAfterCloseIsRejected() {
         final GatedConnection gated = new GatedConnection();
-        final StorageTaskExecutor executor = StorageTaskExecutor.New(gated.connection);
+        final StorageTaskExecutor executor = StorageTaskExecutor.create(gated.connection);
         executor.close();
         assertThrows(IllegalStateException.class, executor::runChecks);
     }

@@ -3,8 +3,8 @@ package peruncs.datagrid.cluster.node.store;
 import org.eclipse.serializer.afs.types.ADirectory;
 
 import java.time.Duration;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -21,8 +21,8 @@ public interface StorageDiskSpaceReader {
     ///
     /// @param storageDir storage directory
     /// @return disk-space reader
-    static StorageDiskSpaceReader New(final ADirectory storageDir) {
-        return New(storageDir, DEFAULT_CACHE_TTL);
+    static StorageDiskSpaceReader create(final ADirectory storageDir) {
+        return create(storageDir, DEFAULT_CACHE_TTL);
     }
 
         /// Creates a disk-space reader with an explicit cache lifetime.
@@ -30,7 +30,7 @@ public interface StorageDiskSpaceReader {
     /// @param storageDir storage directory
     /// @param cacheTtl   how long one measurement is reused
     /// @return disk-space reader
-    static StorageDiskSpaceReader New(final ADirectory storageDir, final Duration cacheTtl) {
+    static StorageDiskSpaceReader create(final ADirectory storageDir, final Duration cacheTtl) {
         return new Default(notNull(storageDir), notNull(cacheTtl));
     }
 

@@ -10,7 +10,7 @@ class StorageBinaryDataClientTest {
         /// transport position instead of failing or fabricating one.
     @Test
     void noOpClientReportsBestEffortStopResult() {
-        final StorageBinaryDataClient client = StorageBinaryDataClient.NoOp(null);
+        final StorageBinaryDataClient client = StorageBinaryDataClient.noOp(null);
         assertSame(ReplicationCursor.NONE, client.cursor(),
                 "a null starting cursor must normalize to the none cursor");
 

@@ -52,11 +52,11 @@ final class BackupCrashChildMain {
             throw new IllegalArgumentException("unknown backup crash point: %s".formatted(point));
         }
         final Path volume = base.resolve("backup-volume");
-        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.New(volume);
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(volume);
         mark(control.resolve("ready"), "ready");
         if ("MID_EXPORT".equals(point)) {
             backend.createBackup(new ParkingExportConnection(control, point), CURSOR,
-                    BackupMetadata.New(11L, false, CURSOR));
+                    BackupMetadata.create(11L, false, CURSOR));
             return;
         }
         /* The production seam is ScopedValue-scoped: an instance created
@@ -68,7 +68,7 @@ final class BackupCrashChildMain {
                 awaitParent(control.resolve("release"));
             }
         }, () -> backend.createBackup(new TestStorageConnection(), CURSOR,
-                BackupMetadata.New(11L, false, CURSOR)));
+                BackupMetadata.create(11L, false, CURSOR)));
         mark(control.resolve("outcome"), "PUBLISHED");
     }
 

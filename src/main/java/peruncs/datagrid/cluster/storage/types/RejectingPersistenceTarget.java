@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.node.exceptions.ReaderWriteRejectedException;
+import peruncs.datagrid.cluster.errors.ReaderWriteRejectedException;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -34,7 +34,7 @@ public final class RejectingPersistenceTarget implements PersistenceTarget<Binar
     ///
     /// @param delegate lifecycle delegate, never `null`
     /// @return rejecting target
-    public static RejectingPersistenceTarget New(final PersistenceTarget<Binary> delegate) {
+    public static RejectingPersistenceTarget create(final PersistenceTarget<Binary> delegate) {
         return new RejectingPersistenceTarget(notNull(delegate));
     }
 

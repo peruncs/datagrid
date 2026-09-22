@@ -49,7 +49,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
 
         @Override
         public StorageBinaryDataDistributor distributor(final String streamName, final boolean asynchronous) {
-            return StorageBinaryDataDistributor.NoOp();
+            return StorageBinaryDataDistributor.noOp();
         }
 
         @Override
@@ -60,7 +60,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
                 final ReplicationCursor startingCursor,
                 final boolean commitPosition
         ) {
-            return StorageBinaryDataClient.NoOp(startingCursor);
+            return StorageBinaryDataClient.noOp(startingCursor);
         }
 
         @Override
