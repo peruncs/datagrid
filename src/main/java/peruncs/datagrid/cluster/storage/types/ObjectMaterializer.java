@@ -80,9 +80,18 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
 
         /// Materializes each object collected by [#acceptEntityData(long, long)].
     void materialize() {
+        this.materialize(this.loader);
+    }
+
+    /// Materializes through a loader whose source is selected by the caller.
+    ///
+    /// The distributed importer uses this overload to make the loader consume
+    /// the just-received binary rather than asking Store's normal source for an
+    /// entity that was already live before the import.
+    void materialize(final PersistenceLoader sourceLoader) {
         try {
             // Batch-materializes all collected objects in the live graph
-            this.loader.collect(_ ->
+            sourceLoader.collect(_ ->
             {
                 // no-op
             }, this.oids);

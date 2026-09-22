@@ -59,6 +59,11 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
      * only the target's local-rejection path keeps its admission hold across
      * that bounded abort offer. */
     private final ReentrantLock writeLock = new ReentrantLock();
+    /* Set before Archive maintenance waits for the current writer. New Store
+     * writes fail immediately instead of queueing behind an operation whose
+     * caller may already have timed out. */
+    private final java.util.concurrent.atomic.AtomicBoolean maintenance =
+            new java.util.concurrent.atomic.AtomicBoolean();
     /* Writer identity pinned at claim time. The publisher seeds its sequence
      * from the checkpoint (recording ID + epoch) at construction; these values
      * refuse a publisher that was swapped or rewound underneath this
@@ -194,7 +199,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// @return the value returned by the operation
     <T> T executeWriteAtomically(final WriteOperation<T> operation) {
         Objects.requireNonNull(operation, "operation");
-        this.writeLock.lock();
+        this.lockWriteAdmission();
         try {
             this.ensureNotCommitting();
             this.ensureWriterIdentity();
@@ -561,6 +566,9 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// @return operation result
     public long withWritesPaused(final LongSupplier maintenance) {
         Objects.requireNonNull(maintenance, "maintenance");
+        if (!this.maintenance.compareAndSet(false, true)) {
+            throw new IllegalStateException("Aeron Archive maintenance is already in progress");
+        }
         this.writeLock.lock();
         try {
             this.awaitNoCommit();
@@ -570,6 +578,31 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             return maintenance.getAsLong();
         } finally {
             this.writeLock.unlock();
+            this.maintenance.set(false);
+        }
+    }
+
+    private void lockWriteAdmission() {
+        if (this.maintenance.get()) {
+            throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+        }
+        if (this.writeLock.tryLock()) {
+            if (!this.maintenance.get()) return;
+            this.writeLock.unlock();
+        }
+        while (!this.writeLock.tryLock()) {
+            if (this.maintenance.get()) {
+                throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+            }
+            java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+            if (Thread.interrupted()) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while waiting for Aeron write admission");
+            }
+        }
+        if (this.maintenance.get()) {
+            this.writeLock.unlock();
+            throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
         }
     }
 

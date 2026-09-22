@@ -88,7 +88,7 @@ class TransactionAssemblerBarrierTest {
         assertEquals(2, assembler.lastResolvedSequence());
         assertEquals(2, assembler.lastAppliedSequence());
         assertEquals(0, assembler.unflushedDeliveryCount());
-        assertEquals(3, resolved.get());
+        assertEquals(1, resolved.get(), "one durable callback represents the barrier tail");
         assertEquals(1, before.get());
         assertEquals(1, after.get());
     }
@@ -105,7 +105,7 @@ class TransactionAssemblerBarrierTest {
         assertEquals(0, resolved.get());
         commitOne(assembler, 3);
         assertEquals(3, assembler.lastResolvedSequence(), "the fourth commit fills the window and flushes");
-        assertEquals(4, resolved.get());
+        assertEquals(1, resolved.get(), "a full window publishes one durable tail");
         assertEquals(0, assembler.unflushedDeliveryCount());
     }
 

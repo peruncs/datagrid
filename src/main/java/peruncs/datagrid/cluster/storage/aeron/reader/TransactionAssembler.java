@@ -118,7 +118,7 @@ final class TransactionAssembler {
     /// @param initialSequence    last sequence already resolved, or `-1` before the first
     /// @param initialPosition    last resolved Archive position, or `-1` before the first
     /// @param receiver           destination for complete Store binaries
-    /// @param transactionResolved callback after a transaction resolves; never `null`
+    /// @param transactionResolved callback after a delivery barrier resolves durably; never `null`
     /// @param deliveryListener   callback around Store materialisation, or `null`
     /// @param wireNonce          expected accidental-cross-wiring nonce; must not be zero
     TransactionAssembler(
@@ -872,6 +872,7 @@ final class TransactionAssembler {
          * holds no monitor: failure latching and disposal stay lock-free, and a
          * snapshot of the staged entries is only taken below. */
         if (hasData) receiver.awaitApplied();
+        boolean resolved = false;
         while (true) {
             final PendingDelivery entry;
             synchronized (this.barrierLock) {
@@ -894,8 +895,12 @@ final class TransactionAssembler {
                 this.lastResolutionDictionaryLength = entry.dictionaryLength();
                 this.lastResolutionDictionaryChunkCount = entry.dictionaryChunkCount();
             }
-            this.transactionResolved.run();
+            resolved = true;
         }
+        /* A barrier is one durability unit. Publishing intermediate callbacks
+         * lets retention observe a sequence whose cursor has not been forced
+         * yet. Notify exactly once, after the tail boundary is installed. */
+        if (resolved) this.transactionResolved.run();
         synchronized (this.barrierLock) {
             this.deliveryMarkerOpen = false;
             this.barrierHasData = false;

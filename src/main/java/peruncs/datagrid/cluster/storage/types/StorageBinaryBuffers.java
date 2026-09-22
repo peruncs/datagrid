@@ -16,13 +16,10 @@ import java.util.Objects;
 /// owned extraction hands the original direct buffers back to a caller that
 /// already owns the binary.
 final class StorageBinaryBuffers {
-        /* The merger calls the array collectors once per transaction. Reuse one
-         * collection scratch list per thread instead of allocating (and growing)
-         * a new list for every batch. Only the returned arrays escape; the
-         * scratch is always cleared before reuse. Virtual threads each hold
-         * their own short-lived list, which dies with the thread. */
-    private static final ThreadLocal<ArrayList<ByteBuffer>> SCRATCH =
-            ThreadLocal.withInitial(ArrayList::new);
+    /* Lexically scoped scratch storage cannot leak from a platform-thread pool
+     * or be retained by a parked virtual thread. The public operation binds one
+     * list and its recursive body consumes that binding. */
+    private static final ScopedValue<ArrayList<ByteBuffer>> SCRATCH = ScopedValue.newInstance();
 
     private StorageBinaryBuffers() {
     }
@@ -37,6 +34,9 @@ final class StorageBinaryBuffers {
     /// @return import-ready duplicate views
     static ByteBuffer[] importArray(final Binary data) {
         Objects.requireNonNull(data, "data");
+        if (!SCRATCH.isBound()) {
+            return ScopedValue.where(SCRATCH, new ArrayList<>()).call(() -> importArray(data));
+        }
         final boolean wrapped = data instanceof ChunksWrapper;
         final ArrayList<ByteBuffer> scratch = scratch();
         try {
@@ -49,7 +49,7 @@ final class StorageBinaryBuffers {
                     }
                     final ByteBuffer view = source.duplicate();
                     if (wrapped) {
-                        final int logicalLength = view.position();
+                        final int logicalLength = logicalLength(data, view);
                         if (logicalLength < 0 || logicalLength > view.capacity()) {
                             throw new StorageBinaryDataException("invalid wrapped binary buffer length");
                         }
@@ -74,6 +74,9 @@ final class StorageBinaryBuffers {
     /// @return original direct buffers, positioned at zero
     static ByteBuffer[] ownedArray(final Binary data) {
         Objects.requireNonNull(data, "data");
+        if (!SCRATCH.isBound()) {
+            return ScopedValue.where(SCRATCH, new ArrayList<>()).call(() -> ownedArray(data));
+        }
         /* One pass with one reused scratch list: each buffer is validated and
          * normalized inline, so no boxed length list and no second loop.
          * Normalizing before a later buffer fails is unobservable: the caller

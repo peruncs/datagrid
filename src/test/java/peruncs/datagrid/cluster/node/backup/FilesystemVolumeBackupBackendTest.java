@@ -17,6 +17,7 @@ import java.nio.channels.FileLock;
 import java.nio.file.*;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermission;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -490,6 +491,34 @@ class FilesystemVolumeBackupBackendTest {
                 "an abandoned export workspace must be reaped");
         assertTrue(Files.exists(live, LinkOption.NOFOLLOW_LINKS),
                 "a fresh export workspace may belong to a live publisher");
+    }
+
+    /// A stale-looking workspace remains live while another process owns its lease.
+    @Test
+    void doesNotReapAnOldLeasedExportWorkspace(@TempDir final Path backupVolume) throws Exception {
+        final Path live = Files.createDirectory(
+                backupVolume.resolve(FilesystemVolumeBackupBackend.EXPORT_WORKSPACE_PREFIX + "leased"));
+        Files.writeString(live.resolve("partial"), "still exporting");
+        Files.setLastModifiedTime(live, FileTime.fromMillis(
+                System.currentTimeMillis()
+                        - FilesystemVolumeBackupBackend.ORPHAN_WORKSPACE_MAX_AGE.toMillis()
+                        - 60_000L));
+        final Path lease = live.resolveSibling(live.getFileName() + ".lease");
+
+        try (FileChannel channel = FileChannel.open(lease,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock ignored = channel.lock()) {
+            FilesystemVolumeBackupBackend.New(backupVolume);
+            assertTrue(Files.exists(live, LinkOption.NOFOLLOW_LINKS),
+                    "age alone must never delete an actively leased export");
+        }
+    }
+
+    /// Publication lock waits must always have a positive operator budget.
+    @Test
+    void rejectsNonPositivePublicationLockTimeout(@TempDir final Path backupVolume) {
+        assertThrows(IllegalArgumentException.class, () -> FilesystemVolumeBackupBackend.New(
+                backupVolume, BackupArchiveLimits.defaults(), Duration.ZERO));
     }
 
     /// Verifies repeated listings reuse the archive metadata cache instead of

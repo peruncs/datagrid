@@ -42,18 +42,21 @@ final class StorageBinaryDataImporter {
     }
 
     private static ByteBuffer[] importAndReset(final StorageConnection storage, final ByteBuffer[] importedBuffers) {
-        /* Storage.importData consumes the supplied views synchronously and does not
-         * retain them. Reset the owned buffers afterwards because their positions are
-         * needed by the deferred materializer. */
-        storage.importData(X.Enum(importedBuffers));
-        for (final ByteBuffer imported : importedBuffers) imported.position(0);
+        /* Store consumes and collapses the supplied views. Give it duplicates
+         * so the owned buffers retain their exact position/limit for deferred
+         * materialization (owned imports are not necessarily capacity-sized). */
+        final ByteBuffer[] views = new ByteBuffer[importedBuffers.length];
+        for (int index = 0; index < importedBuffers.length; index++) {
+            views[index] = importedBuffers[index].duplicate();
+        }
+        storage.importData(X.Enum(views));
         return importedBuffers;
     }
 
     /// Copies the source buffers into distinctly owned native buffers without
     /// importing them. Used by the merger's deferred-import path: the borrowed
     /// binary is released by the transport as soon as its buffers are safely
-    /// copied, and the actual Store import runs later, once per drained batch.
+    /// copied, and the ordered Store imports run later inside one drained batch.
     ///
     /// @param sourceBuffers normalized source buffers
     /// @return distinctly owned native copies
@@ -99,15 +102,44 @@ final class StorageBinaryDataImporter {
     /// @throws RuntimeException if import fails; the caller retains ownership and
     ///                          must release the buffers
     static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers) {
+        return importDirect(storage, buffers, buffers.length);
+    }
+
+    /// Imports the populated prefix of a reusable direct-buffer array.
+    ///
+    /// The import collection is reused by the calling worker thread, avoiding
+    /// an exact-size array allocation for every differently sized replay batch.
+    ///
+    /// @param storage destination Store connection
+    /// @param buffers reusable buffer array
+    /// @param length populated prefix length
+    /// @return `true` when the prefix was imported
+    static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers, final int length) {
+        return importDirect(storage, buffers, 0, length);
+    }
+
+    /// Imports one transaction slice from a reusable batch array.
+    static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers,
+                                final int offset, final int length) {
         notNull(storage);
         notNull(buffers);
-        for (final ByteBuffer buffer : buffers) {
+        if (offset < 0 || length < 0 || offset > buffers.length - length) {
+            throw new IllegalArgumentException(
+                    "import range out of bounds: offset=%s, length=%s".formatted(offset, length));
+        }
+        final int end = offset + length;
+        for (int index = offset; index < end; index++) {
+            final ByteBuffer buffer = buffers[index];
             if (buffer == null || !buffer.isDirect()) return false;
             if (buffer.position() != 0) {
                 throw new IllegalArgumentException("import buffers must be normalized to position zero");
             }
         }
-        importAndReset(storage, buffers);
+        final ByteBuffer[] imported = new ByteBuffer[length];
+        for (int source = offset, target = 0; source < end; source++, target++) {
+            imported[target] = buffers[source].duplicate();
+        }
+        storage.importData(X.Enum(imported));
         return true;
     }
 

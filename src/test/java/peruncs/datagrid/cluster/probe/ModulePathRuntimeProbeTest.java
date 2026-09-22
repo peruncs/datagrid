@@ -67,6 +67,7 @@ class ModulePathRuntimeProbeTest {
                 java,
                 "--enable-preview",
                 "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--add-exports", "peruncs.datagrid.cluster/peruncs.datagrid.cluster.storage.types=ALL-UNNAMED",
                 "--module-path", String.join(File.pathSeparator, modulePath),
                 "--add-modules", "peruncs.datagrid.cluster",
                 "-cp", String.join(File.pathSeparator, classPath),

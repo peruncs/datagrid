@@ -582,6 +582,35 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// An operation that exceeds the controller budget permanently fails retention.
+    @Test
+    void operationTimeoutFailsRetentionClosed() throws Exception {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        try (final AeronArchiveRetention retention = new AeronArchiveRetention(Set.of(READER), () -> {
+            entered.countDown();
+            try {
+                release.await();
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
+                ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
+                () -> true, null, 50L)) {
+            try {
+                final IllegalStateException timeout = assertThrows(IllegalStateException.class,
+                        () -> retention.recordReaderWatermark(cursor(READER)));
+                assertTrue(timeout.getMessage().contains("Timed out"));
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                assertNotNull(retention.failure());
+                assertThrows(IllegalStateException.class, retention::isSupported,
+                        "a timed-out Archive client must never be reused");
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
     /// Verifies an interrupted close stays retryable until agent termination and quorum cleanup complete.
     @Test
     void interruptedCloseStaysRetryableUntilQuorumCleanup() throws Exception {

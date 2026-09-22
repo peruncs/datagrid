@@ -86,28 +86,27 @@ class ModuleDescriptorConsistencyTest {
                 "upstream has not published the corrected spelling yet: " + required);
     }
 
-        /// Public method signatures expose these upstream contracts, so their
-    /// modules must be readable by consumers without repeating every dependency.
+        /// The exported facade contains only JDK types, so implementation
+    /// dependencies must not leak into a consumer's module graph.
     @Test
-    void publicUpstreamContractsAreTransitive() {
-        /* Keep this list synchronized with public exported signatures. A new
-         * upstream type in an exported method must add its module here, or the
-         * consumer-facing JPMS contract is no longer checked. */
-        final Set<ModuleDescriptor.Requires> required = descriptor().requires();
-        final Set<String> transitive = required.stream()
+    void exportedFacadeHasNoTransitiveImplementationDependencies() {
+        final Set<String> transitive = descriptor().requires().stream()
                 .filter(requirement -> requirement.modifiers().contains(ModuleDescriptor.Requires.Modifier.TRANSITIVE))
                 .map(ModuleDescriptor.Requires::name)
                 .collect(Collectors.toSet());
 
-        assertTrue(transitive.containsAll(Set.of(
-                        "org.eclipse.store.storage.embedded",
-                        "org.eclipse.serializer.persistence",
-                        "org.eclipse.serializer.persistence.binary",
-                        "org.eclipse.store.storage",
-                        "org.eclipse.store.gigamap",
-                        "org.eclipse.store.gigamap.lucene",
-                        "org.eclipes.store.gigamap.jvector")),
-                () -> "public upstream contracts require transitive modules: " + transitive);
+        assertTrue(transitive.isEmpty(),
+                "implementation dependencies must not be transitive: " + transitive);
+    }
+
+    /// Exactly one application facade is exported; transport, Store adapter,
+    /// backup, checkpoint, and index packages remain implementation details.
+    @Test
+    void exportsOnlyTheApplicationFacade() {
+        final Set<String> exports = descriptor().exports().stream()
+                .map(ModuleDescriptor.Exports::source)
+                .collect(Collectors.toSet());
+        assertEquals(Set.of("peruncs.datagrid.cluster.api"), exports);
     }
 
         /// No public type from a non-exported package of this module may

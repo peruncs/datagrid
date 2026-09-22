@@ -7,6 +7,7 @@ import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -18,6 +19,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiConsumer;
 
 import static org.eclipse.serializer.util.X.notNull;
@@ -59,6 +61,8 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// older than this bound cannot belong to a live publication on any
     /// reasonable volume, so it is deleted and logged.
     static final Duration ORPHAN_WORKSPACE_MAX_AGE = Duration.ofHours(24);
+    private static final Duration DEFAULT_PUBLICATION_LOCK_TIMEOUT = Duration.ofSeconds(30);
+    private static final long LOCK_RETRY_NANOS = Duration.ofMillis(10).toNanos();
 
     private static final System.Logger LOGGER = System.getLogger(FilesystemVolumeBackupBackend.class.getName());
     /* One advisory lock file per volume serializes archive publication.
@@ -70,11 +74,13 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
      * The in-JVM mutex covers threads of this process; the file lock covers
      * separate processes sharing the volume. */
     private static final String PUBLISH_LOCK_FILE_NAME = ".publish.lock";
+    private static final String WORKSPACE_LEASE_SUFFIX = ".lease";
     private static final ConcurrentHashMap<Path, PublicationMutex> PUBLISH_MUTEXES = new ConcurrentHashMap<>();
 
     private final Path backupVolumePath;
     private final Path userUploadedStorageArchivePath;
     private final BackupArchiveLimits limits;
+    private final Duration publicationLockTimeout;
     private final ConcurrentHashMap<String, CachedArchive> archiveCache = new ConcurrentHashMap<>();
     private final AtomicBoolean orphanWorkspacesReaped = new AtomicBoolean();
 
@@ -84,7 +90,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// @return filesystem backup backend
     public static FilesystemVolumeBackupBackend New(final Path backupVolumePath) {
         return new FilesystemVolumeBackupBackend(notNull(backupVolumePath).toAbsolutePath().normalize(),
-                BackupArchiveLimits.defaults());
+                BackupArchiveLimits.defaults(), DEFAULT_PUBLICATION_LOCK_TIMEOUT);
     }
 
     /// Creates a filesystem backup backend with explicit operator budgets.
@@ -98,7 +104,23 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     ) {
         return new FilesystemVolumeBackupBackend(
                 notNull(backupVolumePath).toAbsolutePath().normalize(),
-                notNull(limits));
+                notNull(limits), DEFAULT_PUBLICATION_LOCK_TIMEOUT);
+    }
+
+    /// Creates a backend with explicit restore and publication-lock budgets.
+    ///
+    /// @param backupVolumePath backup volume path
+    /// @param limits extraction and entry budgets
+    /// @param publicationLockTimeout maximum wait for a peer publisher
+    /// @return filesystem backup backend
+    public static FilesystemVolumeBackupBackend New(
+            final Path backupVolumePath,
+            final BackupArchiveLimits limits,
+            final Duration publicationLockTimeout
+    ) {
+        return new FilesystemVolumeBackupBackend(
+                notNull(backupVolumePath).toAbsolutePath().normalize(),
+                notNull(limits), notNull(publicationLockTimeout));
     }
 
     private static final class PublicationMutex {
@@ -118,10 +140,15 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         void run() throws NodeLibraryException;
     }
 
-    private FilesystemVolumeBackupBackend(final Path backupVolumePath, final BackupArchiveLimits limits) {
+    private FilesystemVolumeBackupBackend(final Path backupVolumePath, final BackupArchiveLimits limits,
+                                          final Duration publicationLockTimeout) {
+        if (publicationLockTimeout.isNegative() || publicationLockTimeout.isZero()) {
+            throw new IllegalArgumentException("publicationLockTimeout must be positive");
+        }
         this.backupVolumePath = backupVolumePath;
         this.userUploadedStorageArchivePath = backupVolumePath.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE);
         this.limits = limits;
+        this.publicationLockTimeout = publicationLockTimeout;
         this.probeAtomicPublication();
     }
 
@@ -310,9 +337,10 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     @Override
     public void createBackup(final StorageConnection connection, final ReplicationCursor cursor, final BackupMetadata backup)
             throws NodeLibraryException {
-        final Path exportDirectory = this.createTemporaryDirectory(EXPORT_WORKSPACE_PREFIX);
+        final ExportWorkspace workspace = this.createExportWorkspace();
+        final Path exportDirectory = workspace.path();
         Throwable primaryFailure = null;
-        try {
+        try (workspace) {
             final var fs = Storage.DefaultFileSystem();
             connection.issueFullBackup(fs.ensureDirectory(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY)));
             ensureNotInterrupted();
@@ -483,7 +511,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
                 final Path lockFile = this.backupVolumePath.resolve(PUBLISH_LOCK_FILE_NAME);
                 try (FileChannel lockChannel = FileChannel.open(lockFile,
                         StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                     FileLock ignored = lockChannel.lock()) {
+                     FileLock ignored = acquireLock(lockChannel, this.publicationLockTimeout, lockFile)) {
                     operation.run();
                 } catch (final OverlappingFileLockException overlapped) {
                     throw new NodeLibraryException(
@@ -684,6 +712,28 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         return createTemporaryDirectory(this.backupVolumePath, prefix);
     }
 
+    private ExportWorkspace createExportWorkspace() throws NodeLibraryException {
+        final Path path = this.createTemporaryDirectory(EXPORT_WORKSPACE_PREFIX);
+        final Path leasePath = workspaceLeasePath(path);
+        try {
+            final FileChannel channel = FileChannel.open(leasePath,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            try {
+                return new ExportWorkspace(path, leasePath, channel, channel.lock());
+            } catch (final IOException | RuntimeException | Error failure) {
+                try {
+                    channel.close();
+                } catch (final IOException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw failure;
+            }
+        } catch (final IOException | RuntimeException failure) {
+            StorageFileOperations.cleanup(path, failure);
+            throw new NodeLibraryException("Failed to lease backup export workspace %s".formatted(path), failure);
+        }
+    }
+
     private Path createTemporaryDirectory(final Path parent, final String prefix) throws NodeLibraryException {
         try {
             StorageFileOperations.ensureNoSymbolicLinks(parent);
@@ -755,14 +805,88 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     }
 
     private void deleteOrphanWorkspace(final Path workspace) {
-        try {
-            StorageFileOperations.deleteDirectory(workspace);
-            LOGGER.log(System.Logger.Level.INFO,
-                    "Deleted backup workspace %s abandoned for more than %s"
-                            .formatted(workspace, ORPHAN_WORKSPACE_MAX_AGE));
-        } catch (final NodeLibraryException failure) {
+        final Path leasePath = workspaceLeasePath(workspace);
+        boolean deleted = false;
+        try (FileChannel channel = FileChannel.open(leasePath,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            final FileLock lock;
+            try {
+                lock = channel.tryLock();
+            } catch (final OverlappingFileLockException liveInThisProcess) {
+                return;
+            }
+            if (lock == null) return;
+            try (lock) {
+                StorageFileOperations.deleteDirectory(workspace);
+                LOGGER.log(System.Logger.Level.INFO,
+                        "Deleted backup workspace %s abandoned for more than %s"
+                                .formatted(workspace, ORPHAN_WORKSPACE_MAX_AGE));
+                deleted = true;
+            }
+        } catch (final IOException | NodeLibraryException failure) {
             LOGGER.log(System.Logger.Level.WARNING,
                     "Failed to delete orphaned backup workspace %s".formatted(workspace), failure);
+        }
+        if (deleted) {
+            try {
+                Files.deleteIfExists(leasePath);
+            } catch (final IOException failure) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Failed to delete orphaned backup workspace lease %s".formatted(leasePath), failure);
+            }
+        }
+    }
+
+    private static Path workspaceLeasePath(final Path workspace) {
+        return workspace.resolveSibling(workspace.getFileName() + WORKSPACE_LEASE_SUFFIX);
+    }
+
+    private static FileLock acquireLock(final FileChannel channel, final Duration timeout, final Path path)
+            throws IOException {
+        final long deadline = ReplicationRetry.deadlineNanos(timeout.toNanos());
+        while (true) {
+            try {
+                final FileLock lock = channel.tryLock();
+                if (lock != null) return lock;
+            } catch (final OverlappingFileLockException overlap) {
+                throw new IOException("backup publication lock is already held by this process at %s".formatted(path), overlap);
+            }
+            if (ReplicationRetry.expired(deadline)) {
+                throw new IOException("timed out after %s ms waiting for backup publication lock at %s"
+                        .formatted(timeout.toMillis(), path));
+            }
+            LockSupport.parkNanos(LOCK_RETRY_NANOS);
+            if (Thread.interrupted()) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted while waiting for backup publication lock at %s".formatted(path));
+            }
+        }
+    }
+
+    private record ExportWorkspace(Path path, Path leasePath, FileChannel channel, FileLock lock)
+            implements AutoCloseable {
+        @Override
+        public void close() {
+            IOException failure = null;
+            try {
+                this.lock.close();
+            } catch (final IOException closeFailure) {
+                failure = closeFailure;
+            }
+            try {
+                this.channel.close();
+            } catch (final IOException closeFailure) {
+                if (failure == null) failure = closeFailure;
+                else failure.addSuppressed(closeFailure);
+            }
+            try {
+                Files.deleteIfExists(this.leasePath);
+            } catch (final IOException closeFailure) {
+                if (failure == null) failure = closeFailure;
+                else failure.addSuppressed(closeFailure);
+            }
+            if (failure != null) throw new NodeLibraryException(
+                    "Failed to release backup export workspace lease %s".formatted(this.leasePath), failure);
         }
     }
 

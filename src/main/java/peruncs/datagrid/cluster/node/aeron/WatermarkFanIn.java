@@ -43,6 +43,7 @@ final class WatermarkFanIn {
      * until the writer boundary exists instead of dropping that acknowledgement. */
     private final ConcurrentHashMap<UUID, AeronReaderWatermark> deferredWatermarks = new ConcurrentHashMap<>();
     private volatile AeronWatermarkChannel channel;
+    private volatile RuntimeException retentionFailure;
 
     WatermarkFanIn(
             final Supplier<Aeron> aeron,
@@ -77,6 +78,8 @@ final class WatermarkFanIn {
     ///
     /// @return channel failure, or `null` while healthy
     RuntimeException channelFailure() {
+        final RuntimeException failedRetention = this.retentionFailure;
+        if (failedRetention != null) return failedRetention;
         final AeronWatermarkChannel current = this.channel;
         return current == null ? null : current.failure();
     }
@@ -129,6 +132,8 @@ final class WatermarkFanIn {
                             }
                             controller.recordReaderWatermark(watermark);
                             } catch (final RuntimeException rejected) {
+                                final RuntimeException failedRetention = controller.failure();
+                                if (failedRetention != null) this.retentionFailure = failedRetention;
                                 /* Reject one malformed, stale, or future
                                  * watermark without killing delivery of later valid progress. */
                                 this.noteRejection("Aeron reader watermark", rejected);
@@ -163,6 +168,8 @@ final class WatermarkFanIn {
                 controller.recordReaderWatermark(entry.getValue());
                 this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
             } catch (final RuntimeException failure) {
+                final RuntimeException failedRetention = controller.failure();
+                if (failedRetention != null) this.retentionFailure = failedRetention;
                 /* The writer boundary is now available, so a rejected token is
                  * stale or invalid; remove it and wait for the reader's next durable
                  * cursor rather than retrying a bad value forever. */

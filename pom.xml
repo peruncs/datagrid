@@ -38,7 +38,10 @@
 		<aeron.version>1.53.1</aeron.version>
 		<lucene.version>9.12.3</lucene.version>
 		<agrona.version>2.6.0</agrona.version>
-		<jvector.version>4.0.0-rc.8</jvector.version>
+		<jvector.version>4.0.0-rc.9</jvector.version>
+		<!-- Optional diagnostics injected into every forked test JVM, for example
+		     -Dtest.jvm.args=-XX:StartFlightRecording=... . Empty in normal builds. -->
+		<test.jvm.args></test.jvm.args>
 	</properties>
 
 	<!-- Eclipse Store/Serializer snapshots track upstream daily builds. The snapshot
@@ -208,6 +211,20 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>default-testCompile</id>
+						<configuration>
+							<!-- Tests are patched into the production module, so grant the
+							     test compilation its test-only JFR read edge explicitly. -->
+							<compilerArgs>
+								<arg>--enable-preview</arg>
+								<arg>--add-modules</arg><arg>jdk.jfr</arg>
+								<arg>--add-reads</arg><arg>peruncs.datagrid.cluster=jdk.jfr</arg>
+							</compilerArgs>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
@@ -234,7 +251,7 @@
 					     module-info.class and checks its name, requirements, and exports
 					     against the source tree. -->
 					<useModulePath>false</useModulePath>
-					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+					<argLine>${test.jvm.args} --enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 				</configuration>
 			</plugin>
 			<plugin>
@@ -244,12 +261,13 @@
 				<configuration>
 					<!-- Keep forked integration fixtures on the class path. -->
 					<useModulePath>false</useModulePath>
-					<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
-					<excludes>
-						<!-- The writer/reader soak only runs under -Psoak; it is
-						     far too heavy for the default gate. -->
-						<exclude>**/AeronWriterReaderSoakIT.java</exclude>
-					</excludes>
+					<argLine>${test.jvm.args} --enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+					<!-- The default gate is deliberately small. Crash, recovery,
+					     full Store, and soak matrices have explicit profiles below. -->
+					<includes>
+						<include>**/AeronArchiveReplicationIT.java</include>
+						<include>**/AeronUdpReplicationIT.java</include>
+					</includes>
 				</configuration>
 				<executions>
 					<execution>
@@ -515,6 +533,25 @@
 	     full relocations plus minimizeJar behind a new profile. -->
 	<profiles>
 		<profile>
+			<id>integration</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-failsafe-plugin</artifactId>
+						<version>3.6.0</version>
+						<configuration>
+							<useModulePath>false</useModulePath>
+							<includes combine.self="override">
+								<include>**/AeronStoreIntegrationIT.java</include>
+								<include>**/AeronDriverFailureIT.java</include>
+							</includes>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+		<profile>
 			<id>crashmatrix</id>
 			<build>
 				<plugins>
@@ -536,7 +573,7 @@
 								<include>**/AeronCrashMatrixIT.java</include>
 								<include>**/AeronReaderCrashMatrixIT.java</include>
 							</includes>
-							<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+							<argLine>${test.jvm.args} --enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 							<forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>
 							<parallel>none</parallel>
 							<systemPropertyVariables>
@@ -588,7 +625,7 @@
 							<excludes combine.self="override" />
 							<!-- Continuous low-overhead flight recording, dumped at fork
 							     exit for offline analysis (jfr summary/print). -->
-							<argLine>--enable-preview --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -XX:StartFlightRecording=disk=true,dumponexit=true,filename=${project.build.directory}/soak.jfr,maxsize=250M,settings=default</argLine>
+							<argLine>--enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -XX:StartFlightRecording=disk=true,dumponexit=true,filename=${project.build.directory}/soak.jfr,maxsize=250M,settings=default</argLine>
 							<forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>
 							<parallel>none</parallel>
 							<systemPropertyVariables>

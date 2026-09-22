@@ -16,6 +16,9 @@
 /// Aeron is the only transport. Each provider owns its embedded MediaDriver
 /// and Archive lifecycle, closed from the storage-manager shutdown callback.
 ///
+/// # Cluster nodes authntication and authorization not required
+/// It is assumed the nodes are tightly controlled in a air-gaped network (VPN)
+///
 /// # Archive-first replication
 ///
 /// Readers must never apply a transaction the writer did not durably
@@ -154,35 +157,23 @@
 /// @since 1.0
 module peruncs.datagrid.cluster
 {
-    requires transitive org.eclipse.store.storage.embedded;
+    requires org.eclipse.store.storage.embedded;
     requires org.eclipse.serializer.base;
-    requires transitive org.eclipse.serializer.persistence;
-    requires transitive org.eclipse.serializer.persistence.binary;
-    requires transitive org.eclipse.store.storage;
+    requires org.eclipse.serializer.persistence;
+    requires org.eclipse.serializer.persistence.binary;
+    requires org.eclipse.store.storage;
     requires org.eclipse.serializer.afs;
     requires org.eclipse.store.afs.nio;
     requires io.aeron.client;
     requires io.aeron.archive;
     requires io.aeron.driver;
     requires org.agrona;
-    requires transitive org.eclipse.store.gigamap;
-    requires transitive org.eclipse.store.gigamap.lucene;
+    requires org.eclipse.store.gigamap;
+    requires org.eclipse.store.gigamap.lucene;
     // The upstream module name is misspelled; keep the dependency aligned with
     // the published module descriptor.
-    requires transitive org.eclipes.store.gigamap.jvector;
+    requires org.eclipes.store.gigamap.jvector;
     requires jvector;
     requires org.apache.lucene.core;
-    // Test-only offline analysis of the soak flight recording; no production
-    // code touches JFR APIs. Static (compile-only): production consumers never
-    // need jdk.jfr on their module path at runtime.
-    requires static jdk.jfr;
-
-    exports peruncs.datagrid.cluster.node.exceptions;
-    exports peruncs.datagrid.cluster.node.backup;
-    exports peruncs.datagrid.cluster.node.replication;
-    exports peruncs.datagrid.cluster.node;
-    exports peruncs.datagrid.cluster.node.store;
-    exports peruncs.datagrid.cluster.node.aeron;
-    exports peruncs.datagrid.cluster.storage.types;
-    exports peruncs.datagrid.cluster.storage.aeron.config;
+    exports peruncs.datagrid.cluster.api;
 }

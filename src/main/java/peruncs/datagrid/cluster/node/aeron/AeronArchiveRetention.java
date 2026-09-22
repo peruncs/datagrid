@@ -17,6 +17,7 @@ import java.nio.channels.SeekableByteChannel;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.*;
 
 /// Writer-owned Archive retention controller.
@@ -71,6 +72,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             .name("datagrid-retention-agent", 0L)
             .factory());
     private final ThreadLocal<Boolean> onAgentThread = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private final AtomicReference<RuntimeException> terminalFailure = new AtomicReference<>();
     private static final System.Logger LOGGER = System.getLogger(AeronArchiveRetention.class.getName());
 
         /// Default bound for one queued retention command, in milliseconds.
@@ -139,10 +141,14 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// the AeronArchive client in an unknown state. Instead the wait fails,
     /// the future is cancelled without interruption (so a command that has not
     /// started yet never runs), and a running command is allowed to finish.
-    /// Callers must treat a timed-out operation as unknown-until-retried.
+    /// The controller becomes terminal after a timeout because the Archive
+    /// client's protocol state and any held writer-maintenance fence are no
+    /// longer safe to reuse.
     /// Failures keep their original type so policy rejections stay
     /// distinguishable from transport faults.
     private <T> T onAgent(final Producer<T> operation) {
+        final RuntimeException failed = this.terminalFailure.get();
+        if (failed != null) throw new IllegalStateException("Aeron retention is unavailable", failed);
         if (Boolean.TRUE.equals(this.onAgentThread.get())) return operation.produce();
         final Future<T> submitted;
         try {
@@ -161,9 +167,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             return submitted.get(this.operationTimeoutMillis, TimeUnit.MILLISECONDS);
         } catch (final TimeoutException timeout) {
             submitted.cancel(false);
-            throw new IllegalStateException(
+            final IllegalStateException terminal = new IllegalStateException(
                     "Timed out waiting for Aeron retention after %s ms".formatted(this.operationTimeoutMillis),
                     timeout);
+            this.terminalFailure.compareAndSet(null, terminal);
+            throw terminal;
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting for Aeron retention", interrupted);
@@ -173,6 +181,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             if (cause instanceof RuntimeException runtime) throw runtime;
             throw new IllegalStateException("Aeron retention failed", cause);
         }
+    }
+
+    /// Returns the terminal retention failure, or `null` while available.
+    RuntimeException failure() {
+        return this.terminalFailure.get();
     }
 
         /// Runs one void retention command on the single agent thread.

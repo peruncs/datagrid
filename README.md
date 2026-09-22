@@ -24,9 +24,9 @@ mvn test
 mvn package
 ```
 
-Heavier suites live behind profiles (see below for knobs): `mvn verify -Psoak`
-for the writer/reader soak and `mvn verify -Pcrashmatrix` for the forked crash
-matrix.
+Heavier suites live behind profiles (see below for knobs): `mvn verify
+-Pintegration` for embedded Store/Aeron integration, `mvn verify -Pcrashmatrix`
+for the forked crash matrix, and `mvn verify -Psoak` for the writer/reader soak.
 
 The checkout is aligned with the locally installed Eclipse Store/Serializer
 `5.0.0-SNAPSHOT` artifacts; use one dated snapshot repository state for a
@@ -41,6 +41,23 @@ metadata across nodes.
     <artifactId>peruncs-cluster</artifactId>
 </dependency>
 ```
+
+The JPMS module exports only `peruncs.datagrid.cluster.api`. Open a node through
+the small owned facade; Aeron, Store adapters, checkpoints, indexes, backup
+internals, and lifecycle controls deliberately remain inaccessible:
+
+```java
+try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
+    MyRoot root = node.store().read(java.util.function.Function.identity());
+    root.add("value");
+    node.store().store(root);
+    NodeStatus status = node.status();
+}
+```
+
+`ClusterStore.read` is the required reader-side graph boundary. Mutations are
+accepted only on the writer. `ClusterNode.close` owns and closes the complete
+node lifecycle.
 
 ## Cluster node with Aeron replication
 `peruncs-cluster` runs a Data Grid node with Aeron replication, including the

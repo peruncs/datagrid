@@ -131,6 +131,8 @@ class ReaderLiveIndexFreshnessTest {
                             new java.util.concurrent.atomic.AtomicBoolean(true);
                     final java.util.concurrent.atomic.AtomicLong tornQueries =
                             new java.util.concurrent.atomic.AtomicLong();
+                    final java.util.concurrent.atomic.AtomicReference<RuntimeException> firstTornQuery =
+                            new java.util.concurrent.atomic.AtomicReference<>();
                     final List<Thread> queryWorkers = new ArrayList<>();
                     for (final ReaderNode reader : readers) {
                         queryWorkers.add(Thread.ofVirtual().name("freshness-query").unstarted(() -> {
@@ -140,6 +142,7 @@ class ReaderLiveIndexFreshnessTest {
                                     reader.graphCoordinator().read(() -> queryReader(reader, queryRandom));
                                 } catch (final RuntimeException torn) {
                                     tornQueries.incrementAndGet();
+                                    firstTornQuery.compareAndSet(null, torn);
                                 }
                                 Thread.yield();
                             }
@@ -180,7 +183,8 @@ class ReaderLiveIndexFreshnessTest {
                     streaming.set(false);
                     for (final Thread queryWorker : queryWorkers) queryWorker.join();
                     assertEquals(0, tornQueries.get(),
-                            "joined reads observed torn batch boundaries during import");
+                            () -> "joined reads observed torn batch boundaries during import; first="
+                                    + firstTornQuery.get());
                     for (final ReaderNode reader : readers) {
                         reader.await(AeronStoreIntegrationIT.latest(writerTransport));
                         reader.assertHealthy();

@@ -606,22 +606,27 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-        /// Retires the dead subscription and clears incomplete native state.
+    /// Retires the dead subscription after committing the current barrier.
     ///
     /// Runs on the polling thread, so closing here never races a fragment
-    /// callback. A partially assembled transaction is dropped — its native
-    /// buffers are released — because the replacement replay restarts that
-    /// transaction from the last resolved position.
+    /// callback. Completed staged transactions must become durable before the
+    /// subscription is replaced; otherwise replay resumes from the older
+    /// position while the assembler still expects the later sequence. Only a
+    /// partially assembled transaction is dropped and replayed.
     private void tearDownReconnectableSubscription(
             final PersistentSubscription current, final ArchiveException disconnect) {
         this.subscription = null;
         this.live = false;
-        this.assembler.dispose();
-        this.reconnectCause = disconnect;
         try {
-            current.close();
-        } catch (final RuntimeException closeFailure) {
-            disconnect.addSuppressed(closeFailure);
+            this.assembler.flushDeliveries();
+        } finally {
+            this.assembler.dispose();
+            this.reconnectCause = disconnect;
+            try {
+                current.close();
+            } catch (final RuntimeException closeFailure) {
+                disconnect.addSuppressed(closeFailure);
+            }
         }
     }
 

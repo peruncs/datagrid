@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
@@ -139,10 +140,8 @@ class StorageBinaryImportIntegrationTest {
         }
     }
 
-        /// Regression guard for the deferred-import batch: several queued
-    /// transactions enter the Store as ONE importData call when one flush
-    /// drains them together, instead of one import (with its fsync set) per
-    /// transaction.
+        /// Regression guard for preserved Store transaction boundaries inside
+    /// one coalesced graph/index flush.
     @Test
     void coalescedReplayImportsQueuedTransactionsAsOneBatch() throws Exception {
         final Path root = Files.createTempDirectory("datagrid-store-batch-import-");
@@ -167,8 +166,31 @@ class StorageBinaryImportIntegrationTest {
             resumedWriter.shutdown();
             assertEquals(3, capture.transactions.size(), "fixture must capture three transactions");
 
-            final EmbeddedStorageManager reader = foundation(readerPath).start();
+            final EmbeddedStorageFoundation<?> readerFoundation = foundation(readerPath);
+            final EmbeddedStorageManager reader = readerFoundation.start();
             final StorageConnection delegate = reader.createConnection();
+            final long valuesObjectId = delegate.persistenceManager()
+                    .lookupObjectId(((Root) reader.root()).values);
+            assertTrue(valuesObjectId > 0L, "loaded values collection must have a persistent object id");
+            assertTrue(delegate.persistenceManager().objectRegistry().containsLiveObject(valuesObjectId),
+                    "loaded values collection must be live in the object registry");
+            final java.util.Set<Long> importedObjectIds = new java.util.HashSet<>();
+            final BinaryEntityRawDataIterator rawIterator = BinaryEntityRawDataIterator.New();
+            for (final List<ByteBuffer> transaction : capture.transactions) {
+                for (final ByteBuffer buffer : transaction) {
+                    if (buffer.remaining() == 0) continue;
+                    final long address = org.eclipse.serializer.memory.XMemory
+                            .getDirectByteBufferAddress(buffer);
+                    rawIterator.iterateEntityRawData(address, address + buffer.remaining(),
+                            (entity, _) -> {
+                                importedObjectIds.add(Binary.getEntityObjectIdRawValue(entity));
+                                return true;
+                            });
+                }
+            }
+            assertTrue(importedObjectIds.contains(valuesObjectId),
+                    () -> "fixture must carry the loaded values object id " + valuesObjectId
+                            + "; imported=" + importedObjectIds);
             final java.util.concurrent.atomic.AtomicInteger importCalls = new java.util.concurrent.atomic.AtomicInteger();
             final StorageConnection counting = (StorageConnection) java.lang.reflect.Proxy.newProxyInstance(
                     StorageConnection.class.getClassLoader(), new Class<?>[]{StorageConnection.class},
@@ -180,17 +202,20 @@ class StorageBinaryImportIntegrationTest {
             final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
             final StorageBinaryDataMerger merger = StorageBinaryDataMerger.New(
                     StorageBinaryDataMergerTestSupport.configuration(
-                            StorageBinaryDataMergerTestSupport.foundation(), counting,
+                            readerFoundation.getConnectionFoundation(), counting,
                             ObjectGraphUpdateHandler.PerStore(coordinator),
                             0L, 1L << 30, 60_000L, coordinator));
             try {
                 for (final List<ByteBuffer> transaction : capture.transactions) {
-                    merger.receiveDataOwned(org.eclipse.serializer.persistence.binary.types.ChunksWrapper.New(
-                            copy(transaction).toArray(ByteBuffer[]::new)));
+                    final ByteBuffer[] owned = copy(transaction).toArray(ByteBuffer[]::new);
+                    for (final ByteBuffer buffer : owned) buffer.position(buffer.limit());
+                    merger.receiveDataOwned(org.eclipse.serializer.persistence.binary.types.ChunksWrapper.New(owned));
                 }
                 merger.awaitApplied();
-                assertEquals(1, importCalls.get(),
-                        "three queued transactions must enter the Store as one batched import");
+                assertEquals(3, importCalls.get(),
+                        "each Store transaction must retain its import boundary");
+                assertTrue(((Root) reader.root()).values.containsAll(java.util.List.of("one", "two", "three")),
+                        () -> "live graph must reflect imported transactions; actual=" + ((Root) reader.root()).values);
             } finally {
                 merger.dispose();
                 reader.shutdown();
@@ -200,7 +225,7 @@ class StorageBinaryImportIntegrationTest {
             try {
                 final Root importedRoot = restarted.root();
                 assertTrue(importedRoot.values.containsAll(java.util.List.of("one", "two", "three")),
-                        "the batched import must apply every transaction");
+                        () -> "the batched import must apply every transaction; actual=" + importedRoot.values);
                 assertEquals(1, importedRoot.values.stream().filter("one"::equals).count(),
                         "each transaction must be applied exactly once");
             } finally {

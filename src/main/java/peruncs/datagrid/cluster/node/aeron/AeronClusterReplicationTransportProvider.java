@@ -344,7 +344,6 @@ public final class AeronClusterReplicationTransportProvider {
                 }
             }
             final AeronReplicationWriteCoordinator coordinator = this.ensureCoordinator();
-            final WriterIndexValidationGate indexGate = new WriterIndexValidationGate();
             return delegate -> new AeronStorageBinaryReplicationTarget(
                     delegate,
                     coordinator,
@@ -356,17 +355,15 @@ public final class AeronClusterReplicationTransportProvider {
                         }
                     },
                     () -> !(distributor instanceof StorageBinaryDataDistributor cluster) || !cluster.ignoreDistribution(),
-                    /* Writer-side index enforcement: a changed root set is
-                     * re-validated before distribution, while repeated writes
-                     * against an unchanged graph skip the scan. The storage
-                     * connection does not exist during wiring, so the supplier
-                     * is resolved lazily and a null connection (root creation)
-                     * skips the scan. */
+                    /* The reachable index topology can change without replacing
+                     * a Store root, so every distributed write validates the
+                     * live graph. The storage connection does not exist during
+                     * wiring; a null connection during root creation skips it. */
                     () ->
                     {
                         final StorageConnection connection = writerStorage == null ? null : writerStorage.get();
                         if (connection != null) {
-                            indexGate.validate(connection);
+                            ClusterStoreIndexes.validateStorageRoots(connection);
                         }
                     }
             );
@@ -480,30 +477,19 @@ public final class AeronClusterReplicationTransportProvider {
                             if (current != null && current == this.readers.current()) {
                                 final CursorSnapshot snapshot = current.cursorSnapshot();
                                 this.nextSequence.accumulateAndGet(snapshot.sequence() + 1, Math::max);
-                                /* Aeron has no broker offset to commit. Its cursor is the
-                                 * durability boundary for every reader, including ordinary readers;
-                                 * the neutral commitPosition flag only controls broker transports. */
-                                if (cursorListener != null && current.unflushedDeliveryCount() == 0) {
-                                    /* Persist the local recovery cursor before advertising the same
-                                     * boundary to the writer's retention controller. Only the
-                                     * barrier's tail cursor is forced to disk: every earlier cursor
-                                     * in the same delivery barrier is superseded by the tail the
-                                     * moment the barrier completes, so skipping it changes no
-                                     * observable restart boundary. The reader's uncertainty marker
-                                     * spans the whole barrier, keeping the crash contract identical
-                                     * to per-transaction persistence. */
+                                /* A retention watermark is proof of a durable recovery
+                                 * cursor, not merely an applied Store update. Persist the
+                                 * barrier tail first and publish exactly that boundary.
+                                 * Readers without a cursor sink cannot join retention. */
+                                if (cursorListener != null) {
                                     final byte[] position = new AeronReplicationCursor(
                                             this.settings.clusterId(), this.settings.identity().nodeId(), this.settings.identity().storeGeneration(),
                                             this.settings.epoch(), this.currentFencingToken(), recordingId,
                                             snapshot.position(), snapshot.sequence()).encode();
                                     this.runInDeliveryCallback(() -> cursorListener.onApplied(ReplicationCursor.of(
                                             "aeron", this.settings.identity().storeGeneration(), snapshot.sequence(), position)));
+                                    this.publishReaderWatermark(snapshot, recordingId);
                                 }
-                                /* Watermark delivery is independent from the optional neutral
-                                 * cursor callback. A direct Aeron reader may not install a
-                                 * persistence listener, but it must still advance the writer's
-                                 * retention quorum after a durable import. */
-                                this.publishReaderWatermark(snapshot, recordingId);
                             }
                         })
                         .deliveryListener(this.readerDeliveryListener())

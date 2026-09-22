@@ -25,9 +25,9 @@ import static org.eclipse.serializer.util.X.notNull;
 /// Applies committed Store binary data on a reader node.
 ///
 /// Incoming buffers are copied to owned native memory and queued immediately;
-/// the Store import itself is deferred into the drained batch so a replay
-/// backlog applies as a few large imports instead of one import per
-/// transaction. Object-graph materialization is coalesced the same way on a
+/// the Store import itself is deferred into the drained batch so replay work,
+/// graph exclusion, and index refresh are coalesced while each Store
+/// transaction boundary remains intact. Object-graph materialization runs on a
 /// bounded single-thread executor. Providers must call this merger only after
 /// their transport-specific commit validation has completed.
 ///
@@ -197,10 +197,21 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private final ExecutorService executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
                 .name("eclipse-datagrid-store-materializer", 0L)
                 .factory());
+        /* A Store callback can ignore interruption forever. Keep timeout
+         * detection off that worker so health and acknowledgement paths fail
+         * closed even when the callback itself never returns. */
+        private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            final Thread thread = Thread.ofPlatform()
+                    .daemon()
+                    .name("eclipse-datagrid-store-watchdog")
+                    .unstarted(runnable);
+            return thread;
+        });
         /* Every access runs under queueLock (admission, drain, release, and
          * flush checks), so an ArrayDeque is sufficient and avoids the
          * per-node allocation a concurrent queue pays on every offer. */
         private final ArrayDeque<ByteBuffer> cachedData = new ArrayDeque<>();
+        private final ArrayDeque<Integer> cachedTransactionLengths = new ArrayDeque<>();
         /* Queue admission and object-graph materialization are separate concerns.
          * The worker and awaitApplied() can run concurrently, but a Store update
          * must never materialize two batches at once or callbacks can observe and
@@ -237,6 +248,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private volatile boolean disposed;
         private boolean workerScheduled;
         private long cachedBytes;
+        /* Native memory transferred from the queue to the active Store batch.
+         * Guarded by queueLock with cachedBytes so the configured hard cap is
+         * a cap on all merger-owned memory, not just the visible queue. */
+        private long inFlightBytes;
         private volatile Future<?> updateFuture;
         /* Reused batch drain: only ever touched under the materialization
          * lock, which serializes the worker drain and any await-thread drain,
@@ -244,6 +259,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
          * the batch; slots past it are always `null`. Grows to the largest
          * batch seen and stays there. */
         private ByteBuffer[] drainBuffers = new ByteBuffer[16];
+        private int[] drainTransactionLengths = new int[16];
         /* Set inside the batch after validation, before the vector rebuild:
          * the overrun budget bounds materialization, whose cost is
          * batch-proportional, not the rebuild, which scans the whole store and
@@ -318,10 +334,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
             final ByteBuffer[] sourceBuffers = StorageBinaryBuffers
                     .importArray(data);
-            /* The Store import is deferred into the batch drain (see
-             * receiveDataOwned): the borrowed views are copied to owned native
-             * memory first, because the caller's binary is released after this
-             * callback returns. The copy failure path must not leak. */
+            /* Copy before queueing because the caller releases the borrowed
+             * binary as soon as this callback returns. */
             final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.copyOwned(sourceBuffers);
             /* scheduleMaterialization owns cleanup on every rejection.  Releasing here
              * as well would double-free buffers when the worker has already drained its
@@ -352,15 +366,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 if (this.disposed) {
                     throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
                 }
-                /* The Store import is deliberately NOT done here. It is deferred
-                 * into the batch drain in applyData so a backlog replays as a few
-                 * large imports — one Store commit, one import fsync set, one index
-                 * maintenance pass per batch — instead of one per transaction. The
-                 * drain runs under the same materialization exclusion as the former
-                 * inline import, and the transport's uncertainty marker still covers
-                 * data queued but not yet imported, so the crash contract is
-                 * unchanged: only the crash window's granularity moves from one
-                 * transaction to one barrier batch. */
+                /* Import is deferred to the drained batch so replay amortizes
+                 * Store commits, fsyncs, materialization, and index refresh. */
             } catch (final RuntimeException | Error failure) {
                 /* Ownership has not transferred to the deferred-materialization
                  * queue on any of these paths. The Aeron callback contract still
@@ -410,8 +417,9 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             final boolean drainFirst;
             this.queueLock.lock();
             try {
-                final long projected = Math.addExact(this.cachedBytes, incomingBytes);
-                drainFirst = this.cachedBytes > 0 && projected > this.maxCachedBytes;
+                final long projected = Math.addExact(
+                        Math.addExact(this.cachedBytes, this.inFlightBytes), incomingBytes);
+                drainFirst = projected > this.maxCachedBytes;
             } finally {
                 this.queueLock.unlock();
             }
@@ -440,19 +448,21 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     if (this.disposed) {
                         throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
                     }
-                    final long projectedBytes = Math.addExact(this.cachedBytes, incomingBytes);
+                    final long projectedBytes = Math.addExact(
+                            Math.addExact(this.cachedBytes, this.inFlightBytes), incomingBytes);
                     if (projectedBytes > this.maxCachedBytes) {
                         throw new StorageBinaryDataLifecycleException(
-                                "Storage binary materialization cache is full: %s queued bytes with a %s byte limit"
-                                        .formatted(this.cachedBytes, this.maxCachedBytes));
+                                "Storage binary materialization cache is full: %s queued plus %s in-flight bytes with a %s byte limit"
+                                        .formatted(this.cachedBytes, this.inFlightBytes, this.maxCachedBytes));
                     }
                     /* Bulk add without a wrapper allocation: Collections.addAll
                      * passes the array straight through to per-element add. */
                     Collections.addAll(this.cachedData, ownedBuffers);
+                    this.cachedTransactionLengths.addLast(ownedBuffers.length);
                     this.cachedBufferCount += ownedBuffers.length;
                     this.cachedBytes = projectedBytes;
                     queued = true;
-                    queuedBytes = this.cachedBytes;
+                    queuedBytes = Math.addExact(this.cachedBytes, this.inFlightBytes);
                     if (!this.workerScheduled) {
                         try {
                             this.workerScheduled = true;
@@ -465,6 +475,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                             for (final ByteBuffer buffer : ownedBuffers) {
                                 removeIdentical(this.cachedData, buffer);
                             }
+                            this.cachedTransactionLengths.removeLast();
                             this.cachedBytes = Math.subtractExact(this.cachedBytes, incomingBytes);
                             this.cachedBufferCount -= ownedBuffers.length;
                             queued = false;
@@ -568,6 +579,9 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * scratch grows once to the largest batch seen. */
                 this.queueLock.lock();
                 final int pending;
+                final int pendingTransactions;
+                final long startedNanos;
+                long batchBytes = 0L;
                 try {
                     final long count = this.cachedBufferCount;
                     if (count > Integer.MAX_VALUE) {
@@ -575,8 +589,21 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     }
                     pending = (int) count;
                     if (pending == 0) return;
+                    pendingTransactions = this.cachedTransactionLengths.size();
                     if (pending > this.drainBuffers.length) {
                         this.drainBuffers = new ByteBuffer[pending];
+                    }
+                    if (pendingTransactions > this.drainTransactionLengths.length) {
+                        this.drainTransactionLengths = new int[pendingTransactions];
+                    }
+                    int countedBuffers = 0;
+                    for (int index = 0; index < pendingTransactions; index++) {
+                        final int transactionLength = this.cachedTransactionLengths.removeFirst();
+                        this.drainTransactionLengths[index] = transactionLength;
+                        countedBuffers = Math.addExact(countedBuffers, transactionLength);
+                    }
+                    if (countedBuffers != pending) {
+                        throw new IllegalStateException("Store transaction boundaries do not match queued buffers");
                     }
                     for (int index = 0; index < pending; index++) {
                         final ByteBuffer next = this.cachedData.poll();
@@ -585,8 +612,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         }
                         this.cachedBufferCount--;
                         this.cachedBytes = Math.subtractExact(this.cachedBytes, next.remaining());
+                        batchBytes = Math.addExact(batchBytes, next.remaining());
                         this.drainBuffers[index] = next;
                     }
+                    this.inFlightBytes = Math.addExact(this.inFlightBytes, batchBytes);
+                    startedNanos = System.nanoTime();
+                    this.batchActiveSinceNanos = startedNanos;
                     /* The batch just left the queue: a waiter parked on the
                      * byte limit may now fit again. Signalling while nobody
                      * waits costs an uncontended signal only. */
@@ -606,30 +637,26 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * never returns still pins this worker; dispose() bounds that
                  * wait and reports the pinned buffers instead of freeing them
                  * underneath the Store. */
-                final long startedNanos = System.nanoTime();
-                this.batchActiveSinceNanos = startedNanos;
                 this.materializedAtNanos = 0L;
+                final ScheduledFuture<?> watchdogTask = this.watchdog.schedule(
+                        () -> this.onMaterializationBudgetExpired(startedNanos),
+                        this.materializationBudgetMs,
+                        TimeUnit.MILLISECONDS);
                 try {
                     this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
                     {
-                        /* One coordinator write section covers the batch end
-                         * to end: Store import, materialization, validation,
-                         * and index refresh. Application reads joining the read
+                        /* One coordinator write section covers import,
+                         * materialization, validation, and index refresh. Application reads joining the read
                          * side observe either the pre-batch or the post-batch
                          * boundary — never a materialized graph with stale
                          * search views. */
-                        /* The deferred import runs here, once for the whole
-                         * batch: every drained transaction's buffers enter the
-                         * Store as one import, so a backlog replays with one
-                         * Store commit (and one fsync set) per batch instead
-                         * of one per transaction. It runs inside the same
-                         * materialization exclusion the delivery-time import
-                         * used, so it can never interleave with a dictionary
-                         * merge or a materialization. */
-                        StorageBinaryDataImporter.importDirect(this.storage,
-                                this.drainBuffers.length == pending
-                                        ? this.drainBuffers
-                                        : Arrays.copyOf(this.drainBuffers, pending));
+                        int transactionOffset = 0;
+                        for (int index = 0; index < pendingTransactions; index++) {
+                            final int transactionLength = this.drainTransactionLengths[index];
+                            StorageBinaryDataImporter.importDirect(
+                                    this.storage, this.drainBuffers, transactionOffset, transactionLength);
+                            transactionOffset += transactionLength;
+                        }
                         /* Reader-side index maintenance follows the import: imports
                          * materialize entities without the map API, so no
                          * index group observes them and both search views
@@ -644,7 +671,21 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                          * only for non-empty batches: applyData returns early
                          * when idle. */
                         ClusterStoreIndexes.refreshImportedIndexes(this.storage, this.maxValidatedIndexObjects);
-                        StorageBinaryDataMaterializer.materialize(this.storage, this.drainBuffers, pending);
+                        transactionOffset = 0;
+                        for (int index = 0; index < pendingTransactions; index++) {
+                            final int transactionLength = this.drainTransactionLengths[index];
+                            /* Serializer's loader treats one source response as
+                             * one version per object. Preserve Store commit
+                             * boundaries during graph application too: replay
+                             * batches commonly contain consecutive versions of
+                             * the same object. Index views are retired first so
+                             * GigaMap's reloaded index state cannot retain a
+                             * view over the pre-import files. */
+                            StorageBinaryDataMaterializer.materialize(
+                                    this.foundation, this.storage, this.drainBuffers,
+                                    transactionOffset, transactionLength);
+                            transactionOffset += transactionLength;
+                        }
                         /* Reader-side index enforcement plus the vector
                          * rebuild share one root-graph traversal: a writer that
                          * smuggled an external Lucene directory or a
@@ -670,17 +711,23 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     }
                     throw failure;
                 } finally {
-                    this.batchActiveSinceNanos = 0L;
-                    this.queueLock.lock();
+                    watchdogTask.cancel(false);
                     try {
-                        /* The batch is over: any producer parked on the
-                         * over-limit wait must re-watch both conditions. */
-                        this.drainedCondition.signalAll();
+                        StorageBinaryDataImporter.release(this.drainBuffers, pending);
                     } finally {
-                        this.queueLock.unlock();
+                        Arrays.fill(this.drainBuffers, 0, pending, null);
+                        Arrays.fill(this.drainTransactionLengths, 0, pendingTransactions, 0);
+                        this.queueLock.lock();
+                        try {
+                            this.inFlightBytes = Math.subtractExact(this.inFlightBytes, batchBytes);
+                            this.batchActiveSinceNanos = 0L;
+                            /* The batch and its native memory are both released:
+                             * waiters may now re-evaluate the complete cap. */
+                            this.drainedCondition.signalAll();
+                        } finally {
+                            this.queueLock.unlock();
+                        }
                     }
-                    StorageBinaryDataImporter.release(this.drainBuffers, pending);
-                    Arrays.fill(this.drainBuffers, 0, pending, null);
                 }
                 /* Bounds materialization only: the vector rebuild above scans
                  * the whole store, so including it would fail a healthy
@@ -713,15 +760,21 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             }
         }
 
-        private void applyDataSafely() {
-            final boolean hasData;
-            this.queueLock.lock();
-            try {
-                hasData = !this.cachedData.isEmpty();
-            } finally {
-                this.queueLock.unlock();
+        private void onMaterializationBudgetExpired(final long startedNanos) {
+            if (this.batchActiveSinceNanos != startedNanos) return;
+            final StorageBinaryDataLifecycleException terminal = new StorageBinaryDataLifecycleException(
+                    "Timed out while applying Store data after %s ms; the Store callback is still running"
+                            .formatted(this.materializationBudgetMs));
+            if (this.failure.compareAndSet(null, terminal)) {
+                LOGGER.log(Level.ERROR, terminal.getMessage(), terminal);
+                this.queueLock.lock();
+                try {
+                    this.drainedCondition.signalAll();
+                    this.flushCondition.signalAll();
+                } finally {
+                    this.queueLock.unlock();
+                }
             }
-            if (hasData) this.applyData();
         }
 
         private void awaitFlushRequestOrTimeout() {
@@ -768,7 +821,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                  * the bounded wait on a wedged materialization (fail-closed
                  * within the retry budget); the queue check applies the byte
                  * backpressure. Both signals arrive via drainedCondition. */
-                while (this.cachedBytes > this.cacheBytesLimit || this.batchActiveSinceNanos != 0L) {
+                while (Math.addExact(this.cachedBytes, this.inFlightBytes) > this.cacheBytesLimit) {
                     if (this.failure.get() != null) {
                         throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
                     }
@@ -811,6 +864,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     pending.add(buffer);
                 }
                 this.cachedBufferCount = 0L;
+                this.cachedTransactionLengths.clear();
                 this.cachedBytes = 0L;
                 /* Failure- and shutdown-path cleanup only: every queued buffer
                  * is distinctly owned, so the unconditional release frees
@@ -1006,6 +1060,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                 Thread.currentThread().interrupt();
                 throw new StorageBinaryDataLifecycleException("Interrupted while waiting for storage graph updates", e);
             } finally {
+                this.watchdog.shutdownNow();
                 if (terminated || this.executor.isTerminated()) this.releaseCachedData();
             }
         }
@@ -1044,18 +1099,32 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             /* Wake a worker that is in its coalescing delay.  The flag avoids a lost
              * signal when the worker is between checking the flag and awaiting
              * the condition. */
-            this.queueLock.lock();
             try {
-                this.flushRequested = true;
-                this.flushCondition.signalAll();
-            } finally {
-                this.queueLock.unlock();
-            }
-            this.applyDataSafely();
-            final Future<?> pending = this.updateFuture;
-            if (pending == null) return;
-            try {
-                this.awaitMaterialization(pending, "imported Store data materialization");
+                while (true) {
+                    this.queueLock.lock();
+                    try {
+                        if (this.cachedData.isEmpty() && this.inFlightBytes == 0L) return;
+                        this.flushRequested = true;
+                        this.flushCondition.signalAll();
+                    } finally {
+                        this.queueLock.unlock();
+                    }
+                    final Future<?> pending = this.updateFuture;
+                    if (pending == null) {
+                        throw this.recordLifecycleFailure(
+                                "Storage data is queued without a materialization worker",
+                                new IllegalStateException("missing materialization future"));
+                    }
+                    this.awaitMaterialization(pending, "imported Store data materialization");
+                    final RuntimeException terminal = this.failure.get();
+                    if (terminal != null) {
+                        throw new ExecutionException(terminal);
+                    }
+                    /* A completed future may have been replaced while a later
+                     * admission scheduled the next worker. Recheck queue and
+                     * in-flight ownership under their lock before declaring
+                     * the durability boundary complete. */
+                }
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 this.noteFailure("Interrupted while waiting for imported Store data materialization", e);
@@ -1073,8 +1142,8 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
             } catch (final TimeoutException e) {
                 final RuntimeException terminal = this.recordLifecycleFailure(
                         "Timed out waiting for imported Store data materialization", e);
-                /* Only queued buffers are safe to release here. The callback represented by
-                 * pending may still own the batch whose wait timed out. */
+                /* Only queued buffers are safe to release here. A callback may
+                 * still own the in-flight batch whose wait timed out. */
                 this.releaseCachedData();
                 throw terminal;
             }
@@ -1101,6 +1170,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     pending.get(this.applyTimeoutMs, TimeUnit.MILLISECONDS);
                     return;
                 } catch (final TimeoutException timeout) {
+                    final RuntimeException terminal = this.failure.get();
+                    if (terminal != null) {
+                        throw new ExecutionException(terminal);
+                    }
                     if (retries-- <= 0) {
                         throw timeout;
                     }

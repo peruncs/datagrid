@@ -33,6 +33,40 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies checkpoint transitions and fail-closed writer coordination.
 class AeronReplicationWriteCoordinatorTest {
+    /// New writes fail instead of waiting behind Archive retention maintenance.
+    @Test
+    void maintenanceClosesWriteAdmission() throws Exception {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        final Thread maintenance = Thread.ofVirtual().start(() -> coordinator.withWritesPaused(() -> {
+            entered.countDown();
+            try {
+                release.await();
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            return 0L;
+        }));
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            final long start = System.nanoTime();
+            assertThrows(IllegalStateException.class,
+                    () -> coordinator.executeWriteAtomically(() -> null));
+            assertTrue(System.nanoTime() - start < TimeUnit.SECONDS.toNanos(1),
+                    "write admission must fail promptly during maintenance");
+        } finally {
+            release.countDown();
+            maintenance.join(5_000L);
+            coordinator.dispose();
+        }
+    }
+
         /// A publisher has one owner so dictionaries and reservations cannot diverge.
     @Test
     void rejectsMultipleCoordinatorsForOnePublisher() {
