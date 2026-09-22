@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -107,6 +108,27 @@ class AeronArchiveRetentionTest {
     private static ReplicationCursor cursor(final UUID reader) {
         return ReplicationCursor.of("aeron", GENERATION, 4, AeronReaderWatermark.of(
                 reader, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode());
+    }
+
+    /// A queued watermark remains owned by retention after a temporary writer
+    /// failure, so a later reader update can retry it without a resend.
+    @Test
+    void retriesQueuedWatermarkAfterTemporaryFailure() {
+        final UUID secondReader = UUID.randomUUID();
+        final AtomicInteger writerChecks = new AtomicInteger();
+        try (final AeronArchiveRetention retention = retention(Set.of(READER, secondReader), null, () -> {
+            if (writerChecks.incrementAndGet() == 1) throw new IllegalStateException("writer temporarily unavailable");
+        })) {
+            assertTrue(retention.offerReaderWatermark(AeronReaderWatermark.of(
+                    READER, CLUSTER, GENERATION, 1, 17, 4, 4_096)));
+            assertFalse(retention.isSupported());
+            assertNotNull(retention.failure(), "the asynchronous failure must reach health status");
+
+            assertTrue(retention.offerReaderWatermark(AeronReaderWatermark.of(
+                    secondReader, CLUSTER, GENERATION, 1, 17, 4, 4_096)));
+            assertTrue(retention.isSupported(), "the first reader's retained progress must be retried");
+            assertNull(retention.failure());
+        }
     }
 
     /// Verifies retention without watermark delivery stays unsupported and rejects retirement without starting the writer.

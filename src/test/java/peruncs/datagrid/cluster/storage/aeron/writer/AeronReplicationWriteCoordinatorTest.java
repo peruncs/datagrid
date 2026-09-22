@@ -892,10 +892,10 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// While a commit waits for its Archive position, a second writer must
-        /// be refused by the commit guard instead of blocking on the lock.
+        /// While a commit waits for its Archive position, a second Store write
+        /// waits on ownership without holding or spinning on the write lock.
     @Test
-    void commitRefusesConcurrentPrepareWhileWaiting() throws Exception {
+    void commitWaitsForConcurrentStoreWriteAdmission() throws Exception {
         final CountDownLatch commitWaitEntered = new CountDownLatch(1);
         final CountDownLatch releaseCommit = new CountDownLatch(1);
         final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
@@ -926,12 +926,25 @@ class AeronReplicationWriteCoordinatorTest {
         try {
             assertTrue(commitWaitEntered.await(10, TimeUnit.SECONDS), "the commit never reached its position wait");
 
-            final IllegalStateException refused = assertThrows(
-                    IllegalStateException.class,
-                    () -> coordinator.executeWriteAtomically(() -> coordinator.prepare(
-                            ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})))));
-            assertTrue(refused.getMessage().contains("commit is in progress"),
-                    "a concurrent writer must be refused by the commit guard: " + refused.getMessage());
+            final CountDownLatch admitted = new CountDownLatch(1);
+            final AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+            final Thread second = Thread.ofVirtual().start(() -> {
+                try {
+                    coordinator.executeWriteAtomically(() -> {
+                        admitted.countDown();
+                        return null;
+                    });
+                } catch (final Throwable failure) {
+                    secondFailure.set(failure);
+                }
+            });
+            assertFalse(admitted.await(100, TimeUnit.MILLISECONDS),
+                    "a second Store write must not enter while the first owns publication");
+            releaseCommit.countDown();
+            second.join(TimeUnit.SECONDS.toMillis(10));
+            assertFalse(second.isAlive(), "the second write did not wake after commit");
+            assertNull(secondFailure.get(), "the second write must be admitted after commit");
+            assertEquals(0L, admitted.getCount());
         } finally {
             releaseCommit.countDown();
             committing.join(TimeUnit.SECONDS.toMillis(10));

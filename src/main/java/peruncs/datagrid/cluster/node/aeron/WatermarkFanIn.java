@@ -43,7 +43,6 @@ final class WatermarkFanIn {
      * until the writer boundary exists instead of dropping that acknowledgement. */
     private final ConcurrentHashMap<UUID, AeronReaderWatermark> deferredWatermarks = new ConcurrentHashMap<>();
     private volatile AeronWatermarkChannel channel;
-    private volatile RuntimeException retentionFailure;
 
     WatermarkFanIn(
             final Supplier<Aeron> aeron,
@@ -74,12 +73,13 @@ final class WatermarkFanIn {
         return this.channel != null;
     }
 
-        /// Returns the watermark channel's terminal failure, or `null`.
+        /// Returns the current watermark or retention failure, or `null`.
     ///
     /// @return channel failure, or `null` while healthy
     RuntimeException channelFailure() {
-        final RuntimeException failedRetention = this.retentionFailure;
-        if (failedRetention != null) return failedRetention;
+        final AeronArchiveRetention controller = this.retention.get();
+        final RuntimeException retentionFailure = controller == null ? null : controller.failure();
+        if (retentionFailure != null) return retentionFailure;
         final AeronWatermarkChannel current = this.channel;
         return current == null ? null : current.failure();
     }
@@ -134,8 +134,6 @@ final class WatermarkFanIn {
                                     (previous, next) -> next.sequence() >= previous.sequence() ? next : previous);
                             this.drainDeferred();
                             } catch (final RuntimeException rejected) {
-                                final RuntimeException failedRetention = controller.failure();
-                                if (failedRetention != null) this.retentionFailure = failedRetention;
                                 /* Reject one malformed, stale, or future
                                  * watermark without killing delivery of later valid progress. */
                                 this.noteRejection("Aeron reader watermark", rejected);
@@ -170,11 +168,12 @@ final class WatermarkFanIn {
                 if (controller.offerReaderWatermark(entry.getValue())) {
                     this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
                 }
+            } catch (final IllegalArgumentException rejected) {
+                this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
+                this.noteRejection("deferred Aeron reader watermark", rejected);
             } catch (final RuntimeException failure) {
-                final RuntimeException failedRetention = controller.failure();
-                if (failedRetention != null) this.retentionFailure = failedRetention;
-                /* Keep the newest value for retry unless validation proved it
-                 * permanently invalid before it entered this mailbox. */
+                /* The mailbox retains the newest value after a transient
+                 * retention failure or a full worker queue. */
                 this.noteRejection("deferred Aeron reader watermark", failure);
             }
         }

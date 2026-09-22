@@ -250,7 +250,11 @@ public final class AtomicFileWriter {
         }
     }
 
-    private static void forceDirectory(final Path parent) throws IOException {
+    /// Forces a metadata directory after a new file name becomes visible.
+    ///
+    /// @param parent directory containing the new file
+    /// @throws IOException if the filesystem cannot sync the directory
+    public static void forceDirectory(final Path parent) throws IOException {
         if (parent == null) {
             return;
         }

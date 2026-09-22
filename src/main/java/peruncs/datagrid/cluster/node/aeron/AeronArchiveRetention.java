@@ -71,6 +71,10 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private final ThreadPoolExecutor agent;
     private final ThreadLocal<Boolean> onAgentThread = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private final AtomicReference<RuntimeException> terminalFailure = new AtomicReference<>();
+    private final AtomicReference<RuntimeException> watermarkFailure = new AtomicReference<>();
+    /* Once the polling thread accepts a watermark, retention owns its retry.
+     * Keep at most one value per configured reader until the agent persists it. */
+    private final ConcurrentHashMap<UUID, AeronReaderWatermark> pendingWatermarks = new ConcurrentHashMap<>();
     private static final System.Logger LOGGER = System.getLogger(AeronArchiveRetention.class.getName());
 
         /// Default bound for one queued retention command, in milliseconds.
@@ -187,7 +191,8 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
 
     /// Returns the terminal retention failure, or `null` while available.
     RuntimeException failure() {
-        return this.terminalFailure.get();
+        final RuntimeException terminal = this.terminalFailure.get();
+        return terminal != null ? terminal : this.watermarkFailure.get();
     }
 
         /// Runs one void retention command on the single agent thread.
@@ -361,13 +366,17 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// Queues reader progress without blocking the Aeron polling thread.
     boolean offerReaderWatermark(final AeronReaderWatermark watermark) {
         if (this.closed || this.terminalFailure.get() != null) return false;
+        Objects.requireNonNull(watermark, "watermark");
+        if (!this.configuredReaders.contains(watermark.readerId()) || this.differsFromWriter(watermark)) {
+            throw new IllegalArgumentException("reader watermark identity is invalid");
+        }
+        this.pendingWatermarks.merge(watermark.readerId(), watermark,
+                (previous, next) -> next.sequence() >= previous.sequence() ? next : previous);
         try {
             this.agent.execute(() -> {
                 this.onAgentThread.set(Boolean.TRUE);
                 try {
-                    this.recordReaderWatermarkOnAgent(watermark);
-                } catch (final RuntimeException failure) {
-                    LOGGER.log(System.Logger.Level.WARNING, "Aeron reader watermark update failed", failure);
+                    this.drainPendingWatermarks();
                 } finally {
                     this.onAgentThread.remove();
                 }
@@ -376,6 +385,23 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         } catch (final RejectedExecutionException fullOrClosed) {
             return false;
         }
+    }
+
+    private void drainPendingWatermarks() {
+        for (final var entry : this.pendingWatermarks.entrySet()) {
+            final AeronReaderWatermark watermark = entry.getValue();
+            try {
+                this.recordReaderWatermarkOnAgent(watermark);
+                this.pendingWatermarks.remove(entry.getKey(), watermark);
+            } catch (final IllegalArgumentException rejected) {
+                this.pendingWatermarks.remove(entry.getKey(), watermark);
+                LOGGER.log(System.Logger.Level.WARNING, "Rejected Aeron reader watermark", rejected);
+            } catch (final RuntimeException failure) {
+                this.watermarkFailure.set(failure);
+                LOGGER.log(System.Logger.Level.WARNING, "Aeron reader watermark update failed; progress retained for retry", failure);
+            }
+        }
+        if (this.pendingWatermarks.isEmpty()) this.watermarkFailure.set(null);
     }
 
     private void recordReaderWatermarkOnAgent(final AeronReaderWatermark watermark) {
@@ -445,6 +471,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             return;
         }
         this.quorum.close();
+        this.pendingWatermarks.clear();
         /* Published only after both steps succeed: a quorum.close() failure
          * stays retryable like a termination failure. */
         this.cleanupComplete = true;

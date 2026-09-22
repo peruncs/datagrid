@@ -1375,7 +1375,7 @@ public final class AeronClusterReplicationTransportProvider {
              * worker first so it cannot enter ensureWriter/retention while writer close
              * is in progress. Reader-side channels remain open until the reader exits so
              * its final cursor publication is not turned into a spurious failure. */
-            if (this.readers.current() == null && this.settings.role().isWriter() && this.watermarks.hasChannel()) {
+            if (!this.readers.occupied() && this.settings.role().isWriter() && this.watermarks.hasChannel()) {
                 failure = this.closeWatermarkChannel();
             }
             failure = appendFailure(failure, this.closeWatermarkChannel());
@@ -1502,7 +1502,7 @@ public final class AeronClusterReplicationTransportProvider {
                 /* A lease held without any other resource means writer startup
                  * failed after acquisition; it still shuts down on the full
                  * path below, never leaking its file and heartbeat thread. */
-                if (this.readers.current() == null && this.writer == null && this.coordinator == null &&
+                if (!this.readers.occupied() && this.writer == null && this.coordinator == null &&
                     this.runtime == null && this.retention == null && !this.watermarks.hasChannel() &&
                     this.writerLease == null) {
                     this.watermarks.discardDeferred();
@@ -1541,20 +1541,20 @@ public final class AeronClusterReplicationTransportProvider {
         private List<CloseSequencer.Stage> closeStages() {
             return List.of(
                     CloseSequencer.stage("reader",
-                            () -> this.readers.current() != null,
+                            this.readers::occupied,
                             this.readers::dispose),
                     /* The coordinator owns every pending transaction and must resolve or
                      * preserve its fence before the Archive wrapper stops the recording.
                      * Closing the raw writer first can publish an ABORT beneath a Store
                      * write that still owns the coordinator. */
                     CloseSequencer.stage("coordinator",
-                            () -> this.readers.current() == null && this.coordinator != null,
+                            () -> !this.readers.occupied() && this.coordinator != null,
                             () -> {
                                 this.coordinator.dispose();
                                 this.coordinator = null;
                             }),
                     CloseSequencer.stage("writer",
-                            () -> this.readers.current() == null && this.coordinator == null && this.writer != null,
+                            () -> !this.readers.occupied() && this.coordinator == null && this.writer != null,
                             () -> {
                                 try {
                                     this.writer.close();
@@ -1582,14 +1582,14 @@ public final class AeronClusterReplicationTransportProvider {
                      * publication. Likewise, keep the writer-side receiver alive until
                      * publication shutdown has completed. */
                     CloseSequencer.stage("watermark",
-                            () -> this.readers.current() == null && this.writer == null && this.coordinator == null &&
+                            () -> !this.readers.occupied() && this.writer == null && this.coordinator == null &&
                                   this.watermarks.hasChannel(),
                             () -> {
                                 final RuntimeException watermarkFailure = this.closeWatermarkChannel();
                                 if (watermarkFailure != null) throw watermarkFailure;
                             }),
                     CloseSequencer.stage("retention",
-                            () -> this.readers.current() == null && this.writer == null && this.coordinator == null &&
+                            () -> !this.readers.occupied() && this.writer == null && this.coordinator == null &&
                                   !this.watermarks.hasChannel() && this.retention != null,
                             () -> {
                                 this.retention.close();
@@ -1600,14 +1600,14 @@ public final class AeronClusterReplicationTransportProvider {
                      * Aeron here would turn that retry into a use-after-close and leak
                      * the unresolved sequence. */
                     CloseSequencer.stage("runtime",
-                            () -> this.readers.current() == null && this.writer == null && this.coordinator == null &&
+                            () -> !this.readers.occupied() && this.writer == null && this.coordinator == null &&
                                   this.retention == null && !this.watermarks.hasChannel() && this.runtime != null,
                             () -> {
                                 this.runtime.close();
                                 this.runtime = null;
                             }),
                     CloseSequencer.stage("writer-lease",
-                            () -> this.readers.current() == null && this.writer == null && this.coordinator == null &&
+                            () -> !this.readers.occupied() && this.writer == null && this.coordinator == null &&
                                   this.runtime == null,
                             () -> {
                                 final WriterFencingLease lease;

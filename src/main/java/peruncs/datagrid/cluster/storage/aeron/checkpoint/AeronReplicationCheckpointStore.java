@@ -1,6 +1,8 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
+import peruncs.datagrid.cluster.storage.types.PathSecurity;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
@@ -19,9 +21,8 @@ import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointC
 
 /// Persists restart records without coupling them to the wire format.
 ///
-/// A new record is forced to a temporary file before it replaces the old
-/// one. Reads validate the complete record and its checksum. A failed write
-/// therefore leaves the previous restart boundary available.
+/// Two fixed journal slots retain the previous checkpoint while the next is
+/// forced. Startup selects the newest complete, checksummed slot.
 public final class AeronReplicationCheckpointStore {
     private static final int SLOT_BYTES = Long.BYTES + AeronReplicationCheckpoint.ENCODED_BYTES + Integer.BYTES;
     private static final int JOURNAL_BYTES = SLOT_BYTES * 2;
@@ -42,7 +43,7 @@ public final class AeronReplicationCheckpointStore {
         synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
             final Path parent = canonical.getParent();
             if (parent != null) Files.createDirectories(parent);
-            if (Files.isSymbolicLink(canonical)) throw new IOException("checkpoint must not be a symbolic link");
+            PathSecurity.ensureNoSymbolicLinks(canonical);
             try (FileChannel channel = FileChannel.open(canonical, StandardOpenOption.CREATE,
                     StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 if (channel.size() != 0L && channel.size() != JOURNAL_BYTES) {
@@ -67,6 +68,7 @@ public final class AeronReplicationCheckpointStore {
                     if (channel.write(slot) == 0) throw new IOException("Aeron checkpoint write made no progress");
                 }
                 channel.force(true);
+                if (generation == 1L) AtomicFileWriter.forceDirectory(parent);
             }
         }
     }
@@ -99,6 +101,7 @@ public final class AeronReplicationCheckpointStore {
     /// @throws IOException if the file is missing, truncated, or invalid
     public static AeronReplicationCheckpoint read(final Path path) throws IOException {
         final Path canonical = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
+        PathSecurity.ensureNoSymbolicLinks(canonical);
         final byte[] bytes;
         synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
             try (FileChannel channel = FileChannel.open(canonical, StandardOpenOption.READ,

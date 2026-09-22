@@ -96,9 +96,11 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         private AeronReplicationPublisher.PreparedTransaction transaction;
         private boolean committedCheckpoint;
         private boolean committing;
+        private Thread ownerThread;
 
         private PreparedWrite(final AeronReplicationPublisher.PreparedTransaction transaction) {
             this.transaction = transaction;
+            this.ownerThread = Thread.currentThread();
         }
     }
 
@@ -308,6 +310,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     throw new IllegalStateException("Aeron commit is in progress");
                 }
                 this.activeWrite.committing = true;
+                this.activeWrite.ownerThread = Thread.currentThread();
                 return;
             }
             this.ensureWriterIdentity();
@@ -488,8 +491,9 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         if (this.maintenance.get()) {
             throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
         }
+        final long deadline = ReplicationRetry.deadlineNanos(this.publisher.admissionTimeoutNanos());
         try {
-            if (!this.writeLock.tryLock(this.publisher.admissionTimeoutNanos(), TimeUnit.NANOSECONDS)) {
+            if (!this.writeLock.tryLock(ReplicationRetry.remainingNanos(deadline), TimeUnit.NANOSECONDS)) {
                 throw new ReplicationUnavailableException(
                         "timed out waiting for Aeron write admission", null);
             }
@@ -498,9 +502,33 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             throw new ReplicationUnavailableException(
                     "interrupted while waiting for Aeron write admission", interrupted);
         }
-        if (this.maintenance.get()) {
-            this.writeLock.unlock();
-            throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+        boolean admitted = false;
+        try {
+            while (this.activeWrite != null) {
+                if (this.activeWrite.ownerThread == Thread.currentThread()) {
+                    throw new IllegalStateException("cannot re-enter an active Aeron write");
+                }
+                if (this.maintenance.get()) {
+                    throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+                }
+                final long remaining = ReplicationRetry.remainingNanos(deadline);
+                if (remaining == 0L) {
+                    throw new ReplicationUnavailableException("timed out waiting for Aeron write admission", null);
+                }
+                try {
+                    this.writeDone.await(remaining, TimeUnit.NANOSECONDS);
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new ReplicationUnavailableException(
+                            "interrupted while waiting for Aeron write admission", interrupted);
+                }
+            }
+            if (this.maintenance.get()) {
+                throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+            }
+            admitted = true;
+        } finally {
+            if (!admitted) this.writeLock.unlock();
         }
     }
 

@@ -71,7 +71,7 @@ class AeronReaderSlotTest {
         assertEquals(2, disposed.get(), "dispose must be idempotent");
     }
 
-        /// Verifies a factory failure retains the disposed reader as an explicit non-empty state.
+    /// A failed replacement never exposes the already disposed reader.
     @Test
     void failedFactoryLeavesSlotEmptyAndDisposesPrevious() {
         final AtomicInteger disposed = new AtomicInteger();
@@ -80,7 +80,35 @@ class AeronReaderSlotTest {
         assertThrows(IllegalStateException.class, () -> slot.replace(() -> {
             throw new IllegalStateException("reader creation failed");
         }));
-        assertNotNull(slot.current());
+        assertNull(slot.current());
+        assertFalse(slot.occupied());
         assertEquals(1, disposed.get());
+    }
+
+    /// Shutdown sees a replacement in progress even while no reader is installed.
+    @Test
+    void startingReplacementRemainsOccupied() throws Exception {
+        final AeronReaderSlot<Disposable> slot = new AeronReaderSlot<>();
+        final CountDownLatch starting = new CountDownLatch(1);
+        final CountDownLatch finish = new CountDownLatch(1);
+        final Thread replacement = Thread.ofVirtual().start(() -> slot.replace(() -> {
+            starting.countDown();
+            try {
+                finish.await();
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            return () -> { };
+        }));
+        try {
+            assertTrue(starting.await(5, TimeUnit.SECONDS));
+            assertNull(slot.current());
+            assertTrue(slot.occupied());
+        } finally {
+            finish.countDown();
+            replacement.join(5_000L);
+            slot.dispose();
+        }
     }
 }
