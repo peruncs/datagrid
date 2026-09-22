@@ -16,9 +16,11 @@ import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -950,6 +952,162 @@ class AeronReplicationWriteCoordinatorTest {
             committing.join(TimeUnit.SECONDS.toMillis(10));
             assertFalse(committing.isAlive(), "the commit did not finish after the position was released");
             assertNull(commitFailure.get(), "the commit must succeed: " + commitFailure.get());
+            coordinator.dispose();
+        }
+    }
+
+    /// Two Store writes keep their dictionary and terminal CRC even when the
+    /// first is waiting for Archive acknowledgement as the second arrives.
+    @Test
+    void concurrentStoreWritesKeepDistinctDictionariesAndCrcs() throws Exception {
+        final List<AeronReplicationEnvelope.Envelope> frames = Collections.synchronizedList(new ArrayList<>());
+        final CountDownLatch firstCommitWaiting = new CountDownLatch(1);
+        final CountDownLatch releaseFirstCommit = new CountDownLatch(1);
+        final AtomicInteger acknowledgements = new AtomicInteger();
+        final AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        final AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> {
+                    frames.add(AeronReplicationEnvelope.decode(buffer, offset, length));
+                    return frames.size();
+                }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0,
+                position -> {
+                    if (acknowledgements.incrementAndGet() == 1) {
+                        firstCommitWaiting.countDown();
+                        try {
+                            assertTrue(releaseFirstCommit.await(10, TimeUnit.SECONDS));
+                        } catch (final InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                    }
+                    return position;
+                });
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
+        final StorageBinaryDataDistributor dictionaries =
+                StorageBinaryDataDistributor.Caching(StorageBinaryDataDistributor.noOp());
+        final PersistenceTarget<Binary> local = new PersistenceTarget<>() {
+            @Override public void write(final Binary data) { }
+            @Override public boolean isWritable() { return true; }
+        };
+        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(
+                local, coordinator, dictionaries, ignored -> { }, () -> true);
+        dictionaries.distributeTypeDictionary("first-type");
+        final Thread first = Thread.ofVirtual().start(() -> {
+            try {
+                target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1, 2, 3})));
+            } catch (final Throwable failure) {
+                firstFailure.set(failure);
+            }
+        });
+        Thread second = null;
+        try {
+            assertTrue(firstCommitWaiting.await(10, TimeUnit.SECONDS));
+            dictionaries.distributeTypeDictionary("second-type");
+            second = Thread.ofVirtual().start(() -> {
+                try {
+                    target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{4, 5, 6})));
+                } catch (final Throwable failure) {
+                    secondFailure.set(failure);
+                }
+            });
+            assertEquals(3, frames.size(), "the second writer must not publish during the first commit wait");
+            releaseFirstCommit.countDown();
+            first.join(10_000L);
+            second.join(10_000L);
+            assertFalse(first.isAlive());
+            assertFalse(second.isAlive());
+            assertNull(firstFailure.get());
+            assertNull(secondFailure.get());
+            assertEquals(6, frames.size());
+            assertEquals(List.of(0L, 0L, 0L, 1L, 1L, 1L),
+                    frames.stream().map(AeronReplicationEnvelope.Envelope::sequence).toList());
+            assertArrayEquals("first-type".getBytes(StandardCharsets.UTF_8), frames.get(0).payload());
+            assertArrayEquals("second-type".getBytes(StandardCharsets.UTF_8), frames.get(3).payload());
+            assertEquals(AeronReplicationEnvelope.crc32c(new byte[]{1, 2, 3}), frames.get(2).commitCrc32c());
+            assertEquals(AeronReplicationEnvelope.crc32c(new byte[]{4, 5, 6}), frames.get(5).commitCrc32c());
+        } finally {
+            releaseFirstCommit.countDown();
+            first.join(10_000L);
+            if (second != null) second.join(10_000L);
+            coordinator.dispose();
+            dictionaries.dispose();
+        }
+    }
+
+    /// A foreign prepared token cannot clear or complete another writer's owner.
+    @Test
+    void foreignTokenCannotStealActiveWrite() {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher firstPublisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationPublisher secondPublisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator first = new AeronReplicationWriteCoordinator(firstPublisher);
+        final AeronReplicationWriteCoordinator second = new AeronReplicationWriteCoordinator(secondPublisher);
+        try {
+            final var firstToken = first.prepare(
+                    ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+            final var foreignToken = second.prepare(
+                    ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})));
+            assertThrows(IllegalStateException.class, () -> first.commitOrMarkUncertain(foreignToken));
+            assertThrows(IllegalStateException.class, () -> first.abort(foreignToken));
+            assertThrows(IllegalStateException.class, () -> first.markCommittingUncertain(foreignToken));
+            first.commitOrMarkUncertain(firstToken);
+            second.abort(foreignToken);
+            assertFalse(firstPublisher.isFailed());
+        } finally {
+            first.dispose();
+            second.dispose();
+        }
+    }
+
+    /// An abort owns the terminal decision until Archive acknowledgement returns.
+    @Test
+    void secondAbortCannotClearFirstAbortOwner() throws Exception {
+        final CountDownLatch abortWaiting = new CountDownLatch(1);
+        final CountDownLatch releaseAbort = new CountDownLatch(1);
+        final AtomicReference<Throwable> abortFailure = new AtomicReference<>();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0, position -> {
+                    abortWaiting.countDown();
+                    try {
+                        assertTrue(releaseAbort.await(10, TimeUnit.SECONDS));
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(interrupted);
+                    }
+                    return position;
+                });
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
+        final var prepared = coordinator.prepare(
+                ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
+        final Thread aborting = Thread.ofVirtual().start(() -> {
+            try {
+                coordinator.abort(prepared);
+            } catch (final Throwable failure) {
+                abortFailure.set(failure);
+            }
+        });
+        try {
+            assertTrue(abortWaiting.await(10, TimeUnit.SECONDS));
+            assertThrows(IllegalStateException.class, () -> coordinator.abort(prepared));
+            assertThrows(IllegalStateException.class, () -> coordinator.markCommittingUncertain(prepared));
+            releaseAbort.countDown();
+            aborting.join(10_000L);
+            assertFalse(aborting.isAlive());
+            assertNull(abortFailure.get());
+        } finally {
+            releaseAbort.countDown();
+            aborting.join(10_000L);
             coordinator.dispose();
         }
     }
