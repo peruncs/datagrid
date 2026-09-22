@@ -17,6 +17,7 @@ import java.nio.channels.SeekableByteChannel;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.*;
 
@@ -75,6 +76,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /* Once the polling thread accepts a watermark, retention owns its retry.
      * Keep at most one value per configured reader until the agent persists it. */
     private final ConcurrentHashMap<UUID, AeronReaderWatermark> pendingWatermarks = new ConcurrentHashMap<>();
+    private final AtomicBoolean watermarkRetryScheduled = new AtomicBoolean();
     private static final System.Logger LOGGER = System.getLogger(AeronArchiveRetention.class.getName());
 
         /// Default bound for one queued retention command, in milliseconds.
@@ -373,18 +375,39 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         this.pendingWatermarks.merge(watermark.readerId(), watermark,
                 (previous, next) -> next.sequence() >= previous.sequence() ? next : previous);
         try {
-            this.agent.execute(() -> {
-                this.onAgentThread.set(Boolean.TRUE);
-                try {
-                    this.drainPendingWatermarks();
-                } finally {
-                    this.onAgentThread.remove();
-                }
-            });
+            this.enqueueWatermarkDrain();
             return true;
         } catch (final RejectedExecutionException fullOrClosed) {
+            this.scheduleWatermarkRetry();
             return false;
         }
+    }
+
+    private void enqueueWatermarkDrain() {
+        this.agent.execute(() -> {
+            this.onAgentThread.set(Boolean.TRUE);
+            try {
+                this.drainPendingWatermarks();
+            } finally {
+                this.onAgentThread.remove();
+            }
+        });
+    }
+
+    private void scheduleWatermarkRetry() {
+        if (this.closed || this.agent.isShutdown() || this.terminalFailure.get() != null ||
+            this.pendingWatermarks.isEmpty() ||
+            !this.watermarkRetryScheduled.compareAndSet(false, true)) return;
+        CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS).execute(() -> {
+            this.watermarkRetryScheduled.set(false);
+            if (this.closed || this.agent.isShutdown() || this.terminalFailure.get() != null ||
+                this.pendingWatermarks.isEmpty()) return;
+            try {
+                this.enqueueWatermarkDrain();
+            } catch (final RejectedExecutionException fullOrClosed) {
+                this.scheduleWatermarkRetry();
+            }
+        });
     }
 
     private void drainPendingWatermarks() {
@@ -397,11 +420,14 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 this.pendingWatermarks.remove(entry.getKey(), watermark);
                 LOGGER.log(System.Logger.Level.WARNING, "Rejected Aeron reader watermark", rejected);
             } catch (final RuntimeException failure) {
-                this.watermarkFailure.set(failure);
-                LOGGER.log(System.Logger.Level.WARNING, "Aeron reader watermark update failed; progress retained for retry", failure);
+                if (this.watermarkFailure.getAndSet(failure) == null) {
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Aeron reader watermark update failed; progress retained for retry", failure);
+                }
             }
         }
         if (this.pendingWatermarks.isEmpty()) this.watermarkFailure.set(null);
+        else this.scheduleWatermarkRetry();
     }
 
     private void recordReaderWatermarkOnAgent(final AeronReaderWatermark watermark) {

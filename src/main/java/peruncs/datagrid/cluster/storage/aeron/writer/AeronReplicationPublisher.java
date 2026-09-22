@@ -14,7 +14,6 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 import java.util.function.LongUnaryOperator;
 import java.util.zip.CRC32C;
@@ -674,29 +673,19 @@ final class AeronReplicationPublisher implements AutoCloseable {
 
         /// Offers the commit marker without waiting for durability.
     ///
-    /// The caller must hold lease ownership across this bounded offer (see
-    /// `WriterLeaseGate`): the retry loop can pause under back pressure long
-    /// enough for a successor to steal the lease, and a marker offered after
-    /// that steal can never be retracted. The Archive acknowledgement wait
-    /// stays with [#awaitCommitPosition] outside any lease lock.
+    /// Each non-blocking offer attempt claims lease ownership separately;
+    /// back-pressure waits and Archive acknowledgement hold no lease lock.
     ///
     /// @param transaction prepared transaction
     /// @return Aeron publication position of the offered marker
     long offerCommitMarker(final PreparedTransaction transaction) {
-        return this.offerCommitMarker(transaction, () -> true);
-    }
-
-    /// Offers a commit marker while checking lease ownership on each retry.
-    long offerCommitMarker(final PreparedTransaction transaction, final BooleanSupplier stillOwner) {
         this.beginTerminal(transaction);
-        /* The offer retries under back pressure for the whole offer timeout; do
-         * not hold the state monitor across it, or health probes and close()
-         * stall behind the marker. offerLock keeps the shared envelope buffer
-         * exclusive instead. */
+        /* Do not hold the state monitor across back-pressure retries.
+         * offerLock still keeps the shared envelope buffer exclusive. */
         try {
             CrashHook.invoke("BEFORE_COMMIT_OFFER", transaction.sequence);
             return this.offerMarker(transaction.sequence, AeronReplicationEnvelope.Kind.COMMIT,
-                    transaction.dataLength, transaction.dataChunkCount, transaction.crc32c, stillOwner);
+                    transaction.dataLength, transaction.dataChunkCount, transaction.crc32c);
         } catch (final RuntimeException | Error failure) {
             this.finishTerminal(transaction, true);
             throw failure;
@@ -777,19 +766,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
                                   this.configuration.chunkSize()));
     }
 
-    private void offerEncoded(final long sequence, final AeronReplicationEnvelope.Kind kind,
-                              final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
-                              final int commitCrc32c, final DirectBuffer payload, final int payloadOffset,
-                              final int payloadChunkLength) {
-        this.leaseGate.offerUnderOwnership(owner ->
-                this.offerEncoded(sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset,
-                        commitCrc32c, payload, payloadOffset, payloadChunkLength, owner));
-    }
-
     private long offerEncoded(final long sequence, final AeronReplicationEnvelope.Kind kind,
                               final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
                               final int commitCrc32c, final DirectBuffer payload, final int payloadOffset,
-                              final int payloadChunkLength, final BooleanSupplier stillOwner) {
+                              final int payloadChunkLength) {
         this.offerLock.lock();
         try {
             final int encodedLength = AeronReplicationEnvelope.encode(this.envelopeBuffer, 0, this.clusterId,
@@ -800,7 +780,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
             if (encodedLength > this.maxMessageLength) {
                 throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
             }
-            return this.offerer.offer(this.envelopeBuffer, encodedLength, stillOwner);
+            final long budget = kind == AeronReplicationEnvelope.Kind.COMMIT ||
+                    kind == AeronReplicationEnvelope.Kind.ABORT
+                    ? this.leaseGate.terminalOfferBudgetNanos() : this.configuration.offerTimeoutNanos();
+            return this.offerer.offerGated(this.envelopeBuffer, encodedLength, this.leaseGate, budget);
         } finally {
             this.offerLock.unlock();
         }
@@ -819,8 +802,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
             if (encodedLength > this.maxMessageLength) {
                 throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
             }
-            this.leaseGate.offerUnderOwnership(owner ->
-                    this.offerer.offer(this.envelopeBuffer, encodedLength, owner));
+            this.offerer.offerGated(this.envelopeBuffer, encodedLength, this.leaseGate,
+                    this.configuration.offerTimeoutNanos());
         } finally {
             this.offerLock.unlock();
         }
@@ -841,18 +824,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
 
     private long offerMarker(final long sequence, final AeronReplicationEnvelope.Kind kind,
                              final int payloadLength, final int chunkCount, final int commitCrc32c) {
-        return this.offerMarker(sequence, kind, payloadLength, chunkCount, commitCrc32c, () -> true);
-    }
-
-    private long offerMarker(final long sequence, final AeronReplicationEnvelope.Kind kind,
-                             final int payloadLength, final int chunkCount, final int commitCrc32c,
-                             final BooleanSupplier stillOwner) {
-        if (kind == AeronReplicationEnvelope.Kind.ABORT) {
-            return this.leaseGate.offerUnderOwnership(owner -> this.offerEncoded(sequence, kind, payloadLength,
-                    0, Math.max(1, chunkCount), 0, commitCrc32c, EMPTY_BUFFER.get(), 0, 0, owner));
-        }
         return this.offerEncoded(sequence, kind, payloadLength, 0, Math.max(1, chunkCount), 0,
-                commitCrc32c, EMPTY_BUFFER.get(), 0, 0, stillOwner);
+                commitCrc32c, EMPTY_BUFFER.get(), 0, 0);
     }
 
         /// Advances the next sequence when an external cursor supplies a newer index.

@@ -6,14 +6,13 @@ import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
-/// Gates terminal-marker offers on continued writer-lease ownership.
+/// Gates each replication-frame offer on continued writer-lease ownership.
 ///
 /// Admission checks use [#isValid()], but a deposed writer can lose the lease
 /// between that check and the Aeron offer when the offer retries under back
-/// pressure. Commit and abort markers must therefore run their bounded offer
-/// through [#offerUnderOwnership(OwnedOffer)]: ownership is verified while
-/// holding the same interprocess lock used for acquisition, and the retry loop
-/// receives a callback that is evaluated before every publication attempt. The
+/// pressure. Every frame therefore runs each publication attempt
+/// through [#offerUnderOwnership(OwnedOffer)] once per non-blocking attempt:
+/// ownership is verified while holding the same interprocess lock used for acquisition. The
 /// heartbeat is refreshed before the lock is released. The slow Archive
 /// acknowledgement wait always runs outside that lock.
 ///
@@ -26,6 +25,9 @@ public interface WriterLeaseGate {
     ///
     /// @return `true` while this writer still owns a fresh lease
     boolean isValid();
+
+    /// Maximum time a terminal marker may retry, below lease staleness in production.
+    default long terminalOfferBudgetNanos() { return Long.MAX_VALUE; }
 
     /// Offers one terminal marker after a single ownership check.
     ///

@@ -131,6 +131,25 @@ class AeronArchiveRetentionTest {
         }
     }
 
+    /// A transient failure is retried even if the reader sends nothing else.
+    @Test
+    void retriesQueuedWatermarkWithoutAnotherArrival() throws Exception {
+        final AtomicInteger writerChecks = new AtomicInteger();
+        try (final AeronArchiveRetention retention = retention(() -> {
+            if (writerChecks.incrementAndGet() == 1) throw new IllegalStateException("writer temporarily unavailable");
+        })) {
+            assertTrue(retention.offerReaderWatermark(AeronReaderWatermark.of(
+                    READER, CLUSTER, GENERATION, 1, 17, 4, 4_096)));
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (writerChecks.get() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertTrue(writerChecks.get() >= 2, "pending progress must retry without another watermark");
+            assertTrue(retention.isSupported());
+            assertNull(retention.failure());
+        }
+    }
+
     /// Verifies retention without watermark delivery stays unsupported and rejects retirement without starting the writer.
     @Test
     void retentionIsUnsupportedWhenWatermarkDeliveryIsNotAvailable() {

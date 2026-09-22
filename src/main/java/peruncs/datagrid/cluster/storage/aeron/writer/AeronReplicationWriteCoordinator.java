@@ -548,8 +548,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         CrashHook.invoke("BEFORE_COMMIT_GATE", prepared.sequence());
         final long commitPosition;
         try {
-            commitPosition = this.leaseGate.offerUnderOwnership(
-                    stillOwner -> this.publisher.offerCommitMarker(prepared, stillOwner));
+            commitPosition = this.publisher.offerCommitMarker(prepared);
         } catch (final WriterFencedException fenced) {
             /* Genuine fencing loss only: the lease gate and the ownership check
              * inside the offer retry loop throw this type exclusively. Every

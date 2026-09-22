@@ -683,6 +683,12 @@ public final class AeronClusterReplicationTransportProvider {
                 }
 
                 @Override
+                public long terminalOfferBudgetNanos() {
+                    final WriterFencingLease lease = writerLease;
+                    return lease == null ? 1L : lease.terminalOfferBudgetNanos();
+                }
+
+                @Override
                 public long offerUnderOwnership(final LongSupplier offer) {
                     final WriterFencingLease lease = writerLease;
                     if (lease == null) {

@@ -490,10 +490,9 @@ final class WriterFencingLease implements AutoCloseable {
         }
     }
 
-        /// Offers one terminal marker while holding the interprocess lease lock.
+        /// Makes one publication attempt while holding the interprocess lease lock.
     ///
-    /// The caller supplies the bounded Aeron offer (back-pressure retries only,
-    /// never the slow Archive acknowledgement wait). Ownership is verified under
+    /// The caller supplies one non-blocking Aeron offer attempt. Ownership is verified under
     /// the same lock file used for acquisition, the offer runs, and the
     /// heartbeat is refreshed before the lock is released — so a successor
     /// racing in another process either blocks until the marker is offered with
@@ -502,17 +501,22 @@ final class WriterFencingLease implements AutoCloseable {
     ///
     /// The heartbeat is rewritten only when it has aged past a third of the
     /// staleness bound, and is also refreshed in the offer's failure path while
-    /// the interprocess lock is still held, so a long or throwing offer cannot
+    /// the interprocess lock is still held, so a throwing offer cannot
     /// leave a stale-but-present lease for a successor to steal. This keeps the
     /// shared volume's per-commit fsync cost proportional to renewal need
     /// rather than to commit rate.
     ///
-    /// @param offer bounded marker offer returning the Aeron position
+    /// @param offer one publication attempt returning an Aeron result
     /// @return Aeron position returned by the offer
     /// @throws WriterFencedException when this holder no longer owns a fresh lease
     public long executeUnderOwnership(final LongSupplier offer) {
         Objects.requireNonNull(offer, "offer");
         return this.executeUnderOwnership(ignored -> offer.getAsLong());
+    }
+
+    /// Leaves room for renewal and takeover before the lease can become stale.
+    public long terminalOfferBudgetNanos() {
+        return Math.max(1L, this.maxStalenessNanos / 3L);
     }
 
         /// Offers one terminal marker with a per-attempt ownership callback.
@@ -531,7 +535,8 @@ final class WriterFencingLease implements AutoCloseable {
             final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
             try (final FileChannel lockChannel = FileChannel.open(
                     rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                 final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
+                 final FileLock ignored = lockFile(lockChannel,
+                         Duration.ofNanos(Math.min(this.lockTimeout.toNanos(), this.terminalOfferBudgetNanos())))) {
                 final LeaseFile current = readForAcquire(this.path);
                 final long nowNanos = System.nanoTime();
                 final boolean fresh = this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);

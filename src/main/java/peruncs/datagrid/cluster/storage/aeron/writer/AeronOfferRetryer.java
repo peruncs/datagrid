@@ -14,8 +14,8 @@ import java.util.function.LongSupplier;
 
 /// The bounded retry policy used by the writer's Aeron publications.
 ///
-/// The helper is allocation-free, so it belongs to one publisher and must be
-/// called by that publisher's serialized write path. Each failed attempt is
+/// It belongs to one publisher and must be called by that publisher's
+/// serialized write path. Each failed attempt is
 /// spaced by a full-jitter delay derived from the configured jitter bounds, so
 /// concurrent writers that share an outage do not retry in lockstep.
 final class AeronOfferRetryer {
@@ -67,12 +67,32 @@ final class AeronOfferRetryer {
         if (source == null || length < 0 || length > source.capacity()) {
             throw new IllegalArgumentException("invalid Aeron offer length");
         }
-        return this.offerLoop(source, length, Objects.requireNonNull(stillOwner, "stillOwner"));
+        Objects.requireNonNull(stillOwner, "stillOwner");
+        return this.offerLoop(source, length, stillOwner, () -> this.offerer.offer(source, 0, length),
+                this.configuration.offerTimeoutNanos());
     }
 
-    private long offerLoop(final DirectBuffer source, final int length, final BooleanSupplier stillOwner) {
+    /// Claims lease ownership for one non-blocking Aeron attempt at a time.
+    long offerGated(final DirectBuffer source, final int length, final WriterLeaseGate gate,
+                    final long budgetNanos) {
+        if (source == null || length < 0 || length > source.capacity()) {
+            throw new IllegalArgumentException("invalid Aeron offer length");
+        }
+        Objects.requireNonNull(gate, "gate");
+        if (budgetNanos <= 0) throw new IllegalArgumentException("offer budget must be positive");
+        return this.offerLoop(source, length, () -> true,
+                () -> gate.offerUnderOwnership(owner -> {
+                    if (!owner.getAsBoolean()) {
+                        throw new WriterFencedException("writer fencing lease lost during Aeron offer retry");
+                    }
+                    return this.offerer.offer(source, 0, length);
+                }), Math.min(budgetNanos, this.configuration.offerTimeoutNanos()));
+    }
+
+    private long offerLoop(final DirectBuffer source, final int length, final BooleanSupplier stillOwner,
+                           final LongSupplier attemptOffer, final long timeoutNanos) {
         final AeronRetryPolicy policy = this.configuration.retryPolicy();
-        final long deadline = ReplicationRetry.deadlineNanos(this.configuration.offerTimeoutNanos(), this.clock);
+        final long deadline = ReplicationRetry.deadlineNanos(timeoutNanos, this.clock);
         long backPressured = 0;
         long notConnected = 0;
         long adminActions = 0;
@@ -85,7 +105,7 @@ final class AeronOfferRetryer {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("interrupted while offering Aeron replication frame");
             }
-            final long position = this.offerer.offer(source, 0, length);
+            final long position = attemptOffer.getAsLong();
             if (position >= 0) return position;
             if (position == Publication.CLOSED || position == Publication.MAX_POSITION_EXCEEDED) {
                 throw new IllegalStateException("Aeron publication failed: %s".formatted(position));
