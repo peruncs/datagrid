@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.api;
 
 import peruncs.datagrid.cluster.node.ClusterFoundation;
+import peruncs.datagrid.cluster.node.NodeRole;
 import peruncs.datagrid.cluster.node.StorageNodeControl;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
@@ -17,13 +18,19 @@ import java.util.Objects;
 public final class ClusterNode<T> implements AutoCloseable {
     private final ClusterFoundation foundation;
     private final ClusterStore<T> store;
+    private final NodeRole role;
 
-    private ClusterNode(final ClusterFoundation foundation, final ClusterStore<T> store) {
+    private ClusterNode(final ClusterFoundation foundation, final ClusterStore<T> store, final NodeRole role) {
         this.foundation = foundation;
         this.store = store;
+        this.role = role;
     }
 
     /// Opens and starts a node from immutable options.
+    ///
+    /// Production nodes require an explicit role, cluster identity, node
+    /// identity, Store generation, and wire nonce. Startup fails closed when
+    /// durable local state cannot be reconciled with the Archive.
     ///
     /// @param <T> root type
     /// @param options immutable node options
@@ -32,13 +39,12 @@ public final class ClusterNode<T> implements AutoCloseable {
     public static <T> ClusterNode<T> open(final NodeOptions<T> options) {
         Objects.requireNonNull(options, "options");
         final ClusterFoundation.Builder builder = ClusterFoundation.New()
-                .setRootSupplier(options.rootSupplier()::get)
-                .setEnableAsyncDistribution(options.asynchronousDistribution());
+                .setRootSupplier(options.rootSupplier()::get);
         final ClusterFoundation foundation = builder.build();
         try {
             final ClusterStorageManager<T> storage =
                     (ClusterStorageManager<T>) foundation.startStorageManager();
-            return new ClusterNode<>(foundation, new ClusterStore<>(storage));
+            return new ClusterNode<>(foundation, new ClusterStore<>(storage), foundation.nodeRole());
         } catch (final RuntimeException | Error failure) {
             try {
                 foundation.close();
@@ -61,12 +67,12 @@ public final class ClusterNode<T> implements AutoCloseable {
         this.control().startStorageChecks();
     }
 
-    /// Creates a scheduled-slot backup on a backup-reader node.
+    /// Stops a backup-reader at a durable boundary and creates a scheduled-slot backup.
     public void createScheduledBackup() {
         this.foundation.backupNodeManager().createStorageBackup(false);
     }
 
-    /// Creates a manually retained backup on a backup-reader node.
+    /// Stops a backup-reader at a durable boundary and creates a retained manual backup.
     public void createManualBackup() {
         this.foundation.backupNodeManager().createStorageBackup(true);
     }
@@ -85,11 +91,10 @@ public final class ClusterNode<T> implements AutoCloseable {
     }
 
     private StorageNodeControl control() {
-        try {
-            return this.foundation.storageNodeManager();
-        } catch (final IllegalStateException notStorageRole) {
-            return this.foundation.backupNodeManager();
-        }
+        return switch (this.role) {
+            case WRITER, READER -> this.foundation.storageNodeManager();
+            case BACKUP_READER -> this.foundation.backupNodeManager();
+        };
     }
 
     private static ReplicationState map(final ReplicationHealth.State state) {

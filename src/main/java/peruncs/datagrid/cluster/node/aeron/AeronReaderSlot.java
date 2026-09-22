@@ -42,7 +42,13 @@ final class AeronReaderSlot<T extends Disposable> {
     T replace(final Supplier<T> factory) {
         Objects.requireNonNull(factory, "factory");
         synchronized (this.lock) {
-            this.disposeLocked();
+            final T previous = this.current;
+            if (previous != null) {
+                /* Keep the old reference visible until creation succeeds.
+                 * Lock-free observers may see a reader being disposed, but
+                 * never a false empty slot during replacement. */
+                previous.dispose();
+            }
             final T replacement = Objects.requireNonNull(factory.get(), "replacement");
             this.current = replacement;
             return replacement;

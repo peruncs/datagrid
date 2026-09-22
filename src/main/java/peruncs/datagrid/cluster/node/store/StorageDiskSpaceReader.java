@@ -4,6 +4,7 @@ import org.eclipse.serializer.afs.types.ADirectory;
 
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -44,6 +45,7 @@ public interface StorageDiskSpaceReader {
         private final ADirectory storageDir;
         private final long cacheNanos;
         private final AtomicLong lastLog = new AtomicLong(System.currentTimeMillis());
+        private final AtomicBoolean refreshRunning = new AtomicBoolean();
         private volatile long cachedBytes;
         private volatile long measuredAtNanos;
 
@@ -62,7 +64,18 @@ public interface StorageDiskSpaceReader {
             if (measuredAt != 0L && now - measuredAt >= 0L && now - measuredAt < this.cacheNanos) {
                 return this.cachedBytes;
             }
-            final long sizeBytes;
+            if (measuredAt != 0L) {
+                if (this.refreshRunning.compareAndSet(false, true)) {
+                    Thread.startVirtualThread(() -> {
+                        try {
+                            this.measure();
+                        } finally {
+                            this.refreshRunning.set(false);
+                        }
+                    });
+                }
+                return this.cachedBytes;
+            }
             synchronized (this) {
                 final long secondMeasuredAt = this.measuredAtNanos;
                 final long secondNow = System.nanoTime();
@@ -70,17 +83,21 @@ public interface StorageDiskSpaceReader {
                     secondNow - secondMeasuredAt < this.cacheNanos) {
                     return this.cachedBytes;
                 }
-                sizeBytes = this.totalSize(this.storageDir);
-                this.cachedBytes = sizeBytes;
-                this.measuredAtNanos = System.nanoTime();
+                if (secondMeasuredAt == 0L) this.measure();
             }
+            return this.cachedBytes;
+        }
+
+        private void measure() {
+            final long sizeBytes = this.totalSize(this.storageDir);
+            this.cachedBytes = sizeBytes;
+            this.measuredAtNanos = System.nanoTime();
             final long nowMillis = System.currentTimeMillis();
             final long previousLog = this.lastLog.get();
             if (LOGGER.isLoggable(System.Logger.Level.TRACE) && nowMillis - previousLog > 600_000L &&
                 this.lastLog.compareAndSet(previousLog, nowMillis)) {
                 LOGGER.log(System.Logger.Level.TRACE, "Read current storage disk space (%s)".formatted(sizeBytes));
             }
-            return sizeBytes;
         }
 
         private long totalSize(final ADirectory dir) {

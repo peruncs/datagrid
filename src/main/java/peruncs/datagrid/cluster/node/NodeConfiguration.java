@@ -40,7 +40,6 @@ import java.util.function.Supplier;
 /// @param propertiesProvider node properties provider
 /// @param storageDiskSpaceReader disk-space reader
 /// @param storageNodeManager storage node manager
-/// @param enableAsyncDistribution whether asynchronous distribution is enabled
 /// @param positionProvider replication position provider
 /// @param replicationRetention replication-log retention policy
 record NodeConfiguration(
@@ -62,7 +61,6 @@ record NodeConfiguration(
         NodeLibraryPropertiesProvider propertiesProvider,
         StorageDiskSpaceReader storageDiskSpaceReader,
         StorageNodeManager storageNodeManager,
-        boolean enableAsyncDistribution,
         ReplicationPositionProvider positionProvider,
         ReplicationLogRetention replicationRetention) {
 }

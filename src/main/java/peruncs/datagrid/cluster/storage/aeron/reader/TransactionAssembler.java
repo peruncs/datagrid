@@ -18,6 +18,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.zip.CRC32C;
 
 /// Reassembles chunks and releases a Store binary only after commit validation.
@@ -35,7 +36,7 @@ final class TransactionAssembler {
     private final long wireNonce;
     private final long epoch;
     private final StorageBinaryDataReceiver receiver;
-    private final Runnable transactionResolved;
+    private final Consumer<CursorSnapshot> transactionResolved;
     private final ReaderDeliveryListener deliveryListener;
     private final AtomicLong lastResolvedSequence = new AtomicLong();
     /* Materialisation can succeed before the durable cursor callback completes.
@@ -94,6 +95,7 @@ final class TransactionAssembler {
     /* Set when any staged entry carries a Store binary; the flush waits for
      * materialization only then — abort-only barriers enqueue nothing. */
     private boolean barrierHasData;
+    private long barrierBytes;
     /* Dedicated monitor for the barrier staging queue. The flush parks in the
      * receiver's awaitApplied() for the whole batch; it must never hold the
      * delivery monitor across that park, because dispose() is specified to
@@ -128,7 +130,7 @@ final class TransactionAssembler {
             final long initialSequence,
             final long initialPosition,
             final StorageBinaryDataReceiver receiver,
-            final Runnable transactionResolved,
+            final Consumer<CursorSnapshot> transactionResolved,
             final ReaderDeliveryListener deliveryListener,
             final long wireNonce
     ) {
@@ -191,7 +193,8 @@ final class TransactionAssembler {
                     this.delivery.stage();
                     /* Full barrier: flush right after staging. An incomplete
                      * barrier flushes on the next idle poll or lifecycle stop. */
-                    if (this.unflushedDeliveryCount() >= this.configuration.readerBarrierMaxTransactions()) {
+                    if (this.unflushedDeliveryCount() >= this.configuration.readerBarrierMaxTransactions()
+                            || this.unflushedDeliveryBytes() >= this.configuration.maxTransactionBytes()) {
                         flushDeliveries();
                     }
                 }
@@ -627,7 +630,7 @@ final class TransactionAssembler {
                 if (this.dictionary == null) {
                     this.dictionaryLength = payloadLength;
                     if (payloadLength != 0) {
-                        this.ensureCapacity(true, wireLength);
+                        this.ensureCapacity(true, payloadLength);
                     }
                 }
                 if (this.dictionaryLength != payloadLength) throw new IllegalArgumentException("dictionary length changed within transaction");
@@ -641,7 +644,7 @@ final class TransactionAssembler {
                 this.dictionaryChunkCount = envelope.chunkCount();
             } else {
                 if (this.data == null && payloadLength != 0) {
-                    this.ensureCapacity(false, wireLength);
+                    this.ensureCapacity(false, payloadLength);
                 }
                 if (this.dataLength != 0 && this.dataLength != payloadLength) throw new IllegalArgumentException("Store binary length changed within transaction");
                 this.dataLength = payloadLength;
@@ -817,6 +820,9 @@ final class TransactionAssembler {
                             this.resolutionKind, this.resolutionCrc32c, this.resolutionDataLength,
                             this.resolutionDataChunkCount, this.completed == null ? 0 : this.completed.dictionaryLength,
                             this.completed == null ? 0 : this.completed.dictionaryChunkCount, this.data != null));
+                    barrierBytes = Math.addExact(barrierBytes,
+                            (long) this.resolutionDataLength
+                                    + (this.completed == null ? 0L : this.completed.dictionaryLength));
                 }
             } finally {
                 if (this.completed != null) this.completed.dispose(dataTransferred);
@@ -872,35 +878,40 @@ final class TransactionAssembler {
          * holds no monitor: failure latching and disposal stay lock-free, and a
          * snapshot of the staged entries is only taken below. */
         if (hasData) receiver.awaitApplied();
-        boolean resolved = false;
+        PendingDelivery resolvedTail = null;
+        long candidateAppliedSequence = this.lastAppliedSequence.get();
         while (true) {
             final PendingDelivery entry;
             synchronized (this.barrierLock) {
                 entry = this.pendingDeliveries.poll();
+                if (entry != null) {
+                    this.barrierBytes -= (long) entry.dataLength() + entry.dictionaryLength();
+                }
             }
             if (entry == null) break;
-            synchronized (this) {
-                /* An abort resolves the replication cursor but does not materialise a
-                 * Store image.  Keep the two observations distinct so health/lag
-                 * callers never report an aborted sequence as applied data. */
-                if (entry.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
-                    this.lastAppliedSequence.set(entry.sequence());
-                }
-                this.lastResolvedSequence.set(entry.sequence());
-                this.lastResolvedPosition.set(entry.position());
-                this.lastResolutionCrc32c = entry.crc32c();
-                this.lastResolutionKind = entry.kind();
-                this.lastResolutionDataLength = entry.dataLength();
-                this.lastResolutionDataChunkCount = entry.dataChunkCount();
-                this.lastResolutionDictionaryLength = entry.dictionaryLength();
-                this.lastResolutionDictionaryChunkCount = entry.dictionaryChunkCount();
+            /* An abort advances the cursor without materialising a Store image. */
+            if (entry.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
+                candidateAppliedSequence = entry.sequence();
             }
-            resolved = true;
+            resolvedTail = entry;
         }
-        /* A barrier is one durability unit. Publishing intermediate callbacks
-         * lets retention observe a sequence whose cursor has not been forced
-         * yet. Notify exactly once, after the tail boundary is installed. */
-        if (resolved) this.transactionResolved.run();
+        /* The callback forces the Store and persists this exact candidate.
+         * Until it succeeds, status and cursorSnapshot() keep exposing the
+         * preceding durable boundary. */
+        if (resolvedTail != null) {
+            this.transactionResolved.accept(new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position()));
+            synchronized (this) {
+                this.lastAppliedSequence.set(candidateAppliedSequence);
+                this.lastResolvedSequence.set(resolvedTail.sequence());
+                this.lastResolvedPosition.set(resolvedTail.position());
+                this.lastResolutionCrc32c = resolvedTail.crc32c();
+                this.lastResolutionKind = resolvedTail.kind();
+                this.lastResolutionDataLength = resolvedTail.dataLength();
+                this.lastResolutionDataChunkCount = resolvedTail.dataChunkCount();
+                this.lastResolutionDictionaryLength = resolvedTail.dictionaryLength();
+                this.lastResolutionDictionaryChunkCount = resolvedTail.dictionaryChunkCount();
+            }
+        }
         synchronized (this.barrierLock) {
             this.deliveryMarkerOpen = false;
             this.barrierHasData = false;
@@ -924,9 +935,16 @@ final class TransactionAssembler {
         }
     }
 
+    long unflushedDeliveryBytes() {
+        synchronized (this.barrierLock) {
+            return this.barrierBytes;
+        }
+    }
+
     private void discardPendingDeliveries() {
         synchronized (this.barrierLock) {
             this.pendingDeliveries.clear();
+            this.barrierBytes = 0L;
         }
     }
 }

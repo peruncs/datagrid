@@ -11,11 +11,9 @@ class ReplicationDurabilityModeTest {
     @Test
     void persistedCodesRoundTrip() {
         assertEquals(1, ReplicationDurabilityMode.ARCHIVE_FIRST.code());
-        assertEquals(2, ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE.code());
         assertSame(ReplicationDurabilityMode.ARCHIVE_FIRST,
                 ReplicationDurabilityMode.fromCode(1));
-        assertSame(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE,
-                ReplicationDurabilityMode.fromCode(2));
+        assertThrows(StorageBinaryDataException.class, () -> ReplicationDurabilityMode.fromCode(2));
     }
 
         /// An unknown code marks corrupt persisted data, not a programming error,

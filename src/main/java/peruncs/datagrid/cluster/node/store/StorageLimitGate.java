@@ -95,15 +95,20 @@ public final class StorageLimitGate {
         Objects.requireNonNull(diskSpaceReader, "diskSpaceReader");
         return () ->
         {
-            LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
+            if (LOGGER.isLoggable(System.Logger.Level.TRACE)) {
+                LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
+            }
             final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
             final long usedGb = usedBytes / BYTES_PER_GIGABYTE;
-            LOGGER.log(System.Logger.Level.DEBUG,
-                    "Storage Size: %sgb/%sgb (%s bytes)".formatted(usedGb, this.limitGb(), usedBytes));
-            if (usedBytes >= this.limitBytes()) {
+            if (LOGGER.isLoggable(System.Logger.Level.DEBUG)) {
+                LOGGER.log(System.Logger.Level.DEBUG,
+                        "Storage Size: %sgb/%sgb (%s bytes)".formatted(usedGb, this.limitGb(), usedBytes));
+            }
+            final boolean wasLimited = this.limitReached();
+            this.updateUsage(usedBytes);
+            if (!wasLimited && this.limitReached()) {
                 LOGGER.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
             }
-            this.updateUsage(usedBytes);
         };
     }
 }

@@ -10,8 +10,13 @@ import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Contract tests for the batched delivery barrier: staging, window-size
 /// auto-flush, idle flush by the polling loop, and the delivery-listener
@@ -125,5 +130,41 @@ class TransactionAssemblerBarrierTest {
 
         assembler.dispose();
         assertEquals(0, assembler.unflushedDeliveryCount(), "dispose clears the staged barrier");
+    }
+
+    /// Status remains at the durable boundary while cursor persistence is blocked or fails.
+    @Test
+    void resolvedBoundaryPublishesOnlyAfterDurabilityCallback() throws Exception {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        final IllegalStateException failure = new IllegalStateException("cursor force failed");
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024)
+                .readerBarrierMaxTransactions(4).build();
+        final TransactionAssembler assembler = new TransactionAssembler(
+                configuration, CLUSTER, EPOCH, -1L, -1L, swallowingReceiver(), ignored -> {
+                    entered.countDown();
+                    try {
+                        assertTrue(release.await(5, TimeUnit.SECONDS));
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(interrupted);
+                    }
+                    throw failure;
+                }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER));
+        commitOne(assembler, 0L);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var flush = executor.submit(assembler::flushDeliveries);
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertEquals(-1L, assembler.lastResolvedSequence());
+            assertEquals(new CursorSnapshot(-1L, -1L), assembler.cursorSnapshot());
+            release.countDown();
+            final var thrown = assertThrows(java.util.concurrent.ExecutionException.class, flush::get);
+            assertEquals(failure, thrown.getCause());
+            assertEquals(-1L, assembler.lastResolvedSequence());
+        } finally {
+            release.countDown();
+            assembler.dispose();
+        }
     }
 }

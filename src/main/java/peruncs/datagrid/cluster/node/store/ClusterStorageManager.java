@@ -693,7 +693,9 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
             @Override
             public void close() {
-                this.delegate.close();
+                /* This adapter is a borrowed view of the Store's shared
+                 * persistence manager. The owning storage manager alone ends
+                 * that lifecycle. */
             }
         }
 

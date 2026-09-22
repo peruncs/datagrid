@@ -130,7 +130,9 @@ final class WatermarkFanIn {
                                 }
                                 return;
                             }
-                            controller.recordReaderWatermark(watermark);
+                            this.deferredWatermarks.merge(watermark.readerId(), watermark,
+                                    (previous, next) -> next.sequence() >= previous.sequence() ? next : previous);
+                            this.drainDeferred();
                             } catch (final RuntimeException rejected) {
                                 final RuntimeException failedRetention = controller.failure();
                                 if (failedRetention != null) this.retentionFailure = failedRetention;
@@ -165,15 +167,14 @@ final class WatermarkFanIn {
         if (controller == null) return;
         for (final var entry : this.deferredWatermarks.entrySet()) {
             try {
-                controller.recordReaderWatermark(entry.getValue());
-                this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
+                if (controller.offerReaderWatermark(entry.getValue())) {
+                    this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
+                }
             } catch (final RuntimeException failure) {
                 final RuntimeException failedRetention = controller.failure();
                 if (failedRetention != null) this.retentionFailure = failedRetention;
-                /* The writer boundary is now available, so a rejected token is
-                 * stale or invalid; remove it and wait for the reader's next durable
-                 * cursor rather than retrying a bad value forever. */
-                this.deferredWatermarks.remove(entry.getKey(), entry.getValue());
+                /* Keep the newest value for retry unless validation proved it
+                 * permanently invalid before it entered this mailbox. */
                 this.noteRejection("deferred Aeron reader watermark", failure);
             }
         }

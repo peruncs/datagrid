@@ -2,14 +2,12 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -17,6 +15,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies that restart records survive only as complete, checksummed files.
 class AeronReplicationCheckpointStoreTest {
+    private static final int SLOT_BYTES = Long.BYTES + AeronReplicationCheckpoint.ENCODED_BYTES + Integer.BYTES;
+    private static final int JOURNAL_BYTES = SLOT_BYTES * 2;
     private static AeronReplicationCheckpoint checkpoint() {
         return new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
@@ -32,7 +32,7 @@ class AeronReplicationCheckpointStoreTest {
         final Path path = Files.createTempFile("datagrid-checkpoint", ".bin");
         final AeronReplicationCheckpoint expected = checkpoint();
         AeronReplicationCheckpointStore.write(path, expected);
-        assertEquals(AeronReplicationCheckpoint.ENCODED_BYTES, Files.size(path));
+        assertEquals(JOURNAL_BYTES, Files.size(path));
         assertEquals(expected, AeronReplicationCheckpointStore.read(path));
         Files.deleteIfExists(path);
     }
@@ -42,11 +42,14 @@ class AeronReplicationCheckpointStoreTest {
     void rejectsTornAndCorruptRecords() throws Exception {
         final Path path = Files.createTempFile("datagrid-checkpoint", ".bin");
         AeronReplicationCheckpointStore.write(path, checkpoint());
-        final byte[] bytes = Files.readAllBytes(path);
+        byte[] bytes = Files.readAllBytes(path);
         Files.write(path, java.util.Arrays.copyOf(bytes, bytes.length - 1));
         assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(path));
-        Files.write(path, bytes);
-        bytes[20] ^= 1;
+        Files.delete(path);
+        AeronReplicationCheckpointStore.write(path, checkpoint());
+        bytes = Files.readAllBytes(path);
+        bytes[SLOT_BYTES - 1] ^= 1;
+        bytes[JOURNAL_BYTES - 1] ^= 1;
         Files.write(path, bytes);
         assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(path));
         Files.deleteIfExists(path);
@@ -60,9 +63,12 @@ class AeronReplicationCheckpointStoreTest {
             AeronReplicationCheckpointStore.write(path, checkpoint());
             final byte[] bytes = Files.readAllBytes(path);
             final ByteBuffer encoded = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
-            encoded.putShort(6, (short) 1);
-            encoded.putInt(AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES,
-                    Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
+            final int record = SLOT_BYTES + Long.BYTES;
+            encoded.putShort(record + 6, (short) 1);
+            encoded.putInt(record + AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES,
+                    Crc32c.compute(bytes, record, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
+            encoded.putInt(JOURNAL_BYTES - Integer.BYTES,
+                    Crc32c.compute(bytes, SLOT_BYTES, SLOT_BYTES - Integer.BYTES));
             Files.write(path, bytes);
 
             assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(path));
@@ -78,9 +84,10 @@ class AeronReplicationCheckpointStoreTest {
         try {
             AeronReplicationCheckpointStore.write(path, checkpoint());
             final ByteBuffer encoded = ByteBuffer.wrap(Files.readAllBytes(path)).order(ByteOrder.BIG_ENDIAN);
-            assertEquals(AeronReplicationCheckpoint.MAGIC, encoded.getInt(0));
-            assertEquals((short) 2, encoded.getShort(4));
-            assertEquals((short) 0, encoded.getShort(6));
+            final int record = SLOT_BYTES + Long.BYTES;
+            assertEquals(AeronReplicationCheckpoint.MAGIC, encoded.getInt(record));
+            assertEquals((short) 2, encoded.getShort(record + 4));
+            assertEquals((short) 0, encoded.getShort(record + 6));
             assertEquals(115, AeronReplicationCheckpoint.ENCODED_BYTES);
         } finally {
             Files.deleteIfExists(path);
@@ -173,28 +180,22 @@ class AeronReplicationCheckpointStoreTest {
         }
     }
 
-        /// Reader uncertainty markers use cursor crash phases, never writer checkpoint phases.
+        /// Repeated cursor writes reuse the same fixed journal file.
     @Test
-    void readerCursorUsesCursorCrashPhases() throws Exception {
+    void readerCursorUsesFixedJournal() throws Exception {
         final Path path = Files.createTempFile("datagrid-reader-cursor", ".bin");
-        final ArrayList<String> phases = new ArrayList<>();
         final AeronReplicationCheckpoint readerCursor = new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
                 ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 6, 7, 4096, 0, 0, 0);
         try {
-            FileStoreCrashHooks.callWithHook((phase, ignored) -> phases.add(phase), () -> {
-                AeronReplicationCheckpointStore.write(path, readerCursor);
-                return null;
-            });
+            AeronReplicationCheckpointStore.write(path, readerCursor);
+            AeronReplicationCheckpointStore.write(path, readerCursor);
+            assertEquals(JOURNAL_BYTES, Files.size(path));
+            assertEquals(readerCursor, AeronReplicationCheckpointStore.read(path));
         } finally {
             Files.deleteIfExists(path);
         }
-        assertEquals(java.util.List.of(
-                "BEFORE_CURSOR_TEMP_WRITE",
-                "DURING_CURSOR_FILE_WRITE",
-                "AFTER_CURSOR_TEMP_WRITE_BEFORE_RENAME",
-                "AFTER_CURSOR_RENAME_BEFORE_DIRECTORY_SYNC"), phases);
     }
 }

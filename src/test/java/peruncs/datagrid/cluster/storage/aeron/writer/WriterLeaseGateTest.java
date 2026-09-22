@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
+import peruncs.datagrid.cluster.errors.WriterFencedException;
 
 import java.util.function.LongSupplier;
 

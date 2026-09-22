@@ -272,6 +272,7 @@ class ReaderSeedBootstrapTest {
         public String replicationProperty(final String name) {
             return switch (name) {
                 case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID" -> "11111111-1111-1111-1111-111111111111";
+                case "ECLIPSE_DATAGRID_AERON_WIRE_NONCE" -> "731947";
                 case "ECLIPSE_DATAGRID_AERON_NODE_ID" -> "22222222-2222-2222-2222-222222222222";
                 case "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> "33333333-3333-3333-3333-333333333333";
                 case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> this.aeronHome.resolve("driver").toString();

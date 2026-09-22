@@ -3,7 +3,6 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfer;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
 import java.util.function.BooleanSupplier;
@@ -13,16 +12,9 @@ import static org.eclipse.serializer.util.X.notNull;
 
 /// Store target that couples local acceptance to Aeron replication.
 ///
-/// The selected durability mode decides which side is attempted first and is
-/// a distinct failure contract (see
-/// [peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode]). A
-/// failed terminal step records an uncertain state and stops further writes;
-/// this is safer than allowing the local Store and Archive to drift silently.
-/// In `ENQUEUE_THEN_ARCHIVE` mode a preparation failure after local
-/// acceptance leaves a durable local write with no Archive copy: the write
-/// call throws a reseed-required failure, the sequence stays consumed, and
-/// the node must be reseeded from a healthy peer or a backup — never resumed
-/// in place by clearing the fence.
+/// The Archive preparation always happens before the local Store write. A
+/// failed terminal step records an uncertain state and stops further writes
+/// instead of letting the Store and Archive drift silently.
 ///
 /// The local write and the Aeron preparation run inside one
 /// [AeronReplicationWriteCoordinator#executeWriteAtomically] section; the
@@ -109,7 +101,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     @Override
     public void write(final Binary data) throws PersistenceExceptionTransfer {
         final AeronReplicationPublisher.PreparedTransaction prepared =
-                this.coordinator.executeWriteAtomically(() -> this.prepareWrite(data));
+                this.coordinator.prepareWriteAtomically(() -> this.prepareWrite(data));
         if (prepared == null) {
             return;
         }
@@ -152,46 +144,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
             }
         }
         data.iterateChannelChunks(Binary::mark);
-        if (this.coordinator.durabilityMode() == ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE) {
-            boolean localAccepted = false;
-            try {
-                final long localSequence = this.coordinator.markLocalEnqueue(data);
-                this.delegate.write(data);
-                localAccepted = true;
-                CrashHook.invoke("AFTER_ENQUEUE_BEFORE_PREPARE", localSequence);
-            } catch (final RuntimeException failure) {
-                try {
-                    if (localAccepted) this.coordinator.markEnqueueWithoutArchive();
-                    else this.coordinator.clearLocalEnqueue();
-                } catch (final RuntimeException clearFailure) {
-                    failure.addSuppressed(clearFailure);
-                }
-                throw failure;
-            } finally {
-                data.iterateChannelChunks(Binary::reset);
-            }
-            final AeronReplicationPublisher.PreparedTransaction prepared;
-            try {
-                prepared = this.coordinator.prepare(data);
-            } catch (final RuntimeException failure) {
-                try {
-                    this.coordinator.markEnqueueWithoutArchive();
-                } catch (final RuntimeException markerFailure) {
-                    failure.addSuppressed(markerFailure);
-                }
-                throw new IllegalStateException(
-                        "local Store write completed but Aeron publication could not prepare; reseed is required", failure);
-            }
-            boolean handedOff = false;
-            try {
-                this.coordinator.markEnqueued(prepared);
-                handedOff = true;
-                return prepared;
-            } finally {
-                if (!handedOff) prepared.abandonWithoutAbort();
-            }
-        }
-
         final AeronReplicationPublisher.PreparedTransaction prepared;
         try {
             prepared = this.coordinator.prepare(data);
@@ -230,7 +182,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                 }
                 throw failure;
             }
-            this.coordinator.markEnqueued(prepared);
             handedOff = true;
             return prepared;
         } finally {

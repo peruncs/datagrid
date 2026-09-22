@@ -400,6 +400,10 @@ public interface StorageBackupManager {
                 final StorageBinaryDataClient.StopResult result = this.dataClient.stopResult();
                 final StorageBinaryDataClient.StopOutcome outcome = result.outcome();
                 if (outcome == StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
+                    final RuntimeException failure = this.dataClient.failure();
+                    if (failure != null) {
+                        throw new NodeLibraryException("Cannot create backup after replication reader failure", failure);
+                    }
                     return;
                 }
                 final RuntimeException failure = this.dataClient.failure();

@@ -1,18 +1,19 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
-import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 
@@ -22,10 +23,14 @@ import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointC
 /// one. Reads validate the complete record and its checksum. A failed write
 /// therefore leaves the previous restart boundary available.
 public final class AeronReplicationCheckpointStore {
+    private static final int SLOT_BYTES = Long.BYTES + AeronReplicationCheckpoint.ENCODED_BYTES + Integer.BYTES;
+    private static final int JOURNAL_BYTES = SLOT_BYTES * 2;
+    private static final ConcurrentHashMap<Path, Object> LOCKS = new ConcurrentHashMap<>();
+
     private AeronReplicationCheckpointStore() {
     }
 
-    /// Replaces `path` only after the complete record is on disk.
+    /// Forces the next journal slot without renaming the checkpoint file.
     ///
     /// @param path       checkpoint file
     /// @param checkpoint record to persist
@@ -33,22 +38,37 @@ public final class AeronReplicationCheckpointStore {
     public static void write(final Path path, final AeronReplicationCheckpoint checkpoint) throws IOException {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(checkpoint, "checkpoint");
-        /* The encoded bytes are intentionally owned by this invocation. A callback
-         * (including a crash hook) can therefore not overwrite a buffer owned by
-         * this write while AtomicFileWriter is still consuming it. Checkpoint writes are
-         * infrequent and the fixed-size allocation is preferable to an escaping,
-         * re-entrancy-sensitive mutable buffer. */
-        final byte[] bytes = encode(checkpoint);
-        final AtomicFileWriter.Phase phase = checkpoint.recordType() == AeronReplicationCheckpoint.RecordType.READER_CURSOR
-                ? AtomicFileWriter.Phase.CURSOR
-                : AtomicFileWriter.Phase.CHECKPOINT;
-        AtomicFileWriter.write(path, channel ->
-        {
-            final ByteBuffer encoded = ByteBuffer.wrap(bytes);
-            while (encoded.hasRemaining()) {
-                if (channel.write(encoded) == 0) throw new IOException("Aeron checkpoint write made no progress");
+        final Path canonical = path.toAbsolutePath().normalize();
+        synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
+            final Path parent = canonical.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            if (Files.isSymbolicLink(canonical)) throw new IOException("checkpoint must not be a symbolic link");
+            try (FileChannel channel = FileChannel.open(canonical, StandardOpenOption.CREATE,
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                if (channel.size() != 0L && channel.size() != JOURNAL_BYTES) {
+                    throw new IOException("invalid Aeron checkpoint journal length=" + channel.size());
+                }
+                if (channel.size() == 0L) {
+                    channel.position(JOURNAL_BYTES - 1L);
+                    channel.write(ByteBuffer.wrap(new byte[1]));
+                    channel.force(true);
+                }
+                final Slot first = readSlot(channel, 0);
+                final Slot second = readSlot(channel, 1);
+                final long generation = Math.max(first == null ? 0L : first.generation(),
+                        second == null ? 0L : second.generation()) + 1L;
+                if (generation <= 0L) throw new IOException("checkpoint journal generation exhausted");
+                final byte[] record = encode(checkpoint);
+                final ByteBuffer slot = ByteBuffer.allocate(SLOT_BYTES);
+                slot.putLong(generation).put(record);
+                slot.putInt(Crc32c.compute(slot.array(), 0, SLOT_BYTES - Integer.BYTES)).flip();
+                channel.position((generation & 1L) * SLOT_BYTES);
+                while (slot.hasRemaining()) {
+                    if (channel.write(slot) == 0) throw new IOException("Aeron checkpoint write made no progress");
+                }
+                channel.force(true);
             }
-        }, phase);
+        }
     }
 
     private static byte[] encode(final AeronReplicationCheckpoint checkpoint) {
@@ -78,7 +98,22 @@ public final class AeronReplicationCheckpointStore {
     /// @return validated checkpoint
     /// @throws IOException if the file is missing, truncated, or invalid
     public static AeronReplicationCheckpoint read(final Path path) throws IOException {
-        final byte[] bytes = readFixedRecord(path);
+        final Path canonical = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
+        final byte[] bytes;
+        synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
+            try (FileChannel channel = FileChannel.open(canonical, StandardOpenOption.READ,
+                    LinkOption.NOFOLLOW_LINKS)) {
+                if (channel.size() != JOURNAL_BYTES) {
+                    throw new IOException("invalid Aeron checkpoint journal length=" + channel.size());
+                }
+                final Slot first = readSlot(channel, 0);
+                final Slot second = readSlot(channel, 1);
+                final Slot newest = first == null ? second : second == null || first.generation() > second.generation()
+                        ? first : second;
+                if (newest == null) throw new IOException("Aeron checkpoint journal has no valid slot");
+                bytes = newest.record();
+            }
+        }
         final int expected = getInt(bytes, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES);
         if (expected != Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES)) {
             throw new IOException("Aeron checkpoint CRC32C mismatch");
@@ -115,25 +150,23 @@ public final class AeronReplicationCheckpointStore {
         }
     }
 
-    private static byte[] readFixedRecord(final Path path) throws IOException {
-        Objects.requireNonNull(path, "path");
-        /* Keep the file descriptor open while reading and request NOFOLLOW_LINKS.
-         * The old size/readAllBytes sequence allowed a symlink swap between the
-         * validation and read, which could make recovery consume attacker-controlled
-         * metadata from outside the configured checkpoint directory. */
-        try (SeekableByteChannel channel = Files.newByteChannel(
-                path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-            final long size = channel.size();
-            if (size != AeronReplicationCheckpoint.ENCODED_BYTES)
-                throw new IOException("invalid Aeron checkpoint length=%s".formatted(size));
-            final byte[] bytes = new byte[AeronReplicationCheckpoint.ENCODED_BYTES];
-            final ByteBuffer target = ByteBuffer.wrap(bytes);
-            while (target.hasRemaining()) {
-                final int read = channel.read(target);
-                if (read <= 0) throw new IOException("Aeron checkpoint read made no progress");
-            }
-            return bytes;
+    private static Slot readSlot(final FileChannel channel, final int index) throws IOException {
+        final byte[] bytes = new byte[SLOT_BYTES];
+        final ByteBuffer target = ByteBuffer.wrap(bytes);
+        channel.position((long) index * SLOT_BYTES);
+        while (target.hasRemaining()) {
+            final int read = channel.read(target);
+            if (read < 0) return null;
+            if (read == 0) throw new IOException("Aeron checkpoint read made no progress");
         }
+        final long generation = ByteBuffer.wrap(bytes).getLong();
+        if (generation <= 0L) return null;
+        final int expected = ByteBuffer.wrap(bytes, SLOT_BYTES - Integer.BYTES, Integer.BYTES).getInt();
+        if (expected != Crc32c.compute(bytes, 0, SLOT_BYTES - Integer.BYTES)) return null;
+        return new Slot(generation, java.util.Arrays.copyOfRange(
+                bytes, Long.BYTES, Long.BYTES + AeronReplicationCheckpoint.ENCODED_BYTES));
     }
+
+    private record Slot(long generation, byte[] record) {}
 
 }

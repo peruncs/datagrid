@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.writer;
 
-import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
+import peruncs.datagrid.cluster.errors.WriterFencedException;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;

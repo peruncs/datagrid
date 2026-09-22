@@ -16,8 +16,12 @@
 /// Aeron is the only transport. Each provider owns its embedded MediaDriver
 /// and Archive lifecycle, closed from the storage-manager shutdown callback.
 ///
-/// # Cluster nodes authntication and authorization not required
-/// It is assumed the nodes are tightly controlled in a air-gaped network (VPN)
+/// # Trusted network boundary
+///
+/// Replication data and reader watermarks are not authenticated. Deploy them
+/// only on an isolated, trusted network such as a private VPN. Aeron Archive
+/// control authentication is a separate boundary and does not authenticate
+/// replication frames.
 ///
 /// # Archive-first replication
 ///
@@ -175,4 +179,5 @@ module peruncs.datagrid.cluster
     requires org.eclipes.store.gigamap.jvector;
     requires jvector;
     exports peruncs.datagrid.cluster.api;
+    exports peruncs.datagrid.cluster.errors;
 }

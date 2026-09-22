@@ -446,9 +446,9 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     if (this.disposed) {
                         throw new StorageBinaryDataLifecycleException("Storage binary merger is disposed");
                     }
-                    final long projectedBytes = Math.addExact(
-                            Math.addExact(this.cachedBytes, this.inFlightBytes), incomingBytes);
-                    if (projectedBytes > this.maxCachedBytes) {
+                    final long queuedAfterAdmission = Math.addExact(this.cachedBytes, incomingBytes);
+                    final long residentAfterAdmission = Math.addExact(queuedAfterAdmission, this.inFlightBytes);
+                    if (residentAfterAdmission > this.maxCachedBytes) {
                         throw new StorageBinaryDataLifecycleException(
                                 "Storage binary materialization cache is full: %s queued plus %s in-flight bytes with a %s byte limit"
                                         .formatted(this.cachedBytes, this.inFlightBytes, this.maxCachedBytes));
@@ -458,9 +458,9 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                     Collections.addAll(this.cachedData, ownedBuffers);
                     this.cachedTransactionLengths.addLast(ownedBuffers.length);
                     this.cachedBufferCount += ownedBuffers.length;
-                    this.cachedBytes = projectedBytes;
+                    this.cachedBytes = queuedAfterAdmission;
                     queued = true;
-                    queuedBytes = Math.addExact(this.cachedBytes, this.inFlightBytes);
+                    queuedBytes = residentAfterAdmission;
                     if (!this.workerScheduled) {
                         try {
                             this.workerScheduled = true;
@@ -485,6 +485,10 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                             }
                             throw failure;
                         }
+                    }
+                    if (queuedBytes > this.cacheBytesLimit) {
+                        this.flushRequested = true;
+                        this.flushCondition.signal();
                     }
                 } finally {
                     this.queueLock.unlock();

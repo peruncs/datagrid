@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.api;
 
-/// Immutable operational snapshot of one node.
+/// Tells an operator whether this node can serve traffic and keep up with replication.
 ///
 /// @param writer whether this node owns the writer role
 /// @param ready whether it may serve requests

@@ -65,29 +65,26 @@ final class ClusterIndexMaintenance {
     ///
     /// @param storage             storage connection owning the materialized graph
     /// @param maxValidatedObjects object bound for the discovery scan
-    @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter") // map is the shared GigaMap monitor, not a local lock
     static void refreshImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
         Objects.requireNonNull(storage, "storage");
         final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
         collectMaps(storage, scratch, maxValidatedObjects);
         try {
             for (final GigaMap<?> map : scratch.maps) {
-                synchronized (map) {
-                    ClusterIndexValidation.collectIndexGroups(map, scratch.groups);
-                    try {
-                        for (final IndexGroup<?> group : scratch.groups) {
-                            if (group instanceof VectorIndices<?> vectors) {
-                                resetVectorSearchGraphs(vectors);
-                            } else if (group instanceof LuceneIndex<?> lucene) {
-                                retireLuceneView(lucene);
-                            }
-                            /* Bitmap groups carry no cached search views: their
-                             * structural state ships inside the Store and
-                             * materializes directly, so nothing needs refresh. */
+                ClusterIndexValidation.collectIndexGroups(map, scratch.groups);
+                try {
+                    for (final IndexGroup<?> group : scratch.groups) {
+                        if (group instanceof VectorIndices<?> vectors) {
+                            resetVectorSearchGraphs(vectors);
+                        } else if (group instanceof LuceneIndex<?> lucene) {
+                            retireLuceneView(lucene);
                         }
-                    } finally {
-                        scratch.groups.clear();
+                        /* Bitmap groups carry no cached search views: their
+                         * structural state ships inside the Store and
+                         * materializes directly, so nothing needs refresh. */
                     }
+                } finally {
+                    scratch.groups.clear();
                 }
             }
         } finally {
@@ -123,9 +120,7 @@ final class ClusterIndexMaintenance {
         try {
             ClusterIndexValidation.validateStorageRoots(storage, maxValidatedObjects, scratch.vectorGroups);
             for (final ClusterIndexValidation.VectorGroup group : scratch.vectorGroups) {
-                synchronized (group.map()) {
-                    ensureVectorSearchGraphs(group.vectors(), scratch);
-                }
+                ensureVectorSearchGraphs(group.vectors(), scratch);
             }
         } finally {
             scratch.vectorGroups.clear();

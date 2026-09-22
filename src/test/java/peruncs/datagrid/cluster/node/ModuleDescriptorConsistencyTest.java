@@ -106,7 +106,7 @@ class ModuleDescriptorConsistencyTest {
         final Set<String> exports = descriptor().exports().stream()
                 .map(ModuleDescriptor.Exports::source)
                 .collect(Collectors.toSet());
-        assertEquals(Set.of("peruncs.datagrid.cluster.api"), exports);
+        assertEquals(Set.of("peruncs.datagrid.cluster.api", "peruncs.datagrid.cluster.errors"), exports);
     }
 
         /// No public type from a non-exported package of this module may

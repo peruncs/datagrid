@@ -256,8 +256,14 @@ record AeronSettings(
         final String cluster = value(properties, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", null);
         if (cluster == null) throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_CLUSTER_ID is required");
         final UUID clusterId = parseUuid(cluster, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID");
-        final long wireNonce = parseLong(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE",
-                Long.toString(AeronReplicationEnvelope.defaultWireNonce(clusterId)));
+        final String configuredNonce = value(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE", null);
+        if (productionMode && (configuredNonce == null || configuredNonce.isBlank())) {
+            throw new IllegalArgumentException(
+                    "ECLIPSE_DATAGRID_AERON_WIRE_NONCE is required in production");
+        }
+        final long wireNonce = configuredNonce == null || configuredNonce.isBlank()
+                ? AeronReplicationEnvelope.defaultWireNonce(clusterId)
+                : parseLong(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE", null);
         if (wireNonce == 0L) {
             throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_WIRE_NONCE must not be zero");
         }
@@ -782,12 +788,7 @@ record AeronSettings(
         }
     }
 
-        /// Resolves the durability mode from the primary and legacy environment
-    /// keys. Both keys set to different modes is a configuration conflict.
-    /// The modes are distinct failure contracts documented on
-    /// [ReplicationDurabilityMode]:
-    /// `ENQUEUE_THEN_ARCHIVE` accepts a local write that readers can never
-    /// replay when preparation fails, and recovery then requires a reseed.
+        /// Accepts only archive-first durability.
     private static ReplicationDurabilityMode durabilityMode(final NodeLibraryPropertiesProvider properties) {
         final String primary = value(properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE", null);
         final String legacy = value(properties, "ECLIPSE_DATAGRID_AERON_DURABILITY_MODE", null);
@@ -799,9 +800,8 @@ record AeronSettings(
         if (selected == null || selected.isBlank()) return ReplicationDurabilityMode.ARCHIVE_FIRST;
         return switch (selected.trim().toLowerCase(Locale.ROOT)) {
             case "archive-first", "archive_first" -> ReplicationDurabilityMode.ARCHIVE_FIRST;
-            case "enqueue-then-archive", "enqueue_then_archive" -> ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE;
             default -> throw new IllegalArgumentException(
-                    "Unknown replication durability mode: %s".formatted(selected));
+                    "Unsupported replication durability mode '%s'; only archive-first is supported".formatted(selected));
         };
     }
 

@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import io.aeron.Publication;
 import org.agrona.DirectBuffer;
-import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
+import peruncs.datagrid.cluster.errors.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.datagrid.cluster.storage.types.ReplicationRetry;

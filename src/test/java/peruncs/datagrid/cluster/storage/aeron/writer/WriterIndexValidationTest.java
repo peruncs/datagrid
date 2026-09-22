@@ -116,7 +116,7 @@ class WriterIndexValidationTest {
     void unwiredTargetSkipsWriterValidation() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
-                .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
+                .durabilityMode(ReplicationDurabilityMode.ARCHIVE_FIRST)
                 .build();
         final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
@@ -167,7 +167,7 @@ class WriterIndexValidationTest {
         Probe(final StorageConnection connection) {
             final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                     .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
-                    .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
+                    .durabilityMode(ReplicationDurabilityMode.ARCHIVE_FIRST)
                     .build();
             final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                     (buffer, offset, length) ->

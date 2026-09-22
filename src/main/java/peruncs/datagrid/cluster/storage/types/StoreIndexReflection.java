@@ -46,23 +46,26 @@ final class StoreIndexReflection {
                     if (Modifier.isStatic(field.getModifiers())) continue;
                     switch (field.getName()) {
                         case "builder" -> {
-                            if (builderField == null && GraphIndexBuilder.class.isAssignableFrom(field.getType())) {
+                            if (GraphIndexBuilder.class.isAssignableFrom(field.getType())) {
+                                if (builderField != null) throw ambiguous(type, "builder");
                                 builderField = field;
                             }
                         }
                         case "index" -> {
-                            if (graphField == null && OnHeapGraphIndex.class.isAssignableFrom(field.getType())) {
+                            if (OnHeapGraphIndex.class.isAssignableFrom(field.getType())) {
+                                if (graphField != null) throw ambiguous(type, "index");
                                 graphField = field;
                             }
                         }
                         case "graphRebuilt" -> {
-                            if (rebuiltField == null && field.getType() == boolean.class) {
+                            if (field.getType() == boolean.class) {
+                                if (rebuiltField != null) throw ambiguous(type, "graphRebuilt");
                                 rebuiltField = field;
                             }
                         }
                         case "deferredBuilderOps" -> {
-                            if (deferredField == null
-                                    && ConcurrentLinkedQueue.class.isAssignableFrom(field.getType())) {
+                            if (ConcurrentLinkedQueue.class.isAssignableFrom(field.getType())) {
+                                if (deferredField != null) throw ambiguous(type, "deferredBuilderOps");
                                 deferredField = field;
                             }
                         }
@@ -91,20 +94,28 @@ final class StoreIndexReflection {
     private static final ClassValue<Field> LUCENE_CONTEXT_FIELD = new ClassValue<>() {
         @Override
         protected Field computeValue(final Class<?> type) {
+            Field match = null;
             for (Class<?> current = type; current != null && current != Object.class;
                  current = current.getSuperclass()) {
                 for (final Field field : current.getDeclaredFields()) {
                     if (Modifier.isStatic(field.getModifiers())) continue;
                     if (LuceneContext.class.isAssignableFrom(field.getType())) {
-                        return field;
+                        if (match != null) throw ambiguous(type, "LuceneContext");
+                        match = field;
                     }
                 }
             }
+            if (match != null) return match;
             throw new IllegalStateException(
                     "cannot resolve the Lucene context on %s; unsupported Store version"
                             .formatted(type.getName()));
         }
     };
+
+    private static IllegalStateException ambiguous(final Class<?> type, final String field) {
+        return new IllegalStateException(
+                "multiple '%s' fields found on %s; unsupported Store version".formatted(field, type.getName()));
+    }
 
     /// Returns the cached transient vector-index fields for one index class.
     ///

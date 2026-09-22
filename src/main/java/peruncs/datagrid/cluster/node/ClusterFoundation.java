@@ -63,7 +63,6 @@ public interface ClusterFoundation extends AutoCloseable {
         private NodeLibraryPropertiesProvider propertiesProvider;
         private StorageDiskSpaceReader storageDiskSpaceReader;
         private StorageNodeManager storageNodeManager;
-        private boolean enableAsyncDistribution;
         private ReplicationPositionProvider positionProvider;
         private ReplicationLogRetention replicationRetention;
 
@@ -104,15 +103,6 @@ public interface ClusterFoundation extends AutoCloseable {
             return this;
         }
 
-        /// Sets whether asynchronous distribution is enabled.
-        ///
-        /// @param value whether asynchronous distribution is enabled
-        /// @return this builder
-        public Builder setEnableAsyncDistribution(final boolean value) {
-            this.enableAsyncDistribution = value;
-            return this;
-        }
-
         /// Builds the immutable node foundation.
         ///
         /// @return configured cluster foundation
@@ -125,7 +115,7 @@ public interface ClusterFoundation extends AutoCloseable {
                     this.embeddedStorageFoundation, this.backupNodeManager, this.dataClient,
                     this.dataDistributor, this.healthCheck, this.propertiesProvider,
                     this.storageDiskSpaceReader, this.storageNodeManager,
-                    this.enableAsyncDistribution, this.positionProvider, this.replicationRetention));
+                    this.positionProvider, this.replicationRetention));
         }
     }
 
@@ -141,6 +131,11 @@ public interface ClusterFoundation extends AutoCloseable {
     /// @throws ReseedRequiredException if local recovery evidence cannot be reconciled and the node
     ///                                 must be reseeded from a compatible backup or Store image
     ClusterStorageManager<?> startStorageManager() throws NodeLibraryException;
+
+    /// Returns the role fixed when this node was built.
+    ///
+    /// @return configured node role
+    NodeRole nodeRole();
 
         /// Returns the storage node control view, starting the node when necessary.
     ///
@@ -191,7 +186,6 @@ public interface ClusterFoundation extends AutoCloseable {
         private final LazyConstant<StorageBackupTaskExecutor> storageBackupTaskExecutor;
         private final LazyConstant<StorageDiskSpaceReader> storageDiskSpaceReader;
         private final LazyConstant<StorageNodeManager> storageNodeManager;
-        private final boolean enableAsyncDistribution;
         private final LazyConstant<Supplier<Object>> rootSupplier;
         private final LazyConstant<ObjectGraphUpdateHandler> graphUpdateHandler;
         private final LazyConstant<StorageBackupManager> storageBackupManager;
@@ -207,6 +201,7 @@ public interface ClusterFoundation extends AutoCloseable {
         private final LazyConstant<ClusterReplicationTransport> replicationTransport;
         private final LazyConstant<ReplicationPositionProvider> positionProvider;
         private final LazyConstant<ReplicationLogRetention> replicationRetention;
+        private final NodeRole nodeRole;
 
         // cached created types
         /* Both managers are published to monitoring threads; the volatile
@@ -220,6 +215,7 @@ public interface ClusterFoundation extends AutoCloseable {
         private volatile boolean started;
         private volatile boolean closed;
         private volatile boolean closing;
+        private volatile Throwable closeFailure;
 
         private Node(final NodeConfiguration configuration) {
             this.backupBackend = lazy(configuration.backupBackend(), this::ensureBackupBackend);
@@ -242,10 +238,10 @@ public interface ClusterFoundation extends AutoCloseable {
             this.propertiesProvider = lazy(configuration.propertiesProvider(), this::ensureNodeLibraryPropertiesProvider);
             this.storageDiskSpaceReader = lazy(configuration.storageDiskSpaceReader(), this::ensureStorageDiskSpaceReader);
             this.storageNodeManager = lazy(configuration.storageNodeManager(), this::ensureStorageNodeManager);
-            this.enableAsyncDistribution = configuration.enableAsyncDistribution();
             this.positionProvider = lazy(configuration.positionProvider(), this::ensureReplicationPositionProvider);
             this.replicationRetention = lazy(configuration.replicationRetention(), this::ensureReplicationLogRetention);
             this.backupRestorePolicy = LazyConstant.of(this::ensureBackupRestorePolicy);
+            this.nodeRole = this.propertiesProvider.get().nodeRole();
         }
 
         private static <T> LazyConstant<T> lazy(final T configured, final Supplier<? extends T> factory) {
@@ -383,7 +379,7 @@ public interface ClusterFoundation extends AutoCloseable {
         ///
         /// @return consumed-message listener
         private DataMessageAppliedListener ensureDataMessageAppliedListener() {
-            final var props = this.getNodeLibraryPropertiesProvider();
+            final boolean persistCursor = this.nodeRole != NodeRole.WRITER;
 
             final var storedCursorUpdater = new DataMessageAppliedListener() {
                 final StoredReplicationCursorManager delegate = Node.this
@@ -391,7 +387,7 @@ public interface ClusterFoundation extends AutoCloseable {
 
                 @Override
                 public void onApplied(final ReplicationCursor cursor) throws NodeLibraryException {
-                    if (props.nodeRole() != NodeRole.WRITER) {
+                    if (persistCursor) {
                         // Every reader must persist its resolved boundary; writers do not consume replication.
                         this.delegate.set(cursor);
                     }
@@ -402,8 +398,13 @@ public interface ClusterFoundation extends AutoCloseable {
                     this.delegate.close();
                 }
             };
-            LOGGER.log(System.Logger.Level.TRACE, "Created DataMessageAppliedListener->StoredReplicationCursorManager delegate. WillRun=%s".formatted(props.nodeRole() != NodeRole.WRITER));
+            LOGGER.log(System.Logger.Level.TRACE, "Created DataMessageAppliedListener->StoredReplicationCursorManager delegate. WillRun=%s".formatted(persistCursor));
             return storedCursorUpdater;
+        }
+
+        @Override
+        public NodeRole nodeRole() {
+            return this.nodeRole;
         }
 
                 /// Creates the storage backup manager.
@@ -545,7 +546,7 @@ public interface ClusterFoundation extends AutoCloseable {
             return StorageBinaryDataDistributor.Caching(
                     this.getClusterReplicationTransport().distributor(
                             this.getNodeLibraryPropertiesProvider().replicationStreamName(),
-                            this.enableAsyncDistribution
+                            false
                     )
             );
         }
@@ -1258,7 +1259,7 @@ public interface ClusterFoundation extends AutoCloseable {
             sequencer.run("failed to close housekeeper and replication resources");
         }
 
-                /// Closes the complete foundation graph once, retaining all failures.
+        /// Stops the node and all resources it created.
         ///
         /// The node monitor protects the lifecycle flags and is taken only
         /// briefly here, so close waits for an in-flight start to finish
@@ -1278,6 +1279,7 @@ public interface ClusterFoundation extends AutoCloseable {
                 }
                 this.closing = true;
             }
+            Throwable failure = null;
             try {
                 final boolean storageManagerOwnsNodeResources = this.clusterStorageManager != null;
                 final boolean storageManagerClosed = this.storageNodeManager.isInitialized();
@@ -1293,6 +1295,10 @@ public interface ClusterFoundation extends AutoCloseable {
                  * or when the manager does not own them. Every implementation is
                  * idempotent. Roles are fixed, so at most one manager started. */
                 sequencer
+                        /* Stop new maintenance work before waiting for task
+                         * executors or closing anything those tasks use. */
+                        .add("housekeeper", this.housekeeper.isInitialized(),
+                                () -> this.housekeeper.get().close())
                         .add("backup task executor", this.storageBackupTaskExecutor.isInitialized(),
                                 () -> this.storageBackupTaskExecutor.get().close())
                         .add("storage task executor",
@@ -1326,25 +1332,31 @@ public interface ClusterFoundation extends AutoCloseable {
                                 !this.dataMessageAppliedListener.isInitialized() && this.storedReplicationCursorManager != null,
                                 this::closeStoredReplicationCursorManager)
                         .add("replication resources", !storageManagerOwnsNodeResources,
-                                this::closeReplicationTransportAndPositionProvider)
-                        .add("housekeeper", !storageManagerOwnsNodeResources && this.housekeeper.isInitialized(),
-                                () -> this.housekeeper.get().close());
+                                this::closeReplicationTransportAndPositionProvider);
                 sequencer.run("Failed to close cluster foundation");
+            } catch (final RuntimeException | Error closeFailure) {
+                failure = closeFailure;
+                throw closeFailure;
             } finally {
-                /* A failed close leaves the node permanently unusable rather
-                 * than half-open: every resource was already attempted and the
-                 * released managers must never be handed out again. */
                 synchronized (this) {
-                    this.clusterStorageManager = null;
-                    this.embeddedStorageManager = null;
-                    this.closed = true;
+                    if (failure == null) {
+                        this.clusterStorageManager = null;
+                        this.embeddedStorageManager = null;
+                        this.closeFailure = null;
+                        this.closed = true;
+                    } else {
+                        /* Keep resource references so a later close can retry a
+                         * stage such as deferred backup-client disposal. Other
+                         * APIs remain unavailable while teardown is incomplete. */
+                        this.closeFailure = failure;
+                    }
                     this.closing = false;
                 }
             }
         }
 
         private void ensureOpen() {
-            if (this.closed || this.closing) {
+            if (this.closed || this.closing || this.closeFailure != null) {
                 throw new IllegalStateException("Cluster foundation is closed");
             }
         }

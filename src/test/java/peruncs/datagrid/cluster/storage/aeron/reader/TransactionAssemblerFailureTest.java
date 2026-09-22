@@ -193,7 +193,7 @@ class TransactionAssemblerFailureTest {
             }
         };
         assertThrows(IllegalArgumentException.class, () -> new TransactionAssembler(
-                configuration, CLUSTER, EPOCH, -1, -1, receiver, () -> {
+                configuration, CLUSTER, EPOCH, -1, -1, receiver, ignored -> {
         }, null, 0L));
     }
 }

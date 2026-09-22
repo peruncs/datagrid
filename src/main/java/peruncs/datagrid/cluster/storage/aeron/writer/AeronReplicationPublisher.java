@@ -527,6 +527,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return this.configuration.maxTransactionBytes();
     }
 
+    long admissionTimeoutNanos() {
+        return this.configuration.offerTimeoutNanos();
+    }
+
         /// Returns the bounded wait for one recorded-position acknowledgement.
     ///
     /// Coordinator shutdown paths use it to bound their wait for an in-flight
@@ -777,8 +781,9 @@ final class AeronReplicationPublisher implements AutoCloseable {
                               final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
                               final int commitCrc32c, final DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
-        this.offerEncoded(sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset,
-                commitCrc32c, payload, payloadOffset, payloadChunkLength, () -> true);
+        this.leaseGate.offerUnderOwnership(owner ->
+                this.offerEncoded(sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset,
+                        commitCrc32c, payload, payloadOffset, payloadChunkLength, owner));
     }
 
     private long offerEncoded(final long sequence, final AeronReplicationEnvelope.Kind kind,
@@ -814,7 +819,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
             if (encodedLength > this.maxMessageLength) {
                 throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
             }
-            this.offerer.offer(this.envelopeBuffer, encodedLength);
+            this.leaseGate.offerUnderOwnership(owner ->
+                    this.offerer.offer(this.envelopeBuffer, encodedLength, owner));
         } finally {
             this.offerLock.unlock();
         }

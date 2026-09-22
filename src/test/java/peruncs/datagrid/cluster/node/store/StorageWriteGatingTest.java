@@ -142,6 +142,20 @@ class StorageWriteGatingTest {
         }
     }
 
+    /// Closing the borrowed persistence view must not close the live Store.
+    @Test
+    void persistenceManagerViewDoesNotOwnTheStore(@TempDir final Path dir) {
+        try (EmbeddedStorageManager delegate = start(dir)) {
+            final ClusterStorageManager<Object> manager =
+                    ClusterStorageManager.New(delegate, () -> false, ClusterStorageManager.ShutdownCallback.NoOp());
+
+            manager.persistenceManager().close();
+
+            assertTrue(manager.isRunning());
+            assertDoesNotThrow(() -> manager.store(new Payload("still-open")));
+        }
+    }
+
     private static EmbeddedStorageManager start(final Path dir) {
         final StorageConfiguration configuration = StorageConfiguration.Builder()
                 .setStorageFileProvider(Storage.FileProvider(dir))

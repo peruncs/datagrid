@@ -131,8 +131,6 @@ public record AeronReplicationCheckpoint(
     public enum State {
                 /// Data publication has started but has no terminal result yet.
         PREPARING(1),
-                /// The local Store accepted the transaction.
-        ENQUEUED(2),
                 /// The outcome was lost and must not be guessed during restart.
         COMMITTING_UNCERTAIN(3),
                 /// The commit marker reached the Archive recording.
@@ -148,7 +146,6 @@ public record AeronReplicationCheckpoint(
         static State from(final int code) {
             return switch (code) {
                 case 1 -> PREPARING;
-                case 2 -> ENQUEUED;
                 case 3 -> COMMITTING_UNCERTAIN;
                 case 4 -> COMMITTED;
                 case 5 -> REJECTED;

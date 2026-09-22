@@ -9,12 +9,8 @@ import java.util.function.Supplier;
 /// read from the node environment and validated before startup.
 ///
 /// @param rootSupplier creates a root for an empty Store
-/// @param asynchronousDistribution whether Store publication may be asynchronous
 /// @param <T> root type
-public record NodeOptions<T>(
-        Supplier<? extends T> rootSupplier,
-        boolean asynchronousDistribution
-) {
+public record NodeOptions<T>(Supplier<? extends T> rootSupplier) {
     /// Validates the immutable node options.
     public NodeOptions {
         Objects.requireNonNull(rootSupplier, "rootSupplier");
@@ -26,6 +22,6 @@ public record NodeOptions<T>(
     /// @param rootSupplier creates a root for an empty Store
     /// @return immutable node options
     public static <T> NodeOptions<T> of(final Supplier<? extends T> rootSupplier) {
-        return new NodeOptions<>(rootSupplier, false);
+        return new NodeOptions<>(rootSupplier);
     }
 }

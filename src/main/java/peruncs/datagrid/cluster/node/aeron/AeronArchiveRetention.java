@@ -68,9 +68,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private volatile boolean cleanupComplete;
     private boolean stateRestored;
     private AeronReaderWatermark persistedBoundary;
-    private final ExecutorService agent = Executors.newSingleThreadExecutor(Thread.ofVirtual()
-            .name("datagrid-retention-agent", 0L)
-            .factory());
+    private final ThreadPoolExecutor agent;
     private final ThreadLocal<Boolean> onAgentThread = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private final AtomicReference<RuntimeException> terminalFailure = new AtomicReference<>();
     private static final System.Logger LOGGER = System.getLogger(AeronArchiveRetention.class.getName());
@@ -128,6 +126,10 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             throw new IllegalArgumentException("operationTimeoutMillis must be positive");
         }
         this.operationTimeoutMillis = operationTimeoutMillis;
+        this.agent = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(Math.max(16, readers.size() * 2)),
+                Thread.ofVirtual().name("datagrid-retention-agent", 0L).factory(),
+                new ThreadPoolExecutor.AbortPolicy());
     }
 
         /// Runs one retention command on the single agent thread.
@@ -354,6 +356,26 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         /// Accepts a watermark already decoded by the Aeron control subscription.
     void recordReaderWatermark(final AeronReaderWatermark watermark) {
         this.onAgent(() -> this.recordReaderWatermarkOnAgent(watermark));
+    }
+
+    /// Queues reader progress without blocking the Aeron polling thread.
+    boolean offerReaderWatermark(final AeronReaderWatermark watermark) {
+        if (this.closed || this.terminalFailure.get() != null) return false;
+        try {
+            this.agent.execute(() -> {
+                this.onAgentThread.set(Boolean.TRUE);
+                try {
+                    this.recordReaderWatermarkOnAgent(watermark);
+                } catch (final RuntimeException failure) {
+                    LOGGER.log(System.Logger.Level.WARNING, "Aeron reader watermark update failed", failure);
+                } finally {
+                    this.onAgentThread.remove();
+                }
+            });
+            return true;
+        } catch (final RejectedExecutionException fullOrClosed) {
+            return false;
+        }
     }
 
     private void recordReaderWatermarkOnAgent(final AeronReaderWatermark watermark) {

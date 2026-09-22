@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.node.exceptions.WriterFencedException;
+import peruncs.datagrid.cluster.errors.WriterFencedException;
 import peruncs.datagrid.cluster.node.store.StorageFileOperations;
 import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 import peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate;
@@ -143,21 +143,22 @@ final class WriterFencingLease implements AutoCloseable {
         if (lockTimeout.isZero() || lockTimeout.isNegative()) {
             throw new IllegalArgumentException("lease lock wait must be positive");
         }
+        final Path canonicalVolume = volumeDirectory.toAbsolutePath().normalize();
         try {
-            Files.createDirectories(volumeDirectory);
-            if (Files.isSymbolicLink(volumeDirectory)) {
+            Files.createDirectories(canonicalVolume);
+            if (Files.isSymbolicLink(canonicalVolume)) {
                 throw new IOException("writer lease directory must not be a symbolic link");
             }
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot create writer lease directory %s".formatted(volumeDirectory), failure);
+            throw new IllegalStateException("cannot create writer lease directory %s".formatted(canonicalVolume), failure);
         }
-        final Path path = leasePath(volumeDirectory, clusterId, storeGeneration);
+        final Path path = leasePath(canonicalVolume, clusterId, storeGeneration);
         synchronized (mutexFor(path)) {
             final WriterFencingLease active = ACTIVE.get(path);
-            if (active != null && active.isCurrent()) {
-                throw new IllegalStateException("a writer lease is already held in this JVM");
+            if (active != null && (active.releaseUnproven || active.isCurrent())) {
+                throw new IllegalStateException("a writer lease is already held or its release is unresolved in this JVM");
             }
-            return acquireLocked(volumeDirectory, clusterId, storeGeneration, nodeId, maxStaleness, lockTimeout);
+            return acquireLocked(canonicalVolume, clusterId, storeGeneration, nodeId, maxStaleness, lockTimeout);
         }
     }
 
@@ -281,7 +282,8 @@ final class WriterFencingLease implements AutoCloseable {
     /// @param storeGeneration Store generation identity
     /// @return lease path
     static Path leasePath(final Path volumeDirectory, final UUID clusterId, final UUID storeGeneration) {
-        return volumeDirectory.resolve("writer-lease-%s-%s.lease".formatted(clusterId, storeGeneration));
+        return volumeDirectory.toAbsolutePath().normalize()
+                .resolve("writer-lease-%s-%s.lease".formatted(clusterId, storeGeneration));
     }
 
     private final Path path;
@@ -302,6 +304,7 @@ final class WriterFencingLease implements AutoCloseable {
      * so a heartbeat can never be written after close() returns. */
     private final Object stateLock = new Object();
     private boolean closed;
+    private volatile boolean releaseUnproven;
     private boolean hasCheck;
     private long lastCheckNanos;
     private boolean lastCheckResult;
@@ -589,10 +592,9 @@ final class WriterFencingLease implements AutoCloseable {
     /// passes. The fencing token series therefore survives clean restarts,
     /// crashes, and takeovers.
     @Override
-    public void close() {
+    public synchronized void close() {
         synchronized (this.stateLock) {
             if (this.closed) return;
-            this.closed = true;
         }
         this.heartbeat.shutdownNow();
         try {
@@ -604,6 +606,7 @@ final class WriterFencingLease implements AutoCloseable {
             Thread.currentThread().interrupt();
         }
         final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
+        boolean releaseProven = false;
         try (final FileChannel lockChannel = FileChannel.open(rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
              final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
             /* Nothing to write: the file intentionally survives release.
@@ -615,12 +618,19 @@ final class WriterFencingLease implements AutoCloseable {
             if (!ignored.isValid()) {
                 throw new IOException("writer lease lock became invalid during release");
             }
+            releaseProven = true;
         } catch (final IOException | RuntimeException releaseFailure) {
+            this.releaseUnproven = true;
             System.getLogger(WriterFencingLease.class.getName()).log(WARNING,
                     "writer lease lock was not available during release; a concurrent heartbeat or offer may still be finishing",
                     releaseFailure);
         }
-        ACTIVE.remove(this.path, this);
+        if (releaseProven) {
+            synchronized (this.stateLock) {
+                this.closed = true;
+            }
+            ACTIVE.remove(this.path, this);
+        }
     }
 
     private record LeaseFile(long token, UUID nodeId, UUID holderId, long heartbeatMillis) {

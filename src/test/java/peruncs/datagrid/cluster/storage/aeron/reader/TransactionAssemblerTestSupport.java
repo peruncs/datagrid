@@ -98,7 +98,7 @@ final class TransactionAssemblerTestSupport {
                                     final ReaderDeliveryListener deliveryListener) {
         Objects.requireNonNull(clusterId, "clusterId");
         return new TransactionAssembler(configuration, clusterId, epoch, initialSequence, initialPosition,
-                receiver, transactionResolved, deliveryListener,
+                receiver, ignored -> transactionResolved.run(), deliveryListener,
                 AeronReplicationEnvelope.defaultWireNonce(clusterId));
     }
 }

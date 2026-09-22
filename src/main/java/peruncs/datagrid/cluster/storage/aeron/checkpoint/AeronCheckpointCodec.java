@@ -9,18 +9,20 @@ import java.util.UUID;
 /// format revision assigns a bit meaning. The watermark, replication cursor,
 /// and checkpoint store all encode and validate that header through this
 /// interface so the three formats can never drift apart.
-interface AeronCheckpointCodec {
+final class AeronCheckpointCodec {
+    private AeronCheckpointCodec() {
+    }
     /// Number of bytes in one UUID encoding.
-    int UUID_BYTES = 16;
+    static final int UUID_BYTES = 16;
 
     /// Offset of the version field within the shared header.
-    int VERSION_OFFSET = Integer.BYTES;
+    static final int VERSION_OFFSET = Integer.BYTES;
 
     /// Offset of the flags field within the shared header.
-    int FLAGS_OFFSET = Integer.BYTES + Short.BYTES;
+    static final int FLAGS_OFFSET = Integer.BYTES + Short.BYTES;
 
     /// Number of bytes in the shared magic, version, and flags header.
-    int HEADER_LENGTH = Integer.BYTES + Short.BYTES * 2;
+    static final int HEADER_LENGTH = Integer.BYTES + Short.BYTES * 2;
 
     /// Writes the shared `magic`, `version`, zero-`flags` header.
     ///
@@ -123,7 +125,7 @@ interface AeronCheckpointCodec {
     /// Each `read*` call returns the value at the current offset and advances
     /// past it, so decoders name each field once instead of repeating a
     /// `get*` plus `offset += SIZE` pair per field.
-    final class FrameReader {
+    static final class FrameReader {
         private final byte[] source;
         private int offset;
 

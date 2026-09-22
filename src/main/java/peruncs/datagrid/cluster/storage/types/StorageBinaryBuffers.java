@@ -16,11 +16,6 @@ import java.util.Objects;
 /// owned extraction hands the original direct buffers back to a caller that
 /// already owns the binary.
 final class StorageBinaryBuffers {
-    /* Lexically scoped scratch storage cannot leak from a platform-thread pool
-     * or be retained by a parked virtual thread. The public operation binds one
-     * list and its recursive body consumes that binding. */
-    private static final ScopedValue<ArrayList<ByteBuffer>> SCRATCH = ScopedValue.newInstance();
-
     private StorageBinaryBuffers() {
     }
 
@@ -34,11 +29,8 @@ final class StorageBinaryBuffers {
     /// @return import-ready duplicate views
     static ByteBuffer[] importArray(final Binary data) {
         Objects.requireNonNull(data, "data");
-        if (!SCRATCH.isBound()) {
-            return ScopedValue.where(SCRATCH, new ArrayList<>()).call(() -> importArray(data));
-        }
         final boolean wrapped = data instanceof ChunksWrapper;
-        final ArrayList<ByteBuffer> scratch = scratch();
+        final ArrayList<ByteBuffer> scratch = new ArrayList<>();
         try {
             data.iterateChannelChunks(chunk ->
             {
@@ -74,15 +66,12 @@ final class StorageBinaryBuffers {
     /// @return original direct buffers, positioned at zero
     static ByteBuffer[] ownedArray(final Binary data) {
         Objects.requireNonNull(data, "data");
-        if (!SCRATCH.isBound()) {
-            return ScopedValue.where(SCRATCH, new ArrayList<>()).call(() -> ownedArray(data));
-        }
         /* One pass with one reused scratch list: each buffer is validated and
          * normalized inline, so no boxed length list and no second loop.
          * Normalizing before a later buffer fails is unobservable: the caller
          * discards the whole binary on failure and releases its native storage
          * through the ownership cleanup block instead. */
-        final ArrayList<ByteBuffer> scratch = scratch();
+        final ArrayList<ByteBuffer> scratch = new ArrayList<>();
         try {
             data.iterateChannelChunks(channel ->
             {
@@ -143,12 +132,6 @@ final class StorageBinaryBuffers {
         } catch (final RuntimeException ignored) {
             /* Best-effort cleanup stays silent by contract. */
         }
-    }
-
-    private static ArrayList<ByteBuffer> scratch() {
-        final ArrayList<ByteBuffer> scratch = SCRATCH.get();
-        scratch.clear();
-        return scratch;
     }
 
     /// Returns the logical payload length of one channel buffer.

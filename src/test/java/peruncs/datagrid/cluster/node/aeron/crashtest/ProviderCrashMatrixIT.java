@@ -224,13 +224,13 @@ class ProviderCrashMatrixIT {
         /// Verifies enqueue before prepare fence requires reseed.
     @Test
     void enqueueBeforePrepareFenceRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_ENQUEUE_BEFORE_PREPARE", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, false);
+        this.assertReseed("AFTER_ENQUEUE_BEFORE_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
         /// Verifies uncertain checkpoint requires reseed.
     @Test
     void uncertainCheckpointRequiresReseed() throws Exception {
-        this.assertReseed("DURING_COMMITTING_UNCERTAIN_WRITE", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, true);
+        this.assertReseed("DURING_COMMITTING_UNCERTAIN_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, true);
     }
 
         /// Verifies a checkpoint write interrupted before rename preserves the prior boundary.
@@ -671,7 +671,7 @@ class ProviderCrashMatrixIT {
         /// Verifies failed prepare abort boundary requires reseed.
     @Test
     void failedPrepareAbortBoundaryRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, true);
+        this.assertReseed("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST, true);
     }
 
         /// Seeded process-kill soak.  It is enabled by the crashmatrix profile and
@@ -711,11 +711,11 @@ class ProviderCrashMatrixIT {
                                 "RESEED_REQUIRED"),
                         new CrashScenario("AFTER_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST, false, true,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_ENQUEUE_BEFORE_PREPARE", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE,
+                        new CrashScenario("AFTER_ENQUEUE_BEFORE_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST,
                                 false, false, "RESEED_REQUIRED"),
-                        new CrashScenario("DURING_COMMITTING_UNCERTAIN_WRITE", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE,
+                        new CrashScenario("DURING_COMMITTING_UNCERTAIN_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST,
                                 true, false, "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE,
+                        new CrashScenario("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST,
                                 true, false, "RESEED_REQUIRED"),
                         new CrashScenario("BEFORE_CHECKPOINT_TEMP_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
                                 "RESEED_REQUIRED"),

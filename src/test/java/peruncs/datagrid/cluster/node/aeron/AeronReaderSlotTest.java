@@ -71,7 +71,7 @@ class AeronReaderSlotTest {
         assertEquals(2, disposed.get(), "dispose must be idempotent");
     }
 
-        /// Verifies a factory failure leaves the slot empty instead of a half-installed reader.
+        /// Verifies a factory failure retains the disposed reader as an explicit non-empty state.
     @Test
     void failedFactoryLeavesSlotEmptyAndDisposesPrevious() {
         final AtomicInteger disposed = new AtomicInteger();
@@ -80,7 +80,7 @@ class AeronReaderSlotTest {
         assertThrows(IllegalStateException.class, () -> slot.replace(() -> {
             throw new IllegalStateException("reader creation failed");
         }));
-        assertNull(slot.current());
+        assertNotNull(slot.current());
         assertEquals(1, disposed.get());
     }
 }

@@ -344,7 +344,10 @@ final class ClusterIndexValidation {
     /// @throws IllegalArgumentException if the index uses an external directory
     static void validateLuceneIndex(final LuceneIndex<?> index) {
         final LuceneContext<?> context = luceneContext(index);
-        if (context != null) validateLuceneContext(context);
+        if (context == null) {
+            throw new IllegalArgumentException("Lucene index has no embedded context");
+        }
+        validateLuceneContext(context);
     }
 
     static LuceneContext<?> luceneContext(final LuceneIndex<?> index) {

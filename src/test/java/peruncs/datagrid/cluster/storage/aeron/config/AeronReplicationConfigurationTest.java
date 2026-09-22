@@ -77,7 +77,7 @@ class AeronReplicationConfigurationTest {
                 .recordingStartTimeoutNanos(6000)
                 .recordedPositionTimeoutNanos(7000)
                 .recordingStopTimeoutNanos(8000)
-                .durabilityMode(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE)
+                .durabilityMode(ReplicationDurabilityMode.ARCHIVE_FIRST)
                 .build();
         assertEquals(1024, configuration.mtuLength());
         assertEquals(32768, configuration.chunkSize());
@@ -86,7 +86,7 @@ class AeronReplicationConfigurationTest {
         assertEquals(6000, configuration.recordingStartTimeoutNanos());
         assertEquals(7000, configuration.recordedPositionTimeoutNanos());
         assertEquals(8000, configuration.recordingStopTimeoutNanos());
-        assertEquals(ReplicationDurabilityMode.ENQUEUE_THEN_ARCHIVE, configuration.durabilityMode());
+        assertEquals(ReplicationDurabilityMode.ARCHIVE_FIRST, configuration.durabilityMode());
     }
 
         /// Verifies rejection of invalid term mtu chunk and timeout values.

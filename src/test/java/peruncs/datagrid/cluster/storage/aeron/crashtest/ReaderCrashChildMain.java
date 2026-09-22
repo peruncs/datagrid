@@ -125,7 +125,7 @@ public final class ReaderCrashChildMain {
                         .replicationConfiguration(configuration).clusterId(CLUSTER_ID).epoch(EPOCH)
                         .initialSequence(cursor == null ? -1 : cursor.sequence)
                         .initialPosition(cursor == null ? -1 : cursor.position)
-                        .receiver(fixture).transactionResolved(() ->
+                        .receiver(fixture).transactionResolved(ignored ->
                         {
                             final AeronArchiveReader current = readerRef.get();
                             if (current != null) {

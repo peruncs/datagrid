@@ -19,9 +19,8 @@ import static org.eclipse.serializer.util.X.notNull;
 /// next run instead of overlapping it. A task that throws is logged and the
 /// remaining tasks keep running; a task that fails [#FAILURE_THRESHOLD]
 /// consecutive runs degrades [#failure()] so readiness reports the node
-/// instead of hiding the repeated failure, and the next successful run
-/// clears the degradation — a transient flap degrades health only while it
-/// lasts. A fatal [Error] never clears.
+/// instead of hiding the repeated failure. Each task clears only its own
+/// failure after it recovers. A fatal [Error] never clears.
 final class NodeHousekeeper implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(NodeHousekeeper.class.getName());
     private static final int THREADS = 2;
@@ -31,7 +30,7 @@ final class NodeHousekeeper implements AutoCloseable {
 
     private final ScheduledThreadPoolExecutor scheduler;
     private final AtomicReference<Error> fatalFailure = new AtomicReference<>();
-    private final AtomicReference<RuntimeException> degradedFailure = new AtomicReference<>();
+    private final ConcurrentHashMap<String, RuntimeException> degradedFailures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> consecutiveFailures = new ConcurrentHashMap<>();
     private final List<ScheduledTask> pending = new ArrayList<>();
     private boolean started;
@@ -59,12 +58,8 @@ final class NodeHousekeeper implements AutoCloseable {
         LOGGER.log(System.Logger.Level.DEBUG, "Running housekeeper task '%s'".formatted(scheduled.name()));
         try {
             scheduled.task().run();
-            /* A success clears both the streak and any degradation an earlier
-             * streak latched: health must recover when maintenance recovers,
-             * not stay degraded for the node's lifetime. Fatal [Error]s are
-             * never cleared — the node must fail closed until restart. */
             this.consecutiveFailures.remove(scheduled.name());
-            this.degradedFailure.set(null);
+            this.degradedFailures.remove(scheduled.name());
             LOGGER.log(System.Logger.Level.DEBUG, "Finished housekeeper task '%s'".formatted(scheduled.name()));
         } catch (final RuntimeException failure) {
             LOGGER.log(System.Logger.Level.ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
@@ -72,7 +67,7 @@ final class NodeHousekeeper implements AutoCloseable {
                     .computeIfAbsent(scheduled.name(), ignored -> new AtomicInteger())
                     .incrementAndGet();
             if (failures >= FAILURE_THRESHOLD) {
-                this.degradedFailure.compareAndSet(null, failure);
+                this.degradedFailures.put(scheduled.name(), failure);
             }
         } catch (final Error failure) {
             /* Never let an Error escape scheduleWithFixedDelay: ScheduledExecutorService
@@ -90,7 +85,7 @@ final class NodeHousekeeper implements AutoCloseable {
     /// @return failure requiring health degradation, or `null`
     Throwable failure() {
         final Error fatal = this.fatalFailure.get();
-        return fatal != null ? fatal : this.degradedFailure.get();
+        return fatal != null ? fatal : this.degradedFailures.values().stream().findFirst().orElse(null);
     }
 
         /// Registers one periodic task. Tasks must be scheduled before start.

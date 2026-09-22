@@ -20,6 +20,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /// Reads committed Store transactions from an Archive and then from the live
 /// publication.
@@ -79,7 +80,7 @@ public final class AeronArchiveReader implements Disposable {
             long initialSequence,
             long initialPosition,
             StorageBinaryDataReceiver receiver,
-            Runnable transactionResolved,
+            Consumer<CursorSnapshot> transactionResolved,
             ReaderDeliveryListener deliveryListener
     ) {
         /// Validates required reader collaborators and recovered cursor bounds.
@@ -121,7 +122,7 @@ public final class AeronArchiveReader implements Disposable {
             private long initialSequence = -1L;
             private long initialPosition = -1L;
             private StorageBinaryDataReceiver receiver;
-            private Runnable transactionResolved = () -> {
+            private Consumer<CursorSnapshot> transactionResolved = ignored -> {
             };
             private ReaderDeliveryListener deliveryListener;
 
@@ -217,7 +218,7 @@ public final class AeronArchiveReader implements Disposable {
             ///
             /// @param value post-transaction callback
             /// @return this builder
-            public Builder transactionResolved(final Runnable value) { this.transactionResolved = value; return this; }
+            public Builder transactionResolved(final Consumer<CursorSnapshot> value) { this.transactionResolved = value; return this; }
             /// Sets the Store materialisation callback, or `null`.
             ///
             /// @param value Store materialisation callback, or `null`
@@ -470,7 +471,7 @@ public final class AeronArchiveReader implements Disposable {
          * becomes RUNNING, but a failed or timed-out reader never looks healthy. */
         this.updateOutcome(StorageBinaryDataClient.StopOutcome.RUNNING);
         this.stopped = new CountDownLatch(1);
-        this.thread = Thread.ofVirtual().name("datagrid-aeron-archive-reader").unstarted(this::run);
+        this.thread = Thread.ofPlatform().daemon().name("datagrid-aeron-archive-reader").unstarted(this::run);
         this.thread.start();
     }
 
@@ -523,6 +524,9 @@ public final class AeronArchiveReader implements Disposable {
     private int pollSubscription() {
         final PersistentSubscription current = this.subscription;
         if (current == null) {
+            if (!this.active.get() || this.disposeRequested) {
+                return 0;
+            }
             /* A previous reconnect attempt could not even create the
              * subscription (channel still unresolved). Stay in reconnect mode
              * until either create succeeds or the reconnect budget expires. */
