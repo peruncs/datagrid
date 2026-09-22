@@ -58,6 +58,28 @@ class AeronReplicationPublisherTest {
         }
     }
 
+    /// Chunks and the marker share one transaction's native buffer, never another's.
+    @Test
+    void eachTransactionOwnsItsFrameBuffer() {
+        final List<DirectBuffer> offeredBuffers = new ArrayList<>();
+        final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> {
+                    offeredBuffers.add(buffer);
+                    return offeredBuffers.size();
+                }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            final byte[] payload = new byte[300];
+            publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
+            publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
+        }
+        assertEquals(6, offeredBuffers.size(), "each transaction has two chunks and one commit marker");
+        assertSame(offeredBuffers.get(0), offeredBuffers.get(1));
+        assertSame(offeredBuffers.get(0), offeredBuffers.get(2));
+        assertSame(offeredBuffers.get(3), offeredBuffers.get(4));
+        assertSame(offeredBuffers.get(3), offeredBuffers.get(5));
+        assertNotSame(offeredBuffers.get(0), offeredBuffers.get(3));
+    }
+
         /// Verifies times out and fails closed after persistent back pressure.
     @Test
     void timesOutAndFailsClosedAfterPersistentBackPressure() {

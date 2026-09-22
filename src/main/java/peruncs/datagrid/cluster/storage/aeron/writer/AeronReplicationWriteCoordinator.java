@@ -26,11 +26,11 @@ import java.util.function.LongSupplier;
 /// restart can distinguish a committed transaction from an uncertain one.
 ///
 /// Lock order is strict: coordinator {@code writeLock} → publisher state
-/// monitor → publisher {@code offerLock}. The coordinator lock is a short
+/// monitor. The coordinator lock is a short
 /// state-transition lock, never a wait lock: the slow marker offer and the
 /// Archive acknowledgement wait run with no coordinator lock held, and the
 /// in-progress guard is what keeps a second writer out. No callback may
-/// acquire the coordinator lock while holding the publisher offer lock.
+/// acquire the coordinator lock while holding the publisher state monitor.
 ///
 /// Every coordinator method either holds no lock or acquires {@code writeLock}
 /// in a {@code try/finally} that releases it before returning or throwing, so
