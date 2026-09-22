@@ -62,15 +62,13 @@ public final class AeronEnvelopeBenchmark {
                 AeronReplicationEnvelope.HEADER_LENGTH + chunkSize));
         final var checksum = new AeronReplicationEnvelope.ChecksumContext();
         for (int i = 0; i < warmup; i++) {
-            final int sequence = i;
-            encodeTransaction(target, payload, clusterId, epoch, sequence,
+            encodeTransaction(target, payload, clusterId, epoch, i,
                     payloadLength, chunkSize, chunkCount, checksum);
         }
         final AllocationCounter allocation = AllocationCounter.start();
         final long start = System.nanoTime();
         for (int i = 0; i < iterations; i++) {
-            final int sequence = i + warmup;
-            encodeTransaction(target, payload, clusterId, epoch, sequence,
+            encodeTransaction(target, payload, clusterId, epoch, i + warmup,
                     payloadLength, chunkSize, chunkCount, checksum);
         }
         final long elapsed = System.nanoTime() - start;

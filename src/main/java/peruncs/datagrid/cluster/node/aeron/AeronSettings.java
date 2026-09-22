@@ -1090,7 +1090,8 @@ record AeronSettings(
     /// @return credentials supplier, or `null`
     CredentialsSupplier credentialsSupplier() {
         if (!this.auth.enabled()) return null;
-        final byte[] credentials = this.auth.credentials();
+        final byte[] credentials = Objects.requireNonNull(this.auth.credentials(),
+                "auth credentials must be set when auth is enabled");
         return new CredentialsSupplier() {
             @Override
             public byte[] encodedCredentials() {

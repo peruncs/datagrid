@@ -151,6 +151,7 @@ class StorageWriteGatingTest {
     }
 
     static final class Payload {
+        @SuppressWarnings("FieldCanBeLocal") // retained as a stored field for Eclipse Store serialization
         private final String value;
 
         Payload(final String value) {

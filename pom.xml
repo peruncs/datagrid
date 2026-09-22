@@ -41,7 +41,7 @@
 		<jvector.version>4.0.0-rc.9</jvector.version>
 		<!-- Optional diagnostics injected into every forked test JVM, for example
 		     -Dtest.jvm.args=-XX:StartFlightRecording=... . Empty in normal builds. -->
-		<test.jvm.args></test.jvm.args>
+		<test.jvm.args/>
 	</properties>
 
 	<!-- Eclipse Store/Serializer snapshots track upstream daily builds. The snapshot

@@ -773,11 +773,11 @@ final class AeronReplicationPublisher implements AutoCloseable {
                                   this.configuration.chunkSize()));
     }
 
-    private long offerEncoded(final long sequence, final AeronReplicationEnvelope.Kind kind,
+    private void offerEncoded(final long sequence, final AeronReplicationEnvelope.Kind kind,
                               final int payloadLength, final int chunkIndex, final int chunkCount, final int chunkOffset,
                               final int commitCrc32c, final DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
-        return this.offerEncoded(sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset,
+        this.offerEncoded(sequence, kind, payloadLength, chunkIndex, chunkCount, chunkOffset,
                 commitCrc32c, payload, payloadOffset, payloadChunkLength, () -> true);
     }
 

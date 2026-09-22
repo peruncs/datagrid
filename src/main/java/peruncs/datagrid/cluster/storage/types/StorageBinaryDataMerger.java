@@ -200,13 +200,11 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         /* A Store callback can ignore interruption forever. Keep timeout
          * detection off that worker so health and acknowledgement paths fail
          * closed even when the callback itself never returns. */
-        private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            final Thread thread = Thread.ofPlatform()
-                    .daemon()
-                    .name("eclipse-datagrid-store-watchdog")
-                    .unstarted(runnable);
-            return thread;
-        });
+        private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(runnable ->
+                Thread.ofPlatform()
+                        .daemon()
+                        .name("eclipse-datagrid-store-watchdog")
+                        .unstarted(runnable));
         /* Every access runs under queueLock (admission, drain, release, and
          * flush checks), so an ArrayDeque is sufficient and avoids the
          * per-node allocation a concurrent queue pays on every offer. */

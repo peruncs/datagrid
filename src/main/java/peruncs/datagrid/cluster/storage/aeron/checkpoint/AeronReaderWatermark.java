@@ -193,7 +193,7 @@ public record AeronReaderWatermark(
             if (least == null) {
                 least = watermark;
             } else {
-                if (!sameWriterIdentity(least, watermark))
+                if (differsFromWriterIdentity(least, watermark))
                     throw new IllegalArgumentException("watermarks do not belong to one Aeron writer");
                 if (compareProgress(watermark, least) < 0) least = watermark;
             }
@@ -211,11 +211,11 @@ public record AeronReaderWatermark(
             throw new IllegalArgumentException("invalid Aeron watermark progress");
     }
 
-    private static boolean sameWriterIdentity(
+    private static boolean differsFromWriterIdentity(
             final AeronReaderWatermark left, final AeronReaderWatermark right) {
-        return left.clusterId().equals(right.clusterId()) &&
-               left.storeGeneration().equals(right.storeGeneration()) &&
-               left.writerEpoch() == right.writerEpoch() && left.recordingId() == right.recordingId();
+        return !left.clusterId().equals(right.clusterId()) ||
+               !left.storeGeneration().equals(right.storeGeneration()) ||
+               left.writerEpoch() != right.writerEpoch() || left.recordingId() != right.recordingId();
     }
 
     private static int compareProgress(
@@ -270,7 +270,7 @@ public record AeronReaderWatermark(
                 if (watermark == null)
                     throw new IllegalArgumentException("invalid Aeron watermark");
                 final AeronReaderWatermark previous = this.latest.get(watermark.readerId());
-                if (previous != null && (!sameWriterIdentity(previous, watermark) ||
+                if (previous != null && (differsFromWriterIdentity(previous, watermark) ||
                                          !monotonicProgress(watermark, previous))) {
                     throw new IllegalStateException("Aeron reader watermark is not monotonic");
                 }
@@ -447,7 +447,7 @@ public record AeronReaderWatermark(
                     if (least == null) {
                         least = watermark;
                     } else {
-                        if (!sameWriterIdentity(least, watermark))
+                        if (differsFromWriterIdentity(least, watermark))
                             throw new IllegalStateException("Aeron reader quorum contains mixed writer identities");
                         if (compareProgress(watermark, least) < 0) least = watermark;
                     }
@@ -486,15 +486,15 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns whether a reader identity is part of this writer's retention quorum.
+        /// Returns whether a reader identity is rejected by this writer's retention quorum.
         ///
         /// @param readerId reader identity
-        /// @return `true` when the reader belongs to the quorum
-        public boolean acceptsReader(final UUID readerId) {
+        /// @return {@code true} when the reader is not an active quorum member
+        public boolean rejectsReader(final UUID readerId) {
             return this.state.read(() ->
             {
                 this.validator.ensureOpen();
-                return this.activeReaders.contains(readerId);
+                return !this.activeReaders.contains(readerId);
             });
         }
 

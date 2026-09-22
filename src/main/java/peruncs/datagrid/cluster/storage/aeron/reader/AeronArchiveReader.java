@@ -5,6 +5,7 @@ import io.aeron.archive.client.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
+import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -181,7 +182,7 @@ public final class AeronArchiveReader implements Disposable {
             /// Sets the accidental-cross-wiring nonce shared with the writer.
             ///
             /// When no nonce is set, the reader derives the same documented
-            /// default as [AeronClusterReplicationTransportProvider] from the
+            /// default as {@link AeronClusterReplicationTransportProvider} from the
             /// cluster identity; setting it explicitly keeps peers pinned to a
             /// deployment-chosen value. An explicit zero is rejected.
             ///
@@ -252,7 +253,7 @@ public final class AeronArchiveReader implements Disposable {
     /* Poller-thread barrier coalescing state: when the first idle poll stamps
      * it and the idle delay runs out, the staged barrier flushes. */
     private long barrierIdleSinceNanos;
-    private long barrierIdleFlushNanos;
+    private final long barrierIdleFlushNanos;
     private final AtomicBoolean active = new AtomicBoolean();
     private final AtomicLong stopDeadlineNanos = new AtomicLong();
     /* Sliding stop deadline: while a requested stop drains a replay backlog,

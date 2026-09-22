@@ -68,6 +68,7 @@ class DistributedStorageConfiguratorTest {
                 new NoOpDistributor(), delegate -> target);
 
         final PersistenceTarget<Binary> decorated = configurator.apply(new BothContracts());
+        assertNotNull(decorated);
         decorated.prepareTarget();
         decorated.closeTarget();
 
@@ -89,6 +90,7 @@ class DistributedStorageConfiguratorTest {
         assertEquals(1, written.size());
     }
 
+    @SuppressWarnings("unchecked") // dynamic proxy stand-in for the lifecycle target
     private static PersistenceTarget<Binary> lifecycleTargetProxy(final List<String> lifecycle) {
         return (PersistenceTarget<Binary>) Proxy.newProxyInstance(
                 DistributedStorageConfiguratorTest.class.getClassLoader(),

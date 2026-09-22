@@ -73,13 +73,13 @@ final class AeronReaderLifecycle {
         }
     }
 
-        /// Stops polling and closes the subscription exactly once.
+    /// Stops polling and closes the subscription exactly once.
     ///
-    /// [closed] is read first, so a repeated call after a successful close is a
-    /// no-op. It is set only after [closeSubscription] returns normally; a
-    /// bounded-wait timeout, an interrupted wait, or a failed close leaves it
-    /// `false` and the subscription open, so the caller can retry without
-    /// closing a subscription the polling thread may still touch.
+    /// The close-once flag is read first, so a repeated call after a successful
+    /// close is a no-op. It is set only after the subscription-close callback returns
+    /// normally; a bounded-wait timeout, an interrupted wait, or a failed close
+    /// leaves it `false` and the subscription open, so the caller can retry
+    /// without closing a subscription the polling thread may still touch.
     ///
     /// @param active            reader running flag
     /// @param thread            reader polling thread, or `null`
@@ -98,7 +98,8 @@ final class AeronReaderLifecycle {
             final AtomicBoolean closed,
             final Runnable closeSubscription,
             final long timeoutNanos) {
-        if (timeoutNanos <= 0L) throw new IllegalArgumentException("timeoutNanos must be positive");
+        if (timeoutNanos <= 0L)
+            throw new IllegalArgumentException("timeoutNanos must be positive");
         Objects.requireNonNull(active, "active");
         Objects.requireNonNull(closed, "closed");
         Objects.requireNonNull(closeSubscription, "closeSubscription");

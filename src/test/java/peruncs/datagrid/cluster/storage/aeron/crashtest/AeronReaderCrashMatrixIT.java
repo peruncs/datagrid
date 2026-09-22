@@ -397,7 +397,6 @@ class AeronReaderCrashMatrixIT {
                 .threadingMode(io.aeron.archive.ArchiveThreadingMode.SHARED)
                 .controlChannel(controlChannel)
                 .replicationChannel(REPLAY_CHANNEL);
-        Process phase1 = null;
         Process crashedRecovery = null;
         Process recovery = null;
         try (ArchivingMediaDriver _ = ArchivingMediaDriver.launch(mediaContext, archiveContext);
@@ -444,7 +443,6 @@ class AeronReaderCrashMatrixIT {
                         "the torn marker must still force a reseed\n%s".formatted(outcome));
             }
         } finally {
-            if (phase1 != null && phase1.isAlive()) phase1.destroyForcibly();
             if (crashedRecovery != null && crashedRecovery.isAlive()) crashedRecovery.destroyForcibly();
             if (recovery != null && recovery.isAlive()) recovery.destroyForcibly();
             deleteTree(base);

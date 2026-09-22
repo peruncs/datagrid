@@ -449,7 +449,7 @@ class ClusterStoreIndexesTest {
         map.index().register(new IndexCategory<>() {
             @Override
             public Class<? extends IndexGroup<Article>> indexType() {
-                return (Class<? extends IndexGroup<Article>>) (Class<?>) CustomGroup.class;
+                return CustomGroup.class;
             }
 
             @Override
@@ -600,7 +600,7 @@ class ClusterStoreIndexesTest {
         }
     }
 
-    private interface CustomGroup<E> extends IndexGroup.Internal<E> {
+    private interface CustomGroup extends IndexGroup.Internal<Article> {
     }
 
     /// Verifies concurrent vector registrations with distinct names all survive.
@@ -670,6 +670,7 @@ class ClusterStoreIndexesTest {
 
     private static final class Root {
         GigaMap<Article> articles;
+        @SuppressWarnings("MismatchedCollectionQueryUpdate")
         List<CatalogEntry> catalog;
     }
 

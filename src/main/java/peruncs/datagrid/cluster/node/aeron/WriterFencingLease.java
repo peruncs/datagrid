@@ -289,7 +289,6 @@ final class WriterFencingLease implements AutoCloseable {
     private final UUID nodeId;
     private final UUID holderId;
     private final long maxStalenessNanos;
-    private final long futureSkewMillis;
     private final long checkIntervalNanos;
     /* Bounded wait for every interprocess lease lock (acquisition, renewal,
      * commit-offer proof, and release). Configured at acquisition so a
@@ -321,7 +320,6 @@ final class WriterFencingLease implements AutoCloseable {
         this.nodeId = nodeId;
         this.holderId = PROCESS_HOLDER_ID;
         this.maxStalenessNanos = maxStaleness.toNanos();
-        this.futureSkewMillis = Math.max(1L, maxStaleness.toMillis() / 2L);
         this.checkIntervalNanos = Math.max(1L, this.maxStalenessNanos / 3L);
         this.lockTimeout = lockTimeout;
         this.lastWriteNanos = lastWriteNanos;
@@ -477,7 +475,7 @@ final class WriterFencingLease implements AutoCloseable {
         synchronized (this.stateLock) {
             if (this.closed) return;
         }
-writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId, writeMillis));
+        writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId, writeMillis));
         this.lastWriteNanos = writeNanos;
         synchronized (this.stateLock) {
             if (this.closed) return;
@@ -566,7 +564,7 @@ writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
         }
     }
 
-    private void refreshHeartbeatIfDueLocked() throws IOException {
+    private void refreshHeartbeatIfDueLocked() {
         if (System.nanoTime() - this.lastWriteNanos <= this.checkIntervalNanos) return;
         this.refreshHeartbeatLocked();
     }
@@ -579,7 +577,7 @@ writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
         }
     }
 
-        /// Stops renewal, leaving the lease file in place for the next holder.
+    /// Stops renewal, leaving the lease file in place for the next holder.
     ///
     /// An in-flight heartbeat is awaited (bounded) and the interprocess lock
     /// is acquired (bounded) before close returns. A renewal that entered
@@ -614,6 +612,9 @@ writeAtomically(this.path, new LeaseFile(this.token, this.nodeId, this.holderId,
              * bounded failure is logged rather than thrown: `closed` already
              * prevents every future renewal write, and close() must stay
              * callable while an unrelated offer is in flight. */
+            if (!ignored.isValid()) {
+                throw new IOException("writer lease lock became invalid during release");
+            }
         } catch (final IOException | RuntimeException releaseFailure) {
             System.getLogger(WriterFencingLease.class.getName()).log(WARNING,
                     "writer lease lock was not available during release; a concurrent heartbeat or offer may still be finishing",

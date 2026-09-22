@@ -15,11 +15,16 @@ public record NodeOptions<T>(
         Supplier<? extends T> rootSupplier,
         boolean asynchronousDistribution
 ) {
+    /// Validates the immutable node options.
     public NodeOptions {
         Objects.requireNonNull(rootSupplier, "rootSupplier");
     }
 
     /// Creates options using the default Store foundation and synchronous publication.
+    ///
+    /// @param <T> root type
+    /// @param rootSupplier creates a root for an empty Store
+    /// @return immutable node options
     public static <T> NodeOptions<T> of(final Supplier<? extends T> rootSupplier) {
         return new NodeOptions<>(rootSupplier, false);
     }

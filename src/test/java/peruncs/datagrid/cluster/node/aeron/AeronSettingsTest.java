@@ -266,7 +266,9 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-reader",
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(credentials)
         ), false, "reader"));
-        final var service = settings.authorisationServiceSupplier().get();
+        final var supplier = settings.authorisationServiceSupplier();
+        assertNotNull(supplier);
+        final var service = supplier.get();
         assertNotNull(service);
         final byte[] principal = "datagrid-reader".getBytes(StandardCharsets.US_ASCII);
         assertTrue(service.isAuthorised(MessageHeaderDecoder.SCHEMA_ID, ReplayRequestDecoder.TEMPLATE_ID, null, principal));
@@ -484,11 +486,13 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS", Base64.getEncoder().encodeToString(readerCredentials)
         )));
         final byte[] firstRead = settings.auth().readerCredentials();
+        assertNotNull(firstRead);
         assertArrayEquals(readerCredentials, firstRead);
         Arrays.fill(firstRead, (byte) 0);
         assertArrayEquals(readerCredentials, settings.auth().readerCredentials(),
                 "mutating a returned array must not change the settings-held secret");
         final byte[] writerRead = settings.auth().credentials();
+        assertNotNull(writerRead);
         Arrays.fill(writerRead, (byte) 0);
         assertArrayEquals(writerCredentials, settings.auth().credentials(),
                 "mutating a returned array must not change the settings-held secret");

@@ -17,6 +17,7 @@ class RejectingPersistenceTargetTest {
     /// Verifies the target reports writable and store-enabled so Store routes
     /// writes into the rejection, while the default validators stay no-ops.
     @Test
+    @SuppressWarnings("unchecked") // dynamic proxy stand-in for the delegate target
     void writablePredicatesRouteWritesIntoTheRejection() {
         final PersistenceTarget<Binary> delegate = (PersistenceTarget<Binary>) Proxy.newProxyInstance(
                 RejectingPersistenceTargetTest.class.getClassLoader(),

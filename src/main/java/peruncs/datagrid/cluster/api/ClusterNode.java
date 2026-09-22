@@ -2,7 +2,6 @@ package peruncs.datagrid.cluster.api;
 
 import peruncs.datagrid.cluster.node.ClusterFoundation;
 import peruncs.datagrid.cluster.node.StorageNodeControl;
-import peruncs.datagrid.cluster.node.backup.BackupNodeControl;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 import peruncs.datagrid.cluster.node.store.ClusterStorageManager;
@@ -25,6 +24,10 @@ public final class ClusterNode<T> implements AutoCloseable {
     }
 
     /// Opens and starts a node from immutable options.
+    ///
+    /// @param <T> root type
+    /// @param options immutable node options
+    /// @return the started node and its owned Store view
     @SuppressWarnings("unchecked")
     public static <T> ClusterNode<T> open(final NodeOptions<T> options) {
         Objects.requireNonNull(options, "options");
@@ -47,6 +50,8 @@ public final class ClusterNode<T> implements AutoCloseable {
     }
 
     /// Returns the guarded Store owned by this node.
+    ///
+    /// @return the Store view guarded by this node's lifecycle
     public ClusterStore<T> store() {
         return this.store;
     }
@@ -67,6 +72,8 @@ public final class ClusterNode<T> implements AutoCloseable {
     }
 
     /// Returns one immutable status snapshot.
+    ///
+    /// @return the current role, readiness, replication, and storage metrics
     public NodeStatus status() {
         final StorageNodeControl control = this.control();
         final ReplicationMetrics metrics = control.replicationMetrics();
@@ -81,8 +88,7 @@ public final class ClusterNode<T> implements AutoCloseable {
         try {
             return this.foundation.storageNodeManager();
         } catch (final IllegalStateException notStorageRole) {
-            final BackupNodeControl backup = this.foundation.backupNodeManager();
-            return backup;
+            return this.foundation.backupNodeManager();
         }
     }
 

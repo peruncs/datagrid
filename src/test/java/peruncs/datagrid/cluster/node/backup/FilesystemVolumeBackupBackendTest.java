@@ -9,6 +9,7 @@ import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -535,7 +536,13 @@ class FilesystemVolumeBackupBackendTest {
         final FileTime cachedTime = Files.getLastModifiedTime(archive);
         try (FileChannel channel = FileChannel.open(archive, StandardOpenOption.WRITE)) {
             /* Corrupt the ZIP signature without changing size or file identity. */
-            channel.write(ByteBuffer.wrap(new byte[]{0, 0, 0, 0}), 0);
+            final ByteBuffer corruption = ByteBuffer.wrap(new byte[]{0, 0, 0, 0});
+            long position = 0L;
+            while (corruption.hasRemaining()) {
+                final int written = channel.write(corruption, position);
+                if (written <= 0) throw new IOException("archive corruption write made no progress");
+                position += written;
+            }
         }
         Files.setLastModifiedTime(archive, cachedTime);
 

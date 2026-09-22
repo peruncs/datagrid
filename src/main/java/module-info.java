@@ -174,6 +174,5 @@ module peruncs.datagrid.cluster
     // the published module descriptor.
     requires org.eclipes.store.gigamap.jvector;
     requires jvector;
-    requires org.apache.lucene.core;
     exports peruncs.datagrid.cluster.api;
 }

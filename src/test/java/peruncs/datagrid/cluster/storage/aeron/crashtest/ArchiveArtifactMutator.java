@@ -71,7 +71,7 @@ public final class ArchiveArtifactMutator {
                 }
             }
             if (matches && i + AeronReplicationEnvelope.HEADER_LENGTH < bytes.length &&
-                !hasMagic(bytes, i + AeronReplicationEnvelope.HEADER_LENGTH) &&
+                lacksMagic(bytes, i + AeronReplicationEnvelope.HEADER_LENGTH) &&
                 ByteBuffer.wrap(bytes, i + Integer.BYTES, Short.BYTES).getShort() == AeronReplicationEnvelope.VERSION &&
                 AeronReplicationEnvelope.isPayloadKindCode(
                         Byte.toUnsignedInt(bytes[i + Integer.BYTES + Short.BYTES]))) {
@@ -87,9 +87,9 @@ public final class ArchiveArtifactMutator {
         throw new UnsupportedArtifactLayoutException("no replication envelope found in %s".formatted(segment));
     }
 
-    private static boolean hasMagic(final byte[] bytes, final int offset) {
-        if (offset < 0 || offset + Integer.BYTES > bytes.length) return false;
-        return ByteBuffer.wrap(bytes, offset, Integer.BYTES).order(ByteOrder.BIG_ENDIAN).getInt() ==
+    private static boolean lacksMagic(final byte[] bytes, final int offset) {
+        if (offset < 0 || offset + Integer.BYTES > bytes.length) return true;
+        return ByteBuffer.wrap(bytes, offset, Integer.BYTES).order(ByteOrder.BIG_ENDIAN).getInt() !=
                AeronReplicationEnvelope.MAGIC;
     }
 
@@ -220,7 +220,7 @@ public final class ArchiveArtifactMutator {
                 }
             }
             if (matches && i + AeronReplicationEnvelope.HEADER_LENGTH < bytes.length &&
-                !hasMagic(bytes, i + AeronReplicationEnvelope.HEADER_LENGTH) &&
+                lacksMagic(bytes, i + AeronReplicationEnvelope.HEADER_LENGTH) &&
                 ByteBuffer.wrap(bytes, i + Integer.BYTES, Short.BYTES).getShort() ==
                 AeronReplicationEnvelope.VERSION &&
                 AeronReplicationEnvelope.isPayloadKindCode(

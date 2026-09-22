@@ -363,9 +363,9 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                     "Aeron retention watermark delivery is not configured");
         }
         this.ensureStateRestored();
-        if (watermark == null || !this.quorum.acceptsReader(watermark.readerId()) ||
+        if (watermark == null || this.quorum.rejectsReader(watermark.readerId()) ||
             watermark.sequence() < 0 || watermark.position() < 0 ||
-            !this.matchesWriter(watermark) ||
+            this.differsFromWriter(watermark) ||
             (this.recordingId.getAsLong() >= 0 && watermark.recordingId() != this.recordingId.getAsLong())) {
             throw new IllegalArgumentException("reader watermark identity is invalid");
         }
@@ -523,7 +523,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 final byte[] token = new byte[length];
                 buffer.get(token);
                 final AeronReaderWatermark watermark = AeronReaderWatermark.decode(token);
-                if (!this.matchesWriter(watermark)) {
+                if (this.differsFromWriter(watermark)) {
                     throw new IOException("retention state belongs to another Aeron writer");
                 }
                 if (watermark.sequence() < 0 || watermark.position() < 0)
@@ -531,7 +531,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 if (!watermarkReaders.add(watermark.readerId())) {
                     throw new IOException("retention state contains duplicate reader watermark");
                 }
-                if (!this.quorum.acceptsReader(watermark.readerId())) {
+                if (this.quorum.rejectsReader(watermark.readerId())) {
                     throw new IOException(
                             "retention state contains a watermark for an unconfigured or retired reader: %s".formatted(watermark.readerId()));
                 }
@@ -585,10 +585,10 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         }
     }
 
-    private boolean matchesWriter(final AeronReaderWatermark watermark) {
-        return watermark.clusterId().equals(this.clusterId) &&
-               watermark.storeGeneration().equals(this.storeGeneration) &&
-               watermark.writerEpoch() == this.writerEpoch;
+    private boolean differsFromWriter(final AeronReaderWatermark watermark) {
+        return !watermark.clusterId().equals(this.clusterId) ||
+               !watermark.storeGeneration().equals(this.storeGeneration) ||
+               watermark.writerEpoch() != this.writerEpoch;
     }
 
     /// Reports whether one purge failure means a live replay still uses a

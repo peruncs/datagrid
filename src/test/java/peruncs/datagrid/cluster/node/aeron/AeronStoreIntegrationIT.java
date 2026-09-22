@@ -678,7 +678,6 @@ class AeronStoreIntegrationIT {
                 }
                 assertEquals(frozen.logicalSequence(), parked.logicalSequence(),
                         "the parked reader must freeze exactly at the requested boundary");
-                RuntimeException failure = null;
                 try (ReaderNode lagging = ReaderNode.open(laggingNode, laggingStore, "reader",
                         laggingReaderId, clusterId, generation, parked,
                         controlPort, livePort, watermarkPort)) {
@@ -693,7 +692,7 @@ class AeronStoreIntegrationIT {
                                 ? "a reader restarted from a purged cursor silently rejoined the live stream"
                                 : "a reader restarted from a purged cursor neither failed closed nor rejoined within 60s");
                     }
-                    failure = lagging.clientFailure();
+                    final RuntimeException failure = lagging.clientFailure();
                     assertTrue(failure instanceof ReseedRequiredException
                                     || failure instanceof StorageBinaryDataReseedException,
                             "expected the typed reseed signal (health RESEED_REQUIRED), got: " + failure);

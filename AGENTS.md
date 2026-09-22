@@ -21,7 +21,7 @@ For code intelligence (symbols, call chains, architecture, impact), use the code
 12. Beware of Java "god" obects/interafaces/records. When possible, break them into smaller focused entities, that are easier to junit test and reason about.
 13. Avoid Java reflection unless absolutely necessary.
 14. Javadocs at all levels - module, package and individual Java entities. Use simple narrative suitable for humans, less jargon, first sentence is the most important.
-15. Avoid using fully qualified names 9FQN) where sesnible imports can make the code more compact and better to read.
+15. Avoid using fully qualified names FQN where sesnible imports can make the code more compact and better to read.
 16. Avoid methods with more than 5 arguments - consider replacing them Java record inputs, especially for public apis. But avoid watch out for GC pressure and memory unefficiencies, if the code is on the hot path!
 17. Conside Builder pattern for records and classes with complex structure and constructors,  and many fields, to make the code less error prone and more readable.
 18. An interface with staic methods only should be converted to a final class with private construtor and static methods.

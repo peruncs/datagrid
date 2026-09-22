@@ -87,11 +87,13 @@ class AeronReaderLifecycleTest {
             try {
                 while (!release.await(1L, TimeUnit.MILLISECONDS)) {
                     // Deliberately ignore interruption until the owner releases the poller.
+                    Thread.onSpinWait();
                 }
             } catch (final InterruptedException ignored) {
                 try {
                     while (!release.await(1L, TimeUnit.MILLISECONDS)) {
                         // Keep the simulated callback blocked after interruption.
+                        Thread.onSpinWait();
                     }
                 } catch (final InterruptedException retryInterrupted) {
                     Thread.currentThread().interrupt();

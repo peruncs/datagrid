@@ -29,6 +29,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -161,6 +162,7 @@ class AeronWriterReaderSoakIT {
     private final AtomicLong reseedsExecuted = new AtomicLong();
     private final AtomicLong writerRestarts = new AtomicLong();
     private final AtomicLong gcBursts = new AtomicLong();
+    private volatile byte gcBurstSink;
     private final AtomicLong retentionPurges = new AtomicLong();
     private final AtomicLong lagViolations = new AtomicLong();
     private final Map<Long, ArticleState> live = new ConcurrentHashMap<>();
@@ -191,8 +193,7 @@ class AeronWriterReaderSoakIT {
     private volatile List<String> enabledChaosOps = List.of();
     /// Set once the first restart-capable op claimed the guaranteed abrupt
     /// restart for this run. Replaces the old forced-first-op shape.
-    private final java.util.concurrent.atomic.AtomicBoolean guaranteedAbruptUsed =
-            new java.util.concurrent.atomic.AtomicBoolean();
+    private final AtomicBoolean guaranteedAbruptUsed = new AtomicBoolean();
     private final AtomicLong chaosIterations = new AtomicLong();
     private final AtomicLong chaosBusyNanos = new AtomicLong();
     private volatile long lastWriterSeq = -1L;
@@ -1316,11 +1317,13 @@ class AeronWriterReaderSoakIT {
             final byte[] block = new byte[1 << 20];
             block[0] = (byte) i;
             if ((i & 7) == 0) Thread.onSpinWait();
+            this.gcBurstSink = block[0];
         }
         System.gc();
         this.gcBursts.incrementAndGet();
-        audit(startNanos, "gc-burst churnMB=%d".formatted(megabytes));
-        event(startNanos, "gc-burst", "churnMB=%d".formatted(megabytes));
+        final byte marker = this.gcBurstSink;
+        audit(startNanos, "gc-burst churnMB=%d marker=%d".formatted(megabytes, marker));
+        event(startNanos, "gc-burst", "churnMB=%d marker=%d".formatted(megabytes, marker));
         markActivity();
         return OpOutcome.effective();
     }

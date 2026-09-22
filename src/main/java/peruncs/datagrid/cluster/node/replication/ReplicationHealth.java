@@ -49,7 +49,7 @@ public interface ReplicationHealth extends AutoCloseable {
 
         /// Returns the current health state.
     ///
-    /// A provider whose readiness probe throws is reported as [#State.FAILED]
+    /// A provider whose readiness probe throws is reported as {@link State#FAILED}
     /// and the failure is logged at debug level so a monitoring scrape never
     /// hides the failure cause completely.
     ///

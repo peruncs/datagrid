@@ -116,7 +116,6 @@ final class ClusterIndexMaintenance {
     /// @param maxValidatedObjects object bound for the scan
     /// @throws IllegalArgumentException if a root violates the index policy
     /// @throws IllegalStateException    if the scan cannot complete or the rebuild fails
-    @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter") // map is the shared GigaMap monitor, not a local lock
     static void validateAndRebuildImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
         Objects.requireNonNull(storage, "storage");
         final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();

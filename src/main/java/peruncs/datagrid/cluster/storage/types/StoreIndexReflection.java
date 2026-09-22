@@ -76,7 +76,7 @@ final class StoreIndexReflection {
             if (builderField == null || graphField == null || rebuiltField == null || deferredField == null) {
                 throw new IllegalStateException(
                         "cannot reset vector search graph on %s; unsupported Store version"
-                                .formatted(type.getName()));
+                                .formatted(type == null ? null : type.getName()));
             }
             return new VectorGraphFields(builderField, graphField, rebuiltField, deferredField);
         }

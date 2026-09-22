@@ -27,6 +27,7 @@ class ObjectMaterializerTest {
         final List<Set<Long>> collections = new ArrayList<>();
         /* Direct buffers stay reachable for the whole test so their native
          * memory cannot be reclaimed between encoding and acceptance. */
+        @SuppressWarnings("MismatchedCollectionQueryUpdate") // write-only reachability so native buffers outlive the batch
         final List<ByteBuffer> pinned = new ArrayList<>();
 
                 /// Writes one 24-byte entity header (length, type id, object id) off-heap.

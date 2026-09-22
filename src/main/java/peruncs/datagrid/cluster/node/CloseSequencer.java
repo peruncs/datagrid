@@ -8,21 +8,21 @@ import java.util.Objects;
 import java.util.function.BooleanSupplier;
 
 /// Runs an ordered list of close stages, aggregating every failure with
-/// [Error] priority.
+/// {@link Error} priority.
 ///
 /// This is the module's single close-aggregation utility: foundation
 /// teardown, transport shutdown, and manager close loops all share it, so
 /// failure precedence cannot drift between them. Stages run in insertion
 /// order, which must be reverse dependency order, and a stage whose
-/// [#ready] precondition is false at run time is skipped — that is what
+/// {@link Stage#ready()} precondition is false at run time is skipped — that is what
 /// makes a retried close re-run only the stages still owing work instead of
 /// tearing down beneath live resources.
 ///
 /// Every ready stage is attempted even when an earlier stage fails. The
-/// aggregation keeps the first [Error] and the first other failure
-/// separately and always surfaces the [Error] with the other failure
+/// aggregation keeps the first {@link Error} and the first other failure
+/// separately and always surfaces the {@link Error} with the other failure
 /// attached as suppressed, so a fatal condition is never buried under a
-/// preceding [RuntimeException].
+/// preceding {@link RuntimeException}.
 ///
 /// The class is public only because the node, node.aeron, and node.backup
 /// packages share it; it is not application API.
@@ -33,7 +33,7 @@ public final class CloseSequencer {
 
     private final List<Stage> stages = new ArrayList<>();
 
-    /// Creates an empty sequencer for the builder-style [#add].
+    /// Creates an empty sequencer for the builder-style {@link #add(Stage)}.
     public CloseSequencer() {
     }
 
