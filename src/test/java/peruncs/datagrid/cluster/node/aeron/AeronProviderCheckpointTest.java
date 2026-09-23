@@ -2,11 +2,13 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import io.aeron.Aeron;
 import io.aeron.Subscription;
+import io.aeron.archive.client.ArchiveException;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
@@ -21,10 +23,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Verifies provider restart uses the Archive position in the writer checkpoint.
 class AeronProviderCheckpointTest {
+    @Test
+    void writerRecoveryPreservesArchiveFailureCodeAndCause() {
+        final ArchiveException archive = new ArchiveException("control disconnected", ArchiveException.GENERIC);
+        final ReplicationUnavailableException mapped = assertInstanceOf(ReplicationUnavailableException.class,
+                AeronClusterReplicationTransportProvider.writerRecoveryFailure(archive));
+        assertSame(archive, mapped.getCause());
+        assertEquals(ArchiveException.GENERIC, mapped.errorCode());
+    }
+
     private static int freePort() throws Exception {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();

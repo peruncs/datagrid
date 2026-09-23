@@ -82,6 +82,17 @@ public final class AeronClusterReplicationTransportProvider {
                failure.getMessage().contains(CONTROL_RESPONSE_DISCONNECTED_MESSAGE);
     }
 
+    static RuntimeException writerRecoveryFailure(final RuntimeException failure) {
+        if (failure instanceof ArchiveException archive) {
+            return new ReplicationUnavailableException("Aeron Archive writer recovery failed", archive,
+                    archive.errorCode());
+        }
+        if (failure instanceof AeronException) {
+            return new ReplicationUnavailableException("Aeron writer recovery failed", failure);
+        }
+        return failure;
+    }
+
     static long currentCheckpointSequence() {
         return CHECKPOINT_SEQUENCE.orElse(-1L);
     }
@@ -1002,10 +1013,11 @@ public final class AeronClusterReplicationTransportProvider {
                 this.writerRecoveryInProgress = false;
                 return this.writer;
             } catch (final RuntimeException failure) {
-                closeFailedWriter(candidate, failure);
-                this.writerRecoveryState = failure instanceof ReseedRequiredException
+                final RuntimeException classified = writerRecoveryFailure(failure);
+                closeFailedWriter(candidate, classified);
+                this.writerRecoveryState = classified instanceof ReseedRequiredException
                         ? ReplicationHealth.State.RESEED_REQUIRED : ReplicationHealth.State.FAILED;
-                throw failure;
+                throw classified;
             } catch (final Error failure) {
                 closeFailedWriter(candidate, failure);
                 this.writerRecoveryState = ReplicationHealth.State.FAILED;
