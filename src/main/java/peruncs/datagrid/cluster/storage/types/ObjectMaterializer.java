@@ -14,7 +14,7 @@ import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
     private final PersistenceTypeDictionary persistenceTypeDictionary;
     private final PersistenceObjectRegistry objectRegistry;
-    private final PersistenceLoader loader;
+    private final PersistenceManager<?> persistenceManager;
     private final Set_long oids = Set_long.New();
 
         /// Creates a materializer for one persistence manager.
@@ -25,7 +25,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
 
         this.persistenceTypeDictionary = persistenceManager.typeDictionary();
         this.objectRegistry = persistenceManager.objectRegistry();
-        this.loader = persistenceManager.createLoader();
+        this.persistenceManager = persistenceManager;
     }
 
         /// Collects one entity's object id, or fails on a malformed entity header.
@@ -80,7 +80,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
 
         /// Materializes each object collected by [#acceptEntityData(long, long)].
     void materialize() {
-        this.materialize(this.loader);
+        this.materialize(this.persistenceManager.createLoader());
     }
 
     /// Materializes through a loader whose source is selected by the caller.

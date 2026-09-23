@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import io.aeron.archive.client.ArchiveEvent;
+import io.aeron.archive.client.ArchiveException;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -19,16 +20,23 @@ class AeronControlWarningTest {
         /// Verifies the pinned Aeron control-response text classifies as terminal.
     @Test
     void controlResponseDisconnectIsTerminal() {
-        assertTrue(AeronClusterReplicationTransportProvider.isTerminalArchiveWarning(
+        assertTrue(AeronArchiveFailures.terminalControlResponseWarning(
                 new ArchiveEvent(AERON_1_53_CONTROL_RESPONSE_DISCONNECTED)));
     }
 
         /// Verifies unrelated warnings and non-ArchiveEvent failures stay non-terminal.
     @Test
     void unrelatedFailuresAreNotTerminal() {
-        assertFalse(AeronClusterReplicationTransportProvider.isTerminalArchiveWarning(
+        assertFalse(AeronArchiveFailures.terminalControlResponseWarning(
                 new ArchiveEvent("ERROR - some unrelated archive warning")));
-        assertFalse(AeronClusterReplicationTransportProvider.isTerminalArchiveWarning(
+        assertFalse(AeronArchiveFailures.terminalControlResponseWarning(
                 new IllegalStateException(AERON_1_53_CONTROL_RESPONSE_DISCONNECTED)));
+    }
+
+    @Test
+    void unavailableArchiveFailureCanBeNestedWithoutMatchingUnrelatedMessages() {
+        assertTrue(AeronArchiveFailures.unavailable(new IllegalStateException("writer failed",
+                new ArchiveException("archive failed", ArchiveException.GENERIC))));
+        assertFalse(AeronArchiveFailures.unavailable(new IllegalStateException("unrelated failure")));
     }
 }

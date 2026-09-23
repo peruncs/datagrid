@@ -5,12 +5,10 @@ import org.agrona.MutableDirectBuffer;
 import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 import peruncs.datagrid.cluster.storage.types.Crc32c;
 
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.zip.CRC32C;
 
 /// The small envelope around one piece of a replicated Store transaction.
 ///
@@ -61,30 +59,10 @@ public final class AeronReplicationEnvelope {
     /// or [#crc32c(DirectBuffer, int, int, ChecksumContext)]. An instance is
     /// never shared across threads and never retained by a platform thread.
     public static final class ChecksumContext {
-        private final CRC32C crc = new CRC32C();
-        private ByteBuffer source;
-        private ByteBuffer view;
+        private final Crc32c.Context crc = new Crc32c.Context();
 
         private int compute(final DirectBuffer payload, final int offset, final int length) {
-            final CRC32C checksum = this.crc;
-            checksum.reset();
-            final byte[] array = payload.byteArray();
-            if (array != null) {
-                checksum.update(array, payload.wrapAdjustment() + offset, length);
-            } else {
-                final ByteBuffer buffer = payload.byteBuffer();
-                if (buffer == null) {
-                    throw new IllegalArgumentException("Agrona buffer has no accessible backing storage");
-                }
-                if (buffer != this.source) {
-                    this.source = buffer;
-                    this.view = buffer.duplicate();
-                }
-                final int start = payload.wrapAdjustment() + offset;
-                this.view.clear().position(start).limit(start + length);
-                checksum.update(this.view);
-            }
-            return (int) checksum.getValue();
+            return this.crc.compute(payload, offset, length);
         }
     }
 

@@ -40,13 +40,6 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
      * watermark encoding. There is no migration contract, so the unsigned
      * watermark layout starts at version 4. */
     private static final int STATE_VERSION = 4;
-    /* Aeron 1.53's purge guard reports an active-recording purge as
-     * ACTIVE_RECORDING, but its detach guard for an in-progress replay sends
-     * GENERIC with this producer-owned prefix. There is no dedicated error
-     * code for the replay case, so the probe is string-based on top of the
-     * code and pinned by a test. */
-    private static final String REPLAY_IN_PROGRESS_DETACH_MESSAGE = "invalid detach: replay in progress";
-
     private final Set<UUID> configuredReaders;
     private final Runnable ensureWriter;
     private final RecordingPositions recordingPositions;
@@ -278,7 +271,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             try {
                 this.segmentPurger.applyAsLong(boundary);
             } catch (final ArchiveException failure) {
-                if (isReplayInProgressDetach(failure)) {
+                if (AeronArchiveFailures.replayInProgressDetach(failure)) {
                     return new MaintenanceResult(MaintenanceResult.Status.DEFERRED_ACTIVE_REPLAY, boundary,
                             "Archive replay still uses a segment selected for retention");
                 }
@@ -665,17 +658,6 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         return !watermark.clusterId().equals(this.clusterId) ||
                !watermark.storeGeneration().equals(this.storeGeneration) ||
                watermark.writerEpoch() != this.writerEpoch;
-    }
-
-    /// Reports whether one purge failure means a live replay still uses a
-    /// selected segment, in which case retention defers instead of failing.
-    ///
-    /// @param failure Archive purge failure
-    /// @return `true` when the purge must be deferred for an active replay
-    static boolean isReplayInProgressDetach(final ArchiveException failure) {
-        return failure.errorCode() == ArchiveException.ACTIVE_RECORDING ||
-               failure.errorCode() == ArchiveException.GENERIC && failure.getMessage() != null &&
-               failure.getMessage().contains(REPLAY_IN_PROGRESS_DETACH_MESSAGE);
     }
 
     private void persistState() {

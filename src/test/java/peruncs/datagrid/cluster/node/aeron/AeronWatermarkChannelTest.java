@@ -13,7 +13,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.zip.CRC32C;
+import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -248,7 +248,7 @@ class AeronWatermarkChannelTest {
                     final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
                     while (received.get() == null && System.nanoTime() < deadline) {
                         subscription.poll((buffer, offset, length, header) ->
-                                received.set(AeronReaderWatermark.decode(new CRC32C(), buffer, offset, length)), 16);
+                                received.set(AeronReaderWatermark.decode(new Crc32c.Context(), buffer, offset, length)), 16);
                         if (received.get() == null) Thread.sleep(10L);
                     }
                 }

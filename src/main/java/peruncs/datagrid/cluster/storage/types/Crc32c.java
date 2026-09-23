@@ -11,6 +11,36 @@ public final class Crc32c {
     private Crc32c() {
     }
 
+    /// Reuses one checksum and direct-buffer view on a single caller thread.
+    public static final class Context {
+        private final CRC32C checksum = new CRC32C();
+        private ByteBuffer source;
+        private ByteBuffer view;
+
+        public int compute(final DirectBuffer buffer, final int offset, final int length) {
+            Objects.requireNonNull(buffer, "buffer");
+            if (offset < 0 || length < 0 || offset > buffer.capacity() - length) {
+                throw new IllegalArgumentException("invalid CRC32C range");
+            }
+            this.checksum.reset();
+            final byte[] array = buffer.byteArray();
+            if (array != null) {
+                this.checksum.update(array, buffer.wrapAdjustment() + offset, length);
+            } else {
+                final ByteBuffer backing = buffer.byteBuffer();
+                if (backing == null) throw new IllegalArgumentException("Agrona buffer has no accessible backing storage");
+                if (backing != this.source) {
+                    this.source = backing;
+                    this.view = backing.duplicate();
+                }
+                final int start = buffer.wrapAdjustment() + offset;
+                this.view.clear().position(start).limit(start + length);
+                this.checksum.update(this.view);
+            }
+            return (int) this.checksum.getValue();
+        }
+    }
+
     /// Returns a fresh resettable CRC32C accumulator.
     ///
     /// The caller owns the returned accumulator and may use it without locking.

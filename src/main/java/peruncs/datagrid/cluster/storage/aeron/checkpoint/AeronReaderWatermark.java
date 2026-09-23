@@ -6,7 +6,6 @@ import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.nio.ByteOrder;
 import java.util.*;
-import java.util.zip.CRC32C;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 
@@ -130,13 +129,13 @@ public record AeronReaderWatermark(
 
         /// Decodes directly from an Aeron/Agrona frame without copying the identity bytes.
     ///
-    /// @param crcReuse caller-owned accumulator used for the CRC32C check;
+    /// @param crcReuse caller-owned checksum state used for the CRC32C check;
     ///                  the watermark worker owns one for its lifetime
     /// @param encoded source frame containing one serialized watermark
     /// @param offset  first byte of the serialized watermark
     /// @param length  serialized watermark length; must be [#ENCODED_LENGTH]
     /// @return decoded watermark
-    public static AeronReaderWatermark decode(final CRC32C crcReuse, final DirectBuffer encoded,
+    public static AeronReaderWatermark decode(final Crc32c.Context crcReuse, final DirectBuffer encoded,
                                               final int offset, final int length) {
         Objects.requireNonNull(encoded, "encoded");
         Objects.requireNonNull(crcReuse, "crcReuse");
@@ -144,7 +143,7 @@ public record AeronReaderWatermark(
             offset > encoded.capacity() - length) {
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
         }
-        final int actualCrc = Crc32c.compute(crcReuse, encoded, offset, CRC_OFFSET);
+        final int actualCrc = crcReuse.compute(encoded, offset, CRC_OFFSET);
         return decodeFrame(
                 encoded.getInt(offset, ByteOrder.BIG_ENDIAN),
                 encoded.getShort(offset + VERSION_OFFSET, ByteOrder.BIG_ENDIAN),

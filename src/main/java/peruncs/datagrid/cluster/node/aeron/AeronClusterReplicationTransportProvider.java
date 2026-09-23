@@ -5,7 +5,6 @@ import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
 import io.aeron.archive.client.*;
 import io.aeron.exceptions.AeronException;
-import io.aeron.exceptions.TimeoutException;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
@@ -60,26 +59,6 @@ public final class AeronClusterReplicationTransportProvider {
     private static final long DEFAULT_LEASE_STALENESS_MILLIS = 30_000L;
         /// Creates a provider that reads Aeron settings when a transport is created.
     public AeronClusterReplicationTransportProvider() {
-    }
-
-    /* Aeron 1.53 surfaces a control-response disconnect only as an
-     * ArchiveEvent carrying this producer-owned text; ArchiveEvent exposes no
-     * error code, so the probe is string-based and pinned by a test. Once the
-     * response publication disconnects, the Archive control session can no
-     * longer validate or publish durable replication state, so this warning is
-     * terminal while the transport is live; during shutdown it is an expected
-     * diagnostic. */
-    private static final String CONTROL_RESPONSE_DISCONNECTED_MESSAGE =
-            "control response publication is not connected";
-
-    /// Reports whether one driver error handler callback is a terminal
-    /// Archive control-response disconnect.
-    ///
-    /// @param failure callback failure
-    /// @return `true` when the failure is a live control-response disconnect
-    static boolean isTerminalArchiveWarning(final Throwable failure) {
-        return failure instanceof ArchiveEvent && failure.getMessage() != null &&
-               failure.getMessage().contains(CONTROL_RESPONSE_DISCONNECTED_MESSAGE);
     }
 
     static RuntimeException writerRecoveryFailure(final RuntimeException failure) {
@@ -270,20 +249,6 @@ public final class AeronClusterReplicationTransportProvider {
             final Throwable normalized = additional instanceof RuntimeException runtime
                     ? runtime : new IllegalStateException("Aeron transport resource close failed", additional);
             return CloseSequencer.append(current, normalized);
-        }
-
-        private static boolean isArchiveUnavailable(final Throwable failure) {
-            for (Throwable current = failure; current != null; current = current.getCause()) {
-                if (current instanceof ArchiveException || current instanceof TimeoutException) {
-                    return true;
-                }
-                final String message = current.getMessage();
-                if (message != null && (message.contains("connection to the archive is no longer available") ||
-                                        message.contains("awaiting response"))) {
-                    return true;
-                }
-            }
-            return false;
         }
 
         private void verifyMetadataStorage() {
@@ -1369,7 +1334,7 @@ public final class AeronClusterReplicationTransportProvider {
                  * session can no longer validate or publish durable replication state. It
                  * is terminal while the transport is live, but remains a normal shutdown
                  * diagnostic after close has begun. */
-                if (!isTerminalArchiveWarning(failure) || this.closing || this.closed) {
+                if (!AeronArchiveFailures.terminalControlResponseWarning(failure) || this.closing || this.closed) {
                     LOGGER.log(WARNING, "Aeron transport warning", aeronFailure);
                     return;
                 }
@@ -1613,7 +1578,7 @@ public final class AeronClusterReplicationTransportProvider {
                                      * checkpoint remains fail-closed, so release the local
                                      * runtime in that terminal case. */
                                     if (this.writer.isClosed() || this.driverFailure.get() != null ||
-                                        (this.settings.externalArchive() && isArchiveUnavailable(writerFailure))) {
+                                        (this.settings.externalArchive() && AeronArchiveFailures.unavailable(writerFailure))) {
                                         this.writer = null;
                                     }
                                     throw writerFailure;

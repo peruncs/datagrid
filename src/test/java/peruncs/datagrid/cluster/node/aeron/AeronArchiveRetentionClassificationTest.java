@@ -16,23 +16,23 @@ class AeronArchiveRetentionClassificationTest {
         /// Verifies the active-recording code defers retention.
     @Test
     void activeRecordingCodeDefersRetention() {
-        assertTrue(AeronArchiveRetention.isReplayInProgressDetach(
+        assertTrue(AeronArchiveFailures.replayInProgressDetach(
                 new ArchiveException("active recording", ArchiveException.ACTIVE_RECORDING)));
     }
 
         /// Verifies the pinned Aeron 1.53 replay-in-progress text defers retention.
     @Test
     void replayInProgressTextDefersRetention() {
-        assertTrue(AeronArchiveRetention.isReplayInProgressDetach(
+        assertTrue(AeronArchiveFailures.replayInProgressDetach(
                 new ArchiveException("GENERIC: invalid detach: replay in progress", ArchiveException.GENERIC)));
     }
 
         /// Verifies unrelated GENERIC failures stay fatal.
     @Test
     void unrelatedGenericFailureStaysFatal() {
-        assertFalse(AeronArchiveRetention.isReplayInProgressDetach(
+        assertFalse(AeronArchiveFailures.replayInProgressDetach(
                 new ArchiveException("invalid detach: something else", ArchiveException.GENERIC)));
-        assertFalse(AeronArchiveRetention.isReplayInProgressDetach(
+        assertFalse(AeronArchiveFailures.replayInProgressDetach(
                 new ArchiveException("unrelated", ArchiveException.UNKNOWN_RECORDING)));
     }
 }

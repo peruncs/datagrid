@@ -3,13 +3,13 @@ package peruncs.datagrid.cluster.node.aeron;
 import io.aeron.Aeron;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.reader.CursorSnapshot;
+import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
-import java.util.zip.CRC32C;
 
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.WARNING;
@@ -36,7 +36,7 @@ final class WatermarkFanIn {
     /* Scratch accumulator for watermark-frame CRC checks. The writer
      * watermark channel owns one worker thread that runs every decode,
      * so the scratch is confined to that thread for the channel's life. */
-    private final CRC32C crcScratch = new CRC32C();
+    private final Crc32c.Context crcScratch = new Crc32c.Context();
     private final AtomicLong rejectedWatermarks = new AtomicLong();
     /* A reader can publish its last durable cursor while the writer is still
      * recovering its Archive recording. Keep one watermark value per reader

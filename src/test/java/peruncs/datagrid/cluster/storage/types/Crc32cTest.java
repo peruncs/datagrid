@@ -1,7 +1,9 @@
 package peruncs.datagrid.cluster.storage.types;
 
 import org.junit.jupiter.api.Test;
+import org.agrona.concurrent.UnsafeBuffer;
 
+import java.nio.ByteBuffer;
 import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -9,6 +11,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies the shared allocation-free CRC32C helper.
 class Crc32cTest {
+    @Test
+    void contextReusesDirectBufferAcrossIndependentRanges() {
+        final ByteBuffer direct = ByteBuffer.allocateDirect(6);
+        direct.put(new byte[]{1, 2, 3, 4, 5, 6});
+        final UnsafeBuffer buffer = new UnsafeBuffer(direct);
+        final Crc32c.Context context = new Crc32c.Context();
+        assertEquals(Crc32c.compute(new byte[]{2, 3, 4}), context.compute(buffer, 1, 3));
+        assertEquals(Crc32c.compute(new byte[]{5, 6}), context.compute(buffer, 4, 2));
+        assertThrows(IllegalArgumentException.class, () -> context.compute(buffer, 5, 2));
+    }
+
         /// A caller-owned accumulator must start each message from zero.
     @Test
     void accumulatorResetsBetweenMessages() {
