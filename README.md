@@ -238,9 +238,12 @@ A writer requires a shared `ECLIPSE_DATAGRID_BACKUP_PATH` for its fencing
 lease; manual promotion and automated failover remain
 deployment responsibilities, and the lease directory must not sit inside the
 Aeron driver, archive, or checkpoint tree. Provision this path before startup
-on a filesystem whose advisory locks and atomic replacement work across every
-writer host. Local disks, host-local container volumes, and separately mounted
-copies do not provide cross-host fencing. Validate takeover on the exact
+on Linux NFSv4, with the same export mounted by every potential writer and
+working cross-host advisory locks, atomic replacement, and directory force.
+Production startup rejects missing directories and filesystems other than
+`nfs4`; the type check and local atomic-write probe cannot prove that hosts
+share one export. Local disks, host-local container volumes, and separately
+mounted copies do not provide cross-host fencing. Validate takeover on the exact
 production filesystem before enabling failover, then set
 `ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true`. Production writers fail
 startup without that explicit deployment assertion.

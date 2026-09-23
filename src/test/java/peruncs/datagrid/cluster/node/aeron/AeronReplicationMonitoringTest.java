@@ -5,6 +5,7 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
@@ -15,14 +16,32 @@ import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /// Verifies provider health reflects writer readiness and checkpoint state.
 class AeronReplicationMonitoringTest {
+    @TempDir
+    Path temporaryDirectory;
+
+    @Test
+    void productionLeaseRequiresPreProvisionedSharedFilesystem() throws Exception {
+        final Path absent = temporaryDirectory.resolve("absent");
+        final IllegalArgumentException missing = assertThrows(IllegalArgumentException.class,
+                () -> AeronClusterReplicationTransportProvider.validateSharedLeaseFilesystem(absent));
+        assertTrue(missing.getMessage().contains("pre-provisioned"));
+
+        assumeFalse("nfs4".equalsIgnoreCase(Files.getFileStore(temporaryDirectory).type()));
+        final IllegalArgumentException local = assertThrows(IllegalArgumentException.class,
+                () -> AeronClusterReplicationTransportProvider.validateSharedLeaseFilesystem(temporaryDirectory));
+        assertTrue(local.getMessage().contains("supported shared filesystem"));
+    }
+
     private static NodeLibraryPropertiesProvider properties(final String role) {
         return propertiesWith(role, null, null);
     }

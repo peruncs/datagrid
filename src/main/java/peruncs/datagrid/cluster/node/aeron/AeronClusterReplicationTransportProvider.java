@@ -32,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.LinkOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -120,13 +121,17 @@ public final class AeronClusterReplicationTransportProvider {
     private static void validateLeaseDirectory(final AeronSettings settings, final Path leaseDirectory,
                                                final NodeLibraryPropertiesProvider properties) {
         if (leaseDirectory == null) {
+            if (settings.productionMode() && settings.role() == NodeRole.WRITER) {
+                throw new IllegalArgumentException("production writer requires a pre-provisioned shared lease directory");
+            }
             return;
         }
-        if (settings.productionMode() && settings.role() == NodeRole.WRITER && !Boolean.parseBoolean(
-                properties.replicationProperty("ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM"))) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true is required for a production writer; "
-                            + "the lease path must be one pre-provisioned shared filesystem with cross-host locks and atomic replacement");
+        if (settings.productionMode() && settings.role() == NodeRole.WRITER) {
+            if (!Boolean.parseBoolean(properties.replicationProperty("ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM"))) {
+                throw new IllegalArgumentException(
+                        "ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true is required for a production writer");
+            }
+            validateSharedLeaseFilesystem(leaseDirectory);
         }
         if (overlaps(leaseDirectory, settings.directories().aeronDirectory()) ||
             overlaps(leaseDirectory, settings.directories().archiveDirectory()) ||
@@ -134,6 +139,25 @@ public final class AeronClusterReplicationTransportProvider {
             throw new IllegalArgumentException(
                     "writer lease directory must not overlap the Aeron driver, archive, or checkpoint paths: lease=%s, driver=%s, archive=%s, checkpoint=%s".formatted(
                             leaseDirectory, settings.directories().aeronDirectory(), settings.directories().archiveDirectory(), settings.directories().checkpointPath()));
+        }
+    }
+
+    /* FileStore.type is only a fail-closed local-filesystem filter, not proof
+     * that two hosts mounted the same export or honor distributed locks. */
+    static void validateSharedLeaseFilesystem(final Path directory) {
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("production writer lease directory must be pre-provisioned: " + directory);
+        }
+        try {
+            PathSecurity.ensureNoSymbolicLinks(directory);
+            final String type = Files.getFileStore(directory).type();
+            if (!"nfs4".equalsIgnoreCase(type)) {
+                throw new IllegalArgumentException("production writer lease requires a supported shared filesystem (nfs4); found "
+                        + type + " at " + directory);
+            }
+            AtomicFileWriter.verify(directory.resolve(".datagrid-lease-probe"));
+        } catch (final IOException failure) {
+            throw new IllegalStateException("production writer lease filesystem validation failed: " + directory, failure);
         }
     }
 
