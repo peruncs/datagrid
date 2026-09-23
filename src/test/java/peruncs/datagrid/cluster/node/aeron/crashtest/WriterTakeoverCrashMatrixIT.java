@@ -241,11 +241,11 @@ final class WriterTakeoverCrashMatrixIT {
         final Class<?> assembler = Class.forName(ASSEMBLER);
         final Constructor<?> constructor = assembler.getDeclaredConstructor(
                 AeronReplicationConfiguration.class, UUID.class, long.class, long.class, long.class,
-                StorageBinaryDataReceiver.class, Runnable.class,
+                StorageBinaryDataReceiver.class, java.util.function.Consumer.class,
                 Class.forName(DELIVERY_LISTENER), long.class);
         constructor.setAccessible(true);
         return constructor.newInstance(configuration, CLUSTER_ID, EPOCH, -1L, -1L,
-                receiver, (Runnable) () -> {
+                receiver, (java.util.function.Consumer<Object>) ignored -> {
                 }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID));
     }
 

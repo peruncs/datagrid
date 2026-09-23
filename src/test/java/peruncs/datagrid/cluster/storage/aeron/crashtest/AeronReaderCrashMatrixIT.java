@@ -289,15 +289,12 @@ class AeronReaderCrashMatrixIT {
                 new byte[][]{payload(0)});
     }
 
-    /// Kill inside the AtomicFileWriter mid-write phase of the uncertainty
-    /// marker itself. The rename never happened, so the visible marker file
-    /// is absent and only a torn `reader.reader-inflight.tmp-*` sibling
-    /// remains. Because the marker write always precedes the first import,
-    /// no Store bytes can exist either, and pure Archive replay is the
-    /// provably safe outcome: the fixture must contain both published
-    /// transactions exactly once.
+    /// Kill after the fixed checkpoint journal is preallocated but before
+    /// either slot contains a valid uncertainty marker. The file exists but
+    /// cannot prove whether an import started, so recovery must require a
+    /// reseed even though this particular kill precedes the first import.
     @Test
-    void tornInflightMarkerWriteReplaysFromArchiveExactlyOnce() throws Exception {
+    void incompleteInflightJournalRequiresReseedBeforeImport() throws Exception {
         final String point = "DURING_INFLIGHT_MARKER_WRITE";
         final List<byte[]> payloads = List.of(payload(0), payload(1));
         final Path base = Files.createTempDirectory("dg-reader-crash-");
@@ -340,29 +337,21 @@ class AeronReaderCrashMatrixIT {
                 assertEquals(point, ReaderMilestone.read(milestonePath).point());
                 child.destroyForcibly();
                 assertTrue(child.waitFor(10, TimeUnit.SECONDS), "reader child did not exit after kill");
-                /* The kill landed before the marker's atomic rename: the
-                 * visible marker never appeared, the torn temp sibling is the
-                 * only trace, and no Store import could have started. */
-                assertFalse(Files.exists(base.resolve("reader.reader-inflight")),
-                        "a marker killed mid-write must never become visible");
-                try (var entries = Files.list(base)) {
-                    assertTrue(entries.anyMatch(p -> p.getFileName().toString().startsWith("reader.reader-inflight.tmp-")),
-                            "a torn temp sibling must remain as crash evidence");
-                }
+                final Path journal = base.resolve("reader.reader-inflight");
+                assertTrue(Files.exists(journal), "the preallocated journal must survive the kill");
+                assertEquals(ReaderCrashChildMain.INFLIGHT_JOURNAL_BYTES, Files.size(journal));
+                assertThrows(IOException.class, () -> AeronReplicationCheckpointStore.read(journal),
+                        "an incomplete journal must not be accepted as a checkpoint");
                 assertFalse(Files.exists(base.resolve("reader.store")),
                         "no import may run before the marker write completed");
                 recovery = launch(base, "phase2", "NONE", recordingId, controlChannel, mediaDirectory);
                 awaitFile(base.resolve("control/outcome"), recovery);
                 assertTrue(recovery.waitFor(15, TimeUnit.SECONDS), "reader recovery child did not exit");
                 final String outcome = Files.readString(base.resolve("control/outcome"));
-                assertTrue(outcome.lines().anyMatch(line -> line.equals("OUTCOME=REPLAY_FROM_ARCHIVE")),
-                        "with neither marker nor fixture, replay is the safe outcome\n%s".formatted(outcome));
-                final List<byte[]> records = readFixtureRecords(base.resolve("reader.store"));
-                assertEquals(payloads.size(), records.size(), "replayed fixture must hold every transaction once");
-                for (int index = 0; index < payloads.size(); index++) {
-                    assertArrayEquals(payloads.get(index), records.get(index),
-                            "replayed record %s does not match the published payload".formatted(index));
-                }
+                assertTrue(outcome.lines().anyMatch(line -> line.equals("OUTCOME=RESEED_REQUIRED")),
+                        "an incomplete journal must fail closed\n%s".formatted(outcome));
+                assertFalse(Files.exists(base.resolve("reader.store")),
+                        "recovery must not import Store bytes over an uncertain journal");
             }
         } finally {
             if (child != null && child.isAlive()) child.destroyForcibly();
@@ -915,7 +904,7 @@ class AeronReaderCrashMatrixIT {
                 awaitFile(milestonePath, child);
                 final ReaderMilestone milestone = ReaderMilestone.read(milestonePath);
                 assertEquals(point, milestone.point(), "unexpected reader milestone %s".formatted(milestone));
-                assertTrue(milestone.sequence() >= 0, "reader milestone has no sequence");
+                assertTrue(milestone.sequence() >= 0, "reader milestone has no sequence: " + milestone);
                 child.destroyForcibly();
                 assertTrue(child.waitFor(10, TimeUnit.SECONDS), "reader child did not exit after kill");
                 recovery = launch(base, "phase2", "NONE", recordingId, controlChannel, mediaDirectory);

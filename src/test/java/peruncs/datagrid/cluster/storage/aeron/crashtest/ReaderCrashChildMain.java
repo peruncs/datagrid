@@ -8,11 +8,11 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.reader.ReaderDeliveryListener;
 import peruncs.datagrid.cluster.storage.aeron.reader.TransactionCrashHooks;
 import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
-import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
 
@@ -31,6 +31,7 @@ import java.util.zip.CRC32C;
 
 /// Forked reader used by the reader crash matrix. It never self-terminates.
 public final class ReaderCrashChildMain {
+    static final int INFLIGHT_JOURNAL_BYTES = 254;
     private static final UUID CLUSTER_ID = UUID.nameUUIDFromBytes("reader-crash-cluster".getBytes(StandardCharsets.UTF_8));
     private static final long EPOCH = 2L;
     private static final int LIVE_STREAM_ID = 1001;
@@ -123,14 +124,16 @@ public final class ReaderCrashChildMain {
                         .liveChannel(required("dg.reader.liveChannel")).liveStreamId(LIVE_STREAM_ID)
                         .replayChannel(required("dg.reader.replayChannel")).replayStreamId(REPLAY_STREAM_ID)
                         .replicationConfiguration(configuration).clusterId(CLUSTER_ID).epoch(EPOCH)
+                        .wireNonce(AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))
                         .initialSequence(cursor == null ? -1 : cursor.sequence)
                         .initialPosition(cursor == null ? -1 : cursor.position)
                         .receiver(fixture).transactionResolved(ignored ->
                         {
+                            if (ignored.sequence() < 0) return;
                             final AeronArchiveReader current = readerRef.get();
                             if (current != null) {
                                 writeCursor(base.resolve("reader.cursor"),
-                                        current.lastResolvedSequence(), current.lastResolvedPosition(), point, control);
+                                        ignored.sequence(), ignored.position(), point, control);
                             }
                         }).deliveryListener(new Listener(fixture, uncertainty, point, recordingId)).build());
                 readerRef.set(reader);
@@ -336,21 +339,16 @@ public final class ReaderCrashChildMain {
                         java.util.UUID.nameUUIDFromBytes("reader-crash-generation".getBytes(StandardCharsets.UTF_8)),
                         this.recordingId, EPOCH, 1L, sequence, position, dataLength, dataChunkCount, crc32c);
                 if ("DURING_INFLIGHT_MARKER_WRITE".equals(this.point)) {
-                    /* Park inside the AtomicFileWriter mid-write phase of the
-                     * uncertainty marker itself: the kill leaves a torn temp
-                     * sibling behind and the visible marker never appears. */
-                    FileStoreCrashHooks.runWithHook((phase, path) -> {
-                        if ("DURING_CURSOR_FILE_WRITE".equals(phase)
-                                && path.getFileName().startsWith("reader.reader-inflight")) {
-                            this.fixture.barrier(this.point, sequence, position);
-                        }
-                    }, () -> {
-                        try {
-                            writeMarker(marker);
-                        } catch (final IOException failure) {
-                            throw new java.io.UncheckedIOException(failure);
-                        }
-                    });
+                    /* Model the first fixed-journal write after preallocation,
+                     * before either slot contains a complete checkpoint. */
+                    try (FileChannel channel = FileChannel.open(this.uncertainty,
+                            StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                        channel.position(INFLIGHT_JOURNAL_BYTES - 1L);
+                        channel.write(ByteBuffer.wrap(new byte[1]));
+                        channel.force(true);
+                    }
+                    this.fixture.barrier(this.point, sequence, position);
+                    writeMarker(marker);
                 } else {
                     writeMarker(marker);
                 }
