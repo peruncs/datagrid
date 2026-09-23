@@ -17,6 +17,23 @@ final class AeronArchiveFailures {
                failure.getMessage().contains(CONTROL_RESPONSE_DISCONNECTED);
     }
 
+    static boolean belongsToControlSession(final Throwable failure, final long activeSessionId) {
+        final String message = failure.getMessage();
+        if (message == null) return true;
+        final String prefix = "controlSessionId=";
+        final int start = message.indexOf(prefix);
+        if (start < 0) return true;
+        final int digits = start + prefix.length();
+        int end = digits;
+        while (end < message.length() && Character.isDigit(message.charAt(end))) end++;
+        if (end == digits) return true;
+        try {
+            return Long.parseLong(message.substring(digits, end)) == activeSessionId;
+        } catch (final NumberFormatException malformed) {
+            return true;
+        }
+    }
+
     static boolean replayInProgressDetach(final ArchiveException failure) {
         return failure.errorCode() == ArchiveException.ACTIVE_RECORDING ||
                failure.errorCode() == ArchiveException.GENERIC && failure.getMessage() != null &&

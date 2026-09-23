@@ -1338,6 +1338,18 @@ public final class AeronClusterReplicationTransportProvider {
                     LOGGER.log(WARNING, "Aeron transport warning", aeronFailure);
                     return;
                 }
+                /* The embedded Archive can finish an older control session
+                 * after this transport has connected its own client. Its
+                 * disconnected response publication is not this writer's
+                 * durability channel. Never call Archive RPCs on the
+                 * conductor thread: the session id is an immutable snapshot. */
+                final AeronRuntime current = this.runtime;
+                final AeronArchive archive = current == null ? null : current.archive();
+                if (archive == null || !AeronArchiveFailures.belongsToControlSession(
+                        failure, archive.controlSessionId())) {
+                    LOGGER.log(WARNING, "Aeron warning for an inactive Archive control session", aeronFailure);
+                    return;
+                }
             }
             final RuntimeException normalized = failure instanceof RuntimeException runtimeException
                     ? runtimeException

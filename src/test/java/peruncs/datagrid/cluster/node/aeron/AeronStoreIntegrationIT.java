@@ -371,6 +371,7 @@ class AeronStoreIntegrationIT {
             public String replicationProperty(final String name) {
                 return switch (name) {
                     case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID" -> clusterId.toString();
+                    case "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK" -> "true";
                     case "ECLIPSE_DATAGRID_AERON_NODE_ID" -> nodeId.toString();
                     case "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> generation.toString();
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();

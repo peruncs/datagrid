@@ -39,4 +39,13 @@ class AeronControlWarningTest {
                 new ArchiveException("archive failed", ArchiveException.GENERIC))));
         assertFalse(AeronArchiveFailures.unavailable(new IllegalStateException("unrelated failure")));
     }
+
+    @Test
+    void disconnectedOldControlSessionDoesNotIdentifyCurrentArchive() {
+        final ArchiveEvent old = new ArchiveEvent(
+                "control response publication is not connected: ControlSession{controlSessionId=17, state=DONE}");
+        assertTrue(AeronArchiveFailures.terminalControlResponseWarning(old));
+        assertFalse(AeronArchiveFailures.belongsToControlSession(old, 18));
+        assertTrue(AeronArchiveFailures.belongsToControlSession(old, 17));
+    }
 }
