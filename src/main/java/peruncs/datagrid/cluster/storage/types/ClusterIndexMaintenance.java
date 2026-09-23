@@ -3,33 +3,133 @@ package peruncs.datagrid.cluster.storage.types;
 import io.github.jbellis.jvector.graph.GraphIndexBuilder;
 import io.github.jbellis.jvector.graph.OnHeapGraphIndex;
 import org.eclipse.serializer.exceptions.IORuntimeException;
+import org.eclipse.serializer.collections.Set_long;
+import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataAcceptor;
+import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
 import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.gigamap.types.IndexGroup;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-/// Reader-side index maintenance for replicated Store imports.
+import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
+
+    /// Reader-side index maintenance for replicated Store imports.
 ///
-/// Imports materialize entities without calling the map's add/update/remove
-/// API, so no index group observes the change and both search views freeze at
-/// whatever the first query built. This class retires the Lucene view before
-/// materialization and validates plus rebuilds the vector views after it, as
-/// documented on [ClusterStoreIndexes].
+/// Imports bypass map update methods. Lucene views are retired before the
+/// object swap; vector graphs are rebuilt afterward only when their persisted
+/// change counter advanced.
 final class ClusterIndexMaintenance {
-    private ClusterIndexMaintenance() {
+    private static final BinaryEntityRawDataIterator ITERATOR = BinaryEntityRawDataIterator.New();
+    private final ArrayList<GigaMap<?>> cachedMaps = new ArrayList<>();
+    private final IdentityHashMap<GigaMap<?>, Boolean> knownMaps = new IdentityHashMap<>();
+    private final Set_long reachableIds = Set_long.New();
+    private final Map<String, Object> rootValues = new HashMap<>();
+    private final BinaryEntityRawDataAcceptor importedIdCheck = (start, bound) -> {
+        if (start + Binary.entityHeaderLength() > bound) {
+            throw new IllegalStateException("truncated imported entity header during index maintenance");
+        }
+        if (this.reachableIds.contains(Binary.getEntityObjectIdRawValue(start))) {
+            this.reachabilityChanged = true;
+        }
+        return true;
+    };
+    private boolean initialized;
+    private boolean reachabilityChanged;
+    private boolean rootsDiffer;
+    private int rootsSeen;
+
+    /// Records the indexes and root links that may change in the incoming batch.
+    void beforeApply(final StorageConnection storage, final ByteBuffer[] buffers,
+                     final int length, final int maxValidatedObjects) {
+        if (!this.initialized || this.rootsChanged(storage)) this.scanRoots(storage, maxValidatedObjects);
+        this.reachabilityChanged = false;
+        for (int index = 0; index < length; index++) {
+            final ByteBuffer buffer = buffers[index];
+            if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
+                throw new IllegalArgumentException("index maintenance requires normalized direct buffers");
+            }
+            if (buffer.limit() != 0) {
+                final long start = getDirectByteBufferAddress(buffer);
+                if (ITERATOR.iterateEntityRawData(start, start + buffer.limit(), this.importedIdCheck) != 0L) {
+                    throw new CorruptReplicationDataException("incomplete entity in imported index batch");
+                }
+            }
+        }
+        refreshMaps(this.cachedMaps, ClusterIndexValidation.scratch());
     }
 
-        /// Reader-side maintenance entry: refreshes every replicated search view
-        /// reachable from this Store's roots before a replicated batch is applied.
+    /// Validates changed roots and rebuilds only changed vector graphs.
+    void afterApply(final StorageConnection storage, final int maxValidatedObjects) {
+        final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
+        scratch.vectorGroups.clear();
+        scratch.rebuiltGroups.clear();
+        try {
+            if (this.reachabilityChanged || this.rootsChanged(storage)) {
+                this.scanRoots(storage, maxValidatedObjects);
+            } else {
+                for (final GigaMap<?> map : this.cachedMaps) {
+                    ClusterIndexValidation.validateMap(map, scratch.vectorGroups, scratch);
+                }
+            }
+            for (final ClusterIndexValidation.VectorGroup group : scratch.vectorGroups) {
+                if (scratch.rebuiltGroups.put(group.vectors(), Boolean.TRUE) == null) {
+                    resetChangedVectorSearchGraphs(group.vectors(), scratch);
+                }
+            }
+        } finally {
+            scratch.vectorGroups.clear();
+            scratch.rebuiltGroups.clear();
+            scratch.vectorModCounts.clear();
+        }
+    }
+
+    private boolean rootsChanged(final StorageConnection storage) {
+        this.rootsSeen = 0;
+        this.rootsDiffer = false;
+        storage.persistenceManager().viewRoots().iterateEntries((identifier, value) -> {
+            this.rootsSeen++;
+            if (!this.rootValues.containsKey(identifier) || this.rootValues.get(identifier) != value) {
+                this.rootsDiffer = true;
+            }
+        });
+        return this.rootsDiffer || this.rootsSeen != this.rootValues.size();
+    }
+
+    private void scanRoots(final StorageConnection storage, final int maxValidatedObjects) {
+        final var manager = storage.persistenceManager();
+        final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
+        this.cachedMaps.clear();
+        this.knownMaps.clear();
+        this.reachableIds.truncate();
+        scratch.vectorGroups.clear();
+        ClusterIndexValidation.validateStorageRoots(storage, maxValidatedObjects, scratch.vectorGroups, current -> {
+            if (current instanceof GigaMap<?> map && this.knownMaps.put(map, Boolean.TRUE) == null) {
+                this.cachedMaps.add(map);
+            }
+            final long id = manager.lookupObjectId(current);
+            if (id > 0L) this.reachableIds.add(id);
+        });
+        this.rootValues.clear();
+        manager.viewRoots().iterateEntries((identifier, value) -> this.rootValues.put(identifier, value));
+        this.initialized = true;
+    }
+
+        /// Compatibility entry for refreshing views discovered from Store roots.
     ///
     /// Imports materialize entities without calling the map's add/update/remove
     /// API, so no index group observes the change and both search views freeze
@@ -46,20 +146,16 @@ final class ClusterIndexMaintenance {
     /// the already-current files. A reader-side rollback or rebuild is not
     /// just unnecessary here, it is corrupting: rollback deletes the
     /// replicated commit point the writer never created, and reopening over
-    /// the commit-less remainder wipes the rest. The retired writer is
-    /// closed, never kept open across batches, so no file deleter ever spans
-    /// an import swap. JVector instead keeps only vectors in the
-    /// Store with a transient search graph, so the refresh resets that graph
-    /// to its just-loaded state: the next access rebuilds it from the
-    /// already-current vector store — the same lazy rebuild every restart
-    /// performs, with no vectorize call and no per-entity graph surgery.
+    /// the commit-less remainder wipes the rest. JVector stores its vectors
+    /// but not its search graph; the refresh records its change counter so the
+    /// post-import pass can rebuild only graphs that changed.
     ///
     /// Everything runs under the map monitor, the same lock queries use, and
     /// the merger holds one coordinator write section across retirement,
     /// materialization, and validation, so joined application reads observe
     /// either the pre-batch or the post-batch boundary — never a materialized
     /// graph with stale search views. Retirement precedes the swap: the
-    /// merger calls this before materializing, so every close still observes
+    /// caller runs this before materializing, so every close still observes
     /// the directory state its handles reference. Callers invoke this only
     /// for non-empty batches.
     ///
@@ -68,32 +164,40 @@ final class ClusterIndexMaintenance {
     static void refreshImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
         Objects.requireNonNull(storage, "storage");
         final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
+        scratch.vectorModCounts.clear();
         collectMaps(storage, scratch, maxValidatedObjects);
         try {
-            for (final GigaMap<?> map : scratch.maps) {
-                ClusterIndexValidation.collectIndexGroups(map, scratch.groups);
-                try {
-                    for (final IndexGroup<?> group : scratch.groups) {
-                        if (group instanceof VectorIndices<?> vectors) {
-                            resetVectorSearchGraphs(vectors);
-                        } else if (group instanceof LuceneIndex<?> lucene) {
-                            retireLuceneView(lucene);
-                        }
-                        /* Bitmap groups carry no cached search views: their
-                         * structural state ships inside the Store and
-                         * materializes directly, so nothing needs refresh. */
-                    }
-                } finally {
-                    scratch.groups.clear();
-                }
-            }
+            refreshMaps(scratch.maps, scratch);
         } finally {
             scratch.maps.clear();
         }
     }
 
-        /// Validates this Store's replicated index boundary and eagerly rebuilds
-        /// every vector search graph the refresh cleared, in one traversal.
+    private static void refreshMaps(final ArrayList<GigaMap<?>> maps,
+                                    final ClusterIndexValidation.ValidationScratch scratch) {
+        scratch.vectorModCounts.clear();
+        for (final GigaMap<?> map : maps) {
+            ClusterIndexValidation.collectIndexGroups(map, scratch.groups);
+            try {
+                for (final IndexGroup<?> group : scratch.groups) {
+                    if (group instanceof VectorIndices<?> vectors) {
+                        vectors.accessIndices(indices -> indices.values().iterate(index -> {
+                            if (index instanceof VectorIndex.Default<?> known) {
+                                scratch.vectorModCounts.put(index, known.getStructuralModCount());
+                            }
+                        }));
+                    } else if (group instanceof LuceneIndex<?> lucene) {
+                        retireLuceneView(lucene);
+                    }
+                    /* Bitmap groups carry no cached search views. */
+                }
+            } finally {
+                scratch.groups.clear();
+            }
+        }
+    }
+
+        /// Validates this Store's index boundary and rebuilds changed vector graphs.
     ///
     /// The rebuild runs here — inside the merger's coordinator write section
     /// and under the map monitor — instead of lazily on the next query. A
@@ -117,13 +221,39 @@ final class ClusterIndexMaintenance {
         Objects.requireNonNull(storage, "storage");
         final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
         scratch.vectorGroups.clear();
+        scratch.rebuiltGroups.clear();
         try {
             ClusterIndexValidation.validateStorageRoots(storage, maxValidatedObjects, scratch.vectorGroups);
             for (final ClusterIndexValidation.VectorGroup group : scratch.vectorGroups) {
-                ensureVectorSearchGraphs(group.vectors(), scratch);
+                if (scratch.rebuiltGroups.put(group.vectors(), Boolean.TRUE) == null) {
+                    resetChangedVectorSearchGraphs(group.vectors(), scratch);
+                }
             }
         } finally {
             scratch.vectorGroups.clear();
+            scratch.rebuiltGroups.clear();
+            scratch.vectorModCounts.clear();
+        }
+    }
+
+    private static void resetChangedVectorSearchGraphs(final VectorIndices<?> vectors,
+                                                       final ClusterIndexValidation.ValidationScratch scratch) {
+        scratch.vectorIndexes.clear();
+        scratch.dirtyVectorIndexes.clear();
+        try {
+            vectors.accessIndices(indices -> indices.values().iterate(scratch.vectorIndexes::add));
+            for (final VectorIndex<?> index : scratch.vectorIndexes) {
+                final Long before = scratch.vectorModCounts.get(index);
+                if (!(index instanceof VectorIndex.Default<?> known) || before == null ||
+                    before.longValue() != known.getStructuralModCount()) {
+                    resetVectorSearchGraph(index);
+                    scratch.dirtyVectorIndexes.add(index);
+                }
+            }
+            ensureVectorSearchGraphs(scratch.dirtyVectorIndexes, scratch);
+        } finally {
+            scratch.vectorIndexes.clear();
+            scratch.dirtyVectorIndexes.clear();
         }
     }
 
@@ -163,7 +293,7 @@ final class ClusterIndexMaintenance {
         }
     }
 
-        /// Resets every vector search graph in a group to its just-loaded state.
+        /// Resets one changed vector search graph to its just-loaded state.
     ///
     /// The transient HNSW builder and graph are closed and dropped and the
     /// one-shot rebuild guard is cleared, so the next search or mutation
@@ -186,17 +316,8 @@ final class ClusterIndexMaintenance {
     /// skipped-in-incremental-mode rebuild path cannot apply here: the rebuild
     /// always runs.
     ///
-    /// @param vectors group whose search graphs to reset
+    /// @param index index whose search graph to reset
     /// @throws IllegalStateException if the upstream field layout changed
-    private static void resetVectorSearchGraphs(final VectorIndices<?> vectors) {
-        Objects.requireNonNull(vectors, "vectors");
-        final ArrayList<VectorIndex<?>> found = new ArrayList<>();
-        vectors.accessIndices(indices -> indices.values().iterate(found::add));
-        for (final VectorIndex<?> index : found) {
-            resetVectorSearchGraph(index);
-        }
-    }
-
     private static void resetVectorSearchGraph(final VectorIndex<?> index) {
         final Object target = Objects.requireNonNull(index, "index");
         final StoreIndexReflection.VectorGraphFields fields =
@@ -235,7 +356,7 @@ final class ClusterIndexMaintenance {
         /// Rebuilds one vector group's search graphs eagerly after an import batch.
     ///
     /// The trigger is a trivial top-1 search: a search always initializes the
-    /// index first, which rebuilds exactly when the refresh cleared the guard.
+    /// index first, which rebuilds exactly when a changed graph was retired.
     /// The probe vector is all-ones so its norm can never be zero. The guard
     /// is read back after every probe, so an upstream version that decouples
     /// search from initialization fails this merger loudly instead of
@@ -244,12 +365,9 @@ final class ClusterIndexMaintenance {
     ///
     /// @param vectors vector group to rebuild
     /// @param scratch worker-local scratch owning the reused probes
-    private static void ensureVectorSearchGraphs(final VectorIndices<?> vectors,
+    private static void ensureVectorSearchGraphs(final ArrayList<VectorIndex<?>> dirtyIndexes,
                                                   final ClusterIndexValidation.ValidationScratch scratch) {
-        scratch.vectorIndexes.clear();
-        try {
-            vectors.accessIndices(indices -> indices.values().iterate(scratch.vectorIndexes::add));
-            for (final VectorIndex<?> index : scratch.vectorIndexes) {
+        for (final VectorIndex<?> index : dirtyIndexes) {
                 try {
                     final float[] probe = scratch.vectorProbes.computeIfAbsent(
                             index, key -> ones(key.configuration().dimension()));
@@ -274,9 +392,6 @@ final class ClusterIndexMaintenance {
                             "vector search graph rebuild did not run on %s; unsupported Store version"
                                     .formatted(index.getClass().getName()));
                 }
-            }
-        } finally {
-            scratch.vectorIndexes.clear();
         }
     }
 

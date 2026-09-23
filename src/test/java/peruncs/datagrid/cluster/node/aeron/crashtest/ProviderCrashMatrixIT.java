@@ -66,11 +66,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class ProviderCrashMatrixIT {
     /// Transient startup race the phase-2 recovery may legitimately retry:
     /// the SIGKILLed phase-1 child left its embedded driver's mark file behind
-    /// and the Aeron client refuses to connect while the driver directory
-    /// still looks active. Classification is by exception type in the child's
-    /// cause chain, never by message text: an upstream wording change (or a
-    /// message-less wrapper) must not silently convert a real recovery defect
-    /// into retried noise. An unparsable outcome is not retryable either.
+    /// and Aeron may refuse startup while a driver or Archive mark is active.
+    /// The Archive's MarkFile currently throws a plain IllegalStateException,
+    /// so that case also requires its exact message and archive-mark filename.
+    /// Unrelated IllegalStateExceptions remain real failures.
     static boolean isActiveDriverRetry(final String outcome) {
         final CrashOutcome parsed;
         try {
@@ -78,13 +77,29 @@ class ProviderCrashMatrixIT {
         } catch (final RuntimeException unparseable) {
             return false;
         }
-        return parsed.errorTypes().stream().anyMatch(RETRYABLE_STARTUP_TYPES::contains);
+        if (parsed.errorTypes().stream().anyMatch(RETRYABLE_STARTUP_TYPES::contains)) return true;
+        return parsed.policy() == RecoveryPolicy.FAIL_CLOSED && parsed.storeValid() &&
+               parsed.errorTypes().equals(java.util.List.of(IllegalStateException.class.getName())) &&
+               parsed.error() != null &&
+               parsed.error().replace('\\', '/').matches(
+                       "active mark file detected: .*/archive/archive-mark\\.dat");
     }
 
     /// Exception types considered evidence of the stale active-driver race.
     private static final java.util.Set<String> RETRYABLE_STARTUP_TYPES = java.util.Set.of(
             io.aeron.driver.exceptions.ActiveDriverException.class.getName(),
             io.aeron.exceptions.DriverTimeoutException.class.getName());
+
+    @Test
+    void activeArchiveMarkRetryDoesNotHideOtherIllegalStateFailures() {
+        final String base = "HEALTH=FAILED\nOUTCOME=FAIL_CLOSED\nPROOF_STORE_VALID=true\n" +
+                "ERROR_TYPE=java.lang.IllegalStateException\nERROR=";
+        assertTrue(isActiveDriverRetry(base +
+                "active mark file detected: /tmp/archive/archive-mark.dat\n"));
+        assertFalse(isActiveDriverRetry(base + "checkpoint is invalid\n"));
+        assertFalse(isActiveDriverRetry(base +
+                "active mark file detected: /tmp/unrelated/archive-mark.dat\n"));
+    }
 
     private static void assertNotHarnessError(final CrashOutcome outcome, final String raw) {
         if (outcome.policy() == RecoveryPolicy.HARNESS_ERROR) {
@@ -221,40 +236,22 @@ class ProviderCrashMatrixIT {
         this.assertReseed("AFTER_LOCAL_WRITE_BEFORE_COMMIT", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-        /// Verifies enqueue before prepare fence requires reseed.
+        /// Verifies a kill before the next journal slot is written preserves the prior boundary.
     @Test
-    void enqueueBeforePrepareFenceRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_ENQUEUE_BEFORE_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+    void checkpointBeforeJournalSlotRequiresReseed() throws Exception {
+        this.assertReseed("BEFORE_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-        /// Verifies uncertain checkpoint requires reseed.
+        /// Verifies a partial inactive journal slot cannot advance the durable boundary.
     @Test
-    void uncertainCheckpointRequiresReseed() throws Exception {
-        this.assertReseed("DURING_COMMITTING_UNCERTAIN_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, true);
+    void checkpointDuringJournalSlotRequiresReseed() throws Exception {
+        this.assertReseed("DURING_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
     }
 
-        /// Verifies a checkpoint write interrupted before rename preserves the prior boundary.
+        /// Verifies a forced journal slot remains restartable before in-memory publication.
     @Test
-    void checkpointTempWriteBeforeRenameRequiresReseed() throws Exception {
-        this.assertReseed("BEFORE_CHECKPOINT_TEMP_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
-    }
-
-        /// Verifies a checkpoint write interrupted during file output preserves the prior boundary.
-    @Test
-    void checkpointFileWriteRequiresReseed() throws Exception {
-        this.assertReseed("DURING_CHECKPOINT_FILE_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
-    }
-
-        /// Verifies a forced temporary checkpoint that was not renamed leaves the prior boundary.
-    @Test
-    void checkpointAfterTempWriteBeforeRenameRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_CHECKPOINT_TEMP_WRITE_BEFORE_RENAME", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
-    }
-
-        /// Verifies a renamed checkpoint remains restartable before directory force completes.
-    @Test
-    void checkpointRenameBeforeDirectorySyncContinues() throws Exception {
-        this.assertOutcome("AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
+    void checkpointAfterJournalForceContinues() throws Exception {
+        this.assertOutcome("AFTER_JOURNAL_SLOT_FORCE",
                 ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "CONTINUE");
     }
 
@@ -410,7 +407,11 @@ class ProviderCrashMatrixIT {
                     assertTrue(Files.exists(checkpoint), "expected a durable checkpoint to corrupt");
                     final byte[] bytes = Files.readAllBytes(checkpoint);
                     assertTrue(bytes.length > 0, "checkpoint file is empty");
-                    bytes[bytes.length / 2] ^= 0x01;
+                    /* Both journal slots must be damaged: one corrupt slot is
+                     * intentionally recovered from the other valid slot. */
+                    assertEquals(254, bytes.length);
+                    bytes[126] ^= 0x01;
+                    bytes[253] ^= 0x01;
                     Files.write(checkpoint, bytes);
                 });
     }
@@ -645,7 +646,8 @@ class ProviderCrashMatrixIT {
                  "AFTER_DICTIONARY_CHUNKS",
                  "AFTER_DATA_CHUNKS",
                  "AFTER_PREPARE",
-                 "AFTER_PREPARE_BEFORE_LOCAL_WRITE" -> targetSequence;
+                 "AFTER_PREPARE_BEFORE_LOCAL_WRITE",
+                 "AFTER_PREPARE_FAILURE_ABORT_OFFERED" -> targetSequence;
             default -> targetSequence + 1;
         };
     }
@@ -711,19 +713,13 @@ class ProviderCrashMatrixIT {
                                 "RESEED_REQUIRED"),
                         new CrashScenario("AFTER_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST, false, true,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_ENQUEUE_BEFORE_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                false, false, "RESEED_REQUIRED"),
-                        new CrashScenario("DURING_COMMITTING_UNCERTAIN_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                true, false, "RESEED_REQUIRED"),
                         new CrashScenario("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST,
                                 true, false, "RESEED_REQUIRED"),
-                        new CrashScenario("BEFORE_CHECKPOINT_TEMP_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("BEFORE_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("DURING_CHECKPOINT_FILE_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("DURING_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_CHECKPOINT_TEMP_WRITE_BEFORE_RENAME", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                false, false, "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC", ReplicationDurabilityMode.ARCHIVE_FIRST,
+                        new CrashScenario("AFTER_JOURNAL_SLOT_FORCE", ReplicationDurabilityMode.ARCHIVE_FIRST,
                                 false, false, "CONTINUE"),
                         new CrashScenario("AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
                                 ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "CONTINUE"),
@@ -752,7 +748,7 @@ class ProviderCrashMatrixIT {
             final int controlPort = layout.controlPort();
             Process child = null;
             try {
-                child = this.launch(base, "phase1", "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
+                child = this.launch(base, "phase1", "AFTER_JOURNAL_SLOT_FORCE",
                         ReplicationDurabilityMode.ARCHIVE_FIRST, livePort, controlPort);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 this.await(base.resolve("control/milestone.reached"), child, budget("crash.budget.milestone", 60_000L));
@@ -763,11 +759,8 @@ class ProviderCrashMatrixIT {
                         base.resolve("checkpoint/writer.checkpoint"));
                 assertEquals(AeronReplicationCheckpoint.State.COMMITTED, checkpoint.state(),
                         "phase 1 must leave a valid terminal checkpoint before the recovery crash");
-                child = this.launch(base, "phase2", "AFTER_RECOVERY_CHECKPOINT_READ",
-                        ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, livePort, controlPort, 2,
+                child = this.launchRecoveryMilestone(base, livePort, controlPort,
                         (int) checkpoint.transactionSequence());
-                this.await(base.resolve("control/milestone.reached"), child,
-                        budget("crash.budget.milestone", 60_000L));
                 final ChildMilestone recoveryMarker = ChildMilestone.read(base.resolve("control/milestone.reached"));
                 assertEquals("AFTER_RECOVERY_CHECKPOINT_READ", recoveryMarker.point());
                 assertEquals(checkpoint.transactionSequence(), recoveryMarker.sequence(),
@@ -833,7 +826,7 @@ class ProviderCrashMatrixIT {
             CrashEventLog.append(base.resolve("control"), "selection", "triple-recovery-chain");
             Process child = null;
             try {
-                child = this.launch(base, "phase1", "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
+                child = this.launch(base, "phase1", "AFTER_JOURNAL_SLOT_FORCE",
                         ReplicationDurabilityMode.ARCHIVE_FIRST, livePort, controlPort);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 this.await(base.resolve("control/milestone.reached"), child, budget("crash.budget.milestone", 60_000L));
@@ -845,11 +838,8 @@ class ProviderCrashMatrixIT {
                 assertEquals(AeronReplicationCheckpoint.State.COMMITTED, checkpoint.state(),
                         "phase 1 must leave a valid terminal checkpoint before the recovery crashes");
                 for (int crash = 1; crash <= 2; crash++) {
-                    child = this.launch(base, "phase2", "AFTER_RECOVERY_CHECKPOINT_READ",
-                            ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, livePort, controlPort, 2,
+                    child = this.launchRecoveryMilestone(base, livePort, controlPort,
                             (int) checkpoint.transactionSequence());
-                    this.await(base.resolve("control/milestone.reached"), child,
-                            budget("crash.budget.milestone", 60_000L));
                     final ChildMilestone recoveryMarker = ChildMilestone.read(base.resolve("control/milestone.reached"));
                     assertEquals("AFTER_RECOVERY_CHECKPOINT_READ", recoveryMarker.point());
                     assertEquals(checkpoint.transactionSequence(), recoveryMarker.sequence(),
@@ -1031,6 +1021,36 @@ class ProviderCrashMatrixIT {
                 }
             }
         }
+    }
+
+    private Process launchRecoveryMilestone(final Path base, final int livePort, final int controlPort,
+                                            final int sequence) throws Exception {
+        final long deadline = System.nanoTime() +
+                TimeUnit.MILLISECONDS.toNanos(budget("crash.budget.archiveStop", 30_000L));
+        AssertionError lastStartupFailure = null;
+        do {
+            final long storeSize = fileSize(base.resolve("store.records"));
+            final Process child = this.launch(base, "phase2", "AFTER_RECOVERY_CHECKPOINT_READ",
+                    ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, livePort, controlPort, 2, sequence);
+            try {
+                this.await(base.resolve("control/milestone.reached"), child,
+                        budget("crash.budget.milestone", 60_000L));
+                return child;
+            } catch (final AssertionError startupFailure) {
+                final Path outcomePath = base.resolve("control/outcome");
+                if (!Files.exists(outcomePath) ||
+                    !isActiveDriverRetry(Files.readString(outcomePath, StandardCharsets.UTF_8))) {
+                    if (child.isAlive()) child.destroyForcibly();
+                    throw startupFailure;
+                }
+                assertTrue(child.waitFor(10, TimeUnit.SECONDS), "mark-file retry child did not exit");
+                assertEquals(storeSize, fileSize(base.resolve("store.records")),
+                        "Archive mark-file retry changed the Store fixture");
+                lastStartupFailure = startupFailure;
+                Thread.sleep(1_000L);
+            }
+        } while (System.nanoTime() < deadline);
+        throw new AssertionError("Archive mark remained active before recovery milestone", lastStartupFailure);
     }
 
     private Process launch(final Path base, final String mode, final String point,

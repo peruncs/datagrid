@@ -16,6 +16,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 
@@ -27,8 +28,17 @@ public final class AeronReplicationCheckpointStore {
     private static final int SLOT_BYTES = Long.BYTES + AeronReplicationCheckpoint.ENCODED_BYTES + Integer.BYTES;
     private static final int JOURNAL_BYTES = SLOT_BYTES * 2;
     private static final ConcurrentHashMap<Path, Object> LOCKS = new ConcurrentHashMap<>();
+    private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
 
     private AeronReplicationCheckpointStore() {
+    }
+
+    static void runWithTestHook(final BiConsumer<String, Path> hook, final Runnable action) {
+        ScopedValue.where(TEST_HOOK, Objects.requireNonNull(hook, "hook")).run(action);
+    }
+
+    private static void testPoint(final String phase, final Path path) {
+        if (TEST_HOOK.isBound()) TEST_HOOK.get().accept(phase, path);
     }
 
     /// Forces the next journal slot without renaming the checkpoint file.
@@ -64,10 +74,21 @@ public final class AeronReplicationCheckpointStore {
                 slot.putLong(generation).put(record);
                 slot.putInt(Crc32c.compute(slot.array(), 0, SLOT_BYTES - Integer.BYTES)).flip();
                 channel.position((generation & 1L) * SLOT_BYTES);
+                testPoint("BEFORE_JOURNAL_SLOT_WRITE", canonical);
+                if (TEST_HOOK.isBound()) {
+                    final ByteBuffer firstHalf = slot.duplicate();
+                    firstHalf.limit(SLOT_BYTES / 2);
+                    while (firstHalf.hasRemaining()) {
+                        if (channel.write(firstHalf) == 0) throw new IOException("Aeron checkpoint write made no progress");
+                    }
+                    slot.position(SLOT_BYTES / 2);
+                    testPoint("DURING_JOURNAL_SLOT_WRITE", canonical);
+                }
                 while (slot.hasRemaining()) {
                     if (channel.write(slot) == 0) throw new IOException("Aeron checkpoint write made no progress");
                 }
                 channel.force(true);
+                testPoint("AFTER_JOURNAL_SLOT_FORCE", canonical);
                 if (generation == 1L) AtomicFileWriter.forceDirectory(parent);
             }
         }

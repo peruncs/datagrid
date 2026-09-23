@@ -22,14 +22,11 @@ class StorageBinaryDataImporterTest {
     @TempDir
     Path storagePath;
 
-    /// Verifies release tolerates nulls, empty channels, and zero-capacity buffers while rejecting an out-of-range length.
+    /// Verifies release tolerates nulls and empty views while rejecting an out-of-range length.
     @Test
     void releaseFreesEverySlotUnconditionally() {
-        /* Empty slots are independently owned since the shared static empty
-         * was removed, so the release frees them exactly like any other slot —
-         * including zero-capacity buffers, which the old capacity guard used
-         * to skip. Slots must be distinctly owned: two views of one native
-         * address would free it twice. */
+        /* Zero-capacity views have no caller-owned native memory. Non-empty
+         * slots must still own distinct addresses to avoid double-free. */
         final ByteBuffer owned = XMemory.allocateDirectNative(64);
         final ByteBuffer firstEmpty = ByteBuffer.allocateDirect(0);
         final ByteBuffer secondEmpty = ByteBuffer.allocateDirect(0);
@@ -43,11 +40,9 @@ class StorageBinaryDataImporterTest {
                 () -> StorageBinaryDataImporter.release(new ByteBuffer[]{owned}, 2));
     }
 
-    /// Verifies empty heap sources each import to a distinct owned empty buffer that releases cleanly.
+    /// Verifies empty sources remain distinct for Store's identity-based import.
     @Test
-    void emptySourcesGetFreshEmptiesPerSlot() {
-        /* Each empty source must produce its own independently owned empty —
-         * never two duplicates of one shared static buffer. */
+    void emptySourcesGetDistinctDirectViews() {
         try (EmbeddedStorageManager manager = EmbeddedStorage.start(new Root(), this.storagePath)) {
             final StorageConnection connection = manager.createConnection();
 
@@ -57,12 +52,12 @@ class StorageBinaryDataImporterTest {
                 assertEquals(2, owned.length);
                 assertNotNull(owned[0]);
                 assertNotNull(owned[1]);
-                assertNotSame(owned[0], owned[1],
-                        "empty slots must be independently owned, not duplicates of one shared buffer");
+                assertNotSame(owned[0], owned[1]);
+                assertTrue(owned[0].isDirect());
                 assertEquals(0, owned[0].capacity());
                 assertEquals(0, owned[1].capacity());
             } finally {
-                /* Unconditional release frees both empties without throwing. */
+                /* Each identity is distinct, but zero-capacity views own no native allocation. */
                 assertDoesNotThrow(() -> StorageBinaryDataImporter.release(owned));
             }
         }
@@ -146,6 +141,28 @@ class StorageBinaryDataImporterTest {
         assertEquals(3, first.limit());
         assertEquals(0, second.position());
         assertEquals(5, second.limit());
+    }
+
+    @Test
+    void importDirectReusesAndClearsWorkerViews() {
+        final ByteBuffer first = ByteBuffer.allocateDirect(8);
+        final ByteBuffer second = ByteBuffer.allocateDirect(8);
+        final ByteBuffer[] scratch = new ByteBuffer[1];
+        final AtomicReference<ByteBuffer[]> imported = new AtomicReference<>();
+        final StorageConnection storage = (StorageConnection) Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{StorageConnection.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("importData")) {
+                        final var views = (Iterable<ByteBuffer>) args[0];
+                        imported.set(java.util.stream.StreamSupport.stream(views.spliterator(), false)
+                                .toArray(ByteBuffer[]::new));
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+        assertTrue(StorageBinaryDataImporter.importDirect(
+                storage, new ByteBuffer[]{first, second}, 1, 1, scratch));
+        assertSame(second, imported.get()[0]);
+        assertNull(scratch[0], "worker scratch must not keep native buffers alive");
     }
 
     private static Object defaultValue(final Class<?> type) {

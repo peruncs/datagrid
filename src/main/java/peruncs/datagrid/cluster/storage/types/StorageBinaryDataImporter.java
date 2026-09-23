@@ -10,12 +10,10 @@ import static org.eclipse.serializer.util.X.notNull;
 
 /// Copies incoming Store binary buffers into owned native memory and imports them.
 ///
-/// Every slot of a returned array is distinctly owned native memory — including
-/// empty slots, which each get their own fresh empty direct buffer instead of
-/// sharing one static instance. The caller must therefore release every slot
-/// exactly once through [#release(ByteBuffer[])] (or the ranged overload);
-/// slots are never shared, duplicated, or retained anywhere else.
+/// Non-empty slots own distinct native memory. Empty slots are distinct views
+/// of one shared zero-capacity buffer: Store's identity set keeps every slot.
 final class StorageBinaryDataImporter {
+    private static final ByteBuffer EMPTY_BACKING = ByteBuffer.allocateDirect(0);
     private StorageBinaryDataImporter() {
     }
 
@@ -72,11 +70,7 @@ final class StorageBinaryDataImporter {
                 }
                 final int sourceLength = source.remaining();
                 if (sourceLength == 0) {
-                    /* A fresh empty per slot: each slot stays independently
-                     * owned so the unconditional release below frees exactly
-                     * what this slot owns — never a shared static buffer, and
-                     * never a duplicate that would double-free one address. */
-                    ownedBuffers[i] = ByteBuffer.allocateDirect(0);
+                    ownedBuffers[i] = EMPTY_BACKING.duplicate();
                     continue;
                 }
                 final ByteBuffer owned = XMemory.allocateDirectNative(sourceLength);
@@ -117,6 +111,12 @@ final class StorageBinaryDataImporter {
     /// Imports one transaction slice from a reusable batch array.
     static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers,
                                 final int offset, final int length) {
+        return importDirect(storage, buffers, offset, length, null);
+    }
+
+    /// Imports a slice using worker-owned views when available.
+    static boolean importDirect(final StorageConnection storage, final ByteBuffer[] buffers,
+                                final int offset, final int length, final ByteBuffer[] reusableViews) {
         notNull(storage);
         notNull(buffers);
         if (offset < 0 || length < 0 || offset > buffers.length - length) {
@@ -135,10 +135,15 @@ final class StorageBinaryDataImporter {
         if (offset == 0 && length == buffers.length) {
             imported = buffers;
         } else {
-            imported = new ByteBuffer[length];
+            imported = reusableViews != null && reusableViews.length == length
+                    ? reusableViews : new ByteBuffer[length];
             System.arraycopy(buffers, offset, imported, 0, length);
         }
-        storage.importData(X.Enum(imported));
+        try {
+            storage.importData(X.Enum(imported));
+        } finally {
+            if (imported == reusableViews) java.util.Arrays.fill(imported, null);
+        }
         return true;
     }
 
@@ -152,10 +157,8 @@ final class StorageBinaryDataImporter {
 
         /// Releases native buffers returned by [#importOwned(StorageConnection, ByteBuffer\[\])].
     ///
-    /// Every non-null slot is deallocated unconditionally — including empty
-    /// buffers, which are independently owned since the shared static empty
-    /// was removed. Slots must be distinctly owned: passing two views of one
-    /// native address would free it twice.
+    /// Every non-empty owned slot is deallocated. Empty views have no native
+    /// ownership; the shared backing remains available for later imports.
     ///
     /// @param buffers buffers to release
     static void release(final ByteBuffer[] buffers) {
@@ -179,7 +182,7 @@ final class StorageBinaryDataImporter {
         RuntimeException failure = null;
         for (int index = 0; index < length; index++) {
             final ByteBuffer buffer = buffers[index];
-            if (buffer != null) {
+            if (buffer != null && buffer.capacity() != 0) {
                 try {
                     XMemory.deallocateDirectByteBuffer(buffer);
                 } catch (final RuntimeException cleanupFailure) {

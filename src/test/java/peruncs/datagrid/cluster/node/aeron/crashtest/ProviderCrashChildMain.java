@@ -10,8 +10,8 @@ import peruncs.datagrid.cluster.node.aeron.TestNodeProperties;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.datagrid.cluster.storage.aeron.checkpoint.CheckpointJournalCrashHooks;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPayloads;
-import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
 import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
 
@@ -35,12 +35,10 @@ public final class ProviderCrashChildMain {
     private static final java.util.Set<String> SUPPORTED_POINTS = java.util.Set.of(
             "BEFORE_PUBLICATION_CONNECTED", "BEFORE_PREPARE", "AFTER_DICTIONARY_CHUNKS", "AFTER_DATA_CHUNKS", "AFTER_PREPARE",
             "AFTER_PREPARE_BEFORE_LOCAL_WRITE", "AFTER_LOCAL_WRITE_BEFORE_COMMIT",
-            "AFTER_ENQUEUE_BEFORE_PREPARE", "AFTER_PREPARE_FAILURE_ABORT_OFFERED",
+            "AFTER_PREPARE_FAILURE_ABORT_OFFERED",
             "BEFORE_COMMIT_OFFER", "AFTER_COMMIT_OFFER", "AFTER_COMMIT_RECORDED",
             "AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", "AFTER_ABORT_OFFERED",
-            "DURING_COMMITTING_UNCERTAIN_WRITE", "DURING_CHECKPOINT_FILE_WRITE",
-            "BEFORE_CHECKPOINT_TEMP_WRITE", "AFTER_CHECKPOINT_TEMP_WRITE_BEFORE_RENAME",
-            "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC",
+            "BEFORE_JOURNAL_SLOT_WRITE", "DURING_JOURNAL_SLOT_WRITE", "AFTER_JOURNAL_SLOT_FORCE",
             "AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
             "AFTER_RECOVERY_CHECKPOINT_READ", "NONE");
     /// Fencing-lease windows whose `sequence` carries the lease token, not a
@@ -288,24 +286,17 @@ public final class ProviderCrashChildMain {
         };
     }
 
-    private static BiConsumer<String, Path> atomicFileHook(final Path control, final String point) {
+    private static BiConsumer<String, Path> journalHook(final Path control, final String point) {
         final long targetSequence = Long.getLong("dg.crash.sequence", 1L);
         return (phase, path) ->
         {
-            /* The in-flight fence is deliberately not a terminal checkpoint.
-             * Do not let a generic file hook kill a checkpoint cell on the wrong
-             * metadata file. The phase-aware AtomicFileWriter names below are used
-             * by the terminal writer checkpoint only. */
+            /* The in-flight fence is not the terminal checkpoint targeted by
+             * these cells. */
             if (path.getFileName().toString().endsWith(".inflight")) return;
-            final String mapped = switch (phase) {
-                case "BEFORE_CHECKPOINT_TEMP_WRITE", "DURING_CHECKPOINT_FILE_WRITE",
-                     "AFTER_CHECKPOINT_TEMP_WRITE_BEFORE_RENAME", "AFTER_CHECKPOINT_RENAME_BEFORE_DIRECTORY_SYNC" -> phase;
-                default -> null;
-            };
-            if (mapped == null || !mapped.equals(point)) return;
+            if (!phase.equals(point)) return;
             final long sequence = checkpointSequence();
             if (sequence != targetSequence) return;
-            writeMilestone(control.resolve("milestone.reached"), mapped, sequence);
+            writeMilestone(control.resolve("milestone.reached"), phase, sequence);
             awaitParent(control.resolve("release"));
         };
     }
@@ -355,7 +346,7 @@ public final class ProviderCrashChildMain {
         private final ReplicationDurabilityMode durability;
         private final String barrierPoint;
         private final BiConsumer<String, Long> crashHook;
-        private final BiConsumer<String, Path> atomicFileHook;
+        private final BiConsumer<String, Path> journalHook;
         private final AtomicBoolean running = new AtomicBoolean();
         private final AtomicBoolean subscriberReady = new AtomicBoolean();
         private final AtomicBoolean runtimeReady = new AtomicBoolean();
@@ -370,12 +361,12 @@ public final class ProviderCrashChildMain {
             this.durability = durability;
             this.barrierPoint = barrierPoint;
             this.crashHook = crashHook(control, barrierPoint);
-            this.atomicFileHook = atomicFileHook(control, barrierPoint);
+            this.journalHook = journalHook(control, barrierPoint);
         }
 
         private void start() {
             AeronCrashHooks.runWithHook(this.crashHook, () ->
-                    FileStoreCrashHooks.runWithHook(this.atomicFileHook, this::startInternal));
+                    CheckpointJournalCrashHooks.runWithHook(this.journalHook, this::startInternal));
         }
 
         private void startInternal() {
@@ -472,7 +463,7 @@ public final class ProviderCrashChildMain {
 
         private void write(final byte[] payload) {
             AeronCrashHooks.runWithHook(this.crashHook, () ->
-                    FileStoreCrashHooks.runWithHook(this.atomicFileHook, () -> this.writeInternal(payload)));
+                    CheckpointJournalCrashHooks.runWithHook(this.journalHook, () -> this.writeInternal(payload)));
         }
 
         private void writeInternal(final byte[] payload) {

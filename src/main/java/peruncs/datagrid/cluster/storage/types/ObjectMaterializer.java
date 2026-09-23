@@ -101,4 +101,8 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
         }
     }
 
+    void clearCollected() {
+        this.oids.truncate();
+    }
+
 }

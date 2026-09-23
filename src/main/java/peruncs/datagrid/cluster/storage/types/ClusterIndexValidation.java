@@ -19,6 +19,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /// The embedded-index validation policy: which Store index kinds replication
 /// can carry, and the bounded root-graph scan that proves it.
@@ -90,8 +91,11 @@ final class ClusterIndexValidation {
          * never needs recreating. Entries stay until the worker thread dies;
          * the set is bounded by the indexes that thread has seen. */
         final IdentityHashMap<VectorIndex<?>, float[]> vectorProbes = new IdentityHashMap<>();
+        final IdentityHashMap<VectorIndex<?>, Long> vectorModCounts = new IdentityHashMap<>();
         /* Reused index enumeration scratch for one vector group. */
         final ArrayList<VectorIndex<?>> vectorIndexes = new ArrayList<>();
+        final ArrayList<VectorIndex<?>> dirtyVectorIndexes = new ArrayList<>();
+        final IdentityHashMap<VectorIndices<?>, Boolean> rebuiltGroups = new IdentityHashMap<>();
     }
 
         /// One vector index group and the map that owns it.
@@ -263,6 +267,11 @@ final class ClusterIndexValidation {
     /// @throws IllegalStateException    if a large index-relevant graph cannot be inspected completely
     static void validateGraph(final Object root, final int maxValidatedObjects,
                               final List<VectorGroup> vectorSink) {
+        validateGraph(root, maxValidatedObjects, vectorSink, null);
+    }
+
+    static void validateGraph(final Object root, final int maxValidatedObjects,
+                              final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink) {
         if (root == null) return;
         final ValidationScratch scratch = SCRATCH.get();
         scratch.seen.clear();
@@ -280,6 +289,7 @@ final class ClusterIndexValidation {
                                     .formatted(maxValidatedObjects));
                 }
                 final Object current = scratch.queue.poll();
+                if (visitedSink != null) visitedSink.accept(current);
                 switch (current) {
                     case GigaMap<?> map ->
                         /* Index metadata only: descending into entity payload would make
@@ -317,11 +327,16 @@ final class ClusterIndexValidation {
     /// @throws IllegalStateException    if a root cannot be inspected completely
     static void validateStorageRoots(final StorageConnection storage, final int maxValidatedObjects,
                                      final List<VectorGroup> vectorSink) {
+        validateStorageRoots(storage, maxValidatedObjects, vectorSink, null);
+    }
+
+    static void validateStorageRoots(final StorageConnection storage, final int maxValidatedObjects,
+                                     final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink) {
         final StorageConnection checked = Objects.requireNonNull(storage, "storage");
         checked.persistenceManager()
                 .viewRoots()
                 .iterateEntries((identifier, value) -> {
-                    if (value != null) validateGraph(value, maxValidatedObjects, vectorSink);
+                    if (value != null) validateGraph(value, maxValidatedObjects, vectorSink, visitedSink);
                 });
     }
 

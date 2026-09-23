@@ -266,6 +266,54 @@ class ClusterStoreIndexesTest {
         }
     }
 
+    @Test
+    void unchangedVectorGraphSurvivesAnApplyBoundary() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(),
+                new ArticleVectorizer());
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            root.articles.add(new Article("kept", "body", new float[]{1, 0, 0}));
+            storage.storeRoot();
+            final StorageConnection connection = storage.createConnection();
+            final VectorIndex<Article> index = root.articles.index()
+                    .get(VectorIndices.<Article>Category()).get("article-vectors");
+            index.search(new float[]{1, 0, 0}, 1);
+            final var graphField = StoreIndexReflection.vectorGraphFields(index.getClass()).graph();
+            final Object graph = StoreIndexReflection.read(index, graphField);
+            assertNotNull(graph);
+
+            ClusterIndexMaintenance.refreshImportedIndexes(connection, 4096);
+            ClusterIndexMaintenance.validateAndRebuildImportedIndexes(connection, 4096);
+
+            assertSame(graph, StoreIndexReflection.read(index, graphField),
+                    "an unchanged vector index must not pay for a graph rebuild");
+        }
+    }
+
+    @Test
+    void importedRootLinkInvalidatesTheIndexCache() {
+        final Root root = new Root();
+        root.articles = GigaMap.New();
+        try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
+            storage.storeRoot();
+            final StorageConnection connection = storage.createConnection();
+            final long rootId = connection.persistenceManager().lookupObjectId(root);
+            assertTrue(rootId > 0L);
+            final java.nio.ByteBuffer changedRoot = java.nio.ByteBuffer.allocateDirect(24)
+                    .order(java.nio.ByteOrder.nativeOrder());
+            changedRoot.putLong(24L).putLong(1L).putLong(rootId).flip();
+
+            final ClusterIndexMaintenance maintenance = new ClusterIndexMaintenance();
+            maintenance.beforeApply(connection, new java.nio.ByteBuffer[]{changedRoot}, 1, 4096);
+            root.articles = GigaMap.New();
+            root.articles.index().register(LuceneIndex.Category(LuceneContext.New(
+                    this.storagePath.resolve("new-external-lucene"), new ArticlePopulator())));
+            assertThrows(IllegalArgumentException.class, () -> maintenance.afterApply(connection, 4096),
+                    "an imported root-link change must rescan newly reachable indexes");
+        }
+    }
+
     /// Verifies a directly registered external Lucene index is rejected by graph validation.
     @Test
     void directExternalLuceneRegistrationIsRejectedByGraphValidation() {

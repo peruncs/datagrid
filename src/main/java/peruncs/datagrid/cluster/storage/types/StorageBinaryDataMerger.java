@@ -227,6 +227,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private final BinaryPersistenceFoundation<?> foundation;
         private final StorageConnection storage;
         private final StorageBinaryDataMaterializer dataMaterializer = new StorageBinaryDataMaterializer();
+        private final ClusterIndexMaintenance indexMaintenance = new ClusterIndexMaintenance();
         private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
         private final StorageGraphCoordinator graphCoordinator;
         private final long cachingTimeoutMs;
@@ -260,6 +261,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
          * the batch; slots past it are always `null`. Grows to the largest
          * batch seen and stays there. */
         private ByteBuffer[] drainBuffers = new ByteBuffer[16];
+        private ByteBuffer[] importViews = new ByteBuffer[0];
         private int[] drainTransactionLengths = new int[16];
         /* Set inside the batch after validation, before the vector rebuild:
          * the overrun budget bounds materialization, whose cost is
@@ -658,8 +660,12 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                         int transactionOffset = 0;
                         for (int index = 0; index < pendingTransactions; index++) {
                             final int transactionLength = this.drainTransactionLengths[index];
+                            if (this.importViews.length != transactionLength) {
+                                this.importViews = new ByteBuffer[transactionLength];
+                            }
                             StorageBinaryDataImporter.importDirect(
-                                    this.storage, this.drainBuffers, transactionOffset, transactionLength);
+                                    this.storage, this.drainBuffers, transactionOffset, transactionLength,
+                                    this.importViews);
                             transactionOffset += transactionLength;
                         }
                         /* Reader-side index maintenance follows the import: imports
@@ -675,7 +681,9 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                          * next query reopens over the current files. Runs
                          * only for non-empty batches: applyData returns early
                          * when idle. */
-                        ClusterStoreIndexes.refreshImportedIndexes(this.storage, this.maxValidatedIndexObjects);
+                        this.indexMaintenance.beforeApply(
+                                this.storage, this.drainBuffers, pending,
+                                this.maxValidatedIndexObjects);
                         transactionOffset = 0;
                         for (int index = 0; index < pendingTransactions; index++) {
                             final int transactionLength = this.drainTransactionLengths[index];
@@ -704,8 +712,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                          * documented on the maintenance entry point: a lazy
                          * rebuild on the next query would race the following
                          * batch's bulk materialization. */
-                        ClusterStoreIndexes.validateAndRebuildImportedIndexes(
-                                this.storage, this.maxValidatedIndexObjects);
+                        this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
                         this.materializedAtNanos = System.nanoTime();
                     });
                 } catch (final RuntimeException | Error failure) {

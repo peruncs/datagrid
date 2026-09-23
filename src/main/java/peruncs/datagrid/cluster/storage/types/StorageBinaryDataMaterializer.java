@@ -15,11 +15,15 @@ import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
 
 /// Applies imported native Store binary buffers to the object graph.
 final class StorageBinaryDataMaterializer {
-    /* The default iterator keeps no per-batch state (all iteration state is
-     * local), so one instance serves every batch. The ObjectMaterializer below
-     * stays per-batch: upstream requires one PersistenceLoader per operation. */
+    /* The merger calls this on one worker. BinaryLoader clears its load items
+     * after each successful collect, so its source and scratch can be reused. */
     private static final BinaryEntityRawDataIterator ITERATOR = BinaryEntityRawDataIterator.New();
     private ByteBuffer[] batchViews = new ByteBuffer[0];
+    private PersistenceManager<Binary> boundManager;
+    private BinaryPersistenceFoundation<?> boundFoundation;
+    private ObjectMaterializer objectMaterializer;
+    private ImportedBinarySource importedSource;
+    private BinaryLoader loader;
 
     StorageBinaryDataMaterializer() {
     }
@@ -55,7 +59,11 @@ final class StorageBinaryDataMaterializer {
          * production Store connections always expose their manager. Keep the
          * native-buffer validation below active for those stand-ins. */
         final PersistenceManager<Binary> manager = rawManager == null ? null : binaryManager(rawManager);
-        final ObjectMaterializer materializer = manager == null ? null : new ObjectMaterializer(manager);
+        if (manager != null && (manager != this.boundManager || foundation != this.boundFoundation)) {
+            this.bind(foundation, manager);
+        }
+        final ObjectMaterializer materializer = manager == null ? null : this.objectMaterializer;
+        if (materializer != null) materializer.clearCollected();
         for (int index = offset; index < end; index++) {
             final ByteBuffer buffer = buffers[index];
             if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
@@ -68,35 +76,43 @@ final class StorageBinaryDataMaterializer {
             }
         }
         if (materializer == null) return;
-        /* Store deliberately leaves already-loaded instances unchanged when
-         * importData replaces their entities. Reading those ids through the
-         * manager immediately after import can therefore return the old cache
-         * payload. Point a fresh BinaryLoader at the received bytes for its
-         * first fetch; unresolved references fall back to Store's normal
-         * source. This uses Serializer's public loader pipeline, preserving
-         * create/update/complete ordering without reflective access to its
-         * package-private BinaryLoadItem constructors. */
+        if (this.loader == null) {
+            materializer.clearCollected();
+            return;
+        }
+        /* The imported bytes must be the loader's first source; Store's normal
+         * source can still hold the old cached version of an updated object. */
         if (this.batchViews.length != length) this.batchViews = new ByteBuffer[length];
         final ByteBuffer[] batch = this.batchViews;
         System.arraycopy(buffers, offset, batch, 0, length);
+        this.importedSource.begin(batch);
         try {
-            final PersistenceSourceSupplier<Binary> source = new ImportedBinarySource(manager, batch);
-            final PersistenceTypeHandlerLookup<Binary> handlers =
-                    binaryHandlers(foundation.getTypeHandlerManager());
-            if (handlers == null) return;
-            final Persister persister = foundation.getPersister() == null
-                    ? manager : foundation.getPersister();
-            final LoadItemsChain loadItems = foundation instanceof EmbeddedStorageConnectionFoundation<?> embedded
-                    ? new LoadItemsChain.ChannelHashing(
-                            embedded.getStorageSystem().channelCountProvider().getChannelCount())
-                    : new LoadItemsChain.Simple();
-            final BinaryLoader loader = BinaryLoader.New(
-                    handlers,
-                    manager.objectRegistry(), persister, source, loadItems, foundation.isByteOrderMismatch());
-            materializer.materialize(loader);
+            materializer.materialize(this.loader);
         } finally {
+            this.importedSource.end();
             java.util.Arrays.fill(batch, null);
         }
+    }
+
+    private void bind(final BinaryPersistenceFoundation<?> foundation, final PersistenceManager<Binary> manager) {
+        final PersistenceTypeHandlerLookup<Binary> handlers = binaryHandlers(foundation.getTypeHandlerManager());
+        this.objectMaterializer = new ObjectMaterializer(manager);
+        this.boundManager = manager;
+        this.boundFoundation = foundation;
+        // State-machine fixtures have a manager but no configured Store loader.
+        if (handlers == null) {
+            this.loader = null;
+            this.importedSource = null;
+            return;
+        }
+        final Persister persister = foundation.getPersister() == null ? manager : foundation.getPersister();
+        final LoadItemsChain loadItems = foundation instanceof EmbeddedStorageConnectionFoundation<?> embedded
+                ? new LoadItemsChain.ChannelHashing(
+                        embedded.getStorageSystem().channelCountProvider().getChannelCount())
+                : new LoadItemsChain.Simple();
+        this.importedSource = new ImportedBinarySource(manager);
+        this.loader = BinaryLoader.New(handlers, manager.objectRegistry(), persister,
+                this.importedSource, loadItems, foundation.isByteOrderMismatch());
     }
 
     @SuppressWarnings("unchecked")
@@ -112,30 +128,39 @@ final class StorageBinaryDataMaterializer {
     private static final class ImportedBinarySource implements PersistenceSourceSupplier<Binary> {
         private final PersistenceManager<Binary> fallback;
         private final PersistenceSource<Binary> source;
+        private ByteBuffer[] buffers;
+        private boolean supplied;
 
-        private ImportedBinarySource(final PersistenceManager<Binary> fallback, final ByteBuffer[] buffers) {
+        private ImportedBinarySource(final PersistenceManager<Binary> fallback) {
             this.fallback = fallback;
             this.source = new PersistenceSource<>() {
-                private boolean supplied;
-
                 @Override
                 public XGettingCollection<? extends Binary> read() {
-                    return this.takeImported(null);
+                    return ImportedBinarySource.this.takeImported(null);
                 }
 
                 @Override
                 public XGettingCollection<? extends Binary> readByObjectIds(final PersistenceIdSet[] ids) {
-                    return this.takeImported(ids);
-                }
-
-                private XGettingCollection<? extends Binary> takeImported(final PersistenceIdSet[] ids) {
-                    if (!this.supplied) {
-                        this.supplied = true;
-                        return X.Enum(ChunksWrapper.New(buffers));
-                    }
-                    return ids == null ? fallback.source().read() : fallback.source().readByObjectIds(ids);
+                    return ImportedBinarySource.this.takeImported(ids);
                 }
             };
+        }
+
+        private void begin(final ByteBuffer[] buffers) {
+            this.buffers = buffers;
+            this.supplied = false;
+        }
+
+        private void end() {
+            this.buffers = null;
+        }
+
+        private XGettingCollection<? extends Binary> takeImported(final PersistenceIdSet[] ids) {
+            if (!this.supplied) {
+                this.supplied = true;
+                return X.Enum(ChunksWrapper.New(this.buffers));
+            }
+            return ids == null ? this.fallback.source().read() : this.fallback.source().readByObjectIds(ids);
         }
 
         @Override
