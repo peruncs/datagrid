@@ -12,8 +12,8 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.reader.StorageBinaryDataClientAeron;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.aeron.reader.ReplicationApplierAeron;
+import peruncs.datagrid.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
@@ -66,7 +66,7 @@ class AeronUdpReplicationIT {
              ExclusivePublication publication = aeron.addExclusivePublication(channel, 1001);
              Subscription subscription = aeron.addSubscription(channel, 1001)) {
             await(() -> publication.isConnected() && subscription.isConnected());
-            final StorageBinaryDataClientAeron client = new StorageBinaryDataClientAeron(
+            final ReplicationApplierAeron client = new ReplicationApplierAeron(
                     subscription, configuration, clusterId, 1, -1, receiver
             );
             client.start();
@@ -138,7 +138,7 @@ class AeronUdpReplicationIT {
              ExclusivePublication publication = aeron.addExclusivePublication(channel, 1002);
              Subscription subscription = aeron.addSubscription(channel, 1002)) {
             await(() -> publication.isConnected() && subscription.isConnected());
-            final StorageBinaryDataClientAeron client = new StorageBinaryDataClientAeron(
+            final ReplicationApplierAeron client = new ReplicationApplierAeron(
                     subscription, configuration, clusterId, 1, -1, receiver
             );
             client.start();
@@ -182,7 +182,7 @@ class AeronUdpReplicationIT {
              ExclusivePublication publication = aeron.addExclusivePublication(publicationChannel, 1101);
              Subscription subscription = aeron.addSubscription(subscriptionChannel, 1101)) {
             await(() -> publication.isConnected() && subscription.isConnected());
-            final StorageBinaryDataClientAeron client = new StorageBinaryDataClientAeron(
+            final ReplicationApplierAeron client = new ReplicationApplierAeron(
                     subscription, configuration, clusterId, 5, -1, receiver);
             client.start();
             final AeronReplicationPublisher publisher = AeronReplicationPublisher.onPublication(
@@ -194,7 +194,7 @@ class AeronUdpReplicationIT {
             final RecordingReceiver reconnectedReceiver = new RecordingReceiver();
             try (Subscription reconnectedSubscription = aeron.addSubscription(subscriptionChannel, 1101)) {
                 await(() -> publication.isConnected() && reconnectedSubscription.isConnected());
-                final StorageBinaryDataClientAeron reconnected = new StorageBinaryDataClientAeron(
+                final ReplicationApplierAeron reconnected = new ReplicationApplierAeron(
                         reconnectedSubscription, configuration, clusterId, 5, 0, reconnectedReceiver);
                 reconnected.start();
                 publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{6, 6, 6})});

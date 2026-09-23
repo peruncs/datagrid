@@ -11,9 +11,12 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.DataMessageAppliedListener;
-import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
-import peruncs.datagrid.cluster.storage.types.*;
+import peruncs.datagrid.cluster.node.replication.CommitAppliedListener;
+import peruncs.datagrid.cluster.node.replication.DurableCursorFile;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.StorageGraphCoordinator;
+import peruncs.datagrid.cluster.storage.binary.*;
+import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -86,11 +89,11 @@ public final class AeronReplayBenchmark {
         final int watermarkPort = AeronStoreIntegrationIT.freePort();
         final Path writerPath = root.resolve("writer-store");
         final Path readerPath = root.resolve("reader-store");
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation,
                         "writer", -1L, controlPort, livePort, watermarkPort))) {
             writerTransport.positionProvider("store").init();
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final AeronStoreIntegrationIT.IndexRoot initial = new AeronStoreIntegrationIT.IndexRoot();
             initial.articles = GigaMap.New();
             configureSelectedIndexes(initial.articles, lucene, vector);
@@ -125,10 +128,10 @@ public final class AeronReplayBenchmark {
 
             final Path readerRoot = root.resolve("reader");
             Files.createDirectories(readerRoot);
-            try (ClusterReplicationTransport readerTransport = new AeronClusterReplicationTransportProvider().create(
+            try (ClusterReplicationTransport readerTransport = new AeronTransport(
                     AeronStoreIntegrationIT.properties(readerRoot, clusterId, UUID.randomUUID(), generation, "reader",
                             -1L, controlPort, livePort, watermarkPort));
-                 StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(
+                 DurableCursorFile cursorManager = DurableCursorFile.of(
                          readerRoot.resolve("cursor"))) {
                 final EmbeddedStorageFoundation<?> readerFoundation = AeronStoreIntegrationIT.foundation(readerPath);
                 final EmbeddedStorageManager reader = readerFoundation.start();
@@ -156,8 +159,8 @@ public final class AeronReplayBenchmark {
                                 readerFoundation.getConnectionFoundation(), reader.createConnection(),
                                 ObjectGraphUpdateHandler.PerStore(graphCoordinator), graphCoordinator));
                 final long[] appliedAt = new long[transactions + 64];
-                final StorageBinaryDataClient client = readerTransport.client(receiver, "store",
-                        new DataMessageAppliedListener() {
+                final ReplicationApplier client = readerTransport.client(receiver, "store",
+                        new CommitAppliedListener() {
                             private int appliedCount;
                             private long firstNanos;
 

@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -10,7 +10,7 @@ import java.util.function.BooleanSupplier;
 /// Runs an ordered list of close stages, aggregating every failure with
 /// {@link Error} priority.
 ///
-/// This is the module's single close-aggregation utility: foundation
+/// This is the module's single close-aggregation utility: assembly/node
 /// teardown, transport shutdown, and manager close loops all share it, so
 /// failure precedence cannot drift between them. Stages run in insertion
 /// order, which must be reverse dependency order, and a stage whose
@@ -72,7 +72,7 @@ public final class CloseSequencer {
         final Throwable failure = this.close();
         if (failure instanceof Error error) throw error;
         if (failure instanceof RuntimeException runtime) throw runtime;
-        if (failure != null) throw new NodeLibraryException(failureMessage, failure);
+        if (failure != null) throw new NodeException(failureMessage, failure);
     }
 
     /// Runs every ready stage in order and returns the aggregated failure.

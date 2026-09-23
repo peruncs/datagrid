@@ -3,12 +3,12 @@ package peruncs.datagrid.cluster.node;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.backup.BackupMetadata;
 import peruncs.datagrid.cluster.node.backup.FilesystemVolumeBackupBackend;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -18,7 +18,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies generation-filtered restores: on a shared backup volume a node
 /// selects the newest backup of its own cluster, generation, epoch, and
@@ -99,9 +100,9 @@ class BackupRestoreCompatibilityTest {
         final Path volume = root.resolve("shared-volume");
         final ReplicationCursor local = cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 9L);
 
-        try (final ClusterFoundation node = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(properties(
-                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly node = NodeAssembly.create()
+                .setNodeSettingsSource(properties(
+                        home, volume, NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             final var manager = node.startStorageManager();
@@ -118,9 +119,9 @@ class BackupRestoreCompatibilityTest {
         publishBackup(volume, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 5L), 100L);
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation restarted = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(properties(
-                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly restarted = NodeAssembly.create()
+                .setNodeSettingsSource(properties(
+                        home, volume, NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             @SuppressWarnings("unchecked")
@@ -149,9 +150,9 @@ class BackupRestoreCompatibilityTest {
         publishBackup(volume, generationOne, 100L);
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation node = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(properties(
-                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly node = NodeAssembly.create()
+                .setNodeSettingsSource(properties(
+                        home, volume, NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             assertTrue(node.startStorageManager().readRoot((Object stored) -> stored != null),
@@ -172,13 +173,13 @@ class BackupRestoreCompatibilityTest {
         writeOffset(home, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 3L));
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation node = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(properties(
-                        home, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly node = NodeAssembly.create()
+                .setNodeSettingsSource(properties(
+                        home, volume, NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            final NodeLibraryException failure =
-                    assertThrows(NodeLibraryException.class, node::startStorageManager);
+            final NodeException failure =
+                    assertThrows(NodeException.class, node::startStorageManager);
             assertTrue(failure.getMessage().contains("compatible"),
                     "refusal must name the compatibility cause, was: %s".formatted(failure.getMessage()));
         }
@@ -195,9 +196,9 @@ class BackupRestoreCompatibilityTest {
         final Path volume = root.resolve("shared-volume");
         final ReplicationCursor local = cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 9L);
 
-        try (final ClusterFoundation writer = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(properties(
-                        writerHome, volume, NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly writer = NodeAssembly.create()
+                .setNodeSettingsSource(properties(
+                        writerHome, volume, NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             final var manager = writer.startStorageManager();
@@ -212,9 +213,9 @@ class BackupRestoreCompatibilityTest {
         publishBackup(volume, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 5L), 100L);
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
-        try (final ClusterFoundation reader = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(properties(
-                        readerHome, volume, NodeLibraryPropertiesProvider.READER_ROLE))
+        try (final NodeAssembly reader = NodeAssembly.create()
+                .setNodeSettingsSource(properties(
+                        readerHome, volume, NodeSettingsSource.READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             @SuppressWarnings("unchecked")

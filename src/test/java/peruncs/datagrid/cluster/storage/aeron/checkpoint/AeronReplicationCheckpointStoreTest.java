@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.Crc32C;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -66,9 +66,9 @@ class AeronReplicationCheckpointStoreTest {
             final int record = SLOT_BYTES + Long.BYTES;
             encoded.putShort(record + 6, (short) 1);
             encoded.putInt(record + AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES,
-                    Crc32c.compute(bytes, record, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
+                    Crc32C.compute(bytes, record, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
             encoded.putInt(JOURNAL_BYTES - Integer.BYTES,
-                    Crc32c.compute(bytes, SLOT_BYTES, SLOT_BYTES - Integer.BYTES));
+                    Crc32C.compute(bytes, SLOT_BYTES, SLOT_BYTES - Integer.BYTES));
             Files.write(path, bytes);
 
             assertThrows(java.io.IOException.class, () -> AeronReplicationCheckpointStore.read(path));

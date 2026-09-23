@@ -9,12 +9,13 @@
 /// through the node managers; the module ships no HTTP surface — any HTTP,
 /// MCP, or UI boundary belongs to the embedding application.
 /// Store binary movement lives in
-/// `...cluster.storage.types`, carried by
+/// `...cluster.storage.binary`, carried by
 /// `...cluster.storage.aeron.*`, which also carries the embedded
 /// Lucene/JVector index policy. The exported `cluster.api` package contains
-/// the contracts embedding applications use; internal failures are translated
-/// at that boundary.
-/// Aeron is the only transport. Each provider owns its embedded MediaDriver
+/// the contracts embedding applications use; the exported `cluster.errors`
+/// package carries the typed failures crossing the same boundary. Everything
+/// else is internal and translated at that boundary.
+/// Aeron is the only transport. Each transport owns its embedded MediaDriver
 /// and Archive lifecycle, closed by the node lifecycle after maintenance stops.
 ///
 /// # Trusted network boundary
@@ -41,8 +42,7 @@
 /// Roles are fixed at configuration: `writer`, `reader`, or
 /// `backup-reader`, or `none` for an unreplicated node. A reader owns a
 /// persistent subscription with no writer publication path, so promotion is
-/// rejected outright instead of producing a distributor that cannot
-/// replicate. The single-writer invariant itself is enforced, not merely
+/// rejected outright instead of starting a writer that cannot replicate. The single-writer invariant itself is enforced, not merely
 /// configured: the writer holds a renewable fencing lease in the shared
 /// backup volume carrying a monotonically increasing token. A different
 /// writer for the same cluster/generation fails acquisition while the
@@ -64,7 +64,7 @@
 /// Every applied commit advances a durable `ReplicationCursor` of
 /// transport, Store generation, logical sequence, and provider position.
 /// The neutral cursor lives in the storage contract package
-/// (`storage.types`), so the node layer persists it through
+/// (`storage`), so the node layer persists it through
 /// `ReplicationCursorStore` without importing the transport; the Aeron
 /// provider encodes its recording identity inside the cursor's opaque
 /// provider-position bytes. Writers additionally persist a checkpoint
@@ -151,10 +151,10 @@
 /// owns the entire boundary — HTTP and OpenAPI routes, MCP tools, a web UI,
 /// Prometheus rendering, authentication, and authorization — and drives the
 /// node through the control views (`StorageNodeControl`, `BackupNodeControl`)
-/// borrowed from `ClusterFoundation`; the Store object graph beneath them is
-/// the entity layer. The foundation owns both managers and closes them
+/// borrowed from `NodeAssembly`; the Store object graph beneath them is
+/// the entity layer. The assembly owns both managers and closes them
 /// exactly once, and both closes are idempotent. Roles stay fixed at startup
-/// as described above, so there is deliberately no reader-to-distributor
+/// as described above, so there is deliberately no reader-to-writer
 /// promotion: a role change is a restart with a new role, never a runtime
 /// transition.
 ///

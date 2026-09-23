@@ -4,9 +4,12 @@ import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.DataMessageAppliedListener;
-import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
-import peruncs.datagrid.cluster.storage.types.*;
+import peruncs.datagrid.cluster.node.replication.CommitAppliedListener;
+import peruncs.datagrid.cluster.node.replication.DurableCursorFile;
+import peruncs.datagrid.cluster.node.store.DistributedStorage;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.StorageGraphCoordinator;
+import peruncs.datagrid.cluster.storage.binary.*;
 
 import java.lang.management.BufferPoolMXBean;
 import java.lang.management.ManagementFactory;
@@ -55,11 +58,11 @@ public final class AeronFullPathBenchmark {
         final int watermarkPort = AeronStoreIntegrationIT.freePort();
         final Path writerPath = root.resolve("writer-store");
         final Path readerPath = root.resolve("reader-store");
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation,
                         "writer", -1L, controlPort, livePort, watermarkPort))) {
             writerTransport.positionProvider("store").init();
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final AeronStoreIntegrationIT.Root initial = new AeronStoreIntegrationIT.Root();
             final EmbeddedStorageFoundation<?> seedFoundation = AeronStoreIntegrationIT.foundation(writerPath);
             DistributedStorage.configureWriting(seedFoundation, distributor,
@@ -77,10 +80,10 @@ public final class AeronFullPathBenchmark {
             final AeronStoreIntegrationIT.Root writerRoot = writer.root();
 
             final Path readerRoot = root.resolve("reader");
-            try (ClusterReplicationTransport readerTransport = new AeronClusterReplicationTransportProvider().create(
+            try (ClusterReplicationTransport readerTransport = new AeronTransport(
                     AeronStoreIntegrationIT.properties(readerRoot, clusterId, UUID.randomUUID(), generation, "reader",
                             -1L, controlPort, livePort, watermarkPort));
-                 StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(
+                 DurableCursorFile cursorManager = DurableCursorFile.of(
                          readerRoot.resolve("cursor"))) {
                 final EmbeddedStorageFoundation<?> readerFoundation = AeronStoreIntegrationIT.foundation(readerPath);
                 final EmbeddedStorageManager reader = readerFoundation.start();
@@ -90,8 +93,8 @@ public final class AeronFullPathBenchmark {
                         ObjectGraphUpdateHandler.PerStore(graphCoordinator),
                         0L, 1L, 1L << 30, 60_000L, 30_000L, 5_000L, 4096, graphCoordinator));
                 final AtomicLong resolved = new AtomicLong(baseline.logicalSequence());
-                final StorageBinaryDataClient client = readerTransport.client(receiver, "store",
-                        new DataMessageAppliedListener() {
+                final ReplicationApplier client = readerTransport.client(receiver, "store",
+                        new CommitAppliedListener() {
                             @Override
                             public void onApplied(final ReplicationCursor cursor) {
                                 cursorManager.set(cursor);
@@ -157,14 +160,14 @@ public final class AeronFullPathBenchmark {
         if (resolved.get() != target) throw new IllegalStateException("reader did not apply sequence %s".formatted(target));
     }
 
-    private static void awaitLive(final StorageBinaryDataClient client) {
+    private static void awaitLive(final ReplicationApplier client) {
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (!client.isLive() && client.failure() == null && System.nanoTime() < deadline) LockSupport.parkNanos(100_000L);
         if (client.failure() != null) throw client.failure();
         if (!client.isLive()) throw new IllegalStateException("reader did not join the live stream");
     }
 
-    private static void awaitStopped(final StorageBinaryDataClient client) {
+    private static void awaitStopped(final ReplicationApplier client) {
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (client.isRunning() && System.nanoTime() < deadline) LockSupport.parkNanos(100_000L);
         if (client.isRunning()) throw new IllegalStateException("reader did not stop at live tail");

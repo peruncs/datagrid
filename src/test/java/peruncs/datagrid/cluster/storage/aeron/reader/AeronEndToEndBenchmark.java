@@ -4,7 +4,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.util.UUID;

@@ -2,9 +2,9 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -143,7 +143,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(UUID.randomUUID(), NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -155,7 +155,7 @@ class BackupMetadataTest {
         final UUID otherGeneration = UUID.randomUUID();
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", otherGeneration, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, otherGeneration, 5L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -166,7 +166,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 43L, 0L, 7L).encode());
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -177,7 +177,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor foreign = ReplicationCursor.of("aeron", GENERATION, 7L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 6L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, foreign));
     }
 
@@ -188,7 +188,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
         final ReplicationCursor drifted = ReplicationCursor.of("aeron", GENERATION, 8L,
                 new AeronReplicationCursor(CLUSTER, NODE, GENERATION, 5L, 7L, 42L, 0L, 7L).encode());
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, drifted));
     }
 
@@ -198,7 +198,7 @@ class BackupMetadataTest {
         final BackupMetadata backup = BackupMetadata.create(100L, false, aeronCursor(7L));
         final ReplicationCursor corrupt =
                 new ReplicationCursor("aeron", GENERATION, 7L, "deadbeef");
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(backup, corrupt));
     }
 
@@ -209,7 +209,7 @@ class BackupMetadataTest {
         assertFalse(BackupArchive.isBackupFileName("1700000000000.manual.zip"));
         assertFalse(BackupArchive.isBackupFileName("123.evil.zip"));
         assertFalse(BackupArchive.isBackupFileName(null));
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupArchive.parseMetadata("1700000000000.zip", volume));
     }
 
@@ -266,7 +266,7 @@ class BackupMetadataTest {
         final BackupMetadata drifted = new BackupMetadata(
                 100L, false, CLUSTER, GENERATION, 5L, 42L, 6L, NODE, UUID.randomUUID(), BackupMetadata.UNKNOWN);
 
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupMetadata.requireConsistentWithCursor(drifted, cursor));
     }
 }

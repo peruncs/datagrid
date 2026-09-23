@@ -6,20 +6,20 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
+import peruncs.datagrid.cluster.node.replication.DurableCursorFile;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
-import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
-import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
+import peruncs.datagrid.cluster.storage.io.FileStoreCrashHooks;
 
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
@@ -37,7 +37,7 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32C;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Soak test: one writer, `-Dsoak.readers` readers (default three), threaded
 /// load with jitter, index queries served while replication lands, and seeded
@@ -273,12 +273,12 @@ class AeronWriterReaderSoakIT {
         final Set<UUID> retentionReaders = this.retentionEnabled ? Set.of(readerIds) : Set.of();
         try (WriterHandle writerHandle = new WriterHandle(writerStore, root.resolve("writer"),
                 clusterId, writerNodeId, generation, controlPort, livePort, watermarkPort,
-                new AeronClusterReplicationTransportProvider().create(
+                new AeronTransport(
                         AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                                 controlPort, livePort, watermarkPort, retentionReaders)), retentionReaders)) {
             final ClusterReplicationTransport writerTransport = writerHandle.transport();
             writerTransport.positionProvider("store").init();
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final Random seedRandom = new Random(seed);
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
@@ -1550,8 +1550,8 @@ class AeronWriterReaderSoakIT {
                     if (cursor == null && node == null) {
                         final Path cursorFile = readers[r].nodeDir().resolve("cursor");
                         if (Files.isRegularFile(cursorFile)) {
-                            try (StoredReplicationCursorManager manager =
-                                         StoredReplicationCursorManager.NewAtomic(cursorFile)) {
+                            try (DurableCursorFile manager =
+                                         DurableCursorFile.of(cursorFile)) {
                                 cursor = manager.get();
                             } catch (final RuntimeException torn) {
                                 audit(startNanos, "retention-cursor-unreadable reader=%d (%s)"
@@ -1711,14 +1711,14 @@ class AeronWriterReaderSoakIT {
             audit(startNanos, "cursor-corrupt-fired reader=%d stopped=%d".formatted(victim, stopped.logicalSequence()));
             event(startNanos, "cursor-corrupt", "reader=%d stopped=%d".formatted(victim, stopped.logicalSequence()));
             /* The fresh read runs in its own narrow catch: cursor decoding
-             * fails with NodeLibraryException on every torn input, and only
+             * fails with NodeException on every torn input, and only
              * that type counts as the expected fail-closed path. Any Error
              * (OOM, internal assertion) or unexpected RuntimeException must
              * propagate and fail the soak, never park as success. */
             final ReplicationCursor reread;
             try {
                 reread = node.readPersistedCursorFresh();
-            } catch (final NodeLibraryException expected) {
+            } catch (final NodeException expected) {
                 audit(startNanos, "cursor-corrupt-failclosed reader=%d (%s)".formatted(victim, expected.getMessage()));
                 event(startNanos, "cursor-failclosed", "reader=%d".formatted(victim));
                 node.close();
@@ -1831,11 +1831,11 @@ class AeronWriterReaderSoakIT {
             return OpOutcome.effectiveHeavy();
         } catch (final RuntimeException restartFailure) {
 /* Fail-closed allowlist, nothing broader: reseed demands are caught
-             * above, and NodeLibraryException is the provider's fail-closed
+             * above, and NodeException is the provider's fail-closed
              * vocabulary for unreadable durable state. AssertionError is never
              * a fail-closed signal and Error (OOM and friends) must fail
              * loudly, so neither is caught here — both propagate by design. */
-            if (!(restartFailure instanceof NodeLibraryException)) throw restartFailure;
+            if (!(restartFailure instanceof NodeException)) throw restartFailure;
             audit(startNanos, "rollback-failclosed reader=%d (%s)".formatted(victim, restartFailure));
             event(startNanos, "rollback-failclosed", "reader=%d".formatted(victim));
             node.close();
@@ -1912,11 +1912,11 @@ class AeronWriterReaderSoakIT {
             return;
         } catch (final RuntimeException restartFailure) {
 /* Fail-closed allowlist, nothing broader: reseed demands are caught
-             * above, and NodeLibraryException is the provider's fail-closed
+             * above, and NodeException is the provider's fail-closed
              * vocabulary for unreadable durable state. AssertionError is never
              * a fail-closed signal and Error (OOM and friends) must fail
              * loudly, so neither is caught here — both propagate by design. */
-            if (!(restartFailure instanceof NodeLibraryException)) throw restartFailure;
+            if (!(restartFailure instanceof NodeException)) throw restartFailure;
             audit(startNanos, "%s-failclosed reader=%d (%s)".formatted("cursor-torn", victim, restartFailure));
             event(startNanos, "cursor-torn-failclosed", "reader=%d".formatted(victim));
             node.close();
@@ -2045,11 +2045,11 @@ class AeronWriterReaderSoakIT {
                 return OpOutcome.effectiveHeavy();
             } catch (final RuntimeException restartFailure) {
 /* Fail-closed allowlist, nothing broader: reseed demands are caught
-             * above, and NodeLibraryException is the provider's fail-closed
+             * above, and NodeException is the provider's fail-closed
              * vocabulary for unreadable durable state. AssertionError is never
              * a fail-closed signal and Error (OOM and friends) must fail
              * loudly, so neither is caught here — both propagate by design. */
-                if (!(restartFailure instanceof NodeLibraryException)) throw restartFailure;
+                if (!(restartFailure instanceof NodeException)) throw restartFailure;
                 audit(startNanos, "segment-failclosed reader=%d (%s)".formatted(victim, restartFailure));
                 event(startNanos, "segment-failclosed", "reader=%d".formatted(victim));
                 node.close();
@@ -2827,12 +2827,12 @@ class AeronWriterReaderSoakIT {
                 if (this.manager != null) this.manager.shutdown();
                 this.transport.close();
             }
-            this.transport = new AeronClusterReplicationTransportProvider().create(
+            this.transport = new AeronTransport(
                     AeronStoreIntegrationIT.properties(this.nodeRoot, this.clusterId, this.nodeId,
                             this.generation, "writer", -1L,
                             this.controlPort, this.livePort, this.watermarkPort, this.retentionReaders));
             this.transport.positionProvider("store").init();
-            final StorageBinaryDataDistributor distributor = this.transport.distributor("store", false);
+            final ReplicationPublisher distributor = this.transport.distributor("store");
             final EmbeddedStorageManager restarted = AeronStoreIntegrationIT.startExistingIndex(
                     this.storePath, distributor,
                     this.transport.persistenceTargetFactory("store", distributor));
@@ -2879,7 +2879,7 @@ class AeronWriterReaderSoakIT {
             final ReplicationCursor snapshot = this.transport.positionProvider("store").latest();
             AeronStoreIntegrationIT.delete(snapshotDir);
             AeronStoreIntegrationIT.copyDirectory(this.storePath, snapshotDir);
-            final StorageBinaryDataDistributor distributor = this.transport.distributor("store", false);
+            final ReplicationPublisher distributor = this.transport.distributor("store");
             final EmbeddedStorageManager restarted = AeronStoreIntegrationIT.startExistingIndex(
                     this.storePath, distributor,
                     this.transport.persistenceTargetFactory("store", distributor));

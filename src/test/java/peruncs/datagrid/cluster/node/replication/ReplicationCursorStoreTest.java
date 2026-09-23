@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.Crc32C;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -44,7 +44,7 @@ class ReplicationCursorStoreTest {
         final byte[] original = Files.readAllBytes(path);
         final byte[] extended = Arrays.copyOf(original, original.length + 1);
         System.arraycopy(original, 0, extended, 0, original.length - Integer.BYTES);
-        final int crc = Crc32c.compute(extended, 0, extended.length - Integer.BYTES);
+        final int crc = Crc32C.compute(extended, 0, extended.length - Integer.BYTES);
         ByteBuffer.wrap(extended).putInt(extended.length - Integer.BYTES, crc);
         Files.write(path, extended);
 
@@ -59,7 +59,7 @@ class ReplicationCursorStoreTest {
                 new ReplicationCursor("aeron", null, 3, "01"));
         ByteBuffer.wrap(flags).putShort(6, (short) 1);
         ByteBuffer.wrap(flags).putInt(flags.length - Integer.BYTES,
-                Crc32c.compute(flags, 0, flags.length - Integer.BYTES));
+                Crc32C.compute(flags, 0, flags.length - Integer.BYTES));
         assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.decode(flags));
 
         final byte[] malformed = ReplicationCursorStore.encode(
@@ -67,7 +67,7 @@ class ReplicationCursorStoreTest {
         malformed[12] = (byte) 0xc3;
         malformed[13] = 0x28;
         ByteBuffer.wrap(malformed).putInt(malformed.length - Integer.BYTES,
-                Crc32c.compute(malformed, 0, malformed.length - Integer.BYTES));
+                Crc32C.compute(malformed, 0, malformed.length - Integer.BYTES));
         assertThrows(java.io.IOException.class, () -> ReplicationCursorStore.decode(malformed));
     }
 }

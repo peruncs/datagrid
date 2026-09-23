@@ -6,7 +6,7 @@ import io.aeron.archive.codecs.StartRecordingRequestDecoder;
 import io.aeron.archive.codecs.TruncateRecordingRequestDecoder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,15 +19,15 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Direct validation tests for configuration combinations that must fail before runtime startup.
 class AeronSettingsTest {
-    private static NodeLibraryPropertiesProvider properties(final Map<String, String> overrides) {
+    private static NodeSettingsSource properties(final Map<String, String> overrides) {
         return properties(overrides, false);
     }
 
-    private static NodeLibraryPropertiesProvider properties(final Map<String, String> overrides, final boolean production) {
+    private static NodeSettingsSource properties(final Map<String, String> overrides, final boolean production) {
         return properties(overrides, production, "writer");
     }
 
-    private static NodeLibraryPropertiesProvider properties(
+    private static NodeSettingsSource properties(
             final Map<String, String> overrides,
             final boolean production,
             final String role
@@ -79,7 +79,7 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_EXTERNAL_ARCHIVE", "true",
                 "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", UUID.randomUUID().toString()
         )));
-        assertEquals(1, settings.retentionReaders().size());
+        assertEquals(1, settings.archivePolicy().retentionReaders().size());
     }
 
     /// Verifies an external archive writer accepts its point-to-point recording channel.
@@ -109,7 +109,7 @@ class AeronSettingsTest {
                 Base64.getEncoder().encodeToString("sixteen-byte-key".getBytes(StandardCharsets.US_ASCII)),
                 "ECLIPSE_DATAGRID_NETWORK_PROFILE", "trusted-network"
         )));
-        assertTrue(settings.retentionReaders().isEmpty());
+        assertTrue(settings.archivePolicy().retentionReaders().isEmpty());
     }
 
     /// Verifies a recording id below the Aeron null value is rejected.
@@ -199,9 +199,9 @@ class AeronSettingsTest {
     @Test
     void aeronAuthIsDisabledByDefault() {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
-        assertFalse(settings.auth().enabled());
-        assertNull(settings.auth().principal());
-        assertNull(settings.auth().credentials());
+        assertFalse(settings.authentication().enabled());
+        assertNull(settings.authentication().principal());
+        assertNull(settings.authentication().credentials());
         assertNull(settings.authenticatorSupplier());
         assertNull(settings.authorisationServiceSupplier());
         assertNull(settings.credentialsSupplier());
@@ -216,9 +216,9 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", "datagrid-node",
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS", Base64.getEncoder().encodeToString(credentials)
         )));
-        assertTrue(settings.auth().enabled());
-        assertEquals("datagrid-node", settings.auth().principal());
-        assertArrayEquals(credentials, settings.auth().credentials());
+        assertTrue(settings.authentication().enabled());
+        assertEquals("datagrid-node", settings.authentication().principal());
+        assertArrayEquals(credentials, settings.authentication().credentials());
         final var authenticatorSupplier = settings.authenticatorSupplier();
         assertNotNull(authenticatorSupplier);
         assertNotNull(authenticatorSupplier.get());
@@ -304,8 +304,8 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS_FILE", file.toString()
         )));
 
-        assertTrue(settings.auth().enabled());
-        assertArrayEquals(credentials, settings.auth().credentials());
+        assertTrue(settings.authentication().enabled());
+        assertArrayEquals(credentials, settings.authentication().credentials());
         final var credentialsSupplier = settings.credentialsSupplier();
         assertNotNull(credentialsSupplier);
         assertArrayEquals(credentials, credentialsSupplier.encodedCredentials());
@@ -390,7 +390,7 @@ class AeronSettingsTest {
         final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
                 "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", "true")));
 
-        assertFalse(settings.auth().enabled());
+        assertFalse(settings.authentication().enabled());
         assertNull(settings.authenticatorSupplier());
     }
 
@@ -413,8 +413,8 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS",
                 Base64.getEncoder().encodeToString("datagrid-reader-secret".getBytes(StandardCharsets.US_ASCII)))));
 
-        assertTrue(settings.auth().enabled());
-        assertEquals("datagrid-node", settings.auth().principal());
+        assertTrue(settings.authentication().enabled());
+        assertEquals("datagrid-node", settings.authentication().principal());
     }
 
         /// Retention without a reader set stays unconfigured rather than failing:
@@ -422,7 +422,7 @@ class AeronSettingsTest {
     @Test
     void writerWithoutRetentionReadersLeavesRetentionUnconfigured() {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
-        assertTrue(settings.retentionReaders().isEmpty());
+        assertTrue(settings.archivePolicy().retentionReaders().isEmpty());
     }
 
         /// Verifies the Archive control, watermark close, and lease lock budgets
@@ -430,11 +430,11 @@ class AeronSettingsTest {
     @Test
     void perConcernTimeoutBudgetsDefaultIndependently() {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of()));
-        assertEquals(TimeUnit.SECONDS.toNanos(5), settings.archiveControlTimeoutNanos(),
+        assertEquals(TimeUnit.SECONDS.toNanos(5), settings.timeouts().archiveControlTimeoutNanos(),
                 "Archive control requests must use their own 5 s budget");
-        assertEquals(TimeUnit.SECONDS.toNanos(5), settings.watermarkCloseTimeoutNanos(),
+        assertEquals(TimeUnit.SECONDS.toNanos(5), settings.timeouts().watermarkCloseTimeoutNanos(),
                 "watermark channel close must use its own 5 s budget");
-        assertEquals(5_000L, settings.leaseAcquireLockTimeoutMillis(),
+        assertEquals(5_000L, settings.timeouts().leaseAcquireLockTimeoutMillis(),
                 "the writer lease lock wait must have its own bounded default");
         assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().offerTimeoutNanos(),
                 "offerTimeoutNanos must stay the publication-offer budget");
@@ -448,9 +448,9 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS", "654321",
                 "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS", "42"
         )));
-        assertEquals(123456L, settings.archiveControlTimeoutNanos());
-        assertEquals(654321L, settings.watermarkCloseTimeoutNanos());
-        assertEquals(42L, settings.leaseAcquireLockTimeoutMillis());
+        assertEquals(123456L, settings.timeouts().archiveControlTimeoutNanos());
+        assertEquals(654321L, settings.timeouts().watermarkCloseTimeoutNanos());
+        assertEquals(42L, settings.timeouts().leaseAcquireLockTimeoutMillis());
     }
 
         /// Verifies non-positive per-concern budgets fail configuration validation.
@@ -487,21 +487,21 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL", "datagrid-reader",
                 "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS", Base64.getEncoder().encodeToString(readerCredentials)
         )));
-        final byte[] firstRead = settings.auth().readerCredentials();
+        final byte[] firstRead = settings.authentication().readerCredentials();
         assertNotNull(firstRead);
         assertArrayEquals(readerCredentials, firstRead);
         Arrays.fill(firstRead, (byte) 0);
-        assertArrayEquals(readerCredentials, settings.auth().readerCredentials(),
+        assertArrayEquals(readerCredentials, settings.authentication().readerCredentials(),
                 "mutating a returned array must not change the settings-held secret");
-        final byte[] writerRead = settings.auth().credentials();
+        final byte[] writerRead = settings.authentication().credentials();
         assertNotNull(writerRead);
         Arrays.fill(writerRead, (byte) 0);
-        assertArrayEquals(writerCredentials, settings.auth().credentials(),
+        assertArrayEquals(writerCredentials, settings.authentication().credentials(),
                 "mutating a returned array must not change the settings-held secret");
     }
 
         /// Production-shaped settings with routable endpoints and home-directory paths.
-    private static NodeLibraryPropertiesProvider prodProperties(final Map<String, String> overrides) {
+    private static NodeSettingsSource prodProperties(final Map<String, String> overrides) {
         final HashMap<String, String> merged = new HashMap<>(overrides);
         final Path root = Path.of(System.getProperty("user.home"),
                 "datagrid-auth-test-%s".formatted(UUID.randomUUID()));

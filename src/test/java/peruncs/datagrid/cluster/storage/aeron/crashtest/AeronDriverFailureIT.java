@@ -9,9 +9,6 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /// Regression test for Aeron's default DriverTimeoutException exit policy.
 class AeronDriverFailureIT {
     private static void deleteTree(final Path root) throws IOException {

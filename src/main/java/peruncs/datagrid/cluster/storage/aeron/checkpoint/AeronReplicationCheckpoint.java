@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 
 import java.util.UUID;
 

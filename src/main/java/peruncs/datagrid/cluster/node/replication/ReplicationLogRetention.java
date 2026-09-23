@@ -1,12 +1,15 @@
 package peruncs.datagrid.cluster.node.replication;
 
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.errors.NodeException;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 
 import java.util.Objects;
 import java.util.UUID;
 
-/// Provider-specific retention hook; unsupported providers retain history and report it explicitly.
+/// Deletes old Archive segments only after every configured reader has durably passed them.
+///
+/// Provider-specific retention hook; providers that cannot prove safe reader
+/// watermarks retain history and report retention as unsupported.
 public interface ReplicationLogRetention extends AutoCloseable {
         /// Returns whether this transport can safely delete replicated history. A
     /// provider that cannot establish authenticated reader watermarks must return
@@ -21,8 +24,8 @@ public interface ReplicationLogRetention extends AutoCloseable {
     ///
     /// @param cursor deletion boundary
     /// @return result of the bounded maintenance attempt
-    /// @throws NodeLibraryException if deletion fails
-    MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodeLibraryException;
+    /// @throws NodeException if deletion fails
+    MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodeException;
 
         /// Records one authenticated reader acknowledgement for a later aggregate
     /// retention request. Providers without reader-watermark support reject this

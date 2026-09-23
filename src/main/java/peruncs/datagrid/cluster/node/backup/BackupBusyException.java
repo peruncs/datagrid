@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.node.backup;
 
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
 
 /// A backup was requested while another backup is still running.
 ///
@@ -10,11 +10,11 @@ import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 /// throws it and the boundary catches it by name.
 ///
 /// @since 1.0
-public final class BackupBusyException extends NodeLibraryException {
+final class BackupBusyException extends NodeException {
         /// Creates a busy-backup failure.
     ///
     /// @param message failure message
-    public BackupBusyException(final String message) {
+    BackupBusyException(final String message) {
         super(message);
     }
 
@@ -22,7 +22,7 @@ public final class BackupBusyException extends NodeLibraryException {
     ///
     /// @param message failure message
     /// @param cause   underlying cause
-    public BackupBusyException(final String message, final Throwable cause) {
+    BackupBusyException(final String message, final Throwable cause) {
         super(message, cause);
     }
 }

@@ -14,7 +14,7 @@ import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
 import static org.eclipse.serializer.util.X.notNull;
 
-/// This executor runs backups and storage checks without blocking a request.
+/// Runs backups and storage checks without blocking a request.
 ///
 /// At most one backup thread is active. A concurrent request is rejected
 /// explicitly instead of being silently discarded, so callers can retry or
@@ -41,7 +41,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     /// executor. A run while another backup is active is skipped instead of
     /// queuing behind it.
     ///
-    /// @return backup task for housekeeper scheduling
+    /// @return backup task for maintenance scheduling
     default Runnable createScheduledWork() {
         /* Looked up once when the task is created rather than on every run. The
          * interface cannot hold static state, and the test double inherits

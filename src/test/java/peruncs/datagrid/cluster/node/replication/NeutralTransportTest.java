@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,7 +16,7 @@ class NeutralTransportTest {
     @Test
     void noOpTransportKeepsCoreUsableWithoutAnyProviderDependency() {
         final ClusterReplicationTransport transport = ClusterReplicationTransport.noOp();
-        final StorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+        final ReplicationPublisher distributor = transport.distributor("stream");
         distributor.messageIndex(12);
         distributor.ignoreDistribution(true);
         assertEquals(12, distributor.messageIndex());
@@ -30,7 +30,7 @@ class NeutralTransportTest {
     @Test
     void cachingDistributorCarriesOneWriterDictionaryToTheNextTransaction() {
         final List<String> dictionaries = new ArrayList<>();
-        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
+        final ReplicationPublisher delegate = new ReplicationPublisher() {
             private final AtomicReference<String> pending = new AtomicReference<>();
 
             public void distributeTypeDictionary(final String value) {
@@ -44,7 +44,7 @@ class NeutralTransportTest {
             public void dispose() {
             }
         };
-        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
+        final ReplicationPublisher caching = ReplicationPublisher.Caching(delegate);
         caching.distributeTypeDictionary("dictionary-1");
         caching.distributeData(null);
         caching.distributeTypeDictionary("dictionary-2");
@@ -55,7 +55,7 @@ class NeutralTransportTest {
         /// A restart dictionary queued by startup is consumed by the first Store thread.
     @Test
     void queuedDictionaryCrossesTheStartupThreadBoundary() {
-        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
+        final ReplicationPublisher delegate = new ReplicationPublisher() {
             public void distributeTypeDictionary(final String value) {
             }
 
@@ -65,7 +65,7 @@ class NeutralTransportTest {
             public void dispose() {
             }
         };
-        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
+        final ReplicationPublisher caching = ReplicationPublisher.Caching(delegate);
         caching.queueTypeDictionaryForNextTransaction("full-dictionary");
         assertEquals("full-dictionary", caching.consumeTypeDictionary());
         assertNull(caching.consumeTypeDictionary());
@@ -74,7 +74,7 @@ class NeutralTransportTest {
         /// A restart snapshot replaces an incremental dictionary staged before startup completed.
     @Test
     void queuedDictionarySupersedesStaleIncrementalDictionary() {
-        final StorageBinaryDataDistributor delegate = new StorageBinaryDataDistributor() {
+        final ReplicationPublisher delegate = new ReplicationPublisher() {
             public void distributeTypeDictionary(final String value) {
             }
 
@@ -84,7 +84,7 @@ class NeutralTransportTest {
             public void dispose() {
             }
         };
-        final StorageBinaryDataDistributor caching = StorageBinaryDataDistributor.Caching(delegate);
+        final ReplicationPublisher caching = ReplicationPublisher.Caching(delegate);
         caching.distributeTypeDictionary("stale-incremental");
         caching.queueTypeDictionaryForNextTransaction("full-restart-dictionary");
         assertEquals("full-restart-dictionary", caching.consumeTypeDictionary());

@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -30,16 +30,16 @@ class StorageBackupTaskExecutorTest {
         private final AtomicInteger runs = new AtomicInteger();
 
         @Override
-        public void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException {
+        public void createStorageBackup(final boolean useManualSlot) throws NodeException {
             this.runs.incrementAndGet();
             this.entered.countDown();
             try {
                 if (!this.release.await(1, TimeUnit.MINUTES)) {
-                    throw new NodeLibraryException("backup was never released");
+                    throw new NodeException("backup was never released");
                 }
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
-                throw new NodeLibraryException("backup interrupted", interrupted);
+                throw new NodeException("backup interrupted", interrupted);
             }
         }
 
@@ -95,8 +95,8 @@ class StorageBackupTaskExecutorTest {
     void exposesBackupFailure() throws Exception {
         final StorageBackupManager failing = new BlockingManager() {
             @Override
-            public void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException {
-                throw new NodeLibraryException("backup failed");
+            public void createStorageBackup(final boolean useManualSlot) throws NodeException {
+                throw new NodeException("backup failed");
             }
         };
         try (final StorageBackupTaskExecutor executor =

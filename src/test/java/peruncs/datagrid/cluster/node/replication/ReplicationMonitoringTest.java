@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.api.ReplicationState;
 import peruncs.datagrid.cluster.node.StorageNodeManager;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -24,8 +25,8 @@ class ReplicationMonitoringTest {
                 return "aeron";
             }
 
-            public ReplicationHealth.State replicationState() {
-                return ReplicationHealth.State.REPLAYING;
+            public ReplicationState replicationState() {
+                return ReplicationState.REPLAYING;
             }
 
             public void startStorageChecks() {
@@ -56,7 +57,7 @@ class ReplicationMonitoringTest {
         assertEquals(10, metrics.latestSequence());
         assertEquals(3, metrics.lagTransactions());
         assertEquals("aeron", metrics.transport());
-        assertEquals(ReplicationHealth.State.REPLAYING, metrics.state());
+        assertEquals(ReplicationState.REPLAYING, metrics.state());
         assertFalse(metrics.ready());
         assertTrue(metrics.healthy());
         assertEquals(123, manager.readStorageSizeBytes());
@@ -75,8 +76,8 @@ class ReplicationMonitoringTest {
                 return "aeron";
             }
 
-            public ReplicationHealth.State replicationState() {
-                return ReplicationHealth.State.REPLAYING;
+            public ReplicationState replicationState() {
+                return ReplicationState.REPLAYING;
             }
 
             public void startStorageChecks() {

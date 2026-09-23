@@ -22,8 +22,9 @@ final class AeronArchiveCapacity {
     private volatile CapacitySnapshot capacity = new CapacitySnapshot(0L, Long.MIN_VALUE);
 
     AeronArchiveCapacity(final AeronSettings settings) {
-        this(settings.externalArchive(), settings.minimumArchiveFreeBytes(),
-                settings.archiveSegmentFileLength(), () -> queryUsableSpace(settings.directories().archiveDirectory()));
+        this(settings.archivePolicy().externalArchive(), settings.archivePolicy().minimumFreeBytes(),
+                settings.archivePolicy().segmentFileLength(),
+                () -> queryUsableSpace(settings.topology().directories().archiveDirectory()));
     }
 
     AeronArchiveCapacity(final boolean externalArchive, final long minimumFreeBytes,

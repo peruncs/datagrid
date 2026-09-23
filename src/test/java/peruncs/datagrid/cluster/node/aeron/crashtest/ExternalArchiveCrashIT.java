@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron.crashtest;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.io.IOException;

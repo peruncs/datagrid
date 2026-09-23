@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.reader;
 
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.util.Objects;
 import java.util.UUID;

@@ -4,7 +4,7 @@ import org.eclipse.serializer.afs.types.AFile;
 import org.eclipse.serializer.afs.types.AWritableFile;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
 import org.eclipse.store.storage.types.StorageLiveFileProvider;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;

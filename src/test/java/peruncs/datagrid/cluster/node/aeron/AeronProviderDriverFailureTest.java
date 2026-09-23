@@ -7,9 +7,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /// Proves the production provider overrides Aeron's process-exiting timeout handler.
 class AeronProviderDriverFailureTest {
     /// Verifies a dead owned driver fails provider health in a child JVM without exiting the process.

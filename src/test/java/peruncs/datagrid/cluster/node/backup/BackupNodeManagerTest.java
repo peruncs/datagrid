@@ -2,8 +2,8 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
 
 import java.lang.reflect.Proxy;
 
@@ -83,7 +83,7 @@ class BackupNodeManagerTest {
         assertFalse(manager.isReady(), "readiness still requires the reader to run");
     }
 
-    private static final class FakeClient implements StorageBinaryDataClient {
+    private static final class FakeClient implements ReplicationApplier {
         private boolean running;
         private RuntimeException failure;
 

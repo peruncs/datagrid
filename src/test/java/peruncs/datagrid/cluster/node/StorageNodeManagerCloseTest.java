@@ -1,15 +1,15 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
+import peruncs.datagrid.cluster.errors.NodeException;
+import peruncs.datagrid.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
-import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.node.store.StorageUsageGauge;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
@@ -48,8 +48,8 @@ class StorageNodeManagerCloseTest {
                     return new ReplicationCursor("test", UUID.randomUUID(), 5L, "");
                 }
                 case "stopResult" -> {
-                    return new StorageBinaryDataClient.StopResult(
-                            StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY, 5L, -1L);
+                    return new ReplicationApplier.StopResult(
+                            ReplicationApplier.StopOutcome.RESOLVED_BOUNDARY, 5L, -1L);
                 }
                 default -> {
                     final Class<?> result = method.getReturnType();
@@ -73,11 +73,11 @@ class StorageNodeManagerCloseTest {
             final CountingHandler distributor, final CountingHandler client,
             final CountingHandler health, final CountingHandler position) {
         return StorageNodeManager.create(new StorageNodeManager.Configuration(
-                tracked(StorageBinaryDataDistributor.class, distributor),
+                tracked(ReplicationPublisher.class, distributor),
                 tracked(StorageTaskExecutor.class, new CountingHandler()),
-                tracked(StorageBinaryDataClient.class, client),
+                tracked(ReplicationApplier.class, client),
                 tracked(StorageNodeHealthCheck.class, health),
-                tracked(StorageDiskSpaceReader.class, new CountingHandler()),
+                tracked(StorageUsageGauge.class, new CountingHandler()),
                 tracked(ReplicationPositionProvider.class, position),
                 "aeron",
                 role));
@@ -100,7 +100,7 @@ class StorageNodeManagerCloseTest {
         distributor.disposeFailure = new IllegalStateException("distributor close failed");
         final StorageNodeManager manager = reader(distributor, client, health, position);
 
-        assertThrows(NodeLibraryException.class, manager::close);
+        assertThrows(NodeException.class, manager::close);
         manager.close();
 
         assertEquals(1, distributor.disposeCalls.get(), "distributor re-disposed on retry");
@@ -114,7 +114,7 @@ class StorageNodeManagerCloseTest {
     @Test
     void latestSequenceFaultsReadAsUnknown() {
         final CountingHandler position = new CountingHandler();
-        position.latestFailure = new NodeLibraryException("writer boundary not readable");
+        position.latestFailure = new NodeException("writer boundary not readable");
         final StorageNodeManager transportFailure = reader(
                 new CountingHandler(), new CountingHandler(), new CountingHandler(), position);
         assertEquals(-1L, transportFailure.latestSequence());

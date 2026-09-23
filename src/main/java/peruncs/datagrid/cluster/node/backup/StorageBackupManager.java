@@ -1,11 +1,11 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -16,7 +16,7 @@ import java.util.function.Supplier;
 import static org.eclipse.serializer.math.XMath.positive;
 import static org.eclipse.serializer.util.X.notNull;
 
-/// This manager creates, lists, restores, and deletes storage backups.
+/// Creates, lists, restores, and deletes storage backups.
 ///
 /// Backup creation stops the replication reader, captures the current message
 /// position, publishes one archive, resumes the reader, and then runs
@@ -39,7 +39,7 @@ public interface StorageBackupManager {
             final int maxBackupCount,
             final StorageBackupBackend storageBackupBackend,
             final Supplier<ReplicationCursor> cursorSupplier,
-            final StorageBinaryDataClient dataClient,
+            final ReplicationApplier dataClient,
             final ReplicationLogRetention retention) {
         return new Default(
                 notNull(storageConnection),
@@ -70,14 +70,14 @@ public interface StorageBackupManager {
     /// the manual slot.
     ///
     /// @param useManualSlot whether to use the manual slot
-    /// @throws NodeLibraryException if backup creation or publication fails
-    void createStorageBackup(boolean useManualSlot) throws NodeLibraryException;
+    /// @throws NodeException if backup creation or publication fails
+    void createStorageBackup(boolean useManualSlot) throws NodeException;
 
         /// Lists available backups.
     ///
     /// @return backup metadata
-    /// @throws NodeLibraryException if listing fails
-    List<BackupMetadata> listBackups() throws NodeLibraryException;
+    /// @throws NodeException if listing fails
+    List<BackupMetadata> listBackups() throws NodeException;
 
         /// Returns the failure of the most recent post-publication maintenance
     /// step (resolving retention, pruning, or log retention), if any.
@@ -95,32 +95,32 @@ public interface StorageBackupManager {
         /// Deletes one backup.
     ///
     /// @param backup backup to delete
-    /// @throws NodeLibraryException if deletion fails
-    void deleteBackup(BackupMetadata backup) throws NodeLibraryException;
+    /// @throws NodeException if deletion fails
+    void deleteBackup(BackupMetadata backup) throws NodeException;
 
         /// Restores one backup.
     ///
     /// @param storageDestinationParentPath destination parent
     /// @param backup                       backup to restore
-    /// @throws NodeLibraryException if restore fails
-    void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeLibraryException;
+    /// @throws NodeException if restore fails
+    void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeException;
 
         /// Reports whether user storage exists.
     ///
     /// @return `true` when user storage exists
-    /// @throws NodeLibraryException if the check fails
-    boolean hasUserUploadedStorage() throws NodeLibraryException;
+    /// @throws NodeException if the check fails
+    boolean hasUserUploadedStorage() throws NodeException;
 
         /// Restores user storage.
     ///
     /// @param storageDestinationParentPath destination parent
-    /// @throws NodeLibraryException if restore fails
-    void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeLibraryException;
+    /// @throws NodeException if restore fails
+    void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeException;
 
         /// Deletes user storage.
     ///
-    /// @throws NodeLibraryException if deletion fails
-    void deleteUserUploadedStorage() throws NodeLibraryException;
+    /// @throws NodeException if deletion fails
+    void deleteUserUploadedStorage() throws NodeException;
 
         /// Implements the stop, backup, retention, and resume sequence.
     class Default implements StorageBackupManager {
@@ -134,7 +134,7 @@ public interface StorageBackupManager {
         private final int maxBackupCount;
         private final StorageBackupBackend backend;
         private final Supplier<ReplicationCursor> cursorSupplier;
-        private final StorageBinaryDataClient dataClient;
+        private final ReplicationApplier dataClient;
         private final ReplicationLogRetention retention;
         private final AtomicReference<Throwable> maintenanceFailure = new AtomicReference<>();
 
@@ -143,7 +143,7 @@ public interface StorageBackupManager {
                 final int maxBackupCount,
                 final StorageBackupBackend backupBackend,
                 final Supplier<ReplicationCursor> cursorSupplier,
-                final StorageBinaryDataClient dataClient,
+                final ReplicationApplier dataClient,
                 final ReplicationLogRetention retention
         ) {
             this.storageConnection = storageConnection;
@@ -155,14 +155,14 @@ public interface StorageBackupManager {
         }
 
         @Override
-        public void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException {
+        public void createStorageBackup(final boolean useManualSlot) throws NodeException {
             LOGGER.log(System.Logger.Level.TRACE, "Creating new storage backup");
 
             final List<BackupMetadata> backups = this.listBackups();
             final long timestamp = this.nextBackupTimestamp(backups, useManualSlot);
             final RuntimeException readerFailure = this.dataClient.failure();
             if (readerFailure != null) {
-                throw new NodeLibraryException("Cannot create backup after replication reader failure", readerFailure);
+                throw new NodeException("Cannot create backup after replication reader failure", readerFailure);
             }
 
             final boolean isRunning = this.dataClient.isRunning();
@@ -174,11 +174,11 @@ public interface StorageBackupManager {
                  * owns a live polling thread.  Never treat that intermediate state as a
                  * safe backup boundary.  STOPPED/NOT_STARTED remain valid for simple
                  * clients that never expose a stop-at-latest operation. */
-                final StorageBinaryDataClient.StopOutcome outcome = this.dataClient.stopResult().outcome();
-                if (outcome == StorageBinaryDataClient.StopOutcome.STOPPING ||
-                    outcome == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-                    outcome == StorageBinaryDataClient.StopOutcome.FAILED) {
-                    throw new NodeLibraryException(
+                final ReplicationApplier.StopOutcome outcome = this.dataClient.stopResult().outcome();
+                if (outcome == ReplicationApplier.StopOutcome.STOPPING ||
+                    outcome == ReplicationApplier.StopOutcome.TIMED_OUT ||
+                    outcome == ReplicationApplier.StopOutcome.FAILED) {
+                    throw new NodeException(
                             "Cannot create backup while replication reader stop is unresolved: %s".formatted(outcome));
                 }
             }
@@ -202,12 +202,12 @@ public interface StorageBackupManager {
                 operationFailure = failure;
                 throw failure;
             } finally {
-                // only resume if the data client was running previously
+                // only resume if the replication applier was running before the stop
                 /* A stop timeout records a terminal reader failure and deliberately leaves
                  * the client stopped.  Calling resume() from this finally block would mask
                  * the original backup error and race a still-draining poller. */
                 if (isRunning && this.dataClient.failure() == null &&
-                    this.dataClient.stopResult().outcome() == StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
+                    this.dataClient.stopResult().outcome() == ReplicationApplier.StopOutcome.RESOLVED_BOUNDARY) {
                     try {
                         this.dataClient.resume();
                     } catch (final RuntimeException | Error resumeFailure) {
@@ -310,7 +310,7 @@ public interface StorageBackupManager {
 
         /// Advances log retention, reporting but not rethrowing failures.
         private void advanceRetention(final boolean useManualSlot, final ReplicationCursor retentionCursor)
-                throws NodeLibraryException {
+                throws NodeException {
             if (useManualSlot) {
                 return;
             }
@@ -355,68 +355,68 @@ public interface StorageBackupManager {
                 }
             }
             if (timestamp == Long.MAX_VALUE) {
-                throw new NodeLibraryException("No unique timestamp is available for a new backup");
+                throw new NodeException("No unique timestamp is available for a new backup");
             }
             return timestamp;
         }
 
         @Override
-        public void deleteBackup(final BackupMetadata backup) throws NodeLibraryException {
+        public void deleteBackup(final BackupMetadata backup) throws NodeException {
             this.backend.deleteBackup(backup);
         }
 
         @Override
-        public void deleteUserUploadedStorage() throws NodeLibraryException {
+        public void deleteUserUploadedStorage() throws NodeException {
             this.backend.deleteUserUploadedStorage();
         }
 
         @Override
         public void restoreBackup(final Path storageDestinationParentPath, final BackupMetadata backup)
-                throws NodeLibraryException {
+                throws NodeException {
             this.backend.restoreBackup(storageDestinationParentPath, backup);
         }
 
         @Override
         public void restoreUserUploadedStorage(final Path storageDestinationParentPath)
-                throws NodeLibraryException {
+                throws NodeException {
             this.backend.restoreUserUploadedStorage(storageDestinationParentPath);
         }
 
         @Override
-        public boolean hasUserUploadedStorage() throws NodeLibraryException {
+        public boolean hasUserUploadedStorage() throws NodeException {
             return this.backend.hasUserUploadedStorage();
         }
 
         @Override
-        public List<BackupMetadata> listBackups() throws NodeLibraryException {
+        public List<BackupMetadata> listBackups() throws NodeException {
             return this.backend.listBackups();
         }
 
-        private void stopDataClient() throws NodeLibraryException {
+        private void stopDataClient() throws NodeException {
             LOGGER.log(System.Logger.Level.TRACE, "Waiting for data client to stop reading");
             this.dataClient.stopAtLatestMessage();
             final long deadline = ReplicationRetry.deadlineNanos(STOP_TIMEOUT_NANOS);
             while (true) {
-                final StorageBinaryDataClient.StopResult result = this.dataClient.stopResult();
-                final StorageBinaryDataClient.StopOutcome outcome = result.outcome();
-                if (outcome == StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY) {
+                final ReplicationApplier.StopResult result = this.dataClient.stopResult();
+                final ReplicationApplier.StopOutcome outcome = result.outcome();
+                if (outcome == ReplicationApplier.StopOutcome.RESOLVED_BOUNDARY) {
                     final RuntimeException failure = this.dataClient.failure();
                     if (failure != null) {
-                        throw new NodeLibraryException("Cannot create backup after replication reader failure", failure);
+                        throw new NodeException("Cannot create backup after replication reader failure", failure);
                     }
                     return;
                 }
                 final RuntimeException failure = this.dataClient.failure();
                 if (failure != null) {
-                    throw new NodeLibraryException("Cannot create backup after replication reader failure", failure);
+                    throw new NodeException("Cannot create backup after replication reader failure", failure);
                 }
-                if (outcome == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-                    outcome == StorageBinaryDataClient.StopOutcome.FAILED) {
-                    throw new NodeLibraryException(
+                if (outcome == ReplicationApplier.StopOutcome.TIMED_OUT ||
+                    outcome == ReplicationApplier.StopOutcome.FAILED) {
+                    throw new NodeException(
                             "Cannot create backup after replication reader stop %s".formatted(outcome));
                 }
                 if (ReplicationRetry.expired(deadline)) {
-                    throw new NodeLibraryException(
+                    throw new NodeException(
                             "Timed out waiting for replication reader boundary at %s (last resolved sequence=%s, position=%s)"
                                     .formatted(this.dataClient.cursor(), result.sequence(), result.position()));
                 }
@@ -427,18 +427,18 @@ public interface StorageBackupManager {
         /// Waits one poll interval, converting interruption into a domain failure.
         ///
         /// An interrupted caller must not surface a raw `InterruptedException`
-        /// wrapper: it is translated into a [NodeLibraryException], and the
+        /// wrapper: it is translated into a [NodeException], and the
         /// interrupt flag is restored so the caller's cancellation policy still
         /// sees it.
-        private static void awaitNextPoll() throws NodeLibraryException {
+        private static void awaitNextPoll() throws NodeException {
             if (Thread.currentThread().isInterrupted()) {
-                throw new NodeLibraryException("Interrupted while waiting for the replication reader boundary");
+                throw new NodeException("Interrupted while waiting for the replication reader boundary");
             }
             try {
                 Thread.sleep(POLL_INTERVAL_MILLIS);
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
-                throw new NodeLibraryException(
+                throw new NodeException(
                         "Interrupted while waiting for the replication reader boundary", interrupted);
             }
         }
@@ -473,7 +473,7 @@ public interface StorageBackupManager {
         /// chance to finish, and a still-active replay is retained for the next backup
         /// cycle with an explicit warning.
         private ReplicationLogRetention.MaintenanceResult deleteThroughWithReplayRetry(
-                final ReplicationCursor cursor) throws NodeLibraryException {
+                final ReplicationCursor cursor) throws NodeException {
             ReplicationLogRetention.MaintenanceResult result = this.retention.deleteThrough(cursor);
             for (int attempt = 1; result.status() == ReplicationLogRetention.MaintenanceResult.Status.DEFERRED_ACTIVE_REPLAY &&
                                   attempt < RETENTION_RETRY_ATTEMPTS; attempt++) {
@@ -483,15 +483,15 @@ public interface StorageBackupManager {
             return result;
         }
 
-        private static void sleepRetentionRetryDelay() throws NodeLibraryException {
+        private static void sleepRetentionRetryDelay() throws NodeException {
             if (Thread.currentThread().isInterrupted()) {
-                throw new NodeLibraryException("Interrupted while waiting to retry replication retention");
+                throw new NodeException("Interrupted while waiting to retry replication retention");
             }
             try {
                 Thread.sleep(RETENTION_RETRY_DELAY_MILLIS);
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
-                throw new NodeLibraryException("Interrupted while waiting to retry replication retention", interrupted);
+                throw new NodeException("Interrupted while waiting to retry replication retention", interrupted);
             }
         }
     }

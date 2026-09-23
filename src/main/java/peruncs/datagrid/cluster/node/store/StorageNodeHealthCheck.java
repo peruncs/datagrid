@@ -1,14 +1,15 @@
 package peruncs.datagrid.cluster.node.store;
 
 import org.eclipse.store.storage.types.StorageController;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.api.ReplicationState;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
 
 import java.util.function.BooleanSupplier;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/// Neutral storage + replication readiness gate.
+/// Reports whether the Store and replication can serve requests.
 public interface StorageNodeHealthCheck extends AutoCloseable {
         /// Creates a health check.
     ///
@@ -39,8 +40,8 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         /// Reports whether Store and replication are ready.
     ///
     /// @return `true` when ready
-    /// @throws NodeLibraryException if readiness cannot be checked
-    boolean isReady() throws NodeLibraryException;
+    /// @throws NodeException if readiness cannot be checked
+    boolean isReady() throws NodeException;
 
         /// Reports whether Store and replication are healthy.
     ///
@@ -50,11 +51,11 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         /// Returns the provider state used by monitoring and readiness diagnostics.
     ///
     /// @return provider state
-    default ReplicationHealth.State replicationState() {
+    default ReplicationState replicationState() {
         if (isHealthy()) {
-            return ReplicationHealth.State.LIVE;
+            return ReplicationState.LIVE;
         }
-        return isReady() ? ReplicationHealth.State.STARTING : ReplicationHealth.State.FAILED;
+        return isReady() ? ReplicationState.STARTING : ReplicationState.FAILED;
     }
 
         /// Returns the provider's current Archive free-space estimate, or `-1`.
@@ -111,8 +112,8 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         }
 
         @Override
-        public ReplicationHealth.State replicationState() {
-            return this.active ? this.replicationHealth.state() : ReplicationHealth.State.FAILED;
+        public ReplicationState replicationState() {
+            return this.active ? this.replicationHealth.state() : ReplicationState.FAILED;
         }
 
         @Override
@@ -136,7 +137,7 @@ public interface StorageNodeHealthCheck extends AutoCloseable {
         }
 
         @Override
-        public boolean isReady() throws NodeLibraryException {
+        public boolean isReady() throws NodeException {
             return this.available() && this.replicationHealth.isReady();
         }
 

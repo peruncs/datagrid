@@ -22,9 +22,14 @@ public final class ClusterStore<T> {
 
     /// Reads the materialized root under the replication graph boundary.
     ///
-    /// The callback and all traversal of live Store objects must finish before
-    /// this method returns. Do not retain the root or another live graph object
-    /// in the returned value; copy the data needed outside the boundary.
+    /// The query callback runs while the node holds the Store graph read
+    /// boundary. The callback — and all traversal of live graph objects it
+    /// reaches — must finish before this method returns: returned or retained
+    /// live graph objects escape the boundary and may race replication or
+    /// read a graph that is being mutated. Copy whatever data the caller
+    /// needs into plain values or records before returning. (This contract
+    /// is why a shorter name such as `withRootRead` was considered for this
+    /// method; the discipline is the same either way.)
     ///
     /// @param <R> query result type
     /// @param query query evaluated inside the read boundary
@@ -35,21 +40,37 @@ public final class ClusterStore<T> {
 
     /// Persists one changed object on the writer; reader roles reject the call.
     ///
-    /// A fenced writer or unavailable replication service rejects the write
-    /// before local acceptance. An uncertain-commit failure is not safe to
-    /// retry blindly: inspect node status and reconcile or reseed first.
-    /// Capacity failures are retryable after Archive space is restored.
+    /// A reader node throws [peruncs.datagrid.cluster.errors.ReaderWriteRejectedException]
+    /// for every write. A writer that lost its fencing lease throws
+    /// [peruncs.datagrid.cluster.errors.WriterFencedException]; only the lease
+    /// restart procedure may clear that state. A node at its configured
+    /// storage limit throws
+    /// [peruncs.datagrid.cluster.errors.StorageLimitReachedException], which
+    /// is retryable after Archive or Store space is restored.
+    ///
+    /// An uncertain commit — a failure reported after the transaction may
+    /// already be durably recorded — is NOT safe to retry blindly: the retry
+    /// could duplicate it. Inspect [#status()][ClusterNode#status()] and the
+    /// durable writer sequence first; reconcile or reseed when the boundary is
+    /// unclear. Only failures raised before local acceptance are safe to
+    /// retry immediately.
     ///
     /// @param value changed object to publish
     /// @return the publication sequence
+    /// @throws peruncs.datagrid.cluster.errors.ReaderWriteRejectedException on
+    /// a reader or backup-reader node
+    /// @throws peruncs.datagrid.cluster.errors.WriterFencedException when this
+    /// node no longer holds the writer lease
+    /// @throws peruncs.datagrid.cluster.errors.StorageLimitReachedException
+    /// when the configured storage limit is reached
     public long store(final Object value) {
         return this.storage.store(Objects.requireNonNull(value, "value"));
     }
 
     /// Persists changed objects on the writer; reader roles reject the call.
     ///
-    /// The same fencing, capacity, and uncertain-commit rules as [#store]
-    /// apply to the complete batch.
+    /// The same reader-rejection, fencing, capacity, and uncertain-commit
+    /// rules as [#store(Object)] apply to the complete batch.
     ///
     /// @param values changed objects to publish
     /// @return publication sequences in input order
@@ -60,8 +81,8 @@ public final class ClusterStore<T> {
 
     /// Persists the current root on the writer; reader roles reject the call.
     ///
-    /// The same fencing, capacity, and uncertain-commit rules as [#store]
-    /// apply.
+    /// The same reader-rejection, fencing, capacity, and uncertain-commit
+    /// rules as [#store(Object)] apply.
     ///
     /// @return the publication sequence
     public long storeRoot() {

@@ -1,10 +1,10 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.api.ReplicationState;
 import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport.StorageControllerAdapter;
-import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
 
 import java.lang.reflect.Proxy;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -21,7 +21,7 @@ class AeronHealthTest {
         boolean capacityAvailable = true;
         boolean writerReady;
         boolean writerRole;
-        ReplicationHealth.State checkpoint;
+        ReplicationState checkpoint;
         boolean clientRunning;
         boolean clientLive;
         RuntimeException clientFailure;
@@ -33,7 +33,7 @@ class AeronHealthTest {
             return this.health(null);
         }
 
-        AeronHealth health(final StorageBinaryDataClient client) {
+        AeronHealth health(final ReplicationApplier client) {
             final StorageControllerAdapter storage = (StorageControllerAdapter) Proxy.newProxyInstance(
                     AeronHealthTest.class.getClassLoader(),
                     new Class<?>[]{StorageControllerAdapter.class},
@@ -64,10 +64,10 @@ class AeronHealthTest {
                     () -> this.watermarkFailed);
         }
 
-        StorageBinaryDataClient client() {
-            return (StorageBinaryDataClient) Proxy.newProxyInstance(
+        ReplicationApplier client() {
+            return (ReplicationApplier) Proxy.newProxyInstance(
                     AeronHealthTest.class.getClassLoader(),
-                    new Class<?>[]{StorageBinaryDataClient.class},
+                    new Class<?>[]{ReplicationApplier.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "failure" -> this.clientFailure;
                         case "isRunning" -> this.clientRunning;
@@ -92,7 +92,7 @@ class AeronHealthTest {
 
         assertFalse(health.isReady());
         assertFalse(health.isHealthy());
-        assertEquals(ReplicationHealth.State.FAILED, health.state());
+        assertEquals(ReplicationState.FAILED, health.state());
         assertEquals(0, fixture.writerReadyCalls.get());
     }
 
@@ -108,7 +108,7 @@ class AeronHealthTest {
         health.close();
 
         assertFalse(health.isReady());
-        assertEquals(ReplicationHealth.State.FAILED, health.state());
+        assertEquals(ReplicationState.FAILED, health.state());
     }
 
         /// A failed watermark fails readiness without consulting the writer.
@@ -120,7 +120,7 @@ class AeronHealthTest {
         fixture.watermarkFailed = true;
 
         assertFalse(fixture.health().isReady());
-        assertEquals(ReplicationHealth.State.FAILED, fixture.health().state());
+        assertEquals(ReplicationState.FAILED, fixture.health().state());
         assertEquals(0, fixture.writerReadyCalls.get());
     }
 
@@ -133,7 +133,7 @@ class AeronHealthTest {
         fixture.driverFailed = true;
 
         assertFalse(fixture.health().isReady());
-        assertEquals(ReplicationHealth.State.FAILED, fixture.health().state());
+        assertEquals(ReplicationState.FAILED, fixture.health().state());
     }
 
         /// A ready writer with capacity is live.
@@ -146,7 +146,7 @@ class AeronHealthTest {
 
         assertTrue(health.isReady());
         assertTrue(health.isHealthy());
-        assertEquals(ReplicationHealth.State.LIVE, health.state());
+        assertEquals(ReplicationState.LIVE, health.state());
         assertEquals(3, fixture.writerReadyCalls.get(), "one snapshot per evaluation");
     }
 
@@ -159,7 +159,7 @@ class AeronHealthTest {
         final AeronHealth health = fixture.health();
 
         assertFalse(health.isReady());
-        assertEquals(ReplicationHealth.State.STARTING, health.state());
+        assertEquals(ReplicationState.STARTING, health.state());
     }
 
         /// A writer without Archive capacity stays scrutable as degraded.
@@ -170,7 +170,7 @@ class AeronHealthTest {
         fixture.writerReady = true;
         fixture.capacityAvailable = false;
 
-        assertEquals(ReplicationHealth.State.DEGRADED_ARCHIVE, fixture.health().state());
+        assertEquals(ReplicationState.DEGRADED, fixture.health().state());
     }
 
         /// A terminal writer checkpoint wins over a ready publication.
@@ -179,9 +179,9 @@ class AeronHealthTest {
         final Fixture fixture = new Fixture();
         fixture.writerRole = true;
         fixture.writerReady = true;
-        fixture.checkpoint = ReplicationHealth.State.RESEED_REQUIRED;
+        fixture.checkpoint = ReplicationState.RESEED_REQUIRED;
 
-        assertEquals(ReplicationHealth.State.RESEED_REQUIRED, fixture.health().state());
+        assertEquals(ReplicationState.RESEED_REQUIRED, fixture.health().state());
     }
 
         /// A reader without a subscription yet is starting, not failed.
@@ -191,7 +191,7 @@ class AeronHealthTest {
         final AeronHealth health = fixture.health(null);
 
         assertFalse(health.isReady());
-        assertEquals(ReplicationHealth.State.STARTING, health.state());
+        assertEquals(ReplicationState.STARTING, health.state());
     }
 
         /// A live reader client is ready.
@@ -204,7 +204,7 @@ class AeronHealthTest {
 
         assertTrue(health.isReady());
         assertTrue(health.isHealthy());
-        assertEquals(ReplicationHealth.State.LIVE, health.state());
+        assertEquals(ReplicationState.LIVE, health.state());
     }
 
         /// A running reader that has not caught up is replaying but still healthy.
@@ -217,7 +217,7 @@ class AeronHealthTest {
 
         assertFalse(health.isReady(), "readiness requires the live boundary");
         assertTrue(health.isHealthy());
-        assertEquals(ReplicationHealth.State.REPLAYING, health.state());
+        assertEquals(ReplicationState.REPLAYING, health.state());
     }
 
         /// A reader whose bounded reconnect budget expired reports RESEED_REQUIRED.
@@ -230,7 +230,7 @@ class AeronHealthTest {
 
         assertFalse(health.isReady());
         assertFalse(health.isHealthy());
-        assertEquals(ReplicationHealth.State.RESEED_REQUIRED, health.state());
+        assertEquals(ReplicationState.RESEED_REQUIRED, health.state());
     }
 
         /// A failed reader client fails the view.
@@ -244,6 +244,6 @@ class AeronHealthTest {
 
         assertFalse(health.isReady());
         assertFalse(health.isHealthy());
-        assertEquals(ReplicationHealth.State.FAILED, health.state());
+        assertEquals(ReplicationState.FAILED, health.state());
     }
 }

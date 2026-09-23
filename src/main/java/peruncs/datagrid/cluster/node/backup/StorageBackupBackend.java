@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.errors.NodeException;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -11,7 +11,7 @@ import java.util.Objects;
 
 import static org.eclipse.serializer.math.XMath.notNegative;
 
-/// This backend stores and retrieves the durable files that make up a backup.
+/// Stores and retrieves the durable files that make up a backup.
 ///
 /// Backup metadata identifies the message position associated with the
 /// stored files. Implementations must not report a backup as usable until its
@@ -35,8 +35,8 @@ public interface StorageBackupBackend {
         /// Lists complete usable backups.
     ///
     /// @return backups ordered oldest first by [BackupMetadata#OLDEST_FIRST]
-    /// @throws NodeLibraryException if listing fails
-    List<BackupMetadata> listBackups() throws NodeLibraryException;
+    /// @throws NodeException if listing fails
+    List<BackupMetadata> listBackups() throws NodeException;
 
         /// Lists archives that exist on the volume but cannot be trusted.
     ///
@@ -47,8 +47,8 @@ public interface StorageBackupBackend {
     /// them silently.
     ///
     /// @return archive names that are present but unreadable, possibly empty
-    /// @throws NodeLibraryException if the scan fails
-    default List<String> listUnreadableArchives() throws NodeLibraryException {
+    /// @throws NodeException if the scan fails
+    default List<String> listUnreadableArchives() throws NodeException {
         return List.of();
     }
 
@@ -60,8 +60,8 @@ public interface StorageBackupBackend {
     ///
     /// @param backup selected backup
     /// @return stored replication cursor
-    /// @throws NodeLibraryException if reading fails
-    ReplicationCursor getCursorForBackup(BackupMetadata backup) throws NodeLibraryException;
+    /// @throws NodeException if reading fails
+    ReplicationCursor getCursorForBackup(BackupMetadata backup) throws NodeException;
 
         /// Selects the newest backup compatible with the given node identity.
     ///
@@ -71,9 +71,9 @@ public interface StorageBackupBackend {
     ///
     /// @param configured node identity to check against
     /// @return newest compatible backup, or `null` when there is none
-    /// @throws NodeLibraryException if listing fails
+    /// @throws NodeException if listing fails
     default BackupMetadata findLatestCompatibleBackup(final BackupMetadata.Identity configured)
-            throws NodeLibraryException {
+            throws NodeException {
         Objects.requireNonNull(configured, "configured");
         return this.listBackups().stream()
                 .filter(backup -> backup.isCompatibleWith(configured))
@@ -84,8 +84,8 @@ public interface StorageBackupBackend {
         /// Reports whether at least one backup exists.
     ///
     /// @return `true` when a backup exists
-    /// @throws NodeLibraryException if listing fails
-    default boolean containsBackups() throws NodeLibraryException {
+    /// @throws NodeException if listing fails
+    default boolean containsBackups() throws NodeException {
         return !this.listBackups().isEmpty();
     }
 
@@ -98,8 +98,8 @@ public interface StorageBackupBackend {
     ///
     /// @param skip number of newest backups to skip; zero selects the newest
     /// @return selected backup, or `null` when there is no such backup
-    /// @throws NodeLibraryException if listing fails
-    default BackupMetadata getLastBackup(final int skip) throws NodeLibraryException {
+    /// @throws NodeException if listing fails
+    default BackupMetadata getLastBackup(final int skip) throws NodeException {
         notNegative(skip);
 
         /* Implementations may return an immutable snapshot. Sorting a copy keeps
@@ -113,30 +113,30 @@ public interface StorageBackupBackend {
         /// Deletes one backup.
     ///
     /// @param backup backup to delete
-    /// @throws NodeLibraryException if deletion fails
-    void deleteBackup(BackupMetadata backup) throws NodeLibraryException;
+    /// @throws NodeException if deletion fails
+    void deleteBackup(BackupMetadata backup) throws NodeException;
 
         /// Creates one backup.
     ///
     /// @param connection storage connection
     /// @param cursor     replication cursor to store
     /// @param backup     backup metadata
-    /// @throws NodeLibraryException if creation fails
+    /// @throws NodeException if creation fails
     void createBackup(StorageConnection connection, final ReplicationCursor cursor, BackupMetadata backup)
-            throws NodeLibraryException;
+            throws NodeException;
 
         /// Restores one backup.
     ///
     /// @param storageDestinationParentPath destination parent
     /// @param backup                       backup to restore
-    /// @throws NodeLibraryException if restore fails
-    void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeLibraryException;
+    /// @throws NodeException if restore fails
+    void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeException;
 
         /// Reports whether user-uploaded storage exists.
     ///
     /// @return `true` when user storage exists
-    /// @throws NodeLibraryException if the check fails
-    boolean hasUserUploadedStorage() throws NodeLibraryException;
+    /// @throws NodeException if the check fails
+    boolean hasUserUploadedStorage() throws NodeException;
 
         /// Validates the user-uploaded storage archive in full.
     ///
@@ -146,8 +146,8 @@ public interface StorageBackupBackend {
     /// runs before any caller destroys local storage; backends without an
     /// upload volume implement it as a no-op.
     ///
-    /// @throws NodeLibraryException when the upload is missing, ambiguous, partial, or over budget
-    default void validateUserUploadedStorage() throws NodeLibraryException {
+    /// @throws NodeException when the upload is missing, ambiguous, partial, or over budget
+    default void validateUserUploadedStorage() throws NodeException {
     }
 
         /// Restores user-uploaded storage.
@@ -157,12 +157,12 @@ public interface StorageBackupBackend {
     /// caller's validation call and this restore.
     ///
     /// @param storageDestinationParentPath destination parent
-    /// @throws NodeLibraryException if restore fails
-    void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeLibraryException;
+    /// @throws NodeException if restore fails
+    void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeException;
 
         /// Deletes user-uploaded storage.
     ///
-    /// @throws NodeLibraryException if deletion fails
-    void deleteUserUploadedStorage() throws NodeLibraryException;
+    /// @throws NodeException if deletion fails
+    void deleteUserUploadedStorage() throws NodeException;
 
 }

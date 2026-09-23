@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.reader;
 
-/// Hooks around materialising one committed Store transaction.
+/// Hooks around materializing one committed Store transaction.
 ///
 /// The callback runs on the reader polling thread and gives the owner a place
 /// to record an uncertain reader state before import. The state is cleared only

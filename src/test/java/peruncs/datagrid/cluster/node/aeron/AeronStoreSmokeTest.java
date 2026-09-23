@@ -9,8 +9,6 @@ import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-
 /// Bounded writer/reader/index restart gate for the normal build.
 ///
 /// The full three-reader Lucene/JVector restart scenario lives in

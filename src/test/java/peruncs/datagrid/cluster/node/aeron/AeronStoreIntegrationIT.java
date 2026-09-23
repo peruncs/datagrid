@@ -16,12 +16,16 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import peruncs.datagrid.cluster.errors.ReseedRequiredException;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.DataMessageAppliedListener;
+import peruncs.datagrid.cluster.node.replication.CommitAppliedListener;
+import peruncs.datagrid.cluster.node.replication.DurableCursorFile;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
-import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
-import peruncs.datagrid.cluster.storage.types.*;
+import peruncs.datagrid.cluster.node.store.DistributedStorage;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.StorageGraphCoordinator;
+import peruncs.datagrid.cluster.storage.binary.*;
+import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -90,7 +94,7 @@ class AeronStoreIntegrationIT {
     static EmbeddedStorageManager startIndex(
             final Path path,
             final IndexRoot root,
-            final StorageBinaryDataDistributor distributor,
+            final ReplicationPublisher distributor,
             final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
         final EmbeddedStorageFoundation<?> foundation = foundation(path);
         DistributedStorage.configureWriting(foundation, distributor, targetFactory);
@@ -99,7 +103,7 @@ class AeronStoreIntegrationIT {
 
     static EmbeddedStorageManager startExistingIndex(
             final Path path,
-            final StorageBinaryDataDistributor distributor,
+            final ReplicationPublisher distributor,
             final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
         final EmbeddedStorageFoundation<?> foundation = foundation(path);
         DistributedStorage.configureWriting(foundation, distributor, targetFactory);
@@ -147,11 +151,11 @@ class AeronStoreIntegrationIT {
     ) throws Exception {
         Files.createDirectories(readerRoot);
         final Path cursorPath = readerRoot.resolve("cursor");
-        try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport transport = new AeronTransport(
                 properties(readerRoot, clusterId, nodeId, generation, role, -1L,
                         controlPort, livePort, watermarkPort, retentionReaders,
                         watermarkChannelOverride, watermarkStreamIdOverride));
-             StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(cursorPath)) {
+             DurableCursorFile cursorManager = DurableCursorFile.of(cursorPath)) {
             final EmbeddedStorageFoundation<?> readerFoundation = foundation(storePath);
             final EmbeddedStorageManager reader = readerFoundation.start();
             final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
@@ -159,7 +163,7 @@ class AeronStoreIntegrationIT {
                     readerFoundation.getConnectionFoundation(), reader.createConnection(),
                     ObjectGraphUpdateHandler.PerStore(graphCoordinator),
                     0L, 1L, 1L << 30, 60_000L, 30_000L, 5_000L, 4096, graphCoordinator));
-            final StorageBinaryDataClient client = transport.client(receiver, "store", new DataMessageAppliedListener() {
+            final ReplicationApplier client = transport.client(receiver, "store", new CommitAppliedListener() {
                         @Override
                         public void onApplied(final ReplicationCursor cursor) {
                             cursorManager.set(cursor);
@@ -187,7 +191,7 @@ class AeronStoreIntegrationIT {
                 while (client.isRunning() && System.nanoTime() < stopDeadline) {
                     java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
                 }
-                assertEquals(StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY,
+                assertEquals(ReplicationApplier.StopOutcome.RESOLVED_BOUNDARY,
                         client.stopOutcome(), "%s did not stop at a resolved transaction boundary".formatted(role));
             } finally {
                 client.dispose();
@@ -285,7 +289,7 @@ class AeronStoreIntegrationIT {
     private static EmbeddedStorageManager start(
             final Path path,
             final Root root,
-            final StorageBinaryDataDistributor distributor,
+            final ReplicationPublisher distributor,
             final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory
     ) {
         final EmbeddedStorageFoundation<?> foundation = foundation(path);
@@ -295,7 +299,7 @@ class AeronStoreIntegrationIT {
 
     private static EmbeddedStorageManager startExisting(
             final Path path,
-            final StorageBinaryDataDistributor distributor,
+            final ReplicationPublisher distributor,
             final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory
     ) {
         final EmbeddedStorageFoundation<?> foundation = foundation(path);
@@ -311,12 +315,12 @@ class AeronStoreIntegrationIT {
         return EmbeddedStorage.Foundation(configuration);
     }
 
-    static NodeLibraryPropertiesProvider properties(
+    static NodeSettingsSource properties(
             final Path root, final UUID clusterId, final UUID nodeId, final UUID generation) {
         return properties(root, clusterId, nodeId, generation, "writer", -1L, 40124, 40123, 40125);
     }
 
-    static NodeLibraryPropertiesProvider properties(
+    static NodeSettingsSource properties(
             final Path root,
             final UUID clusterId,
             final UUID nodeId,
@@ -331,7 +335,7 @@ class AeronStoreIntegrationIT {
                 controlPort, livePort, watermarkPort, Set.of());
     }
 
-    static NodeLibraryPropertiesProvider properties(
+    static NodeSettingsSource properties(
             final Path root,
             final UUID clusterId,
             final UUID nodeId,
@@ -347,7 +351,7 @@ class AeronStoreIntegrationIT {
                 controlPort, livePort, watermarkPort, retentionReaders, null, -1);
     }
 
-    static NodeLibraryPropertiesProvider properties(
+    static NodeSettingsSource properties(
             final Path root,
             final UUID clusterId,
             final UUID nodeId,
@@ -437,10 +441,10 @@ class AeronStoreIntegrationIT {
         final int watermarkPort = freePort();
         final Path writerStore = root.resolve("writer-store");
         final Path readerStore = root.resolve("reader-store");
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             configureIndexes(initial.articles);
@@ -500,10 +504,10 @@ class AeronStoreIntegrationIT {
         final Path writerStore = root.resolve("writer-store");
         final Path ordinaryStore = root.resolve("ordinary-store");
         final Path backupStore = root.resolve("backup-store");
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort, retentionReaders))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final Root initial = new Root();
             initial.values.add("baseline");
             final EmbeddedStorageManager seeded = start(writerStore, initial, distributor,
@@ -533,7 +537,7 @@ class AeronStoreIntegrationIT {
             final ReplicationCursor secondTarget = latest(writerTransport);
             final Path ordinaryCursor = root.resolve("ordinary-reader/cursor");
             final ReplicationCursor persisted;
-            try (StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(ordinaryCursor)) {
+            try (DurableCursorFile cursorManager = DurableCursorFile.of(ordinaryCursor)) {
                 persisted = cursorManager.get();
             }
             replicateAndVerify(root.resolve("ordinary-reader"), ordinaryStore, "reader", ordinaryReaderId,
@@ -554,7 +558,7 @@ class AeronStoreIntegrationIT {
                     writerTransport.retention().deleteThrough(secondTarget).status(),
                     "authenticated quorum must permit online purge at a complete segment boundary");
             final ReplicationCursor postRetentionStart;
-            try (StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(ordinaryCursor)) {
+            try (DurableCursorFile cursorManager = DurableCursorFile.of(ordinaryCursor)) {
                 postRetentionStart = cursorManager.get();
             }
             writerRoot.values.add("post-retention-update");
@@ -594,10 +598,10 @@ class AeronStoreIntegrationIT {
         /* Payload-driven transactions: the frozen boundary's bytes must sit
          * in a 64 KiB Archive segment that the later purge physically
          * detaches, so ~3/4 MiB of durable history separates freeze from head. */
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort, retentionReaders))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final Root initial = new Root();
             initial.values.add("baseline");
             final EmbeddedStorageManager seeded = start(writerStore, initial, distributor,
@@ -674,7 +678,7 @@ class AeronStoreIntegrationIT {
                  * Silent convergence past deleted history is the bug on trial. */
                 final Path laggingNode = root.resolve("lagging-reader");
                 final ReplicationCursor parked;
-                try (StoredReplicationCursorManager cursorManager = StoredReplicationCursorManager.NewAtomic(
+                try (DurableCursorFile cursorManager = DurableCursorFile.of(
                         laggingNode.resolve("cursor"))) {
                     parked = cursorManager.get();
                 }
@@ -740,11 +744,11 @@ class AeronStoreIntegrationIT {
         final Set<UUID> retentionReaders = Set.of(readerId);
         final Path writerStore = root.resolve("writer-store");
         final Path readerStore = root.resolve("reader-store");
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort, retentionReaders,
                         watermarkChannel, watermarkStreamId))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final Root initial = new Root();
             initial.values.add("baseline");
             final EmbeddedStorageManager seeded = start(writerStore, initial, distributor,
@@ -796,10 +800,10 @@ class AeronStoreIntegrationIT {
         final Path writerStore = root.resolve("writer-store");
         final Path ordinaryStore = root.resolve("ordinary-store");
         final Path backupStore = root.resolve("backup-store");
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final Root initial = new Root();
             initial.values.add("baseline");
             final EmbeddedStorageManager seeded = start(writerStore, initial, distributor,
@@ -880,10 +884,10 @@ class AeronStoreIntegrationIT {
         final AtomicInteger maximumChannels = new AtomicInteger();
         final long[] convergenceNanos = new long[4];
 
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             configureIndexes(initial.articles);
@@ -1011,15 +1015,15 @@ class AeronStoreIntegrationIT {
         final UUID clusterId = UUID.randomUUID();
         final UUID nodeId = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final NodeLibraryPropertiesProvider properties = properties(root, clusterId, nodeId, generation);
+        final NodeSettingsSource properties = properties(root, clusterId, nodeId, generation);
         try {
             final Root value = new Root();
             value.values.addAll(List.of("one", "two", "three", "four"));
             for (int i = 0; i < 512; i++) value.objects.add(new NewType("channel-object-%s".formatted(i)));
             final AtomicBoolean sawFourChannels = new AtomicBoolean();
             long firstSequence;
-            try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(properties)) {
-                final StorageBinaryDataDistributor distributor = transport.distributor("store", false);
+            try (ClusterReplicationTransport transport = new AeronTransport(properties)) {
+                final ReplicationPublisher distributor = transport.distributor("store");
                 final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory = delegate ->
                         transport.persistenceTargetFactory("store", distributor).apply(new PersistenceTarget<>() {
                             @Override
@@ -1052,8 +1056,8 @@ class AeronStoreIntegrationIT {
                 assertTrue(firstSequence >= 0, "real Store write did not reach the Aeron terminal checkpoint");
             }
 
-            try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(properties)) {
-                final StorageBinaryDataDistributor distributor = transport.distributor("store", false);
+            try (ClusterReplicationTransport transport = new AeronTransport(properties)) {
+                final ReplicationPublisher distributor = transport.distributor("store");
                 final EmbeddedStorageManager manager = startExisting(storePath, distributor,
                         transport.persistenceTargetFactory("store", distributor));
                 final Root resumed = manager.root();
@@ -1075,14 +1079,14 @@ class AeronStoreIntegrationIT {
         final UUID clusterId = UUID.randomUUID();
         final UUID nodeId = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final NodeLibraryPropertiesProvider properties = properties(root, clusterId, nodeId, generation);
-        try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(properties)) {
+        final NodeSettingsSource properties = properties(root, clusterId, nodeId, generation);
+        try (ClusterReplicationTransport transport = new AeronTransport(properties)) {
             final AtomicInteger dictionaryChunks = new AtomicInteger();
             AeronCrashHooks.callWithHook((name, ignored) ->
             {
                 if ("AFTER_DICTIONARY_CHUNKS".equals(name)) dictionaryChunks.incrementAndGet();
             }, () -> {
-                final StorageBinaryDataDistributor distributor = transport.distributor("store", false);
+                final ReplicationPublisher distributor = transport.distributor("store");
                 final AtomicBoolean rejectNext = new AtomicBoolean();
                 final java.util.function.UnaryOperator<PersistenceTarget<Binary>> targetFactory = delegate ->
                         transport.persistenceTargetFactory("store", distributor).apply(new PersistenceTarget<>() {
@@ -1143,13 +1147,13 @@ class AeronStoreIntegrationIT {
     static final class ReaderNode implements AutoCloseable {
         private final ClusterReplicationTransport transport;
         private final Path cursorPath;
-        private final StoredReplicationCursorManager cursorManager;
+        private final DurableCursorFile cursorManager;
         private final EmbeddedStorageFoundation<?> foundation;
         private final EmbeddedStorageManager storage;
         private final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
         private final String role;
         private StorageBinaryDataReceiver receiver;
-        private StorageBinaryDataClient client;
+        private ReplicationApplier client;
         private boolean closed;
 
         private ReaderNode(
@@ -1164,12 +1168,12 @@ class AeronStoreIntegrationIT {
                 final int livePort,
                 final int watermarkPort
         ) {
-            this.transport = new AeronClusterReplicationTransportProvider().create(properties(
+            this.transport = new AeronTransport(properties(
                     nodeRoot, clusterId, nodeId, generation, role, -1L, controlPort, livePort, watermarkPort));
             this.role = role;
             try {
                 this.cursorPath = nodeRoot.resolve("cursor");
-                this.cursorManager = StoredReplicationCursorManager.NewAtomic(this.cursorPath);
+                this.cursorManager = DurableCursorFile.of(this.cursorPath);
                 this.foundation = foundation(storePath);
                 this.storage = this.foundation.start();
                 this.receiver = this.newReceiver();
@@ -1205,8 +1209,8 @@ class AeronStoreIntegrationIT {
             this.applyDelayMs = Math.max(0L, delayMs);
         }
 
-        private StorageBinaryDataClient newClient(final ReplicationCursor startingCursor) {
-            return this.transport.client(this.receiver, "store", new DataMessageAppliedListener() {
+        private ReplicationApplier newClient(final ReplicationCursor startingCursor) {
+            return this.transport.client(this.receiver, "store", new CommitAppliedListener() {
                 @Override
                 public void onApplied(final ReplicationCursor cursor) {
                     final long delay = ReaderNode.this.applyDelayMs;
@@ -1239,7 +1243,7 @@ class AeronStoreIntegrationIT {
         /// of masked. A corrupted file throws here (bounded failure), which the
         /// caller must count as a parked reader, never as convergence.
         ReplicationCursor readPersistedCursorFresh() {
-            try (StoredReplicationCursorManager fresh = StoredReplicationCursorManager.NewAtomic(this.cursorPath)) {
+            try (DurableCursorFile fresh = DurableCursorFile.of(this.cursorPath)) {
                 return fresh.get();
             }
         }
@@ -1358,7 +1362,7 @@ class AeronStoreIntegrationIT {
             if (this.client.failure() != null) {
                 throw new AssertionError("reader failed while stopping", this.client.failure());
             }
-            assertEquals(StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY,
+            assertEquals(ReplicationApplier.StopOutcome.RESOLVED_BOUNDARY,
                     this.client.stopOutcome(), "reader did not stop at a resolved boundary");
         }
 

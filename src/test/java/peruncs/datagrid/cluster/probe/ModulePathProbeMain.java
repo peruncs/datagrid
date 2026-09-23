@@ -6,7 +6,7 @@ import org.eclipse.store.gigamap.jvector.VectorSimilarityFunction;
 import org.eclipse.store.gigamap.jvector.Vectorizer;
 import org.eclipse.store.gigamap.lucene.DocumentPopulator;
 import org.eclipse.store.gigamap.types.GigaMap;
-import peruncs.datagrid.cluster.storage.types.ClusterStoreIndexes;
+import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
 /// Forked probe exercising the reflective index validator inside the named module.
 ///

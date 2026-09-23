@@ -8,7 +8,7 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.errors.ReaderWriteRejectedException;
-import peruncs.datagrid.cluster.node.exceptions.StorageLimitReachedException;
+import peruncs.datagrid.cluster.errors.StorageLimitReachedException;
 
 import java.nio.file.Path;
 

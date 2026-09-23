@@ -6,7 +6,7 @@ import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
-/// This executor runs storage maintenance work away from the caller thread.
+/// Runs storage maintenance work away from the caller thread.
 ///
 /// Only one check task may run at a time. A later request while that task is
 /// active is ignored, and the next request can start after the previous thread

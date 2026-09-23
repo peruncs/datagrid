@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.io.IOException;
@@ -9,9 +9,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Crash cells for the backup publication atomics.
 ///

@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node.backup;
 
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.util.Comparator;
 import java.util.Objects;
@@ -158,14 +158,14 @@ public record BackupMetadata(
     ///
     /// @param metadata selected backup metadata
     /// @param cursor   replication cursor archived with that backup
-    /// @throws NodeLibraryException when metadata and cursor disagree
+    /// @throws NodeException when metadata and cursor disagree
     public static void requireConsistentWithCursor(final BackupMetadata metadata, final ReplicationCursor cursor) {
         Objects.requireNonNull(metadata, "metadata");
         Objects.requireNonNull(cursor, "cursor");
         if (!"aeron".equalsIgnoreCase(cursor.transport())) {
             final var generation = metadata.storeGeneration();
             if (!Objects.equals(generation, cursor.storeGeneration())) {
-                throw new NodeLibraryException(
+                throw new NodeException(
                         "backup metadata store generation %s disagrees with archived cursor generation %s"
                                 .formatted(generation, cursor.storeGeneration()));
             }
@@ -175,14 +175,14 @@ public record BackupMetadata(
         final AeronReplicationCursor aeron;
         try {
             if (!cursor.hasProviderPosition()) {
-                throw new NodeLibraryException("Aeron backup cursor carries no provider position");
+                throw new NodeException("Aeron backup cursor carries no provider position");
             }
             aeron = AeronReplicationCursor.decode(cursor.providerPositionBytes());
         } catch (final RuntimeException unreadable) {
-            throw new NodeLibraryException("Aeron backup cursor provider position is undecodable", unreadable);
+            throw new NodeException("Aeron backup cursor provider position is undecodable", unreadable);
         }
         if (!Objects.equals(metadata.clusterId(), aeron.clusterId())) {
-            throw new NodeLibraryException(
+            throw new NodeException(
                     "backup metadata cluster %s disagrees with archived cursor cluster %s"
                             .formatted(metadata.clusterId(), aeron.clusterId()));
         }
@@ -192,22 +192,22 @@ public record BackupMetadata(
         if (!Objects.equals(generation, aeronGeneration) ||
             !Objects.equals(generation, cursorGeneration) ||
             !Objects.equals(aeronGeneration, cursorGeneration)) {
-            throw new NodeLibraryException(
+            throw new NodeException(
                     "backup metadata generation %s disagrees with archived cursor generation %s/%s"
                             .formatted(generation, aeronGeneration, cursorGeneration));
         }
         if (metadata.epoch() != aeron.epoch()) {
-            throw new NodeLibraryException(
+            throw new NodeException(
                     "backup metadata epoch %s disagrees with archived cursor epoch %s"
                             .formatted(metadata.epoch(), aeron.epoch()));
         }
         if (metadata.recordingId() != aeron.recordingId()) {
-            throw new NodeLibraryException(
+            throw new NodeException(
                     "backup metadata recording %s disagrees with archived cursor recording %s"
                             .formatted(metadata.recordingId(), aeron.recordingId()));
         }
         if (cursor.logicalSequence() != aeron.sequence()) {
-            throw new NodeLibraryException(
+            throw new NodeException(
                     "archived cursor sequence %s disagrees with encoded Aeron sequence %s"
                             .formatted(cursor.logicalSequence(), aeron.sequence()));
         }
@@ -216,7 +216,7 @@ public record BackupMetadata(
 
     private static void requireSequenceAgreement(final BackupMetadata metadata, final ReplicationCursor cursor) {
         if (metadata.logicalSequence() != UNKNOWN && metadata.logicalSequence() != cursor.logicalSequence()) {
-            throw new NodeLibraryException(
+            throw new NodeException(
                     "backup metadata sequence %s disagrees with archived cursor sequence %s"
                             .formatted(metadata.logicalSequence(), cursor.logicalSequence()));
         }

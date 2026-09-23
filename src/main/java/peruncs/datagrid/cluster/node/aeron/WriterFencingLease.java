@@ -1,12 +1,11 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import peruncs.datagrid.cluster.errors.WriterFencedException;
+import peruncs.datagrid.cluster.storage.Crc32C;
+import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 import peruncs.datagrid.cluster.storage.aeron.writer.WriterLeaseGate;
-import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.PathSecurity;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -30,7 +29,10 @@ import java.util.function.LongSupplier;
 
 import static java.lang.System.Logger.Level.WARNING;
 
-/// Renewable external writer lease carrying a monotonically increasing fencing token.
+/// Chooses the only writer allowed to publish for this Store generation.
+///
+/// The lease is renewable and carries a monotonically increasing fencing
+/// token.
 ///
 /// Only the writer holding the lease for a cluster/generation may publish.
 /// The lease lives as one CRC-protected file in the shared backup volume, so
@@ -150,7 +152,7 @@ final class WriterFencingLease implements AutoCloseable {
         final Path canonicalVolume = volumeDirectory.toAbsolutePath().normalize();
         try {
             Files.createDirectories(canonicalVolume);
-            PathSecurity.ensureNoSymbolicLinks(canonicalVolume);
+            AtomicFileWriter.ensureNoSymbolicLinks(canonicalVolume);
         } catch (final IOException failure) {
             throw new IllegalStateException("cannot create writer lease directory %s".formatted(canonicalVolume), failure);
         }
@@ -351,7 +353,7 @@ final class WriterFencingLease implements AutoCloseable {
         /// Returns the fencing token this holder publishes with every envelope.
     ///
     /// @return fencing token, always positive
-    public long fencingToken() {
+    long fencingToken() {
         return this.token;
     }
 
@@ -377,7 +379,7 @@ final class WriterFencingLease implements AutoCloseable {
     /// A closed lease is never current.
     ///
     /// @return `true` while the lease file still names this holder with a fresh heartbeat
-    public boolean isCurrent() {
+    boolean isCurrent() {
         return this.isCurrentUncached();
     }
 
@@ -509,13 +511,13 @@ final class WriterFencingLease implements AutoCloseable {
     /// @param offer one publication attempt returning an Aeron result
     /// @return Aeron position returned by the offer
     /// @throws WriterFencedException when this holder no longer owns a fresh lease
-    public long executeUnderOwnership(final LongSupplier offer) {
+    long executeUnderOwnership(final LongSupplier offer) {
         Objects.requireNonNull(offer, "offer");
         return this.executeUnderOwnership(ignored -> offer.getAsLong());
     }
 
     /// Leaves room for renewal and takeover before the lease can become stale.
-    public long terminalOfferBudgetNanos() {
+    long terminalOfferBudgetNanos() {
         return Math.max(1L, this.maxStalenessNanos / 3L);
     }
 
@@ -524,7 +526,7 @@ final class WriterFencingLease implements AutoCloseable {
     /// @param offer offer operation receiving the per-attempt ownership check
     /// @return Aeron position returned by the offer
     /// @throws WriterFencedException when this holder no longer owns a fresh lease
-    public long executeUnderOwnership(final WriterLeaseGate.OwnedOffer offer) {
+    long executeUnderOwnership(final WriterLeaseGate.OwnedOffer offer) {
         Objects.requireNonNull(offer, "offer");
         synchronized (mutexFor(this.path)) {
             synchronized (this.stateLock) {
@@ -713,7 +715,7 @@ final class WriterFencingLease implements AutoCloseable {
         final UUID holderId = new UUID(buffer.getLong(), buffer.getLong());
         final long heartbeat = buffer.getLong();
         if (token <= 0 || heartbeat <= 0 ||
-            buffer.getInt() != Crc32c.compute(bytes, 0, ENCODED_BYTES - Integer.BYTES)) {
+            buffer.getInt() != Crc32C.compute(bytes, 0, ENCODED_BYTES - Integer.BYTES)) {
             throw new IllegalStateException(
                     "writer lease file at %s failed validation; refusing to reset the fencing token".formatted(path));
         }
@@ -721,7 +723,7 @@ final class WriterFencingLease implements AutoCloseable {
     }
 
     private static Path rejectSymbolicLink(final Path path) throws IOException {
-        PathSecurity.ensureNoSymbolicLinks(path);
+        AtomicFileWriter.ensureNoSymbolicLinks(path);
         return path;
     }
 
@@ -732,7 +734,7 @@ final class WriterFencingLease implements AutoCloseable {
                 .putLong(lease.nodeId().getMostSignificantBits()).putLong(lease.nodeId().getLeastSignificantBits())
                 .putLong(lease.holderId().getMostSignificantBits()).putLong(lease.holderId().getLeastSignificantBits())
                 .putLong(lease.heartbeatMillis());
-        buffer.putInt(Crc32c.compute(bytes, 0, ENCODED_BYTES - Integer.BYTES));
+        buffer.putInt(Crc32C.compute(bytes, 0, ENCODED_BYTES - Integer.BYTES));
         try {
             AtomicFileWriter.writeBytes(path, bytes);
         } catch (final IOException failure) {

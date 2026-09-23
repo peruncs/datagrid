@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -15,7 +15,7 @@ import java.util.function.LongConsumer;
 /// Direct data publication is intentionally rejected here. Aeron Store writes must use
 /// the provider's persistence-target factory so local acceptance, Archive
 /// publication, and checkpoint fencing share one transaction owner.
-final class AeronDistributionGate implements StorageBinaryDataDistributor {
+final class AeronDistributionGate implements ReplicationPublisher {
     private final BooleanSupplier writer;
     private final LongConsumer sequenceSynchronizer;
     private final AtomicLong index = new AtomicLong(-1L);
@@ -23,7 +23,7 @@ final class AeronDistributionGate implements StorageBinaryDataDistributor {
     private final AtomicReference<String> dictionary = new AtomicReference<>();
 
     AeronDistributionGate(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer) {
-        this.writer = Objects.requireNonNull(writer, NodeLibraryPropertiesProvider.WRITER_ROLE);
+        this.writer = Objects.requireNonNull(writer, NodeSettingsSource.WRITER_ROLE);
         this.sequenceSynchronizer = Objects.requireNonNull(sequenceSynchronizer, "sequenceSynchronizer");
     }
 

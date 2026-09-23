@@ -6,9 +6,9 @@ import io.aeron.Subscription;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
+import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.util.Arrays;
 import java.util.Objects;

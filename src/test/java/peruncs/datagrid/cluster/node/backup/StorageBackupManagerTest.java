@@ -2,11 +2,11 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
 
 import java.nio.file.Path;
 import java.util.*;
@@ -130,12 +130,12 @@ class StorageBackupManagerTest {
     void doesNotCreateOrResumeWhenTheReaderStopIsUnresolved() {
         final FakeClient client = new FakeClient();
         client.running = true;
-        client.stopOutcome = StorageBinaryDataClient.StopOutcome.TIMED_OUT;
+        client.stopOutcome = ReplicationApplier.StopOutcome.TIMED_OUT;
         final FakeBackend backend = new FakeBackend();
 
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
-        assertThrows(NodeLibraryException.class, () -> manager.createStorageBackup(false));
+        assertThrows(NodeException.class, () -> manager.createStorageBackup(false));
         assertEquals(1, client.stopCalls);
         assertEquals(0, client.resumeCalls);
         assertTrue(backend.created.isEmpty());
@@ -150,8 +150,8 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
-        final NodeLibraryException failure = assertThrows(
-                NodeLibraryException.class, () -> manager.createStorageBackup(false));
+        final NodeException failure = assertThrows(
+                NodeException.class, () -> manager.createStorageBackup(false));
         assertSame(client.failure, failure.getCause());
         assertEquals(0, client.stopCalls);
         assertTrue(backend.created.isEmpty());
@@ -162,7 +162,7 @@ class StorageBackupManagerTest {
     void preservesBackupFailureWhenResumeAlsoFails() {
         final FakeClient client = new FakeClient();
         client.running = true;
-        client.resumeFailure = new NodeLibraryException("resume failed");
+        client.resumeFailure = new NodeException("resume failed");
         final FakeBackend backend = new FakeBackend();
         backend.createFailure = new IllegalStateException("backup failed");
 
@@ -301,7 +301,7 @@ class StorageBackupManagerTest {
         final FakeBackend backend = new FakeBackend();
         backend.backups.addAll(List.of(backup(1L, false), backup(2L, false)));
         backend.previousCursor = CURSOR;
-        backend.deleteFailure = new NodeLibraryException("prune failed");
+        backend.deleteFailure = new NodeException("prune failed");
         final FakeRetention retention = new FakeRetention();
 
         final StorageBackupManager manager = manager(backend, client, retention, 1);
@@ -321,7 +321,7 @@ class StorageBackupManagerTest {
         backend.backups.add(backup(1L, false));
         backend.previousCursor = CURSOR;
         final FakeRetention retention = new FakeRetention();
-        retention.failure = new NodeLibraryException("retention failed");
+        retention.failure = new NodeException("retention failed");
 
         final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 2);
 
@@ -336,7 +336,7 @@ class StorageBackupManagerTest {
         backend.backups.add(backup(1L, false));
         backend.previousCursor = CURSOR;
         final FakeRetention retention = new FakeRetention();
-        retention.failure = new NodeLibraryException("retention failed");
+        retention.failure = new NodeException("retention failed");
         final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 2);
 
         assertDoesNotThrow(() -> manager.createStorageBackup(false));
@@ -353,14 +353,14 @@ class StorageBackupManagerTest {
     void interruptedReaderStopRaisesADomainFailure() {
         final FakeClient client = new FakeClient();
         client.running = true;
-        client.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
+        client.stopOutcome = ReplicationApplier.StopOutcome.STOPPING;
         final FakeBackend backend = new FakeBackend();
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
         try {
             Thread.currentThread().interrupt();
-            final NodeLibraryException failure = assertThrows(
-                    NodeLibraryException.class, () -> manager.createStorageBackup(false));
+            final NodeException failure = assertThrows(
+                    NodeException.class, () -> manager.createStorageBackup(false));
             assertTrue(failure.getMessage().contains("Interrupted"), failure.getMessage());
         } finally {
             Thread.interrupted();
@@ -369,12 +369,12 @@ class StorageBackupManagerTest {
         assertEquals(0, client.resumeCalls);
     }
 
-    private static final class FakeClient implements StorageBinaryDataClient {
+    private static final class FakeClient implements ReplicationApplier {
         private boolean running;
         private RuntimeException failure;
         private RuntimeException resumeFailure;
-        private StorageBinaryDataClient.StopOutcome stopOutcome =
-                StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY;
+        private ReplicationApplier.StopOutcome stopOutcome =
+                ReplicationApplier.StopOutcome.RESOLVED_BOUNDARY;
         private int stopCalls;
         private int resumeCalls;
 

@@ -1,24 +1,36 @@
 package peruncs.datagrid.cluster.node.backup;
 
-import peruncs.datagrid.cluster.node.ClusterFoundation;
+import peruncs.datagrid.cluster.errors.NodeException;
+import peruncs.datagrid.cluster.node.NodeAssembly;
 import peruncs.datagrid.cluster.node.StorageNodeControl;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
 
 /// Protocol-neutral control view of a backup node manager.
 ///
-/// Like [StorageNodeControl], this exposes exactly the operations a boundary
-/// needs and no `close()`: the foundation owns the manager and closes it on
-/// [ClusterFoundation#close].
+/// A backup role does not own the ordinary storage control operations, so
+/// this view deliberately uses composition over inheritance: [#storage()]
+/// borrows the storage control view explicitly instead of letting a backup
+/// boundary inherit operations it may not drive. Like [StorageNodeControl],
+/// this view exposes exactly the operations a boundary needs and no
+/// `close()`: the assembly owns the manager and closes it on
+/// [NodeAssembly#close].
 ///
 /// @since 1.0
-public interface BackupNodeControl extends StorageNodeControl {
+public interface BackupNodeControl {
+        /// Borrows the storage control view of this backup node.
+    ///
+    /// The returned view exposes readiness, health, and observability only;
+    /// the backup-specific operations stay on this control.
+    ///
+    /// @return the storage control view owned by the same manager
+    StorageNodeControl storage();
+
         /// Stops the reader at the latest safe message boundary.
     void stopReadingAtLatestMessage();
 
         /// Resumes the reader after backup work.
     ///
-    /// @throws NodeLibraryException if the reader cannot resume
-    void resumeReading() throws NodeLibraryException;
+    /// @throws NodeException if the reader cannot resume
+    void resumeReading() throws NodeException;
 
         /// Reports whether the reader is active.
     ///
@@ -28,8 +40,8 @@ public interface BackupNodeControl extends StorageNodeControl {
         /// Creates a storage backup.
     ///
     /// @param useManualSlot whether to use the manual backup slot
-    /// @throws NodeLibraryException if backup creation fails
-    void createStorageBackup(final boolean useManualSlot) throws NodeLibraryException;
+    /// @throws NodeException if backup creation fails
+    void createStorageBackup(final boolean useManualSlot) throws NodeException;
 
         /// Reports whether a backup is running.
     ///

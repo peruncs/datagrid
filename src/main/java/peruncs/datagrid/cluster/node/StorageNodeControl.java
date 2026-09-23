@@ -1,16 +1,16 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.api.ReplicationState;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 
 /// Protocol-neutral control and observability view of a node manager.
 ///
-/// The foundation owns every manager's lifecycle, so borrowers — the
+/// The assembly owns every manager's lifecycle, so borrowers — the
 /// embedding application's boundary adapters — receive this view instead of
 /// the manager: it exposes exactly the operations a boundary needs and no
 /// `close()`. Closing a borrowed manager would double-dispose resources the
-/// foundation still owns; only the foundation closes managers, on [ClusterFoundation#close].
+/// assembly still owns; only the assembly closes managers, on [NodeAssembly#close].
 ///
 /// @since 1.0
 public interface StorageNodeControl {
@@ -32,8 +32,8 @@ public interface StorageNodeControl {
         /// Reports whether the node can serve requests.
     ///
     /// @return `true` when the node is ready
-    /// @throws NodeLibraryException if readiness cannot be determined
-    boolean isReady() throws NodeLibraryException;
+    /// @throws NodeException if readiness cannot be determined
+    boolean isReady() throws NodeException;
 
         /// Reports whether the node and its transport are healthy.
     ///
@@ -43,8 +43,8 @@ public interface StorageNodeControl {
         /// Reads the current Store size.
     ///
     /// @return storage size in bytes
-    /// @throws NodeLibraryException if the size cannot be read
-    long readStorageSizeBytes() throws NodeLibraryException;
+    /// @throws NodeException if the size cannot be read
+    long readStorageSizeBytes() throws NodeException;
 
         /// Monitoring hook; nodes without a replication stream return `-1`.
     ///
@@ -91,11 +91,11 @@ public interface StorageNodeControl {
         /// Monitoring hook for provider lifecycle state.
     ///
     /// @return replication state
-    default ReplicationHealth.State replicationState() {
+    default ReplicationState replicationState() {
         if (this.isHealthy()) {
-            return ReplicationHealth.State.LIVE;
+            return ReplicationState.LIVE;
         }
-        return this.isReady() ? ReplicationHealth.State.STARTING : ReplicationHealth.State.FAILED;
+        return this.isReady() ? ReplicationState.STARTING : ReplicationState.FAILED;
     }
 
         /// Monitoring hook for the selected provider's Archive capacity.

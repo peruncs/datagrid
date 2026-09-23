@@ -3,8 +3,8 @@ package peruncs.datagrid.cluster.storage.aeron.config;
 import io.aeron.driver.Configuration;
 import io.aeron.logbuffer.FrameDescriptor;
 import org.agrona.BitUtil;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.util.Objects;
 

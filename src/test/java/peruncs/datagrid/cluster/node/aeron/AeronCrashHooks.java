@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
-import peruncs.datagrid.cluster.storage.types.FileStoreCrashHooks;
+import peruncs.datagrid.cluster.storage.io.FileStoreCrashHooks;
 
 import java.util.function.BiConsumer;
 
@@ -50,7 +50,7 @@ public final class AeronCrashHooks {
     ///
     /// @return current checkpoint sequence, or `-1` when none is active
     public static long currentCheckpointSequence() {
-        return AeronClusterReplicationTransportProvider.currentCheckpointSequence();
+        return AeronWriterTransport.currentCheckpointSequence();
     }
 
 }

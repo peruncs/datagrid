@@ -2,12 +2,12 @@ package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
-import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.node.store.StorageUsageGauge;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.lang.reflect.Proxy;
 
@@ -40,13 +40,13 @@ class StorageNodeManagerRolesTest {
         /// The reader reports its current sequence from the replication client.
     @Test
     void readerReportsClientSequence() {
-        final StorageBinaryDataClient client = stub(StorageBinaryDataClient.class);
+        final ReplicationApplier client = stub(ReplicationApplier.class);
         final StorageNodeManager manager = StorageNodeManager.create(new StorageNodeManager.Configuration(
-                stub(StorageBinaryDataDistributor.class),
+                stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
                 client,
                 stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class),
+                stub(StorageUsageGauge.class),
                 stub(ReplicationPositionProvider.class),
                 "none",
                 StorageNodeManager.Role.READER));
@@ -67,11 +67,11 @@ class StorageNodeManagerRolesTest {
 
     private static StorageNodeManager manager(final StorageNodeManager.Role role, final String transport) {
         return StorageNodeManager.create(new StorageNodeManager.Configuration(
-                stub(StorageBinaryDataDistributor.class),
+                stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
-                stub(StorageBinaryDataClient.class),
+                stub(ReplicationApplier.class),
                 stub(StorageNodeHealthCheck.class),
-                stub(StorageDiskSpaceReader.class),
+                stub(StorageUsageGauge.class),
                 stub(ReplicationPositionProvider.class),
                 transport,
                 role));

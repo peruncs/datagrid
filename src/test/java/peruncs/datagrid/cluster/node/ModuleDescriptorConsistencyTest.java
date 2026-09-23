@@ -13,8 +13,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static org.junit.jupiter.api.Assertions.*;
-
 /// Guards the JPMS descriptor against drift without running tests on the
 /// module path.
 ///

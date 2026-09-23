@@ -2,7 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.agrona.DirectBuffer;
 import org.eclipse.serializer.concurrency.LockedExecutor;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.Crc32C;
 
 import java.nio.ByteOrder;
 import java.util.*;
@@ -107,7 +107,7 @@ public record AeronReaderWatermark(
         cursor = putLong(target, cursor, recordingId);
         cursor = putLong(target, cursor, sequence);
         putLong(target, cursor, position);
-        putInt(target, CRC_OFFSET, Crc32c.compute(target, 0, CRC_OFFSET));
+        putInt(target, CRC_OFFSET, Crc32C.compute(target, 0, CRC_OFFSET));
     }
 
         /// Decodes a token.
@@ -124,7 +124,7 @@ public record AeronReaderWatermark(
                 reader.readInt(), reader.readShort(), reader.readShort(),
                 reader.readUuid(), reader.readUuid(), reader.readUuid(),
                 reader.readLong(), reader.readLong(), reader.readLong(), reader.readLong(),
-                reader.readInt(), Crc32c.compute(encoded, 0, CRC_OFFSET));
+                reader.readInt(), Crc32C.compute(encoded, 0, CRC_OFFSET));
     }
 
         /// Decodes directly from an Aeron/Agrona frame without copying the identity bytes.
@@ -135,7 +135,7 @@ public record AeronReaderWatermark(
     /// @param offset  first byte of the serialized watermark
     /// @param length  serialized watermark length; must be [#ENCODED_LENGTH]
     /// @return decoded watermark
-    public static AeronReaderWatermark decode(final Crc32c.Context crcReuse, final DirectBuffer encoded,
+    public static AeronReaderWatermark decode(final Crc32C.Context crcReuse, final DirectBuffer encoded,
                                               final int offset, final int length) {
         Objects.requireNonNull(encoded, "encoded");
         Objects.requireNonNull(crcReuse, "crcReuse");

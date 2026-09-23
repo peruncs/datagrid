@@ -1,10 +1,12 @@
-/// This package runs one cluster node.
+/// Assembles and runs one cluster node end to end.
 ///
-/// It owns the foundation that assembles node services, the fixed-topology
-/// node managers, the housekeeper, the configuration contract, and fatal error
-/// handling. Node services move from construction to running, draining, and
-/// closed states; a foundation belongs to one node and must not be reused after
-/// that node is closed.
+/// The assembly wires every node service, the lifecycle starts and stops
+/// them in dependency order, and the fixed-topology node managers expose
+/// control views to the embedding application. The maintenance scheduler
+/// runs periodic storage checks, the settings source supplies node-wide
+/// configuration, and fatal error handling lives here. Node services move
+/// from construction to running, draining, and closed states; an assembly
+/// belongs to one node and must not be reused after that node is closed.
 ///
 /// @since 1.0
 package peruncs.datagrid.cluster.node;

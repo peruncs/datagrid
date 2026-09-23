@@ -1,9 +1,9 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,14 +18,13 @@ public final class AeronProviderDriverFailureChildMain {
     static void main(final String[] ignored) throws Exception {
         final Path root = Path.of(System.getProperty("dg.driver.failure.root"));
         Files.createDirectories(root.resolve("control"));
-        final ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
-                .create(properties(root));
-        final StorageBinaryDataClient client = transport.client(null, "store", null, null, false);
+        final ClusterReplicationTransport transport = new AeronTransport(properties(root));
+        final ReplicationApplier client = transport.client(null, "store", null, null, false);
         final ReplicationHealth health = transport.health(() -> true, client);
         final var positionProvider = transport.positionProvider("store");
         positionProvider.init();
         Files.writeString(root.resolve("control/connected"), "connected");
-        AeronClusterReplicationTransportProvider.stopDriverForTest(transport);
+        AeronTransport.stopDriverForTest(transport);
         final long deadline = System.nanoTime() + 5_000_000_000L;
         while (health.isHealthy() && System.nanoTime() < deadline) LockSupport.parkNanos(1_000_000L);
         Files.writeString(root.resolve("control/outcome"), health.isHealthy() ? "NO_FAILURE" : "FAILED");
@@ -35,7 +34,7 @@ public final class AeronProviderDriverFailureChildMain {
         }
     }
 
-    private static NodeLibraryPropertiesProvider properties(final Path root) {
+    private static NodeSettingsSource properties(final Path root) {
         final UUID cluster = UUID.randomUUID();
         final UUID node = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();

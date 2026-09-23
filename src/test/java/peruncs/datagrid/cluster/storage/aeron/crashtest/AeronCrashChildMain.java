@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.crashtest;
 
-import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
+import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;

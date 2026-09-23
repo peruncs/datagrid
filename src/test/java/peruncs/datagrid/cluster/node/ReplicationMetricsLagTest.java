@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.api.ReplicationState;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,7 +21,7 @@ class ReplicationMetricsLagTest {
             }
 
             @Override
-            public boolean isReady() throws NodeLibraryException {
+            public boolean isReady() throws NodeException {
                 return true;
             }
 
@@ -31,7 +31,7 @@ class ReplicationMetricsLagTest {
             }
 
             @Override
-            public long readStorageSizeBytes() throws NodeLibraryException {
+            public long readStorageSizeBytes() throws NodeException {
                 return 0L;
             }
 
@@ -46,8 +46,8 @@ class ReplicationMetricsLagTest {
             }
 
             @Override
-            public ReplicationHealth.State replicationState() {
-                return ReplicationHealth.State.LIVE;
+            public ReplicationState replicationState() {
+                return ReplicationState.LIVE;
             }
         };
     }

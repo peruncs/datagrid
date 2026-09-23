@@ -6,7 +6,8 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Proxy;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies that partial shutdown can be retried without repeating completed work.
 class ClusterStorageManagerShutdownTest {

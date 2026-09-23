@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// seeded with the writer's Store image starts normally.
 class ReaderSeedBootstrapTest {
     /// Environment-backed properties with an explicit role and directories.
-    static class TestProperties extends NodeLibraryPropertiesProvider.Env {
+    static class TestProperties extends NodeSettingsSource.Env {
         private final Path storagePath;
         private final Path backupPath;
         private final String role;
@@ -55,10 +55,10 @@ class ReaderSeedBootstrapTest {
 
         @Override
         public String replicationProperty(final String name) {
-            if (NodeLibraryPropertiesProvider.Env.EnvKeys.STORAGE_PATH.equals(name)) {
+            if (NodeSettingsSource.Env.EnvKeys.STORAGE_PATH.equals(name)) {
                 return this.storagePath.toString();
             }
-            if (NodeLibraryPropertiesProvider.Env.EnvKeys.BACKUP_PATH.equals(name)) {
+            if (NodeSettingsSource.Env.EnvKeys.BACKUP_PATH.equals(name)) {
                 return this.backupPath.toString();
             }
             return null;
@@ -91,9 +91,9 @@ class ReaderSeedBootstrapTest {
         final Path writerHome = root.resolve("writer-home");
         final Path readerHome = root.resolve("reader-home");
 
-        try (final ClusterFoundation writer = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(
-                        new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly writer = NodeAssembly.create()
+                .setNodeSettingsSource(
+                        new TestProperties(writerHome, root.resolve("writer-backups"), NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             final var manager = writer.startStorageManager();
@@ -103,9 +103,9 @@ class ReaderSeedBootstrapTest {
             manager.storeRoot();
         }
 
-        try (final ClusterFoundation reader = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(
-                        new TestProperties(readerHome, root.resolve("reader-backups"), NodeLibraryPropertiesProvider.READER_ROLE))
+        try (final NodeAssembly reader = NodeAssembly.create()
+                .setNodeSettingsSource(
+                        new TestProperties(readerHome, root.resolve("reader-backups"), NodeSettingsSource.READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             final var failure = assertThrows(ReseedRequiredException.class, reader::startStorageManager);
@@ -124,8 +124,8 @@ class ReaderSeedBootstrapTest {
         Files.createDirectories(storage);
         Files.writeString(storage.resolve("orphaned-channel.dat"), "unaddressable history");
 
-        try (final ClusterFoundation reader = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(new AeronReaderProperties(
+        try (final NodeAssembly reader = NodeAssembly.create()
+                .setNodeSettingsSource(new AeronReaderProperties(
                         readerHome, root.resolve("lost-cursor-backups"), root.resolve("lost-cursor-aeron")))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
@@ -162,10 +162,10 @@ class ReaderSeedBootstrapTest {
         image.shutdown();
         assertTrue(Files.isDirectory(storage), "the rootless image must hold Store files");
 
-        try (final ClusterFoundation backup = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(new TestProperties(
+        try (final NodeAssembly backup = NodeAssembly.create()
+                .setNodeSettingsSource(new TestProperties(
                         backupHome, root.resolve("rootless-backups"),
-                        NodeLibraryPropertiesProvider.BACKUP_READER_ROLE))
+                        NodeSettingsSource.BACKUP_READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             final var failure = assertThrows(ReseedRequiredException.class, backup::startStorageManager);
@@ -181,9 +181,9 @@ class ReaderSeedBootstrapTest {
         final Path writerHome = root.resolve("writer-home");
         final Path readerHome = root.resolve("reader-home");
 
-        try (final ClusterFoundation writer = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(
-                        new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly writer = NodeAssembly.create()
+                .setNodeSettingsSource(
+                        new TestProperties(writerHome, root.resolve("writer-backups"), NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             final var manager = writer.startStorageManager();
@@ -198,9 +198,9 @@ class ReaderSeedBootstrapTest {
 
         copyDirectory(writerHome.resolve("storage"), readerHome.resolve("storage"));
 
-        try (final ClusterFoundation reader = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(
-                        new TestProperties(readerHome, root.resolve("reader-backups"), NodeLibraryPropertiesProvider.READER_ROLE))
+        try (final NodeAssembly reader = NodeAssembly.create()
+                .setNodeSettingsSource(
+                        new TestProperties(readerHome, root.resolve("reader-backups"), NodeSettingsSource.READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             @SuppressWarnings("unchecked")
@@ -215,9 +215,9 @@ class ReaderSeedBootstrapTest {
     void seededReaderAndBackupReaderRejectLocalWrites(@TempDir final Path root) throws Exception {
         final Path writerHome = root.resolve("writer-home");
 
-        try (final ClusterFoundation writer = ClusterFoundation.create()
-                .setNodeLibraryPropertiesProvider(
-                        new TestProperties(writerHome, root.resolve("writer-backups"), NodeLibraryPropertiesProvider.WRITER_ROLE))
+        try (final NodeAssembly writer = NodeAssembly.create()
+                .setNodeSettingsSource(
+                        new TestProperties(writerHome, root.resolve("writer-backups"), NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             final var manager = writer.startStorageManager();
@@ -228,12 +228,12 @@ class ReaderSeedBootstrapTest {
         }
 
         for (final String role : new String[]{
-                NodeLibraryPropertiesProvider.READER_ROLE, NodeLibraryPropertiesProvider.BACKUP_READER_ROLE}) {
+                NodeSettingsSource.READER_ROLE, NodeSettingsSource.BACKUP_READER_ROLE}) {
             final Path readerHome = root.resolve("seeded-" + role);
             copyDirectory(writerHome.resolve("storage"), readerHome.resolve("storage"));
 
-            try (final ClusterFoundation reader = ClusterFoundation.create()
-                    .setNodeLibraryPropertiesProvider(
+            try (final NodeAssembly reader = NodeAssembly.create()
+                    .setNodeSettingsSource(
                             new TestProperties(readerHome, root.resolve("backups-" + role), role))
                     .setRootSupplier(ArrayList<String>::new)
                     .build()) {
@@ -254,7 +254,7 @@ class ReaderSeedBootstrapTest {
         private final Path aeronHome;
 
         AeronReaderProperties(final Path storagePath, final Path backupPath, final Path aeronHome) {
-            super(storagePath, backupPath, NodeLibraryPropertiesProvider.READER_ROLE);
+            super(storagePath, backupPath, NodeSettingsSource.READER_ROLE);
             this.aeronHome = aeronHome;
         }
 

@@ -10,11 +10,11 @@ import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.archive.status.RecordingPos;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;

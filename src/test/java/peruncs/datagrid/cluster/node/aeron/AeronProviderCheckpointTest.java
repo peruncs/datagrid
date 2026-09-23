@@ -9,11 +9,11 @@ import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -22,10 +22,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies provider restart uses the Archive position in the writer checkpoint.
 class AeronProviderCheckpointTest {
@@ -33,7 +30,7 @@ class AeronProviderCheckpointTest {
     void writerRecoveryPreservesArchiveFailureCodeAndCause() {
         final ArchiveException archive = new ArchiveException("control disconnected", ArchiveException.GENERIC);
         final ReplicationUnavailableException mapped = assertInstanceOf(ReplicationUnavailableException.class,
-                AeronClusterReplicationTransportProvider.writerRecoveryFailure(archive));
+                AeronWriterTransport.writerRecoveryFailure(archive));
         assertSame(archive, mapped.getCause());
         assertEquals(ArchiveException.GENERIC, mapped.errorCode());
     }
@@ -54,7 +51,7 @@ class AeronProviderCheckpointTest {
         final int controlPort = freePort();
         final int livePort = freePort();
         final String clusterId = UUID.randomUUID().toString();
-        final NodeLibraryPropertiesProvider properties = new TestNodeProperties() {
+        final NodeSettingsSource properties = new TestNodeProperties() {
             @Override
             public String replicationRole() {
                 return "writer";
@@ -84,8 +81,8 @@ class AeronProviderCheckpointTest {
                 };
             }
         };
-        ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider().create(properties);
-        final StorageBinaryDataDistributor distributor = transport.distributor("stream", false);
+        ClusterReplicationTransport transport = new AeronTransport(properties);
+        final ReplicationPublisher distributor = transport.distributor("stream");
         final PersistenceTarget<Binary> target = transport.persistenceTargetFactory("stream", distributor)
                 .apply(new PersistenceTarget<>() {
                     @Override
@@ -104,8 +101,8 @@ class AeronProviderCheckpointTest {
             assertEquals(0, saved.transactionSequence());
             assertTrue(saved.recordingId() >= 0);
             transport.close();
-            transport = new AeronClusterReplicationTransportProvider().create(properties);
-            final StorageBinaryDataDistributor resumedDistributor = transport.distributor("stream", false);
+            transport = new AeronTransport(properties);
+            final ReplicationPublisher resumedDistributor = transport.distributor("stream");
             final PersistenceTarget<Binary> resumedTarget = transport.persistenceTargetFactory("stream", resumedDistributor)
                     .apply(new PersistenceTarget<>() {
                         @Override

@@ -1,17 +1,17 @@
 package peruncs.datagrid.cluster.node;
 
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
-import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
+import peruncs.datagrid.cluster.api.ReplicationState;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
-import peruncs.datagrid.cluster.node.store.StorageDiskSpaceReader;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.node.store.StorageUsageGauge;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.Objects;
 
-/// This manager controls a storage node with a fixed replication role.
+/// Controls a storage node with a fixed replication role.
 ///
 /// The role is fixed when the manager is created: a reader only applies
 /// replicated writes and never distributes, while the writer owns the
@@ -31,20 +31,20 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
 
         /// Immutable collaborators and role used to create a storage node manager.
     ///
-    /// @param dataDistributor        binary distributor
+    /// @param dataDistributor        replication publisher
     /// @param storageTaskExecutor    storage task executor, owned by the caller
     /// @param dataClient             replication client
     /// @param healthCheck            health check
-    /// @param storageDiskSpaceReader disk-space reader
+    /// @param storageUsageGauge disk-space reader
     /// @param positionProvider       position provider
     /// @param replicationTransport   transport id
     /// @param role                   fixed replication role
     record Configuration(
-            StorageBinaryDataDistributor dataDistributor,
+            ReplicationPublisher dataDistributor,
             StorageTaskExecutor storageTaskExecutor,
-            StorageBinaryDataClient dataClient,
+            ReplicationApplier dataClient,
             StorageNodeHealthCheck healthCheck,
-            StorageDiskSpaceReader storageDiskSpaceReader,
+            StorageUsageGauge storageUsageGauge,
             ReplicationPositionProvider positionProvider,
             String replicationTransport,
             Role role
@@ -55,7 +55,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
             Objects.requireNonNull(storageTaskExecutor, "storageTaskExecutor");
             Objects.requireNonNull(dataClient, "dataClient");
             Objects.requireNonNull(healthCheck, "healthCheck");
-            Objects.requireNonNull(storageDiskSpaceReader, "storageDiskSpaceReader");
+            Objects.requireNonNull(storageUsageGauge, "storageUsageGauge");
             Objects.requireNonNull(positionProvider, "positionProvider");
             Objects.requireNonNull(role, "role");
             if (replicationTransport == null || replicationTransport.isBlank()) {
@@ -71,7 +71,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
     /// The manager borrows every collaborator: the caller retains ownership of
     /// all of them, including `storageTaskExecutor`, and [Default#close()] never
     /// closes the executor, the disk-space reader, or any other collaborator
-    /// beyond the distributor, client, health check, and position provider.
+    /// beyond the publisher, applier, health check, and position provider.
     ///
     /// @param configuration immutable manager configuration
     /// @return storage node manager
@@ -87,11 +87,11 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
     final class Default implements StorageNodeManager {
         private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
-        private final StorageBinaryDataDistributor dataDistributor;
+        private final ReplicationPublisher dataDistributor;
         private final StorageTaskExecutor storageTaskExecutor;
-        private final StorageBinaryDataClient dataClient;
+        private final ReplicationApplier dataClient;
         private final StorageNodeHealthCheck healthCheck;
-        private final StorageDiskSpaceReader storageDiskSpaceReader;
+        private final StorageUsageGauge storageUsageGauge;
         private final ReplicationPositionProvider positionProvider;
         private final String replicationTransport;
         private final Role role;
@@ -105,7 +105,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
             this.dataDistributor = configuration.dataDistributor();
             this.dataClient = configuration.dataClient();
             this.healthCheck = configuration.healthCheck();
-            this.storageDiskSpaceReader = configuration.storageDiskSpaceReader();
+            this.storageUsageGauge = configuration.storageUsageGauge();
             this.storageTaskExecutor = configuration.storageTaskExecutor();
             this.positionProvider = configuration.positionProvider();
             this.replicationTransport = configuration.replicationTransport();
@@ -128,7 +128,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         }
 
         @Override
-        public boolean isReady() throws NodeLibraryException {
+        public boolean isReady() throws NodeException {
             return this.storageTaskExecutor.failure() == null && this.replicationReady();
         }
 
@@ -141,7 +141,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         ///
         /// A writer reports its own failure state instead of consulting
         /// the reader health check, which never observes the publication path.
-        private boolean replicationReady() throws NodeLibraryException {
+        private boolean replicationReady() throws NodeException {
             return this.isWriter() ? this.dataDistributor.failure() == null : this.healthCheck.isReady();
         }
 
@@ -151,8 +151,8 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         }
 
         @Override
-        public long readStorageSizeBytes() throws NodeLibraryException {
-            return this.storageDiskSpaceReader.readUsedDiskSpaceBytes();
+        public long readStorageSizeBytes() throws NodeException {
+            return this.storageUsageGauge.readUsedDiskSpaceBytes();
         }
 
         @Override
@@ -166,7 +166,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         public long latestSequence() {
             try {
                 return this.positionProvider.latest().logicalSequence();
-            } catch (final NodeLibraryException unavailable) {
+            } catch (final NodeException unavailable) {
                 /* Any provider failure — an unavailable boundary for this role or a
                  * transport fault — exposes unknown as -1 to monitoring rather than
                  * turning a metrics scrape into a node failure. */
@@ -181,11 +181,11 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         }
 
         @Override
-        public ReplicationHealth.State replicationState() {
+        public ReplicationState replicationState() {
             if (this.isWriter()) {
                 return this.dataDistributor.failure() == null
-                        ? ReplicationHealth.State.LIVE
-                        : ReplicationHealth.State.FAILED;
+                        ? ReplicationState.LIVE
+                        : ReplicationState.FAILED;
             }
             return this.healthCheck.replicationState();
         }
@@ -205,7 +205,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         }
 
         /// Returns the reader-observed writer boundary; the writer reports its
-        /// own published sequence through the distributor instead, since no
+        /// own published sequence through the publisher instead, since no
         /// reader exists to observe it.
         @Override
         public long writerDurableSequence() {
@@ -220,7 +220,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
             return this.isWriter() ? -1L : this.healthCheck.appliedSequence();
         }
 
-        /// Closes distributor, reader, health check, and position provider,
+        /// Closes publisher, reader, health check, and position provider,
         /// aggregating every failure. The first `close()` call performs every
         /// disposal; later calls return immediately, even when the first call
         /// failed, so callers must treat a failed close as final.
@@ -276,7 +276,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
                     throw this.fatal;
                 }
                 if (this.failure != null) {
-                    throw new NodeLibraryException("failed to close storage node resources", this.failure);
+                    throw new NodeException("failed to close storage node resources", this.failure);
                 }
             }
         }

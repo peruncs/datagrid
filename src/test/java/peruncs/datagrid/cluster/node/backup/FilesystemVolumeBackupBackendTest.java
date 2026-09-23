@@ -4,10 +4,10 @@ import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -90,7 +90,7 @@ class FilesystemVolumeBackupBackendTest {
             }
             BackupArchive.compressStorage(source, volume.resolve(archiveName));
         } finally {
-            peruncs.datagrid.cluster.node.store.StorageFileOperations.deleteDirectory(source);
+            peruncs.datagrid.cluster.storage.io.AtomicFileWriter.deleteDirectory(source);
         }
     }
 
@@ -151,7 +151,7 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals("payload", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
         assertFalse(Files.exists(destination.resolve(StorageBackupBackend.MANIFEST_ENTRY)));
         assertFalse(Files.exists(destination.resolve(StorageBackupBackend.READY_ENTRY)));
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> backend.restoreBackup(destination, backend.getLastBackup(0)));
     }
 
@@ -263,7 +263,7 @@ class FilesystemVolumeBackupBackendTest {
         /* The same backup id with a different replication position is a
          * conflicting publication and must fail instead of overwriting. */
         final ReplicationCursor moved = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 8L);
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> backend.createBackup(noOpStorageConnection(), moved, backup));
         assertEquals(cursor, backend.getCursorForBackup(backup),
                 "a conflicting publication must leave the durable archive untouched");
@@ -299,7 +299,7 @@ class FilesystemVolumeBackupBackendTest {
                     try {
                         backend.createBackup(noOpStorageConnection(), cursor, shared);
                         published.incrementAndGet();
-                    } catch (final NodeLibraryException conflict) {
+                    } catch (final NodeException conflict) {
                         conflicts.incrementAndGet();
                     }
                     return null;
@@ -343,10 +343,10 @@ class FilesystemVolumeBackupBackendTest {
             BackupArchive.writeIdentity(source.resolve(BackupArchive.BACKUP_IDENTITY_ENTRY), tampered);
             BackupArchive.compressStorage(source, backupVolume.resolve(BackupArchive.toArchiveFileName(tampered)));
         } finally {
-            peruncs.datagrid.cluster.node.store.StorageFileOperations.deleteDirectory(source);
+            peruncs.datagrid.cluster.storage.io.AtomicFileWriter.deleteDirectory(source);
         }
 
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> backend.restoreBackup(root.resolve("destination"), tampered));
         assertFalse(Files.exists(root.resolve("destination").resolve(StorageBackupBackend.STORAGE_ENTRY)));
     }
@@ -392,7 +392,7 @@ class FilesystemVolumeBackupBackendTest {
         final Path notADirectory = root.resolve("plain-file");
         Files.writeString(notADirectory, "not a volume");
 
-        assertThrows(NodeLibraryException.class, () -> FilesystemVolumeBackupBackend.create(notADirectory),
+        assertThrows(NodeException.class, () -> FilesystemVolumeBackupBackend.create(notADirectory),
                 "an unusable backup volume must fail at construction, not at publication");
     }
 
@@ -415,7 +415,7 @@ class FilesystemVolumeBackupBackendTest {
             /* With no read permission the ZIP cannot be opened; that is a
              * transient I/O failure, not evidence of a partial archive. */
             Files.setPosixFilePermissions(archive, Set.of());
-            assertThrows(NodeLibraryException.class,
+            assertThrows(NodeException.class,
                     () -> backend.createBackup(noOpStorageConnection(), cursor, backup));
             assertTrue(Files.exists(archive, LinkOption.NOFOLLOW_LINKS),
                     "a transient read error must not delete the durable archive");
@@ -462,7 +462,7 @@ class FilesystemVolumeBackupBackendTest {
             BackupArchive.writeIdentity(source.resolve(BackupArchive.BACKUP_IDENTITY_ENTRY), planted);
             BackupArchive.compressStorage(source, backupVolume.resolve(BackupArchive.toArchiveFileName(published)));
         } finally {
-            peruncs.datagrid.cluster.node.store.StorageFileOperations.deleteDirectory(source);
+            peruncs.datagrid.cluster.storage.io.AtomicFileWriter.deleteDirectory(source);
         }
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
 
@@ -563,7 +563,7 @@ class FilesystemVolumeBackupBackendTest {
         try (FileChannel channel = FileChannel.open(lockFile,
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE);
              FileLock ignored = channel.lock()) {
-            assertThrows(NodeLibraryException.class, () -> backend.deleteBackup(backup),
+            assertThrows(NodeException.class, () -> backend.deleteBackup(backup),
                     "a deletion must not proceed while the publication lock is held");
             assertTrue(Files.isRegularFile(
                     backupVolume.resolve(BackupArchive.toArchiveFileName(backup)), LinkOption.NOFOLLOW_LINKS));
@@ -604,11 +604,11 @@ class FilesystemVolumeBackupBackendTest {
         }
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
 
-        final NodeLibraryException validation = assertThrows(NodeLibraryException.class,
+        final NodeException validation = assertThrows(NodeException.class,
                 backend::validateUserUploadedStorage);
         assertTrue(validation.getMessage().contains("exactly one readable manifest"),
                 "must name the missing manifest, was: %s".formatted(validation.getMessage()));
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> backend.restoreUserUploadedStorage(backupVolume.resolveSibling("unused")),
                 "the restore re-validation must refuse the same upload");
     }
@@ -629,7 +629,7 @@ class FilesystemVolumeBackupBackendTest {
         }
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
 
-        final NodeLibraryException refusal = assertThrows(NodeLibraryException.class,
+        final NodeException refusal = assertThrows(NodeException.class,
                 backend::validateUserUploadedStorage);
         assertTrue(refusal.getMessage().contains("non-empty storage payload"),
                 "must name the empty payload, was: %s".formatted(refusal.getMessage()));
@@ -646,11 +646,11 @@ class FilesystemVolumeBackupBackendTest {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(
                 backupVolume, BackupArchiveLimits.of(16 * 1024, 8));
 
-        final NodeLibraryException refusal = assertThrows(NodeLibraryException.class,
+        final NodeException refusal = assertThrows(NodeException.class,
                 backend::validateUserUploadedStorage);
         assertTrue(refusal.getMessage().contains("extraction budget"),
                 "the dry-run refusal must name the budget, was: %s".formatted(refusal.getMessage()));
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> backend.restoreUserUploadedStorage(root.resolve("destination")),
                 "the restore-time dry run must enforce the same budget");
     }
@@ -679,7 +679,7 @@ class FilesystemVolumeBackupBackendTest {
         final Path destination = root.resolve("destination");
         Files.createDirectories(destination.resolve(StorageBackupBackend.STORAGE_ENTRY));
 
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> backend.restoreBackup(destination, backup));
     }
 

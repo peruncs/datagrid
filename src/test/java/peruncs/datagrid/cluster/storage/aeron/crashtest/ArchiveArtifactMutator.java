@@ -2,8 +2,8 @@ package peruncs.datagrid.cluster.storage.aeron.crashtest;
 
 import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
+import peruncs.datagrid.cluster.storage.Crc32C;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -196,7 +196,7 @@ public final class ArchiveArtifactMutator {
         if (recomputeHeaderCrc) {
             /* The stored CRC covers the first 80 header bytes; recompute it so
              * only semantic validation can reject the mutated frame. */
-            final int crc = Crc32c.compute(bytes, envelope, 80);
+            final int crc = Crc32C.compute(bytes, envelope, 80);
             bytes[envelope + 80] = (byte) (crc >>> 24);
             bytes[envelope + 81] = (byte) (crc >>> 16);
             bytes[envelope + 82] = (byte) (crc >>> 8);

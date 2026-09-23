@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron.crashtest;
 
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
@@ -8,7 +9,6 @@ import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator.H
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator.Mutation;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPayloads;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.io.IOException;

@@ -6,10 +6,10 @@ import org.eclipse.serializer.functional.Action;
 import org.eclipse.serializer.functional.Producer;
 import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -77,7 +77,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// Archive segment purges run under the writer-paused fence and can take
     /// a while on large histories; callers wait at most this long before the
     /// wait itself fails.
-    public static final long DEFAULT_OPERATION_TIMEOUT_MILLIS = 60_000L;
+    static final long DEFAULT_OPERATION_TIMEOUT_MILLIS = 60_000L;
 
     private final long operationTimeoutMillis;
 
@@ -614,10 +614,10 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 retiredReaders.add(readerId);
             }
             if (buffer.hasRemaining()) throw new IOException("trailing retention state bytes");
-            /* Build a replacement quorum only after the complete file has been parsed.
-             * Mutating the live quorum here used to make a later runtime validation
-             * failure observable as partially restored state. The replacement is
-             * published in one assignment, so retries always start from a clean view. */
+            /* Build a replacement quorum only after the complete file has been parsed,
+             * so a validation failure can never leave partially restored state behind.
+             * The replacement is published in one assignment, so retries always start
+             * from a clean view. */
             final AeronReaderWatermark.Quorum restored =
                     new AeronReaderWatermark.Quorum(this.configuredReaders);
             for (final UUID readerId : retiredReaders) {

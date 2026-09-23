@@ -11,15 +11,13 @@ import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-
-import static org.junit.jupiter.api.Assertions.*;
 
 /// Deterministic regression for live-reader index freshness.
 ///
@@ -81,11 +79,11 @@ class ReaderLiveIndexFreshnessTest {
         final Path[] readerNodes = {
                 root.resolve("reader-1"), root.resolve("reader-2"), root.resolve("reader-3")};
         final Random random = new Random(7L);
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort))) {
             writerTransport.positionProvider("store").init();
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             AeronStoreIntegrationIT.configureIndexes(initial.articles);

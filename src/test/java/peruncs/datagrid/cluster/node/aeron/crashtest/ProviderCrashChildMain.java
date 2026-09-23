@@ -4,16 +4,16 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.node.aeron.AeronClusterReplicationTransportProvider;
 import peruncs.datagrid.cluster.node.aeron.AeronCrashHooks;
+import peruncs.datagrid.cluster.node.aeron.AeronTransport;
 import peruncs.datagrid.cluster.node.aeron.TestNodeProperties;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.CheckpointJournalCrashHooks;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.CrashPayloads;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -370,7 +370,7 @@ public final class ProviderCrashChildMain {
         }
 
         private void startInternal() {
-            this.transport = new AeronClusterReplicationTransportProvider().create(new ChildProperties(this.base, this.durability));
+            this.transport = new AeronTransport(new ChildProperties(this.base, this.durability));
             /* The subscriber must be allowed to connect before the writer factory
              * waits for the Archive recording to become active. Waiting for the
              * persistence target first creates a circular startup dependency. */
@@ -469,7 +469,7 @@ public final class ProviderCrashChildMain {
         private void writeInternal(final byte[] payload) {
             if (this.subscriberFailure != null && !isDriverTimeout(this.subscriberFailure))
                 throw new IllegalStateException("subscriber failed: %s".formatted(this.subscriberFailure), this.subscriberFailure);
-            final StorageBinaryDataDistributor distributor = this.transport.distributor(STREAM, false);
+            final ReplicationPublisher distributor = this.transport.distributor(STREAM);
             if (this.writes > 0 && "AFTER_DICTIONARY_CHUNKS".equals(this.barrierPoint)) {
                 distributor.distributeTypeDictionary("crash.Type");
             }

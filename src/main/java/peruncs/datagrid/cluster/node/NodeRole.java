@@ -5,7 +5,7 @@ import java.util.Objects;
 
 /// Fixed-topology node role, normalized from the legacy and current settings.
 ///
-/// Two settings describe the role: the legacy [NodeLibraryPropertiesProvider#isBackupNode]
+/// Two settings describe the role: the legacy [NodeSettingsSource#isBackupNode]
 /// flag and the `ECLIPSE_DATAGRID_REPLICATION_ROLE` value (`writer`, `reader`,
 /// or `backup-reader`). Every decision point — startup path, manager guards,
 /// root creation, executors, cursor handling, and transport setup — reads this
@@ -40,9 +40,9 @@ public enum NodeRole {
     /// @return `writer`, `reader`, or `backup-reader`
     public String configName() {
         return switch (this) {
-            case WRITER -> NodeLibraryPropertiesProvider.WRITER_ROLE;
-            case READER -> NodeLibraryPropertiesProvider.READER_ROLE;
-            case BACKUP_READER -> NodeLibraryPropertiesProvider.BACKUP_READER_ROLE;
+            case WRITER -> NodeSettingsSource.WRITER_ROLE;
+            case READER -> NodeSettingsSource.READER_ROLE;
+            case BACKUP_READER -> NodeSettingsSource.BACKUP_READER_ROLE;
         };
     }
 
@@ -95,7 +95,7 @@ public enum NodeRole {
     /// @param properties property provider, must not be `null`
     /// @return effective role
     /// @throws IllegalArgumentException for an unknown value or a legacy/new conflict
-    public static NodeRole of(final NodeLibraryPropertiesProvider properties) {
+    public static NodeRole of(final NodeSettingsSource properties) {
         Objects.requireNonNull(properties, "properties");
         return resolve(properties.replicationRole(), properties.isBackupNode());
     }

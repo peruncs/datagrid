@@ -7,7 +7,7 @@ import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfigurati
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Verifies that terminal publication retries stop as soon as writer ownership is lost.
 class AeronOfferRetryerOwnershipTest {

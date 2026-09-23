@@ -16,8 +16,8 @@ import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.RecordingInspector;
 import peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
+import peruncs.datagrid.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.io.File;
 import java.net.ServerSocket;
@@ -362,7 +362,8 @@ class AeronArchiveReplicationIT {
                     .startPosition(PersistentSubscription.FROM_START)
                     .liveChannel(liveChannel).liveStreamId(1001)
                     .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
-                    .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                    .replicationConfiguration(configuration).clusterId(clusterId)
+                    .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
                     .initialSequence(-1).receiver(receiver).build());
             client.start();
 
@@ -386,7 +387,8 @@ class AeronArchiveReplicationIT {
                     .recordingId(recordingId).startPosition(restartPosition)
                     .liveChannel(liveChannel).liveStreamId(1001)
                     .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
-                    .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                    .replicationConfiguration(configuration).clusterId(clusterId)
+                    .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
                     .initialSequence(restartSequence).initialPosition(restartPosition)
                     .receiver(restartedReceiver).build());
             restarted.start();
@@ -524,7 +526,8 @@ class AeronArchiveReplicationIT {
                                     .startPosition(PersistentSubscription.FROM_START)
                                     .liveChannel(liveChannel).liveStreamId(1001)
                                     .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
-                                    .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                                    .replicationConfiguration(configuration).clusterId(clusterId)
+                    .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
                                     .initialSequence(-1).receiver(receiver).build());
                     try {
                         reader.start();
@@ -545,7 +548,7 @@ class AeronArchiveReplicationIT {
                                     "a mid-replay Archive restart must stay within the bounded reconnect path");
                             assertEquals(transactions, receiver.count(),
                                     "reconnect must resume exactly at the last resolved boundary");
-                            assertEquals(StorageBinaryDataClient.StopOutcome.RUNNING, reader.stopOutcome());
+                            assertEquals(ReplicationApplier.StopOutcome.RUNNING, reader.stopOutcome());
                         }
                     } finally {
                         reader.dispose();
@@ -611,7 +614,8 @@ class AeronArchiveReplicationIT {
                                 .startPosition(PersistentSubscription.FROM_START)
                                 .liveChannel(liveChannel).liveStreamId(1001)
                                 .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
-                                .replicationConfiguration(configuration).clusterId(clusterId).epoch(2)
+                                .replicationConfiguration(configuration).clusterId(clusterId)
+                    .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
                                 .initialSequence(-1).receiver(new CountingReceiver()).build());
                 try {
                     reader.start();
@@ -623,7 +627,7 @@ class AeronArchiveReplicationIT {
                     await(() -> reader.failure() != null, 15_000);
                     assertInstanceOf(ReseedRequiredException.class, reader.failure(),
                             "an unrecoverable Archive loss must surface as RESEED_REQUIRED, not a raw ArchiveException");
-                    assertEquals(StorageBinaryDataClient.StopOutcome.FAILED, reader.stopOutcome());
+                    assertEquals(ReplicationApplier.StopOutcome.FAILED, reader.stopOutcome());
                 } finally {
                     reader.dispose();
                 }

@@ -1,14 +1,14 @@
 package peruncs.datagrid.cluster.node.aeron;
 
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
 
 /// Neutral node-properties fixture for Aeron tests.
 ///
-/// The environment-backed [NodeLibraryPropertiesProvider.Env] is final, so
+/// The environment-backed [NodeSettingsSource.Env] is final, so
 /// tests that need per-test values subclass this fixture instead. Every method
 /// has a benign default and tests override only the settings they exercise.
 /// Public only so forked crash-test children in subpackages can extend it.
-public abstract class TestNodeProperties implements NodeLibraryPropertiesProvider {
+public abstract class TestNodeProperties implements NodeSettingsSource {
     @Override
     public boolean isBackupNode() {
         return false;

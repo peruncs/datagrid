@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /// Forked named-module runtime gate for the JPMS descriptor.
 ///
@@ -67,7 +67,7 @@ class ModulePathRuntimeProbeTest {
                 java,
                 "--enable-preview",
                 "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
-                "--add-exports", "peruncs.datagrid.cluster/peruncs.datagrid.cluster.storage.types=ALL-UNNAMED",
+                "--add-exports", "peruncs.datagrid.cluster/peruncs.datagrid.cluster.storage.index=ALL-UNNAMED",
                 "--module-path", String.join(File.pathSeparator, modulePath),
                 "--add-modules", "peruncs.datagrid.cluster",
                 "-cp", String.join(File.pathSeparator, classPath),

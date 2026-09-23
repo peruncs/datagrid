@@ -1,6 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
-import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.Crc32C;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -66,7 +66,7 @@ public record AeronReplicationCursor(
         if (encoded.length != ENCODED_LENGTH)
             throw new IllegalArgumentException("invalid Aeron cursor encoding length");
         final int expectedCrc = getInt(encoded, PAYLOAD_LENGTH);
-        if (expectedCrc != Crc32c.compute(encoded, 0, PAYLOAD_LENGTH)) {
+        if (expectedCrc != Crc32C.compute(encoded, 0, PAYLOAD_LENGTH)) {
             throw new IllegalArgumentException("Aeron cursor CRC32C mismatch");
         }
         int offset = 0;
@@ -105,7 +105,7 @@ public record AeronReplicationCursor(
         offset = putLong(encoded, offset, this.recordingId);
         offset = putLong(encoded, offset, this.recordingPosition);
         offset = putLong(encoded, offset, this.sequence);
-        putInt(encoded, offset, Crc32c.compute(encoded, 0, PAYLOAD_LENGTH));
+        putInt(encoded, offset, Crc32C.compute(encoded, 0, PAYLOAD_LENGTH));
         return encoded;
     }
 }

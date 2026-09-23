@@ -6,9 +6,9 @@ import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.datagrid.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.node.replication.StoredReplicationCursorManager;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.node.replication.DurableCursorFile;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Path;
 import java.util.UUID;
@@ -68,10 +68,10 @@ public final class AeronStoreSmokeChildMain {
             final UUID generation,
             final UUID writerNodeId,
             final int[] ports)  {
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             AeronStoreIntegrationIT.configureIndexes(initial.articles);
@@ -96,10 +96,10 @@ public final class AeronStoreSmokeChildMain {
     ) throws Exception {
         final Path writerStore = root.resolve("writer-store");
         final Path readerStore = root.resolve("reader-store");
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor,
                     writerTransport.persistenceTargetFactory("store", distributor));
             try {
@@ -136,17 +136,17 @@ public final class AeronStoreSmokeChildMain {
         final Path writerStore = root.resolve("writer-store");
         final Path readerStore = root.resolve("reader-store");
         final ReplicationCursor resumed;
-        try (StoredReplicationCursorManager cursorManager =
-                     StoredReplicationCursorManager.NewAtomic(root.resolve("reader/cursor"))) {
+        try (DurableCursorFile cursorManager =
+                     DurableCursorFile.of(root.resolve("reader/cursor"))) {
             resumed = cursorManager.get();
         }
         if (resumed == null || resumed.logicalSequence() < 0) {
             throw new IllegalStateException("no persisted reader cursor to resume from: " + resumed);
         }
-        try (ClusterReplicationTransport writerTransport = new AeronClusterReplicationTransportProvider().create(
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
-            final StorageBinaryDataDistributor distributor = writerTransport.distributor("store", false);
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
             final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor, writerTransport.persistenceTargetFactory("store", distributor));
             try {
                 /* A second transaction lands while the reader is down (a new

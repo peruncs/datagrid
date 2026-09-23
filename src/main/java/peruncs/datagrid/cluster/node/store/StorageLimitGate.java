@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Records whether storage measurements reached the configured limit.
 ///
-/// The housekeeper updates the gate from its measurement thread while
+/// The maintenance scheduler updates the gate from its measurement thread while
 /// request threads read it to decide whether writes are still accepted. Once
 /// the limit is reached, a configurable hysteresis band (ten percent by
 /// default) prevents usage near the boundary from oscillating between
@@ -90,8 +90,8 @@ public final class StorageLimitGate {
     /// request threads read to decide whether writes are still accepted.
     ///
     /// @param diskSpaceReader storage measurement source
-    /// @return limit-check task for housekeeper scheduling
-    public Runnable createScheduledWork(final StorageDiskSpaceReader diskSpaceReader) {
+    /// @return limit-check task for maintenance scheduling
+    public Runnable createScheduledWork(final StorageUsageGauge diskSpaceReader) {
         Objects.requireNonNull(diskSpaceReader, "diskSpaceReader");
         return () ->
         {

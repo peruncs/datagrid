@@ -481,7 +481,7 @@ class WriterFencingLeaseTest {
         final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
         buffer.putLong(HEARTBEAT_OFFSET, heartbeatMillis);
         buffer.putInt(bytes.length - Integer.BYTES,
-                peruncs.datagrid.cluster.storage.types.Crc32c.compute(bytes, 0, bytes.length - Integer.BYTES));
+                peruncs.datagrid.cluster.storage.Crc32C.compute(bytes, 0, bytes.length - Integer.BYTES));
         Files.write(path, bytes);
     }
 }

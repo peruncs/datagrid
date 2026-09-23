@@ -1,12 +1,12 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import io.aeron.archive.client.ArchiveException;
-import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Files;

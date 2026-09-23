@@ -2,9 +2,9 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.storage.Crc32C;
 
 import java.util.UUID;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -59,7 +59,7 @@ class AeronReaderWatermarkTest {
         final byte[] framed = new byte[encoded.length + 7];
         System.arraycopy(encoded, 0, framed, 7, encoded.length);
         final AeronReaderWatermark decoded = AeronReaderWatermark.decode(
-                new Crc32c.Context(), new UnsafeBuffer(framed), 7, encoded.length);
+                new Crc32C.Context(), new UnsafeBuffer(framed), 7, encoded.length);
         assertEquals(READER_ONE, decoded.readerId());
         assertEquals(CLUSTER, decoded.clusterId());
         assertEquals(GENERATION, decoded.storeGeneration());
@@ -76,7 +76,7 @@ class AeronReaderWatermarkTest {
     /// resetting the accumulator.
     @Test
     void reusedScratchDecodesConsecutiveWatermarksIndependently() {
-        final Crc32c.Context scratch = new Crc32c.Context();
+        final Crc32C.Context scratch = new Crc32C.Context();
         final byte[] first = AeronReaderWatermark.of(
                 READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096).encode();
         final byte[] second = AeronReaderWatermark.of(

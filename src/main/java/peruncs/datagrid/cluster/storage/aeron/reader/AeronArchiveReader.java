@@ -6,11 +6,11 @@ import io.aeron.logbuffer.ControlledFragmentHandler;
 import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.datagrid.cluster.errors.ReseedRequiredException;
+import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
+import peruncs.datagrid.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -61,7 +61,7 @@ public final class AeronArchiveReader implements Disposable {
     /// @param initialPosition          last resolved Archive position
     /// @param receiver                 destination for complete Store binaries
     /// @param transactionResolved      callback after a transaction is delivered
-    /// @param deliveryListener         callback around Store materialisation
+    /// @param deliveryListener         callback around Store materialization
     public record Configuration(
             Aeron aeron,
             AeronArchive.Context archiveContext,
@@ -214,9 +214,9 @@ public final class AeronArchiveReader implements Disposable {
             /// @param value post-transaction callback
             /// @return this builder
             public Builder transactionResolved(final Consumer<CursorSnapshot> value) { this.transactionResolved = value; return this; }
-            /// Sets the Store materialisation callback, or `null`.
+            /// Sets the Store materialization callback, or `null`.
             ///
-            /// @param value Store materialisation callback, or `null`
+            /// @param value Store materialization callback, or `null`
             /// @return this builder
             public Builder deliveryListener(final ReaderDeliveryListener value) { this.deliveryListener = value; return this; }
 
@@ -282,8 +282,8 @@ public final class AeronArchiveReader implements Disposable {
      * including disposal, may downgrade it to a success.  All transitions go
      * through the atomic reference so a polling-thread timeout cannot race a
      * concurrent disposal into the wrong final state. */
-     private final AtomicReference<StorageBinaryDataClient.StopOutcome> stopOutcome =
-            new AtomicReference<>(StorageBinaryDataClient.StopOutcome.NOT_STARTED);
+     private final AtomicReference<ReplicationApplier.StopOutcome> stopOutcome =
+            new AtomicReference<>(ReplicationApplier.StopOutcome.NOT_STARTED);
     /* Reconnect book-keeping, touched only by the polling thread. A zero
      * deadline means no disconnect incident is in flight; each incident gets
      * one full reconnect budget, and confirmed recovery (resolved progress or
@@ -426,7 +426,7 @@ public final class AeronArchiveReader implements Disposable {
     /// reader that already failed, timed out, or closed to a cleaner-looking
     /// state. Non-terminal states (RUNNING, STOPPING, and the resolved boundary
     /// markers) are overwritten as usual.
-    private void updateOutcome(final StorageBinaryDataClient.StopOutcome next) {
+    private void updateOutcome(final ReplicationApplier.StopOutcome next) {
         this.stopOutcome.updateAndGet(current -> switch (current) {
             case FAILED, TIMED_OUT, CLOSED -> current;
             default -> next;
@@ -466,7 +466,7 @@ public final class AeronArchiveReader implements Disposable {
         this.archiveIncidentSignal.set(null);
         /* Preserve any terminal outcome: a restart after STOPPED/RESOLVED_BOUNDARY
          * becomes RUNNING, but a failed or timed-out reader never looks healthy. */
-        this.updateOutcome(StorageBinaryDataClient.StopOutcome.RUNNING);
+        this.updateOutcome(ReplicationApplier.StopOutcome.RUNNING);
         this.stopped = new CountDownLatch(1);
         this.thread = Thread.ofPlatform().daemon().name("datagrid-aeron-archive-reader").unstarted(this::run);
         this.thread.start();
@@ -487,7 +487,7 @@ public final class AeronArchiveReader implements Disposable {
                     () -> this.stopAtLatest && ReplicationRetry.expired(this.stopDeadlineNanos.get()),
                     () ->
                     {
-                        this.updateOutcome(StorageBinaryDataClient.StopOutcome.TIMED_OUT);
+                        this.updateOutcome(ReplicationApplier.StopOutcome.TIMED_OUT);
                         this.assembler.failure(new IllegalStateException(
                                 "Timed out waiting for Aeron Archive replay to reach the live tail"));
                     },
@@ -694,9 +694,9 @@ public final class AeronArchiveReader implements Disposable {
     }
 
     private synchronized void completeRun() {
-        final StorageBinaryDataClient.StopOutcome current = this.stopOutcome.get();
-        if (current == StorageBinaryDataClient.StopOutcome.TIMED_OUT ||
-            current == StorageBinaryDataClient.StopOutcome.CLOSED) {
+        final ReplicationApplier.StopOutcome current = this.stopOutcome.get();
+        if (current == ReplicationApplier.StopOutcome.TIMED_OUT ||
+            current == ReplicationApplier.StopOutcome.CLOSED) {
             return;
         }
         final PersistentSubscription currentSubscription = this.subscription;
@@ -704,17 +704,17 @@ public final class AeronArchiveReader implements Disposable {
             this.assembler.failure(this.classifySubscriptionFailure(currentSubscription));
         }
         if (this.assembler.failure() != null) {
-            this.updateOutcome(StorageBinaryDataClient.StopOutcome.FAILED);
+            this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
             return;
         }
         this.updateOutcome(this.stopAtLatest && this.live
-                ? StorageBinaryDataClient.StopOutcome.RESOLVED_BOUNDARY
-                : StorageBinaryDataClient.StopOutcome.STOPPED);
+                ? ReplicationApplier.StopOutcome.RESOLVED_BOUNDARY
+                : ReplicationApplier.StopOutcome.STOPPED);
     }
 
     private synchronized void finishRun(final CountDownLatch lifecycleStopped) {
         if (this.assembler.failure() != null) {
-            this.updateOutcome(StorageBinaryDataClient.StopOutcome.FAILED);
+            this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
         }
         this.active.set(false);
         this.live = false;
@@ -742,7 +742,7 @@ public final class AeronArchiveReader implements Disposable {
         if (this.disposeRequested) {
             throw new IllegalStateException("Aeron Archive reader is stopping for disposal");
         }
-        if (this.stopOutcome.get() == StorageBinaryDataClient.StopOutcome.FAILED || this.failure() != null) {
+        if (this.stopOutcome.get() == ReplicationApplier.StopOutcome.FAILED || this.failure() != null) {
             return;
         }
         /* The deadline precedes the flag: the polling thread tests the flag
@@ -756,7 +756,7 @@ public final class AeronArchiveReader implements Disposable {
         this.stopProgressSequence.set(this.assembler.lastResolvedSequence());
         this.stopProgressApplied.set(this.assembler.lastAppliedSequence());
         this.stopAtLatest = true;
-        if (this.active.get()) this.updateOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
+        if (this.active.get()) this.updateOutcome(ReplicationApplier.StopOutcome.STOPPING);
     }
 
         /// Pushes the stop deadline out while replay resolution or Store
@@ -894,16 +894,16 @@ public final class AeronArchiveReader implements Disposable {
         /// Returns the stop boundary outcome and never infers success from a dead thread.
     ///
     /// @return current stop outcome
-    public StorageBinaryDataClient.StopOutcome stopOutcome() {
+    public ReplicationApplier.StopOutcome stopOutcome() {
         return this.stopOutcome.get();
     }
 
         /// Returns the terminal stop state and the last resolved sequence/position.
     ///
     /// @return current stop result
-    public StorageBinaryDataClient.StopResult stopResult() {
+    public ReplicationApplier.StopResult stopResult() {
         final CursorSnapshot cursor = this.assembler.cursorSnapshot();
-        return new StorageBinaryDataClient.StopResult(this.stopOutcome.get(), cursor.sequence(), cursor.position());
+        return new ReplicationApplier.StopResult(this.stopOutcome.get(), cursor.sequence(), cursor.position());
     }
 
         /// Stops polling after a terminal Aeron client or MediaDriver failure.
@@ -913,7 +913,7 @@ public final class AeronArchiveReader implements Disposable {
         this.assembler.failure(Objects.requireNonNull(failure, "failure"));
         this.active.set(false);
         this.live = false;
-        this.updateOutcome(StorageBinaryDataClient.StopOutcome.FAILED);
+        this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
     }
 
         /// Stops polling and releases this reader's subscriptions.
@@ -931,7 +931,7 @@ public final class AeronArchiveReader implements Disposable {
         synchronized (this) {
             if (this.disposed) return;
             this.disposeRequested = true;
-            if (this.active.get()) this.updateOutcome(StorageBinaryDataClient.StopOutcome.STOPPING);
+            if (this.active.get()) this.updateOutcome(ReplicationApplier.StopOutcome.STOPPING);
             pollingThread = this.thread;
         }
         AeronReaderLifecycle.stopAndClose(this.active, pollingThread, this.stopped, this.subscriptionClosed,
@@ -945,7 +945,7 @@ public final class AeronArchiveReader implements Disposable {
             this.thread = null;
             this.disposed = true;
             /* A failed or timed-out reader must not be reported as a clean close. */
-            this.updateOutcome(StorageBinaryDataClient.StopOutcome.CLOSED);
+            this.updateOutcome(ReplicationApplier.StopOutcome.CLOSED);
         }
     }
 

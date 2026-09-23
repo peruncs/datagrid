@@ -1,5 +1,7 @@
 package peruncs.datagrid.cluster.node.replication;
 
+import peruncs.datagrid.cluster.api.ReplicationState;
+
 /// Point-in-time replication observability values for one node.
 ///
 /// The record carries raw values only: no Prometheus exposition, no label
@@ -23,7 +25,7 @@ public record ReplicationMetrics(
         long currentSequence,
         long latestSequence,
         String transport,
-        ReplicationHealth.State state,
+        ReplicationState state,
         boolean ready,
         boolean healthy,
         long archiveUsableSpaceBytes,

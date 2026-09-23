@@ -42,9 +42,11 @@ metadata across nodes.
 </dependency>
 ```
 
-The JPMS module exports only `peruncs.datagrid.cluster.api`. Open a node through
-the small owned facade; Aeron, Store adapters, checkpoints, indexes, backup
-internals, and lifecycle controls deliberately remain inaccessible:
+The JPMS module exports only `peruncs.datagrid.cluster.api` (node contracts)
+and `peruncs.datagrid.cluster.errors` (typed failures to name at your
+boundary). Open a node through the small owned facade; Aeron, Store
+adapters, checkpoints, indexes, backup internals, and lifecycle controls
+deliberately remain inaccessible:
 
 ```java
 try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
@@ -55,9 +57,14 @@ try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
 }
 ```
 
-`ClusterStore.read` is the required reader-side graph boundary. Mutations are
-accepted only on the writer. `ClusterNode.close` owns and closes the complete
-node lifecycle.
+`ClusterStore.read` is the required reader-side graph boundary: run the whole
+traversal inside the callback, and return only copied values — never a live
+graph object. Mutations are accepted only on the writer; a reader fails
+writes with `ReaderWriteRejectedException`, a fenced writer with
+`WriterFencedException`, and a full Store with `StorageLimitReachedException`
+(all from `peruncs.datagrid.cluster.errors`). An uncertain-commit failure is
+not safe to retry blindly; see the `ClusterStore.store` Javadoc.
+`ClusterNode.close` owns and closes the complete node lifecycle.
 
 ## Cluster node with Aeron replication
 `peruncs-cluster` runs a Data Grid node with Aeron replication, including the
@@ -268,22 +275,24 @@ backup HTTP transport or hosted backup target is configured by the node.
 
 The Boundary–Control–Entity separation itself is an architectural decision
 recorded in the module documentation. What remains here is the operator
-contract for driving the node through its control views:
+contract for driving the node, exposed through `ClusterNode`:
 
-- `storageNodeManager()` on a storage node returns a `StorageNodeControl`:
-  role (`isWriter`), liveness (`isHealthy`), readiness (`isReady`),
-  storage size (`readStorageSizeBytes`), and raw replication observability
-  (`replicationMetrics()` — transport, replay/live state, current/latest
-  sequence, lag, readiness, health, including Archive or replay failures).
-  The embedder renders these typed values as JSON or Prometheus text itself.
-- `backupNodeManager()` on a backup node returns a `BackupNodeControl`:
-  backup triggers (`createStorageBackup`, `isBackupRunning`) and reader
-  pause/resume (`stopReadingAtLatestMessage`, `resumeReading`, `isReading`).
+- `status()` returns an immutable `NodeStatus`: role (`writer`), readiness
+  (`ready`), liveness (`healthy`), whether storage checks are running,
+  storage size (`storageBytes`), and `ReplicationStatus` with replay/live
+  state, current/latest sequence, and derived lag (`lagTransactions()`).
+  `replication()` is `null` on an unreplicated node. See the `NodeStatus`
+  Javadoc for the operator action of each `ReplicationState` (`FAILED`,
+  `DEGRADED`, `RESEED_REQUIRED`). The embedder renders these typed values
+  as JSON or Prometheus text itself.
+- `startStorageChecks()` starts periodic storage checks (writer and reader
+  roles).
+- `createScheduledBackup()` and `createManualBackup()` run backups on a
+  backup-reader: they pause replication at a durable boundary, snapshot, and
+  resume. A concurrent backup is rejected as busy.
 
-The views carry no `close()`, and both closes are idempotent, so a stray
-borrower call stays harmless. The role is validated before anything starts,
-so probing the wrong role never starts Store, Aeron, recovery, or background
-threads.
+The role is validated before anything starts, so probing the wrong role never
+starts Store, Aeron, recovery, or background threads.
 The mutating operations (backups, storage checks, pausing and resuming
 replication) carry no authentication of their own: the embedding application
 MUST authenticate and authorize them before delegating. Only the health,
@@ -296,14 +305,11 @@ other failure to an internal error.
 
 The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque
 inside a versioned envelope. (Envelope framing and the Archive-first write
-ordering are design decisions; see the module documentation.) A writer should use
-`AeronStorageBinaryReplicationTarget` with an
-`AeronReplicationWriteCoordinator`.
-
-Readers use `AeronArchiveReader.Configuration.builder()` for replay, live
-join, and reconnect. Persist the DataGrid cursor/checkpoint after each
-completed commit. `AeronReplicationCheckpointStore` is provided for
-deployments that persist the Aeron-specific identity and replay boundary.
+ordering are design decisions; see the module documentation.) The transport
+wiring — writer coordination, replay/live reader, and durable cursor and
+checkpoint persistence — is internal to the node and assembled by
+`ClusterNode.open`; applications do not touch those types because the module
+does not export them.
 
 Chunk size must remain below `min(termLength / 8, 16 MiB) - 84`. Aeron fragments each envelope
 as needed for the selected MTU.
@@ -390,25 +396,23 @@ The extended operations assert protocol guarantees, not just survival:
   purges the segment holding that cursor, restarts the reader, and asserts
   the typed reseed signal with the durable cursor and graph untouched.
 
-Current findings the enhanced soak exposes (product gaps, not soak
+Recovery behavior the enhanced soak asserts (product guarantees, not soak
 artifacts):
 
-- Resolved: a writer restart closing the writer-owned Archive from under
-  readers mid-replay is now absorbed by the reader's bounded reconnect. An
-  Archive loss reported by the subscription (escaped `ArchiveException` or
-  the client-side self-heal loop surfacing through the persistent
-  subscription listener) opens a reconnect incident bounded by the reader
-  stop timeout; resolved progress or reaching the live stream closes it, and
-  a channel that stays down past the budget latches a typed
-  `StorageBinaryDataReseedException` (health reports `RESEED_REQUIRED`)
-  instead of dying on a raw transport stack or stalling forever.
-- Resolved: the continuously-appending soak writer used to reject reader
-  watermarks as "ahead of the durable writer boundary" because the terminal
-  checkpoint trails the live recording. Retention now validates watermarks
-  against the Archive's durably recorded position (commit progress past the
-  checkpoint is admissible when it occupies recorded bytes; fabricated or
-  unrecorded progress still fails closed), so the quorum assembles
-  mid-soak and a `quorum-not-supported` skip means genuinely missing readers.
+- A writer restart closing the writer-owned Archive from under readers
+  mid-replay is absorbed by the reader's bounded reconnect. An Archive loss
+  reported by the subscription (escaped `ArchiveException` or the
+  client-side self-heal loop surfacing through the persistent subscription
+  listener) opens a reconnect incident bounded by the reader stop timeout;
+  resolved progress or reaching the live stream closes it, and a channel
+  that stays down past the budget latches a typed `ReseedRequiredException`
+  (health reports `RESEED_REQUIRED`) instead of dying on a raw transport
+  stack or stalling forever.
+- Retention validates watermarks against the Archive's durably recorded
+  position, not the trailing terminal checkpoint: commit progress past the
+  checkpoint is admissible when it occupies recorded bytes, while fabricated
+  or unrecorded progress still fails closed. The quorum assembles mid-soak,
+  so a `quorum-not-supported` skip means genuinely missing readers.
 
 The soak fails on worker failures, lost event-log writes, phantom index hits,
 bad checksums, unexpected exceptions, torn-boundary convergence, excessive

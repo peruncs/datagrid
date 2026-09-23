@@ -2,10 +2,10 @@ package peruncs.datagrid.cluster.node.backup;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.node.exceptions.NodeLibraryException;
+import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.replication.ReplicationCursorStore;
-import peruncs.datagrid.cluster.node.store.StorageFileOperations;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -40,7 +40,7 @@ class BackupArchiveTest {
         final Path archive = root.resolve("unsafe.zip");
         writeArchive(archive, new Entry("../escaped", "bad"));
 
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupArchive.extractArchive(
                         root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults()));
         assertFalse(Files.exists(root.resolve("escaped")));
@@ -86,10 +86,10 @@ class BackupArchiveTest {
         writeDuplicateArchive(archive);
 
         final Path extracted = root.resolve("extracted");
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupArchive.extractArchive(
                         extracted, archive, true, BackupArchiveLimits.defaults()));
-        StorageFileOperations.cleanup(extracted, null);
+        AtomicFileWriter.cleanup(extracted, null);
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
@@ -99,7 +99,7 @@ class BackupArchiveTest {
         final Path archive = root.resolve("missing-manifest.zip");
         writeArchive(archive, new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null));
 
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
+        assertThrows(NodeException.class, () -> BackupArchive.readManifest(
                 archive, BackupArchiveLimits.defaults().maxExtractedBytes(),
                 BackupArchiveLimits.defaults().maxArchiveEntries()));
     }
@@ -110,7 +110,7 @@ class BackupArchiveTest {
         final Path archive = root.resolve("large-manifest.zip");
         writeArchive(archive, new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[(1 << 20) + 1]));
 
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(
+        assertThrows(NodeException.class, () -> BackupArchive.readManifest(
                 archive, BackupArchiveLimits.defaults().maxExtractedBytes(),
                 BackupArchiveLimits.defaults().maxArchiveEntries()));
     }
@@ -119,7 +119,7 @@ class BackupArchiveTest {
     @Test
     void rejectsMalformedBackupFilename() {
         assertFalse(BackupArchive.isBackupFileName("123.evil.zip"));
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupArchive.parseMetadata("123.evil.zip", Path.of("backups")));
     }
 
@@ -140,9 +140,9 @@ class BackupArchiveTest {
                 new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
 
         final Path extracted = root.resolve("extracted");
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+        assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
                 extracted, archive, true, BackupArchiveLimits.of(1024L)));
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.readManifest(archive, 1024L, 8));
+        assertThrows(NodeException.class, () -> BackupArchive.readManifest(archive, 1024L, 8));
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
@@ -155,7 +155,7 @@ class BackupArchiveTest {
                 new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", 8L),
                 new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
 
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+        assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
                 root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults()));
     }
 
@@ -170,7 +170,7 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
 
         final Path tight = root.resolve("tight");
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+        assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
                 tight, archive, true, BackupArchiveLimits.of(8L)));
         BackupArchive.extractArchive(
                 root.resolve("roomy"), archive, true, BackupArchiveLimits.defaults());
@@ -220,7 +220,7 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/one", "1"),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/two", "2"));
 
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.contentDigestOfArchive(
+        assertThrows(NodeException.class, () -> BackupArchive.contentDigestOfArchive(
                 archive, BackupArchiveLimits.of(1L << 30, 2)));
         assertTrue(BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()) >= 0L);
     }
@@ -233,7 +233,7 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[BackupArchive.MAX_MANIFEST_BYTES + 1]),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload"));
 
-        assertThrows(NodeLibraryException.class,
+        assertThrows(NodeException.class,
                 () -> BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()));
     }
 
@@ -248,7 +248,7 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
 
-        assertThrows(NodeLibraryException.class, () -> BackupArchive.extractArchive(
+        assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
                 root.resolve("tight"), archive, true, BackupArchiveLimits.of(1L << 30, 2)));
     }
 

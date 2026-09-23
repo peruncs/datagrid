@@ -8,11 +8,11 @@ import io.aeron.archive.codecs.*;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.security.*;
 import org.agrona.SystemUtil;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
 import peruncs.datagrid.cluster.node.NodeRole;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -27,70 +27,37 @@ import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 
 /// Validated configuration for one Aeron transport. Structural values are
-/// immutable.
+/// immutable and grouped by concern into composed sub-records.
 ///
-/// The environment keys are grouped into four concerns: topology and channels,
-/// authentication, Archive policy, and runtime threading/timeouts. Each group
-/// is parsed and validated by its own step in [#fromEnvironment], and the
-/// result is assembled once. `offerTimeoutNanos` on the nested replication
-/// configuration bounds publication offers only; Archive control requests and
-/// watermark-channel shutdown have their own budgets below.
+/// The environment keys are grouped into four concerns: [Topology] (cluster
+/// and node identity, channels, stream ids, directories), [Authentication]
+/// (Archive control credentials and the wire nonce), [ArchivePolicy]
+/// (recording, retention, and capacity), and [Timeouts] (the per-operation
+/// budgets). Each group is parsed and validated by its own step in
+/// [#fromEnvironment], and the result is assembled once. `offerTimeoutNanos`
+/// on the nested replication configuration bounds publication offers only;
+/// Archive control requests, watermark-channel shutdown, and lease locking
+/// have their own budgets in [Timeouts].
 ///
-/// @param replication                     validated publication framing and timeout settings
-/// @param clusterId                       stable cluster identity shared by all members
-/// @param wireNonce                       shared non-authenticating nonce that rejects accidental cross-wiring
-/// @param epoch                           writer epoch used to reject stale frames
-/// @param streamId                        data stream id; replay and watermark ids are derived from it
-/// @param recordingId                     configured or discovered Archive recording id
-/// @param channels                        live, replay, Archive control, and watermark channels
-/// @param directories                      MediaDriver, Archive, and checkpoint directories
-/// @param identity                         node and Store-generation identities
-/// @param archiveFileSyncLevel            Archive file and catalog synchronization level
-/// @param minimumArchiveFreeBytes         minimum embedded-Archive free space
-/// @param externalArchive                 whether an external Archive owns the recording
-/// @param role                            normalized replication role
-/// @param productionMode                  whether production-only validation is enabled
-/// @param threadingMode                   MediaDriver threading mode
-/// @param archiveThreadingMode            embedded Archive threading mode
-/// @param archiveSegmentFileLength        Archive segment length in bytes
-/// @param archiveLowStorageSpaceThreshold Archive low-storage threshold in bytes
-/// @param maxConcurrentReplays            maximum simultaneous Archive replays
-/// @param driverTimeoutMillis             MediaDriver timeout in milliseconds
-/// @param archiveControlTimeoutNanos      timeout for one synchronous Archive control request
-/// @param watermarkCloseTimeoutNanos      flush budget when a watermark channel closes
-/// @param leaseAcquireLockTimeoutMillis   bounded wait for the writer lease interprocess lock
-/// @param watermarkStreamId               reader-watermark stream id
-/// @param retentionReaders                configured reader identities required for retention
-/// @param auth                             Archive control-session authentication group; disabled auth
-///                                          in production mode requires the explicit
-///                                          `ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE=true` acknowledgement
+/// @param replication          validated publication framing and offer-timeout settings
+/// @param topology             cluster identity, role, channels, stream ids, and directories
+/// @param archivePolicy        Archive recording, retention, and capacity policy
+/// @param timeouts             operation deadlines for driver, Archive control, watermark close, and lease lock
+/// @param authentication       Archive control-session credentials and the wire nonce; disabled auth
+///                             in production mode requires the explicit
+///                             `ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE=true` acknowledgement
+/// @param threadingMode        MediaDriver threading mode
+/// @param archiveThreadingMode embedded Archive threading mode
+/// @param productionMode       whether production-only validation is enabled
 record AeronSettings(
         AeronReplicationConfiguration replication,
-        UUID clusterId,
-        long wireNonce,
-        long epoch,
-        int streamId,
-        long recordingId,
-        Channels channels,
-        Directories directories,
-        StorageIdentity identity,
-        int archiveFileSyncLevel,
-        long minimumArchiveFreeBytes,
-        boolean externalArchive,
-        NodeRole role,
-        boolean productionMode,
+        Topology topology,
+        ArchivePolicy archivePolicy,
+        Timeouts timeouts,
+        Authentication authentication,
         ThreadingMode threadingMode,
         ArchiveThreadingMode archiveThreadingMode,
-        int archiveSegmentFileLength,
-        long archiveLowStorageSpaceThreshold,
-        int maxConcurrentReplays,
-        long driverTimeoutMillis,
-        long archiveControlTimeoutNanos,
-        long watermarkCloseTimeoutNanos,
-        long leaseAcquireLockTimeoutMillis,
-        int watermarkStreamId,
-        Set<UUID> retentionReaders,
-        Auth auth
+        boolean productionMode
 ) {
     private static final int MAX_SECRET_FILE_BYTES = 4096;
     private static final int ARCHIVE_PROTOCOL_ID = MessageHeaderDecoder.SCHEMA_ID;
@@ -135,12 +102,84 @@ record AeronSettings(
             CloseSessionRequestDecoder.TEMPLATE_ID
     };
 
-    /// Copies mutable inputs so the record never shares caller-owned arrays or sets.
-    AeronSettings {
-        retentionReaders = retentionReaders == null ? Set.of() : Set.copyOf(retentionReaders);
-        if (archiveControlTimeoutNanos <= 0L || watermarkCloseTimeoutNanos <= 0L ||
-            leaseAcquireLockTimeoutMillis <= 0L) {
-            throw new IllegalArgumentException("Aeron per-concern timeouts must be positive");
+    /// The cluster-wide and per-node wiring one node joins and publishes on.
+    ///
+    /// @param clusterId         stable cluster identity shared by all members
+    /// @param role              normalized replication role
+    /// @param epoch             writer epoch used to reject stale frames
+    /// @param streamId          data stream id; replay and watermark ids are derived from it
+    /// @param watermarkStreamId reader-watermark stream id
+    /// @param recordingId       configured or discovered Archive recording id
+    /// @param identity          node and Store-generation identities
+    /// @param channels          live, replay, Archive control, and watermark channels
+    /// @param directories       MediaDriver, Archive, and checkpoint directories
+    record Topology(
+            UUID clusterId,
+            NodeRole role,
+            long epoch,
+            int streamId,
+            int watermarkStreamId,
+            long recordingId,
+            StorageIdentity identity,
+            Channels channels,
+            Directories directories
+    ) {
+        Topology {
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(role, "role");
+            Objects.requireNonNull(identity, "identity");
+            Objects.requireNonNull(channels, "channels");
+            Objects.requireNonNull(directories, "directories");
+        }
+    }
+
+    /// The Archive recording, retention, and capacity policy.
+    ///
+    /// Copies the mutable reader set so the record never shares caller-owned state.
+    ///
+    /// @param fileSyncLevel            Archive file and catalog synchronization level
+    /// @param minimumFreeBytes         minimum embedded-Archive free space
+    /// @param externalArchive          whether an external Archive owns the recording
+    /// @param segmentFileLength        Archive segment length in bytes
+    /// @param lowStorageSpaceThreshold Archive low-storage threshold in bytes
+    /// @param maxConcurrentReplays     maximum simultaneous Archive replays
+    /// @param retentionReaders         configured reader identities required for retention
+    record ArchivePolicy(
+            int fileSyncLevel,
+            long minimumFreeBytes,
+            boolean externalArchive,
+            int segmentFileLength,
+            long lowStorageSpaceThreshold,
+            int maxConcurrentReplays,
+            Set<UUID> retentionReaders
+    ) {
+        ArchivePolicy {
+            retentionReaders = retentionReaders == null ? Set.of() : Set.copyOf(retentionReaders);
+        }
+
+        @Override
+        public Set<UUID> retentionReaders() {
+            return this.retentionReaders;
+        }
+    }
+
+    /// The operation deadlines of one transport. Every budget must be positive.
+    ///
+    /// @param driverTimeoutMillis           MediaDriver timeout in milliseconds
+    /// @param archiveControlTimeoutNanos    timeout for one synchronous Archive control request
+    /// @param watermarkCloseTimeoutNanos    flush budget when a watermark channel closes
+    /// @param leaseAcquireLockTimeoutMillis bounded wait for the writer lease interprocess lock
+    record Timeouts(
+            long driverTimeoutMillis,
+            long archiveControlTimeoutNanos,
+            long watermarkCloseTimeoutNanos,
+            long leaseAcquireLockTimeoutMillis
+    ) {
+        Timeouts {
+            if (driverTimeoutMillis <= 0L || archiveControlTimeoutNanos <= 0L ||
+                watermarkCloseTimeoutNanos <= 0L || leaseAcquireLockTimeoutMillis <= 0L) {
+                throw new IllegalArgumentException("Aeron per-concern timeouts must be positive");
+            }
         }
     }
 
@@ -198,7 +237,7 @@ record AeronSettings(
         }
     }
 
-    /// The Archive control-session authentication group.
+    /// The Archive control-session authentication group and the wire nonce.
     ///
     /// Credential arrays are copied in and copied out so the settings never
     /// share caller-owned state; [erase] zeroes the held copies when the
@@ -209,14 +248,17 @@ record AeronSettings(
     /// @param credentials        copied credentials, or `null` when disabled
     /// @param readerPrincipal   optional reader principal accepted by a writer Archive
     /// @param readerCredentials copied credentials for the optional reader principal
-    record Auth(
+    /// @param wireNonce         shared non-authenticating nonce that rejects accidental cross-wiring;
+    ///                          required explicitly in production mode, derived from the cluster id otherwise
+    record Authentication(
             boolean enabled,
             String principal,
             byte[] credentials,
             String readerPrincipal,
-            byte[] readerCredentials
+            byte[] readerCredentials,
+            long wireNonce
     ) {
-        Auth {
+        Authentication {
             credentials = credentials == null ? null : credentials.clone();
             readerCredentials = readerCredentials == null ? null : readerCredentials.clone();
         }
@@ -241,7 +283,7 @@ record AeronSettings(
         }
     }
 
-    static AeronSettings fromEnvironment(final NodeLibraryPropertiesProvider properties) {
+    static AeronSettings fromEnvironment(final NodeSettingsSource properties) {
         Objects.requireNonNull(properties, "properties");
         final String configuredRole = properties.replicationRole();
         if (configuredRole == null || configuredRole.isBlank()) {
@@ -260,83 +302,27 @@ record AeronSettings(
                             + "the replication protocol is not authenticated");
         }
         final AeronReplicationConfiguration replication = replication(properties);
-        final String cluster = value(properties, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", null);
-        if (cluster == null) throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_CLUSTER_ID is required");
-        final UUID clusterId = parseUuid(cluster, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID");
-        final String configuredNonce = value(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE", null);
-        if (productionMode && (configuredNonce == null || configuredNonce.isBlank())) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_WIRE_NONCE is required in production");
-        }
-        final long wireNonce = configuredNonce == null || configuredNonce.isBlank()
-                ? AeronReplicationEnvelope.defaultWireNonce(clusterId)
-                : parseLong(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE", null);
-        if (wireNonce == 0L) {
-            throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_WIRE_NONCE must not be zero");
-        }
-        final long epoch = parseLong(properties, "ECLIPSE_DATAGRID_AERON_EPOCH", "1");
-        final int streamId = parseInt(properties, "ECLIPSE_DATAGRID_AERON_STREAM_ID", "1001");
-        final long recordingId = parseLong(properties, "ECLIPSE_DATAGRID_AERON_RECORDING_ID", "-1");
-        if (epoch < 0 || streamId < 0 || recordingId < -1) {
-            throw new IllegalArgumentException("Aeron epoch/stream/recording settings are out of range");
-        }
-        final Directories directories = directories(properties, productionMode);
-        final StorageIdentity identity = identity(properties);
-        final ArchivePolicy archivePolicy = archivePolicy(properties, productionMode);
-        final Channels channels = channels(properties, cluster, replication, role,
-                archivePolicy.externalArchive(), productionMode);
-        final Set<UUID> retentionReaders = trustedNetwork ? retentionReaders(properties) : Set.of();
-        final Authentication authentication = authentication(properties, role, productionMode,
+        final ArchivePolicy archivePolicy = archivePolicy(properties, productionMode, replication, trustedNetwork);
+        final Topology topology = topology(properties, role, productionMode, replication,
                 archivePolicy.externalArchive());
-        final RuntimeSettings runtime = runtimeSettings(properties, streamId, replication);
-        final AeronSettings settings = new AeronSettings(
+        final Authentication authentication = authentication(properties, role, productionMode,
+                archivePolicy.externalArchive(), topology.clusterId());
+        final ThreadingMode threadingMode = threadingMode(properties);
+        return new AeronSettings(
                 replication,
-                clusterId,
-                wireNonce,
-                epoch,
-                streamId,
-                recordingId,
-                channels,
-                directories,
-                identity,
-                archivePolicy.fileSyncLevel(),
-                archivePolicy.minimumFreeBytes(),
-                archivePolicy.externalArchive(),
-                role,
-                productionMode,
-                runtime.threadingMode(),
-                runtime.archiveThreadingMode(),
-                runtime.archiveSegmentFileLength(),
-                runtime.archiveLowStorageSpaceThreshold(),
-                runtime.maxConcurrentReplays(),
-                runtime.driverTimeoutMillis(),
-                runtime.archiveControlTimeoutNanos(),
-                runtime.watermarkCloseTimeoutNanos(),
-                runtime.leaseAcquireLockTimeoutMillis(),
-                runtime.watermarkStreamId(),
-                retentionReaders,
-                new Auth(
-                        authentication.enabled(),
-                        authentication.enabled() ? authentication.principal() : null,
-                        authentication.credentials(),
-                        authentication.enabled() && authentication.readerPrincipal() != null
-                                && !authentication.readerPrincipal().isBlank()
-                                ? authentication.readerPrincipal() : null,
-                        authentication.readerCredentials()
-                )
+                topology,
+                archivePolicy,
+                timeouts(properties),
+                authentication,
+                threadingMode,
+                threadingMode == ThreadingMode.DEDICATED
+                        ? ArchiveThreadingMode.DEDICATED : ArchiveThreadingMode.SHARED,
+                productionMode
         );
-        /* The record constructor keeps its own defensive copy. Erase the parser's
-         * temporaries immediately so configuration loading does not leave extra
-         * long-lived credential copies on the heap. */
-        final byte[] credentials = authentication.credentials();
-        final byte[] readerCredentials = authentication.readerCredentials();
-        if (credentials != null) Arrays.fill(credentials, (byte) 0);
-        if (readerCredentials != null) Arrays.fill(readerCredentials, (byte) 0);
-        return settings;
     }
 
     /// Parses the replication framing and timeout builder settings.
-    private static AeronReplicationConfiguration replication(final NodeLibraryPropertiesProvider properties) {
+    private static AeronReplicationConfiguration replication(final NodeSettingsSource properties) {
         final AeronReplicationConfiguration.Builder builder = AeronReplicationConfiguration.builder();
         integerSetting(properties, "ECLIPSE_DATAGRID_AERON_TERM_LENGTH", builder::termLength);
         integerSetting(properties, "ECLIPSE_DATAGRID_AERON_MTU_LENGTH", builder::mtuLength);
@@ -356,7 +342,7 @@ record AeronSettings(
     }
 
     /// Resolves and validates the driver, Archive, and checkpoint directories.
-    private static Directories directories(final NodeLibraryPropertiesProvider properties,
+    private static Directories directories(final NodeSettingsSource properties,
                                            final boolean productionMode) {
         final Path aeronDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_DIRECTORY", "/tmp/eclipse-datagrid-aeron"));
         final Path archiveDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY",
@@ -383,7 +369,7 @@ record AeronSettings(
     }
 
     /// Resolves the required node and Store-generation identities.
-    private static StorageIdentity identity(final NodeLibraryPropertiesProvider properties) {
+    private static StorageIdentity identity(final NodeSettingsSource properties) {
         final String configuredNodeId = value(properties, "ECLIPSE_DATAGRID_AERON_NODE_ID", null);
         final String configuredStoreGeneration = value(
                 properties, "ECLIPSE_DATAGRID_AERON_STORE_GENERATION", null);
@@ -396,9 +382,43 @@ record AeronSettings(
                 parseUuid(configuredStoreGeneration, "ECLIPSE_DATAGRID_AERON_STORE_GENERATION"));
     }
 
-    /// Parses the Archive durability and capacity policy.
-    private static ArchivePolicy archivePolicy(final NodeLibraryPropertiesProvider properties,
-                                               final boolean productionMode) {
+    /// Parses and validates the cluster identity, channels, stream ids, and directories.
+    private static Topology topology(final NodeSettingsSource properties, final NodeRole role,
+                                     final boolean productionMode,
+                                     final AeronReplicationConfiguration replication,
+                                     final boolean externalArchive) {
+        final String cluster = value(properties, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", null);
+        if (cluster == null) throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_CLUSTER_ID is required");
+        final UUID clusterId = parseUuid(cluster, "ECLIPSE_DATAGRID_AERON_CLUSTER_ID");
+        final long epoch = parseLong(properties, "ECLIPSE_DATAGRID_AERON_EPOCH", "1");
+        final int streamId = parseInt(properties, "ECLIPSE_DATAGRID_AERON_STREAM_ID", "1001");
+        final long recordingId = parseLong(properties, "ECLIPSE_DATAGRID_AERON_RECORDING_ID", "-1");
+        if (epoch < 0 || streamId < 0 || recordingId < -1) {
+            throw new IllegalArgumentException("Aeron epoch/stream/recording settings are out of range");
+        }
+        /* Distinct streams must be reservable for replay and watermarks. */
+        if (streamId > Integer.MAX_VALUE - 2) {
+            throw new IllegalArgumentException(
+                    "ECLIPSE_DATAGRID_AERON_STREAM_ID must leave room for replay and watermark streams");
+        }
+        final int replayStreamId = streamId + 1;
+        final int watermarkStreamId = parseInt(properties,
+                "ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID", Integer.toString(streamId + 2));
+        if (watermarkStreamId < 0 || watermarkStreamId == streamId || watermarkStreamId == replayStreamId) {
+            throw new IllegalArgumentException(
+                    "ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID must be non-negative and distinct from data/replay streams");
+        }
+        return new Topology(clusterId, role, epoch, streamId, watermarkStreamId, recordingId,
+                identity(properties),
+                channels(properties, cluster, replication, role, externalArchive, productionMode),
+                directories(properties, productionMode));
+    }
+
+    /// Parses the Archive recording, retention, and capacity policy.
+    private static ArchivePolicy archivePolicy(final NodeSettingsSource properties,
+                                               final boolean productionMode,
+                                               final AeronReplicationConfiguration replication,
+                                               final boolean trustedNetwork) {
         final int archiveFileSyncLevel = parseInt(properties, "ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL", "1");
         if (archiveFileSyncLevel < 0 || archiveFileSyncLevel > 2) {
             throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL must be 0, 1, or 2");
@@ -423,11 +443,40 @@ record AeronSettings(
             throw new IllegalArgumentException(
                     "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES is only supported for embedded Archive writers");
         }
-        return new ArchivePolicy(archiveFileSyncLevel, minimumArchiveFreeBytes, externalArchive);
+        final int archiveSegmentFileLength = parseInt(properties, "ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH",
+                Integer.toString(Archive.Configuration.segmentFileLength()));
+        final long archiveLowStorageSpaceThreshold = parseLong(properties,
+                "ECLIPSE_DATAGRID_AERON_ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD",
+                Long.toString(Archive.Configuration.lowStorageSpaceThreshold()));
+        final int maxConcurrentReplays = parseInt(properties, "ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS",
+                Integer.toString(Archive.Configuration.maxConcurrentReplays()));
+        final long driverTimeoutMillis = parseLong(properties,
+                "ECLIPSE_DATAGRID_AERON_DRIVER_TIMEOUT_MILLIS", "10000");
+        if (archiveSegmentFileLength <= 0 || Integer.bitCount(archiveSegmentFileLength) != 1 ||
+            archiveSegmentFileLength < replication.termLength() ||
+            archiveLowStorageSpaceThreshold < 0 || maxConcurrentReplays <= 0 || driverTimeoutMillis <= 0) {
+            throw new IllegalArgumentException(
+                    "Archive segment length must be a positive power of two; low-storage threshold must not be negative; max concurrent replays must be positive");
+        }
+        return new ArchivePolicy(archiveFileSyncLevel, minimumArchiveFreeBytes, externalArchive,
+                archiveSegmentFileLength, archiveLowStorageSpaceThreshold, maxConcurrentReplays,
+                trustedNetwork ? retentionReaders(properties) : Set.of());
+    }
+
+    /// Parses the per-concern timeout budgets.
+    private static Timeouts timeouts(final NodeSettingsSource properties) {
+        return new Timeouts(
+                parseLong(properties, "ECLIPSE_DATAGRID_AERON_DRIVER_TIMEOUT_MILLIS", "10000"),
+                positiveLongSetting(properties,
+                        "ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS", DEFAULT_ARCHIVE_CONTROL_TIMEOUT_NANOS),
+                positiveLongSetting(properties,
+                        "ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS", DEFAULT_WATERMARK_CLOSE_TIMEOUT_NANOS),
+                positiveLongSetting(properties,
+                        "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS", DEFAULT_LEASE_LOCK_TIMEOUT_MILLIS));
     }
 
     /// Parses and validates every channel, including production endpoint policy.
-    private static Channels channels(final NodeLibraryPropertiesProvider properties, final String cluster,
+    private static Channels channels(final NodeSettingsSource properties, final String cluster,
                                      final AeronReplicationConfiguration replication, final NodeRole role,
                                      final boolean externalArchive, final boolean productionMode) {
         /* Keep development defaults self-contained, but make them match the
@@ -472,9 +521,21 @@ record AeronSettings(
                 archiveReplicationChannel, watermarkChannel);
     }
 
-    /// Parses and validates the Archive authentication contract.
-    private static Authentication authentication(final NodeLibraryPropertiesProvider properties, final NodeRole role,
-                                                 final boolean productionMode, final boolean externalArchive) {
+    /// Parses and validates the Archive authentication contract and the wire nonce.
+    private static Authentication authentication(final NodeSettingsSource properties, final NodeRole role,
+                                                 final boolean productionMode, final boolean externalArchive,
+                                                 final UUID clusterId) {
+        final String configuredNonce = value(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE", null);
+        if (productionMode && (configuredNonce == null || configuredNonce.isBlank())) {
+            throw new IllegalArgumentException(
+                    "ECLIPSE_DATAGRID_AERON_WIRE_NONCE is required in production");
+        }
+        final long wireNonce = configuredNonce == null || configuredNonce.isBlank()
+                ? AeronReplicationEnvelope.defaultWireNonce(clusterId)
+                : parseLong(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE", null);
+        if (wireNonce == 0L) {
+            throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_WIRE_NONCE must not be zero");
+        }
         final boolean authEnabled = booleanSetting(properties,
                 "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", false);
         /* Archive control authentication needs its own explicit
@@ -537,57 +598,18 @@ record AeronSettings(
                         "production writers require a separate ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL and credentials");
             }
         }
-        return new Authentication(authEnabled,
+        final Authentication authentication = new Authentication(authEnabled,
                 authEnabled ? authPrincipal.trim() : null,
                 authCredentials,
                 authReaderPrincipal == null || authReaderPrincipal.isBlank() ? null : authReaderPrincipal.trim(),
-                authReaderCredentials);
-    }
-
-    /// Parses threading, Archive sizing, and the per-concern timeout budgets.
-    private static RuntimeSettings runtimeSettings(final NodeLibraryPropertiesProvider properties,
-                                                   final int streamId,
-                                                   final AeronReplicationConfiguration replication) {
-        /* Distinct streams must be reservable for replay and watermarks. */
-        if (streamId > Integer.MAX_VALUE - 2) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_STREAM_ID must leave room for replay and watermark streams");
-        }
-        final int replayStreamId = streamId + 1;
-        final int watermarkStreamId = parseInt(properties,
-                "ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID", Integer.toString(streamId + 2));
-        if (watermarkStreamId < 0 || watermarkStreamId == streamId || watermarkStreamId == replayStreamId) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID must be non-negative and distinct from data/replay streams");
-        }
-        final ThreadingMode threadingMode = threadingMode(properties);
-        final ArchiveThreadingMode archiveThreadingMode = threadingMode == ThreadingMode.DEDICATED
-                ? ArchiveThreadingMode.DEDICATED : ArchiveThreadingMode.SHARED;
-        final int archiveSegmentFileLength = parseInt(properties, "ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH",
-                Integer.toString(Archive.Configuration.segmentFileLength()));
-        final long archiveLowStorageSpaceThreshold = parseLong(properties,
-                "ECLIPSE_DATAGRID_AERON_ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD",
-                Long.toString(Archive.Configuration.lowStorageSpaceThreshold()));
-        final int maxConcurrentReplays = parseInt(properties, "ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS",
-                Integer.toString(Archive.Configuration.maxConcurrentReplays()));
-        final long driverTimeoutMillis = parseLong(properties,
-                "ECLIPSE_DATAGRID_AERON_DRIVER_TIMEOUT_MILLIS", "10000");
-        final long archiveControlTimeoutNanos = positiveLongSetting(properties,
-                "ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS", DEFAULT_ARCHIVE_CONTROL_TIMEOUT_NANOS);
-        final long watermarkCloseTimeoutNanos = positiveLongSetting(properties,
-                "ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS", DEFAULT_WATERMARK_CLOSE_TIMEOUT_NANOS);
-        final long leaseAcquireLockTimeoutMillis = positiveLongSetting(properties,
-                "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS", DEFAULT_LEASE_LOCK_TIMEOUT_MILLIS);
-        if (archiveSegmentFileLength <= 0 || Integer.bitCount(archiveSegmentFileLength) != 1 ||
-            archiveSegmentFileLength < replication.termLength() ||
-            archiveLowStorageSpaceThreshold < 0 || maxConcurrentReplays <= 0 || driverTimeoutMillis <= 0) {
-            throw new IllegalArgumentException(
-                    "Archive segment length must be a positive power of two; low-storage threshold must not be negative; max concurrent replays must be positive");
-        }
-        return new RuntimeSettings(threadingMode, archiveThreadingMode, archiveSegmentFileLength,
-                archiveLowStorageSpaceThreshold, maxConcurrentReplays, driverTimeoutMillis,
-                archiveControlTimeoutNanos, watermarkCloseTimeoutNanos, leaseAcquireLockTimeoutMillis,
-                watermarkStreamId);
+                authReaderCredentials,
+                wireNonce);
+        /* The record constructor keeps its own defensive copy. Erase the parser's
+         * temporaries immediately so configuration loading does not leave extra
+         * long-lived credential copies on the heap. */
+        if (authCredentials != null) Arrays.fill(authCredentials, (byte) 0);
+        if (authReaderCredentials != null) Arrays.fill(authReaderCredentials, (byte) 0);
+        return authentication;
     }
 
     /** Reads one secret file through a bounded, stable descriptor snapshot. */
@@ -656,7 +678,7 @@ record AeronSettings(
         }
     }
 
-    private static Set<UUID> retentionReaders(final NodeLibraryPropertiesProvider properties) {
+    private static Set<UUID> retentionReaders(final NodeSettingsSource properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", null);
         if (configured == null || configured.isBlank()) return Set.of();
         final HashSet<UUID> readers = new HashSet<>();
@@ -691,7 +713,7 @@ record AeronSettings(
     /// @param fileDecoder   decodes a secret file with its property label
     /// @return decoded credentials, or `null` when unconfigured
     private static byte[] credentialsSetting(
-            final NodeLibraryPropertiesProvider properties,
+            final NodeSettingsSource properties,
             final String inlineKey,
             final String fileKey,
             final InlineSecretDecoder inlineDecoder,
@@ -709,7 +731,7 @@ record AeronSettings(
         return inlineDecoder.decode(configured.trim(), inlineKey);
     }
 
-    private static boolean booleanSetting(final NodeLibraryPropertiesProvider properties,
+    private static boolean booleanSetting(final NodeSettingsSource properties,
                                           final String name, final boolean fallback) {
         final String configured = value(properties, name, null);
         if (configured == null || configured.isBlank()) return fallback;
@@ -718,14 +740,14 @@ record AeronSettings(
         throw new IllegalArgumentException("%s must be true or false".formatted(name));
     }
 
-    private static byte[] authCredentials(final NodeLibraryPropertiesProvider properties) {
+    private static byte[] authCredentials(final NodeSettingsSource properties) {
         return authCredentials(properties,
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
                 "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS_FILE");
     }
 
     private static byte[] authCredentials(
-            final NodeLibraryPropertiesProvider properties,
+            final NodeSettingsSource properties,
             final String credentialsProperty,
             final String credentialsFileProperty
     ) {
@@ -761,7 +783,7 @@ record AeronSettings(
         }
     }
 
-    private static ThreadingMode threadingMode(final NodeLibraryPropertiesProvider properties) {
+    private static ThreadingMode threadingMode(final NodeSettingsSource properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_THREADING_MODE",
                 properties.isProdMode() ? "DEDICATED" : "SHARED");
         return switch (configured.trim().toUpperCase(Locale.ROOT)) {
@@ -772,7 +794,7 @@ record AeronSettings(
         };
     }
 
-    private static void integerSetting(final NodeLibraryPropertiesProvider properties,
+    private static void integerSetting(final NodeSettingsSource properties,
                                        final String environment, final IntConsumer setter) {
         final String configured = value(properties, environment, null);
         if (configured == null) return;
@@ -784,7 +806,7 @@ record AeronSettings(
         }
     }
 
-    private static void longSetting(final NodeLibraryPropertiesProvider properties,
+    private static void longSetting(final NodeSettingsSource properties,
                                     final String environment, final LongConsumer setter) {
         final String configured = value(properties, environment, null);
         if (configured == null) return;
@@ -797,7 +819,7 @@ record AeronSettings(
     }
 
         /// Accepts only archive-first durability.
-    private static ReplicationDurabilityMode durabilityMode(final NodeLibraryPropertiesProvider properties) {
+    private static ReplicationDurabilityMode durabilityMode(final NodeSettingsSource properties) {
         final String primary = value(properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE", null);
         final String legacy = value(properties, "ECLIPSE_DATAGRID_AERON_DURABILITY_MODE", null);
         if (primary != null && legacy != null && !equivalentSetting(primary, legacy)) {
@@ -817,16 +839,16 @@ record AeronSettings(
         return left.trim().replace('-', '_').equalsIgnoreCase(right.trim().replace('-', '_'));
     }
 
-    private static String value(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static String value(final NodeSettingsSource properties, final String name, final String fallback) {
         /* The provider owns the precedence rule.  Falling back directly to the
          * process environment here would let an ambient variable override a
-         * deliberately isolated application/test provider. NodeLibrary's Env
+         * deliberately isolated application/test provider. NodeSettingsSource's Env
          * implementation already reads environment variables at its boundary. */
         final String configured = properties.replicationProperty(name);
         return configured == null || configured.isBlank() ? fallback : configured;
     }
 
-    private static String channel(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static String channel(final NodeSettingsSource properties, final String name, final String fallback) {
         final String channel = value(properties, name, fallback).trim();
         if (channel.isEmpty() || channel.chars().anyMatch(Character::isWhitespace) ||
             channel.equals("aeron:udp") ||
@@ -977,7 +999,7 @@ record AeronSettings(
         }
     }
 
-    private static int parseInt(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static int parseInt(final NodeSettingsSource properties, final String name, final String fallback) {
         try {
             return Integer.parseInt(value(properties, name, fallback).trim());
         } catch (final NumberFormatException failure) {
@@ -985,7 +1007,7 @@ record AeronSettings(
         }
     }
 
-    private static long parseLong(final NodeLibraryPropertiesProvider properties, final String name, final String fallback) {
+    private static long parseLong(final NodeSettingsSource properties, final String name, final String fallback) {
         try {
             return Long.parseLong(value(properties, name, fallback).trim());
         } catch (final NumberFormatException failure) {
@@ -994,7 +1016,7 @@ record AeronSettings(
     }
 
     /// Parses a positive long environment setting with a typed default.
-    private static long positiveLongSetting(final NodeLibraryPropertiesProvider properties,
+    private static long positiveLongSetting(final NodeSettingsSource properties,
                                             final String name, final long fallback) {
         final long configured = parseLong(properties, name, Long.toString(fallback));
         if (configured <= 0L) {
@@ -1015,11 +1037,6 @@ record AeronSettings(
         }
     }
 
-    @Override
-    public Set<UUID> retentionReaders() {
-        return this.retentionReaders;
-    }
-
     /// Erases the settings-held Aeron auth credentials when the owning transport closes.
     ///
     /// The owning [AeronRuntime] calls this once its driver, client, and Archive
@@ -1031,7 +1048,7 @@ record AeronSettings(
     /// here. The principal is a non-secret identity string and has no
     /// erasable form.
     void clearAuthCredentials() {
-        this.auth.erase();
+        this.authentication.erase();
     }
 
         /// Builds the Archive authenticator for the embedded Archive, or `null` when auth is disabled.
@@ -1044,12 +1061,12 @@ record AeronSettings(
     ///
     /// @return authenticator supplier, or `null`
     AuthenticatorSupplier authenticatorSupplier() {
-        if (!this.auth.enabled()) return null;
-        final byte[] principal = this.auth.principal().getBytes(StandardCharsets.US_ASCII);
-        final byte[] credentials = this.auth.credentials();
-        final byte[] readerPrincipal = this.auth.readerPrincipal() == null
-                ? null : this.auth.readerPrincipal().getBytes(StandardCharsets.US_ASCII);
-        final byte[] readerCredentials = this.auth.readerCredentials();
+        if (!this.authentication.enabled()) return null;
+        final byte[] principal = this.authentication.principal().getBytes(StandardCharsets.US_ASCII);
+        final byte[] credentials = this.authentication.credentials();
+        final byte[] readerPrincipal = this.authentication.readerPrincipal() == null
+                ? null : this.authentication.readerPrincipal().getBytes(StandardCharsets.US_ASCII);
+        final byte[] readerCredentials = this.authentication.readerCredentials();
         return () -> {
             final SimpleAuthenticator.Builder builder = new SimpleAuthenticator.Builder()
                     .principal(principal, credentials);
@@ -1058,7 +1075,7 @@ record AeronSettings(
         };
     }
 
-        /// Builds the Archive authorisation service for the embedded Archive, or `null` when auth is disabled.
+        /// Builds the Archive authorization service for the embedded Archive, or `null` when auth is disabled.
     ///
     /// Only the configured principal is authorized, and only for the
     /// role-specific Archive actions required by this node. Reader principals
@@ -1066,13 +1083,13 @@ record AeronSettings(
     /// receive recording and retention-maintenance actions. Unknown actions
     /// and principals are denied by default.
     ///
-    /// @return authorisation service supplier, or `null`
+    /// @return authorization service supplier, or `null`
     AuthorisationServiceSupplier authorisationServiceSupplier() {
-        if (!this.auth.enabled()) return null;
-        final byte[] principal = this.auth.principal().getBytes(StandardCharsets.US_ASCII);
-        final byte[] readerPrincipal = this.auth.readerPrincipal() == null
-                ? null : this.auth.readerPrincipal().getBytes(StandardCharsets.US_ASCII);
-        final int[] actions = this.role.isWriter()
+        if (!this.authentication.enabled()) return null;
+        final byte[] principal = this.authentication.principal().getBytes(StandardCharsets.US_ASCII);
+        final byte[] readerPrincipal = this.authentication.readerPrincipal() == null
+                ? null : this.authentication.readerPrincipal().getBytes(StandardCharsets.US_ASCII);
+        final int[] actions = this.topology.role().isWriter()
                 ? WRITER_ARCHIVE_ACTIONS : READER_ARCHIVE_ACTIONS;
         return () -> {
             final SimpleAuthorisationService.Builder builder = new SimpleAuthorisationService.Builder()
@@ -1097,8 +1114,8 @@ record AeronSettings(
     ///
     /// @return credentials supplier, or `null`
     CredentialsSupplier credentialsSupplier() {
-        if (!this.auth.enabled()) return null;
-        final byte[] credentials = Objects.requireNonNull(this.auth.credentials(),
+        if (!this.authentication.enabled()) return null;
+        final byte[] credentials = Objects.requireNonNull(this.authentication.credentials(),
                 "auth credentials must be set when auth is enabled");
         return new CredentialsSupplier() {
             @Override
@@ -1113,22 +1130,5 @@ record AeronSettings(
                 return credentials.clone();
             }
         };
-    }
-
-    /// Local parse holder for the Archive policy group.
-    private record ArchivePolicy(int fileSyncLevel, long minimumFreeBytes, boolean externalArchive) {
-    }
-
-    /// Local parse holder for the authentication group.
-    private record Authentication(boolean enabled, String principal, byte[] credentials,
-                                  String readerPrincipal, byte[] readerCredentials) {
-    }
-
-    /// Local parse holder for the runtime threading and timeout group.
-    private record RuntimeSettings(ThreadingMode threadingMode, ArchiveThreadingMode archiveThreadingMode,
-                                   int archiveSegmentFileLength, long archiveLowStorageSpaceThreshold,
-                                   int maxConcurrentReplays, long driverTimeoutMillis,
-                                   long archiveControlTimeoutNanos, long watermarkCloseTimeoutNanos,
-                                   long leaseAcquireLockTimeoutMillis, int watermarkStreamId) {
     }
 }

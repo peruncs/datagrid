@@ -12,19 +12,19 @@ package peruncs.datagrid.cluster.node.backup;
 ///
 /// @param maxExtractedBytes absolute extraction byte ceiling
 /// @param maxArchiveEntries maximum number of entries an archive may declare
-public record BackupArchiveLimits(long maxExtractedBytes, int maxArchiveEntries) {
+record BackupArchiveLimits(long maxExtractedBytes, int maxArchiveEntries) {
     /// Default absolute extraction ceiling: one tebibyte.
-    public static final long DEFAULT_MAX_EXTRACTED_BYTES = 1L << 40;
+    static final long DEFAULT_MAX_EXTRACTED_BYTES = 1L << 40;
     /// Budgeted bytes per archive entry when deriving the entry budget.
-    public static final long BYTES_PER_ENTRY = 64L * 1024L;
+    static final long BYTES_PER_ENTRY = 64L * 1024L;
     /// Hard upper bound for derived entry budgets, independent of byte budget.
-    public static final int MAX_ENTRY_BUDGET = 1 << 24;
+    static final int MAX_ENTRY_BUDGET = 1 << 24;
 
     /// Creates default limits: a generous byte ceiling and an entry budget
     /// proportional to it, capped independently.
     ///
     /// @return default limits
-    public static BackupArchiveLimits defaults() {
+    static BackupArchiveLimits defaults() {
         return of(DEFAULT_MAX_EXTRACTED_BYTES);
     }
 
@@ -37,7 +37,7 @@ public record BackupArchiveLimits(long maxExtractedBytes, int maxArchiveEntries)
     ///
     /// @param maxExtractedBytes absolute extraction byte ceiling
     /// @return limits with a proportional entry budget
-    public static BackupArchiveLimits of(final long maxExtractedBytes) {
+    static BackupArchiveLimits of(final long maxExtractedBytes) {
         return new BackupArchiveLimits(maxExtractedBytes, entriesFor(maxExtractedBytes));
     }
 
@@ -46,7 +46,7 @@ public record BackupArchiveLimits(long maxExtractedBytes, int maxArchiveEntries)
     /// @param maxExtractedBytes absolute extraction byte ceiling
     /// @param maxArchiveEntries maximum number of archive entries
     /// @return limits
-    public static BackupArchiveLimits of(final long maxExtractedBytes, final int maxArchiveEntries) {
+    static BackupArchiveLimits of(final long maxExtractedBytes, final int maxArchiveEntries) {
         return new BackupArchiveLimits(maxExtractedBytes, maxArchiveEntries);
     }
 
@@ -62,7 +62,7 @@ public record BackupArchiveLimits(long maxExtractedBytes, int maxArchiveEntries)
     }
 
     /// Validates the budgets.
-    public BackupArchiveLimits {
+    BackupArchiveLimits {
         if (maxExtractedBytes <= 0L) {
             throw new IllegalArgumentException("maxExtractedBytes must be positive");
         }

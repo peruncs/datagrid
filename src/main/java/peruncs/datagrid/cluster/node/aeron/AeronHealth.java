@@ -1,9 +1,10 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+import peruncs.datagrid.cluster.api.ReplicationState;
 import peruncs.datagrid.cluster.errors.ReseedRequiredException;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport.StorageControllerAdapter;
 import peruncs.datagrid.cluster.node.replication.ReplicationHealth;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataClient;
+import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
@@ -20,13 +21,13 @@ import java.util.function.Supplier;
 final class AeronHealth implements ReplicationHealth {
     private static final System.Logger LOGGER = System.getLogger(AeronHealth.class.getName());
     private final StorageControllerAdapter storage;
-    private final StorageBinaryDataClient client;
+    private final ReplicationApplier client;
     private final BooleanSupplier closed;
     private final BooleanSupplier driverFailed;
     private final BooleanSupplier capacityAvailable;
     private final BooleanSupplier writerReady;
     private final BooleanSupplier writerRole;
-    private final Supplier<ReplicationHealth.State> checkpointState;
+    private final Supplier<ReplicationState> checkpointState;
     private final LongSupplier archiveUsableSpace;
     private final LongSupplier writerDurablePosition;
     private final LongSupplier writerDurableSequence;
@@ -40,10 +41,10 @@ final class AeronHealth implements ReplicationHealth {
     private final java.util.Set<String> warnedProbes =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    AeronHealth(final StorageControllerAdapter storage, final StorageBinaryDataClient client,
+    AeronHealth(final StorageControllerAdapter storage, final ReplicationApplier client,
                 final BooleanSupplier closed, final BooleanSupplier driverFailed, final BooleanSupplier capacityAvailable,
                 final BooleanSupplier writerReady, final BooleanSupplier writerRole,
-                final Supplier<ReplicationHealth.State> checkpointState, final LongSupplier archiveUsableSpace,
+                final Supplier<ReplicationState> checkpointState, final LongSupplier archiveUsableSpace,
                 final LongSupplier writerDurablePosition, final LongSupplier writerDurableSequence,
                 final LongSupplier appliedSequence, final BooleanSupplier watermarkFailed) {
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -66,7 +67,7 @@ final class AeronHealth implements ReplicationHealth {
     /// @param storage storage adapter identity
     /// @param client  client identity
     /// @return `true` when this view was created for both
-    boolean matches(final StorageControllerAdapter storage, final StorageBinaryDataClient client) {
+    boolean matches(final StorageControllerAdapter storage, final ReplicationApplier client) {
         return this.storage == storage && this.client == client;
     }
 
@@ -132,12 +133,12 @@ final class AeronHealth implements ReplicationHealth {
     ///
     /// @return current replication state
     @Override
-    public ReplicationHealth.State state() {
+    public ReplicationState state() {
         try {
             return this.stateUnchecked();
         } catch (final RuntimeException probeFailure) {
             this.logProbeFailure("state", probeFailure);
-            return ReplicationHealth.State.FAILED;
+            return ReplicationState.FAILED;
         }
     }
 
@@ -156,41 +157,41 @@ final class AeronHealth implements ReplicationHealth {
                 "Aeron replication %s probe failed again".formatted(probe), probeFailure);
     }
 
-    private ReplicationHealth.State stateUnchecked() {
+    private ReplicationState stateUnchecked() {
         if (!this.active || this.closed.getAsBoolean() || this.driverFailed.getAsBoolean() ||
             this.watermarkFailed.getAsBoolean()) {
-            return ReplicationHealth.State.FAILED;
+            return ReplicationState.FAILED;
         }
         if (this.writerRole.getAsBoolean()) {
             /* Writers intentionally have no reader client.  Treating that null client
              * as a failure made every healthy writer report FAILED, even though its
              * publication and terminal checkpoint were ready. */
-            final ReplicationHealth.State checkpoint = this.checkpointState.get();
-            if (checkpoint == ReplicationHealth.State.RESEED_REQUIRED ||
-                checkpoint == ReplicationHealth.State.FAILED) {
+            final ReplicationState checkpoint = this.checkpointState.get();
+            if (checkpoint == ReplicationState.RESEED_REQUIRED ||
+                checkpoint == ReplicationState.FAILED) {
                 return checkpoint;
             }
-            if (!this.capacityAvailable.getAsBoolean()) return ReplicationHealth.State.DEGRADED_ARCHIVE;
+            if (!this.capacityAvailable.getAsBoolean()) return ReplicationState.DEGRADED;
             return this.writerReady.getAsBoolean()
-                    ? ReplicationHealth.State.LIVE : ReplicationHealth.State.STARTING;
+                    ? ReplicationState.LIVE : ReplicationState.STARTING;
         }
-        final ReplicationHealth.State checkpoint = this.checkpointState.get();
+        final ReplicationState checkpoint = this.checkpointState.get();
         if (checkpoint != null) return checkpoint;
         if (this.client == null) {
             /* A reader is not failed merely because the provider has not created its
              * subscription yet.  This is the normal state between provider creation
-             * and ClusterFoundation's client wiring. */
-            return ReplicationHealth.State.STARTING;
+             * and NodeAssembly's client wiring. */
+            return ReplicationState.STARTING;
         }
         if (this.client.failure() instanceof ReseedRequiredException) {
             /* The reader proved its durable cursor unusable or could not
              * reattach within its reconnect budget; retrying the same cursor
              * would fail again, so report the typed reseed signal. */
-            return ReplicationHealth.State.RESEED_REQUIRED;
+            return ReplicationState.RESEED_REQUIRED;
         }
-        if (this.client.failure() != null) return ReplicationHealth.State.FAILED;
-        if (!this.client.isRunning()) return ReplicationHealth.State.STARTING;
-        return this.client.isLive() ? ReplicationHealth.State.LIVE : ReplicationHealth.State.REPLAYING;
+        if (this.client.failure() != null) return ReplicationState.FAILED;
+        if (!this.client.isRunning()) return ReplicationState.STARTING;
+        return this.client.isLive() ? ReplicationState.LIVE : ReplicationState.REPLAYING;
     }
 
         /// Marks this view inactive so later probes report a stable failure

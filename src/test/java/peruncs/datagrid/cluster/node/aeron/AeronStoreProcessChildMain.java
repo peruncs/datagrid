@@ -7,10 +7,10 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
-import peruncs.datagrid.cluster.node.NodeLibraryPropertiesProvider;
+import peruncs.datagrid.cluster.node.NodeSettingsSource;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.storage.types.DistributedStorage;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.node.store.DistributedStorage;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,8 +39,7 @@ public final class AeronStoreProcessChildMain {
         Files.createDirectories(root.resolve("control"));
         final AtomicBoolean rejectNext = new AtomicBoolean(mode.equals("dictionary"));
         final AtomicBoolean sawFourChannels = new AtomicBoolean();
-        try (ClusterReplicationTransport transport = new AeronClusterReplicationTransportProvider()
-                .create(properties(root, clusterId, nodeId, generation))) {
+        try (ClusterReplicationTransport transport = new AeronTransport(properties(root, clusterId, nodeId, generation))) {
             final AtomicInteger dictionaryChunks = new AtomicInteger();
             transport.positionProvider("store").init();
             /* Count dictionary chunks at the publication seam, rather than counting
@@ -51,7 +50,7 @@ public final class AeronStoreProcessChildMain {
             {
                 if ("AFTER_DICTIONARY_CHUNKS".equals(name)) dictionaryChunks.incrementAndGet();
             }, () -> {
-                final StorageBinaryDataDistributor distributor = transport.distributor("store", false);
+                final ReplicationPublisher distributor = transport.distributor("store");
                 final UnaryOperator<PersistenceTarget<Binary>> targetFactory = delegate ->
                         transport.persistenceTargetFactory("store", distributor).apply(new PersistenceTarget<>() {
                             @Override
@@ -121,7 +120,7 @@ public final class AeronStoreProcessChildMain {
         return EmbeddedStorage.Foundation(configuration);
     }
 
-    private static NodeLibraryPropertiesProvider properties(
+    private static NodeSettingsSource properties(
             final Path root, final UUID clusterId, final UUID nodeId, final UUID generation) {
         return new TestNodeProperties() {
             @Override

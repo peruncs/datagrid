@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.node.exceptions.ReplicationPositionUnavailableException;
+import peruncs.datagrid.cluster.errors.ReplicationPositionUnavailableException;
 
 import java.util.UUID;
 

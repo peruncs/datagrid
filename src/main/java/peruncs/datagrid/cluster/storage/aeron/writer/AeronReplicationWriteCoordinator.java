@@ -3,9 +3,9 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.errors.WriterFencedException;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -38,7 +38,7 @@ import java.util.function.LongSupplier;
 ///
 /// This is an Aeron-only write coordinator. Store integration must use
 /// [AeronStorageBinaryReplicationTarget]; exposing this object as the
-/// distributor would allow publication without local Store
+/// publisher would allow publication without local Store
 /// acceptance and would bypass the durable fence.
 public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private final AeronReplicationPublisher publisher;
@@ -257,7 +257,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
         /// Publishes and commits one Store binary using the archive-first fence.
     ///
-    /// This entry point is for the neutral distributor, which has no local
+    /// This entry point is for the neutral publisher, which has no local
     /// persistence target to fence. Store writes should use
     /// [AeronStorageBinaryReplicationTarget] so local acceptance and
     /// publication remain one operation.

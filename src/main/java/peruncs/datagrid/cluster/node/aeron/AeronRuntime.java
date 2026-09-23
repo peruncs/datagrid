@@ -9,7 +9,7 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.exceptions.ActiveDriverException;
 import org.agrona.ErrorHandler;
-import peruncs.datagrid.cluster.storage.types.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.ReplicationRetry;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -176,42 +176,42 @@ final class AeronRuntime implements AutoCloseable {
     }
 
     private void start(final Runnable beforeDriverLaunch) {
-        ensurePrivateDirectory(this.settings.directories().aeronDirectory(), this.settings.productionMode());
-        final Path checkpointParent = this.settings.directories().checkpointPath().toAbsolutePath().getParent();
+        ensurePrivateDirectory(this.settings.topology().directories().aeronDirectory(), this.settings.productionMode());
+        final Path checkpointParent = this.settings.topology().directories().checkpointPath().toAbsolutePath().getParent();
         if (checkpointParent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
         ensurePrivateDirectory(checkpointParent, this.settings.productionMode());
-        final boolean embeddedWriter = this.settings.role().isWriter() && !this.settings.externalArchive();
-        if (embeddedWriter) ensurePrivateDirectory(this.settings.directories().archiveDirectory(), this.settings.productionMode());
+        final boolean embeddedWriter = this.settings.topology().role().isWriter() && !this.settings.archivePolicy().externalArchive();
+        if (embeddedWriter) ensurePrivateDirectory(this.settings.topology().directories().archiveDirectory(), this.settings.productionMode());
         final MediaDriver.Context media = new MediaDriver.Context()
-                .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
-                .driverTimeoutMs(this.settings.driverTimeoutMillis())
+                .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
+                .driverTimeoutMs(this.settings.timeouts().driverTimeoutMillis())
                 .threadingMode(this.settings.threadingMode())
                 .mtuLength(this.settings.replication().mtuLength())
                 .publicationTermBufferLength(this.settings.replication().termLength())
-                .spiesSimulateConnection(embeddedWriter && !explicitlyDisablesSpySimulation(this.settings.channels().live()))
+                .spiesSimulateConnection(embeddedWriter && !explicitlyDisablesSpySimulation(this.settings.topology().channels().live()))
                 .errorHandler(this.errorHandler)
                 .dirDeleteOnStart(false)
                 .dirDeleteOnShutdown(false);
         beforeDriverLaunch.run();
         if (embeddedWriter) {
             final Archive.Context archiveContext = new Archive.Context()
-                    .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
-                    .archiveDir(this.settings.directories().archiveDirectory().toFile())
+                    .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
+                    .archiveDir(this.settings.topology().directories().archiveDirectory().toFile())
                     .deleteArchiveOnStart(false)
                     .threadingMode(this.settings.archiveThreadingMode())
-                    .controlChannel(this.settings.channels().control())
+                    .controlChannel(this.settings.topology().channels().control())
                     .localControlChannel("aeron:ipc")
-                    .replicationChannel(this.settings.channels().archiveReplication())
-                    .segmentFileLength(this.settings.archiveSegmentFileLength())
-                    .lowStorageSpaceThreshold(this.settings.archiveLowStorageSpaceThreshold())
-                    .maxConcurrentReplays(this.settings.maxConcurrentReplays())
+                    .replicationChannel(this.settings.topology().channels().archiveReplication())
+                    .segmentFileLength(this.settings.archivePolicy().segmentFileLength())
+                    .lowStorageSpaceThreshold(this.settings.archivePolicy().lowStorageSpaceThreshold())
+                    .maxConcurrentReplays(this.settings.archivePolicy().maxConcurrentReplays())
                     .errorHandler(this.errorHandler)
-                    .fileSyncLevel(this.settings.archiveFileSyncLevel())
-                    .catalogFileSyncLevel(this.settings.archiveFileSyncLevel());
+                    .fileSyncLevel(this.settings.archivePolicy().fileSyncLevel())
+                    .catalogFileSyncLevel(this.settings.archivePolicy().fileSyncLevel());
             /* The MediaDriver context in this Aeron version exposes no authentication
              * hooks, so the embedded Archive is the enforcement point: it authenticates
              * control sessions while the driver stays a local IPC detail. */
-            if (this.settings.auth().enabled()) {
+            if (this.settings.authentication().enabled()) {
                 archiveContext.authenticatorSupplier(this.settings.authenticatorSupplier());
                 archiveContext.authorisationServiceSupplier(this.settings.authorisationServiceSupplier());
             }
@@ -221,8 +221,8 @@ final class AeronRuntime implements AutoCloseable {
             this.driver = launchDriver(media, () -> MediaDriver.launch(media.clone()));
         }
         this.aeron = Aeron.connect(new Aeron.Context()
-                .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
-                .driverTimeoutMs(this.settings.driverTimeoutMillis())
+                .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
+                .driverTimeoutMs(this.settings.timeouts().driverTimeoutMillis())
                 .errorHandler(this.errorHandler)
                 .subscriberErrorHandler(this.subscriberErrorHandler));
         this.archive = AeronArchive.connect(this.archiveContext());
@@ -239,12 +239,12 @@ final class AeronRuntime implements AutoCloseable {
     AeronArchive.Context archiveContext() {
         final AeronArchive.Context context = new AeronArchive.Context()
                 .aeron(this.aeron)
-                .aeronDirectoryName(this.settings.directories().aeronDirectory().toString())
-                .controlRequestChannel(this.settings.channels().control())
-                .controlResponseChannel(this.settings.channels().controlResponse())
+                .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
+                .controlRequestChannel(this.settings.topology().channels().control())
+                .controlResponseChannel(this.settings.topology().channels().controlResponse())
                 .errorHandler(this.errorHandler)
-                .messageTimeoutNs(this.settings.archiveControlTimeoutNanos());
-        if (this.settings.auth().enabled()) {
+                .messageTimeoutNs(this.settings.timeouts().archiveControlTimeoutNanos());
+        if (this.settings.authentication().enabled()) {
             context.credentialsSupplier(this.settings.credentialsSupplier());
         }
         return context;

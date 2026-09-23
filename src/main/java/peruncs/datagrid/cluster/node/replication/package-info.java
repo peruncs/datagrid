@@ -1,11 +1,11 @@
-/// This package carries Aeron replication between nodes.
+/// Neutral replication contracts shared by the node layer and its transports.
 ///
-/// It owns the transport contract with its no-op implementation for nodes
-/// with replication disabled, plus durable cursors with their store, health,
-/// retention, and position views. Binary distributor, client, merger, and
-/// packet contracts live in the storage-types package so transport providers
-/// do not create a duplicate API layer. A provider owns its transport
-/// resources, while the node owns start and stop order.
+/// This package owns the transport contract with its no-op implementation
+/// for nodes with replication disabled, plus durable cursors with their
+/// store, health, retention, and position views. Binary apply, publish,
+/// receive, and merger contracts live in `...cluster.storage.binary`, so
+/// transport providers do not create a duplicate API layer. A provider owns
+/// its transport resources, while the node owns start and stop order.
 ///
 /// @since 1.0
 package peruncs.datagrid.cluster.node.replication;

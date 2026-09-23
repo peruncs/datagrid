@@ -9,20 +9,16 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.util.BufferSizeProviderIncremental;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.errors.WriterFencedException;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -586,7 +582,7 @@ class AeronReplicationWriteCoordinatorTest {
             return length;
         }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final var coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final var source = new StorageBinaryDataDistributor() {
+        final var source = new ReplicationPublisher() {
             private String dictionary = "type";
 
             public void distributeData(final Binary ignored) {
@@ -632,7 +628,7 @@ class AeronReplicationWriteCoordinatorTest {
             return length;
         }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final var coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final var source = new StorageBinaryDataDistributor() {
+        final var source = new ReplicationPublisher() {
             private String dictionary = "type";
 
             public void distributeData(final Binary ignored) {
@@ -986,8 +982,8 @@ class AeronReplicationWriteCoordinatorTest {
                     return position;
                 });
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final StorageBinaryDataDistributor dictionaries =
-                StorageBinaryDataDistributor.Caching(StorageBinaryDataDistributor.noOp());
+        final ReplicationPublisher dictionaries =
+                ReplicationPublisher.Caching(ReplicationPublisher.noOp());
         final PersistenceTarget<Binary> local = new PersistenceTarget<>() {
             @Override public void write(final Binary data) { }
             @Override public boolean isWritable() { return true; }

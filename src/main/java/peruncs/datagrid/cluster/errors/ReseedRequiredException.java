@@ -7,7 +7,15 @@ package peruncs.datagrid.cluster.errors;
 public class ReseedRequiredException extends ReplicationException {
     private static final String PREFIX = "RESEED_REQUIRED: ";
 
+    /// Creates the exception with a message.
+    ///
+    /// @param message diagnostic message
+
     public ReseedRequiredException(final String message) { super(prefix(message)); }
+    /// Creates the exception with a message and the underlying cause.
+    ///
+    /// @param message diagnostic message
+    /// @param cause   underlying cause
     public ReseedRequiredException(final String message, final Throwable cause) { super(prefix(message), cause); }
 
     private static String prefix(final String message) {

@@ -3,7 +3,7 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfer;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataDistributor;
+import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
@@ -23,7 +23,7 @@ import static org.eclipse.serializer.util.X.notNull;
 public final class AeronStorageBinaryReplicationTarget implements PersistenceTarget<Binary> {
     private final PersistenceTarget<Binary> delegate;
     private final AeronReplicationWriteCoordinator coordinator;
-    private final StorageBinaryDataDistributor dictionarySource;
+    private final ReplicationPublisher dictionarySource;
     private final LongConsumer committedSequence;
     private final BooleanSupplier distributionEnabled;
     private final Runnable writerIndexValidation;
@@ -43,7 +43,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// @param writerIndexValidation writer index check, or `null` to skip
     public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
                                                final AeronReplicationWriteCoordinator coordinator,
-                                               final StorageBinaryDataDistributor dictionarySource,
+                                               final ReplicationPublisher dictionarySource,
                                                final LongConsumer committedSequence,
                                                final BooleanSupplier distributionEnabled,
                                                final Runnable writerIndexValidation) {
@@ -78,7 +78,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// @return target using the supplied callbacks
     static AeronStorageBinaryReplicationTarget create(final PersistenceTarget<Binary> delegate,
                                                    final AeronReplicationWriteCoordinator coordinator,
-                                                   final StorageBinaryDataDistributor dictionarySource,
+                                                   final ReplicationPublisher dictionarySource,
                                                    final LongConsumer committedSequence,
                                                    final BooleanSupplier distributionEnabled) {
         return new AeronStorageBinaryReplicationTarget(delegate, coordinator, dictionarySource,

@@ -3,7 +3,7 @@ package peruncs.datagrid.cluster.storage.aeron.wire;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
+import peruncs.datagrid.cluster.storage.Crc32C;
 
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -59,7 +59,7 @@ public final class AeronReplicationEnvelope {
     /// or [#crc32c(DirectBuffer, int, int, ChecksumContext)]. An instance is
     /// never shared across threads and never retained by a platform thread.
     public static final class ChecksumContext {
-        private final Crc32c.Context crc = new Crc32c.Context();
+        private final Crc32C.Context crc = new Crc32C.Context();
 
         private int compute(final DirectBuffer payload, final int offset, final int length) {
             return this.crc.compute(payload, offset, length);
@@ -387,7 +387,7 @@ public final class AeronReplicationEnvelope {
 
         /// Computes the checksum used to detect damaged chunks and commits.
     public static int crc32c(final byte[] payload) {
-        return Crc32c.compute(payload);
+        return Crc32C.compute(payload);
     }
 
         /// Computes the same checksum directly from an Agrona buffer range using

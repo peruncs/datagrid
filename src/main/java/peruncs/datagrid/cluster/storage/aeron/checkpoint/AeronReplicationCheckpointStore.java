@@ -1,13 +1,11 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
-import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
-import peruncs.datagrid.cluster.storage.types.PathSecurity;
-import peruncs.datagrid.cluster.storage.types.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.Crc32C;
+import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
+import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -53,7 +51,7 @@ public final class AeronReplicationCheckpointStore {
         synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
             final Path parent = canonical.getParent();
             if (parent != null) Files.createDirectories(parent);
-            PathSecurity.ensureNoSymbolicLinks(canonical);
+            AtomicFileWriter.ensureNoSymbolicLinks(canonical);
             try (FileChannel channel = FileChannel.open(canonical, StandardOpenOption.CREATE,
                     StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 if (channel.size() != 0L && channel.size() != JOURNAL_BYTES) {
@@ -72,7 +70,7 @@ public final class AeronReplicationCheckpointStore {
                 final byte[] record = encode(checkpoint);
                 final ByteBuffer slot = ByteBuffer.allocate(SLOT_BYTES);
                 slot.putLong(generation).put(record);
-                slot.putInt(Crc32c.compute(slot.array(), 0, SLOT_BYTES - Integer.BYTES)).flip();
+                slot.putInt(Crc32C.compute(slot.array(), 0, SLOT_BYTES - Integer.BYTES)).flip();
                 channel.position((generation & 1L) * SLOT_BYTES);
                 testPoint("BEFORE_JOURNAL_SLOT_WRITE", canonical);
                 if (TEST_HOOK.isBound()) {
@@ -111,7 +109,7 @@ public final class AeronReplicationCheckpointStore {
         offset = putInt(encoded, offset, checkpoint.dataLength());
         offset = putInt(encoded, offset, checkpoint.dataChunkCount());
         offset = putInt(encoded, offset, checkpoint.resolutionCrc32c());
-        putInt(encoded, offset, Crc32c.compute(encoded, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
+        putInt(encoded, offset, Crc32C.compute(encoded, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES));
         return encoded;
     }
 
@@ -122,7 +120,7 @@ public final class AeronReplicationCheckpointStore {
     /// @throws IOException if the file is missing, truncated, or invalid
     public static AeronReplicationCheckpoint read(final Path path) throws IOException {
         final Path canonical = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
-        PathSecurity.ensureNoSymbolicLinks(canonical);
+        AtomicFileWriter.ensureNoSymbolicLinks(canonical);
         final byte[] bytes;
         synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
             try (FileChannel channel = FileChannel.open(canonical, StandardOpenOption.READ,
@@ -139,7 +137,7 @@ public final class AeronReplicationCheckpointStore {
             }
         }
         final int expected = getInt(bytes, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES);
-        if (expected != Crc32c.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES)) {
+        if (expected != Crc32C.compute(bytes, 0, AeronReplicationCheckpoint.ENCODED_BYTES - Integer.BYTES)) {
             throw new IOException("Aeron checkpoint CRC32C mismatch");
         }
         try {
@@ -186,7 +184,7 @@ public final class AeronReplicationCheckpointStore {
         final long generation = ByteBuffer.wrap(bytes).getLong();
         if (generation <= 0L) return null;
         final int expected = ByteBuffer.wrap(bytes, SLOT_BYTES - Integer.BYTES, Integer.BYTES).getInt();
-        if (expected != Crc32c.compute(bytes, 0, SLOT_BYTES - Integer.BYTES)) return null;
+        if (expected != Crc32C.compute(bytes, 0, SLOT_BYTES - Integer.BYTES)) return null;
         return new Slot(generation, java.util.Arrays.copyOfRange(
                 bytes, Long.BYTES, Long.BYTES + AeronReplicationCheckpoint.ENCODED_BYTES));
     }

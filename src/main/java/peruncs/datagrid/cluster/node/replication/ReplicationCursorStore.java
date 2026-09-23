@@ -1,10 +1,9 @@
 package peruncs.datagrid.cluster.node.replication;
 
 import org.eclipse.serializer.io.XIO;
-import peruncs.datagrid.cluster.node.store.StorageFileOperations;
-import peruncs.datagrid.cluster.storage.types.AtomicFileWriter;
-import peruncs.datagrid.cluster.storage.types.Crc32c;
-import peruncs.datagrid.cluster.storage.types.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.Crc32C;
+import peruncs.datagrid.cluster.storage.ReplicationCursor;
+import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -60,7 +59,7 @@ public final class ReplicationCursorStore {
     /// @return stored cursor
     /// @throws IOException if the cursor is missing or invalid
     public static ReplicationCursor read(final Path path) throws IOException {
-        StorageFileOperations.ensureNoSymbolicLinks(path);
+        AtomicFileWriter.ensureNoSymbolicLinks(path);
         try (SeekableByteChannel channel = Files.newByteChannel(path, Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
             final long size = channel.size();
             if (size < 0L || size > MAX_CURSOR_BYTES) {
@@ -96,7 +95,7 @@ public final class ReplicationCursorStore {
                 .put(transport).putLong(cursor.storeGeneration() == null ? 0 : cursor.storeGeneration().getMostSignificantBits())
                 .putLong(cursor.storeGeneration() == null ? 0 : cursor.storeGeneration().getLeastSignificantBits())
                 .putLong(cursor.logicalSequence()).putInt(position.length).put(position);
-        encoded.putInt(Crc32c.compute(encoded.array(), 0, encoded.position()));
+        encoded.putInt(Crc32C.compute(encoded.array(), 0, encoded.position()));
         return encoded.array();
     }
 
@@ -112,7 +111,7 @@ public final class ReplicationCursorStore {
         }
         final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
         final int expected = buffer.getInt(bytes.length - CRC_BYTES);
-        if (expected != Crc32c.compute(bytes, 0, bytes.length - CRC_BYTES))
+        if (expected != Crc32C.compute(bytes, 0, bytes.length - CRC_BYTES))
             throw new IOException("cursor CRC32C mismatch");
         if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION)
             throw new IOException("unknown cursor format");

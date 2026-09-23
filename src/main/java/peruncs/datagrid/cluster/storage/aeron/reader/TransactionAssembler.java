@@ -8,7 +8,7 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.datagrid.cluster.storage.types.StorageBinaryDataReceiver;
+import peruncs.datagrid.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.CharsetDecoder;
@@ -39,7 +39,7 @@ final class TransactionAssembler {
     private final Consumer<CursorSnapshot> transactionResolved;
     private final ReaderDeliveryListener deliveryListener;
     private final AtomicLong lastResolvedSequence = new AtomicLong();
-    /* Materialisation can succeed before the durable cursor callback completes.
+    /* Materialization can succeed before the durable cursor callback completes.
      * Keep that observation separate for health/lag reporting. */
     private final AtomicLong lastAppliedSequence = new AtomicLong();
     private final AtomicLong lastResolvedPosition = new AtomicLong();
@@ -121,7 +121,7 @@ final class TransactionAssembler {
     /// @param initialPosition    last resolved Archive position, or `-1` before the first
     /// @param receiver           destination for complete Store binaries
     /// @param transactionResolved callback after a delivery barrier resolves durably; never `null`
-    /// @param deliveryListener   callback around Store materialisation, or `null`
+    /// @param deliveryListener   callback around Store materialization, or `null`
     /// @param wireNonce          expected accidental-cross-wiring nonce; must not be zero
     TransactionAssembler(
             final AeronReplicationConfiguration configuration,
@@ -459,7 +459,7 @@ final class TransactionAssembler {
         return this.lastResolvedSequence.get();
     }
 
-        /// Returns the last sequence materialised by the Store receiver.
+        /// Returns the last sequence materialized by the Store receiver.
     ///
     /// @return last applied transaction sequence, or the initial value
     long lastAppliedSequence() {
@@ -579,7 +579,7 @@ final class TransactionAssembler {
         /* One reusable view over [dataStorage] for incremental CRC updates. The
          * JDK ByteBuffer checksum API advances the buffer position, so hashing the
          * destination range through a stable duplicate avoids the per-chunk
-         * duplicate that Crc32c.update would allocate for a direct source. */
+         * duplicate that Crc32C.update would allocate for a direct source. */
         private ByteBuffer dataCrcView;
         private int dictionaryOffset;
         private int dataOffset;
@@ -895,7 +895,7 @@ final class TransactionAssembler {
                 }
             }
             if (entry == null) break;
-            /* An abort advances the cursor without materialising a Store image. */
+            /* An abort advances the cursor without materializing a Store image. */
             if (entry.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
                 candidateAppliedSequence = entry.sequence();
             }
