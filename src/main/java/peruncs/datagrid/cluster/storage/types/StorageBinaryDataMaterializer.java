@@ -19,8 +19,9 @@ final class StorageBinaryDataMaterializer {
      * local), so one instance serves every batch. The ObjectMaterializer below
      * stays per-batch: upstream requires one PersistenceLoader per operation. */
     private static final BinaryEntityRawDataIterator ITERATOR = BinaryEntityRawDataIterator.New();
+    private ByteBuffer[] batchViews = new ByteBuffer[0];
 
-    private StorageBinaryDataMaterializer() {
+    StorageBinaryDataMaterializer() {
     }
 
         /// Materializes all entities in the populated prefix of a scratch array.
@@ -32,13 +33,13 @@ final class StorageBinaryDataMaterializer {
     /// @param storage Store connection owning the persistence manager
     /// @param buffers scratch array with the batch in its prefix
     /// @param length  number of populated prefix slots
-    static void materialize(final BinaryPersistenceFoundation<?> foundation,
+    void materialize(final BinaryPersistenceFoundation<?> foundation,
                             final StorageConnection storage, final ByteBuffer[] buffers, final int length) {
         materialize(foundation, storage, buffers, 0, length);
     }
 
     /// Materializes one transaction slice from a reusable batch array.
-    static void materialize(final BinaryPersistenceFoundation<?> foundation,
+    void materialize(final BinaryPersistenceFoundation<?> foundation,
                             final StorageConnection storage, final ByteBuffer[] buffers,
                             final int offset, final int length) {
         Objects.requireNonNull(foundation, "foundation");
@@ -75,21 +76,27 @@ final class StorageBinaryDataMaterializer {
          * source. This uses Serializer's public loader pipeline, preserving
          * create/update/complete ordering without reflective access to its
          * package-private BinaryLoadItem constructors. */
-        final ByteBuffer[] batch = java.util.Arrays.copyOfRange(buffers, offset, end);
-        final PersistenceSourceSupplier<Binary> source = new ImportedBinarySource(manager, batch);
-        final PersistenceTypeHandlerLookup<Binary> handlers =
-                binaryHandlers(foundation.getTypeHandlerManager());
-        if (handlers == null) return;
-        final Persister persister = foundation.getPersister() == null
-                ? manager : foundation.getPersister();
-        final LoadItemsChain loadItems = foundation instanceof EmbeddedStorageConnectionFoundation<?> embedded
-                ? new LoadItemsChain.ChannelHashing(
-                        embedded.getStorageSystem().channelCountProvider().getChannelCount())
-                : new LoadItemsChain.Simple();
-        final BinaryLoader loader = BinaryLoader.New(
-                handlers,
-                manager.objectRegistry(), persister, source, loadItems, foundation.isByteOrderMismatch());
-        materializer.materialize(loader);
+        if (this.batchViews.length != length) this.batchViews = new ByteBuffer[length];
+        final ByteBuffer[] batch = this.batchViews;
+        System.arraycopy(buffers, offset, batch, 0, length);
+        try {
+            final PersistenceSourceSupplier<Binary> source = new ImportedBinarySource(manager, batch);
+            final PersistenceTypeHandlerLookup<Binary> handlers =
+                    binaryHandlers(foundation.getTypeHandlerManager());
+            if (handlers == null) return;
+            final Persister persister = foundation.getPersister() == null
+                    ? manager : foundation.getPersister();
+            final LoadItemsChain loadItems = foundation instanceof EmbeddedStorageConnectionFoundation<?> embedded
+                    ? new LoadItemsChain.ChannelHashing(
+                            embedded.getStorageSystem().channelCountProvider().getChannelCount())
+                    : new LoadItemsChain.Simple();
+            final BinaryLoader loader = BinaryLoader.New(
+                    handlers,
+                    manager.objectRegistry(), persister, source, loadItems, foundation.isByteOrderMismatch());
+            materializer.materialize(loader);
+        } finally {
+            java.util.Arrays.fill(batch, null);
+        }
     }
 
     @SuppressWarnings("unchecked")

@@ -42,14 +42,10 @@ final class StorageBinaryDataImporter {
     }
 
     private static ByteBuffer[] importAndReset(final StorageConnection storage, final ByteBuffer[] importedBuffers) {
-        /* Store consumes and collapses the supplied views. Give it duplicates
-         * so the owned buffers retain their exact position/limit for deferred
-         * materialization (owned imports are not necessarily capacity-sized). */
-        final ByteBuffer[] views = new ByteBuffer[importedBuffers.length];
-        for (int index = 0; index < importedBuffers.length; index++) {
-            views[index] = importedBuffers[index].duplicate();
-        }
-        storage.importData(X.Enum(views));
+        /* The pinned Store import task reads buffer addresses and limits, and
+         * its file-copy path slices a duplicate. It does not change these
+         * owned views before the synchronous importData call returns. */
+        storage.importData(X.Enum(importedBuffers));
         return importedBuffers;
     }
 
@@ -69,7 +65,7 @@ final class StorageBinaryDataImporter {
         final ByteBuffer[] ownedBuffers = new ByteBuffer[sourceBuffers.length];
         try {
             for (int i = 0; i < sourceBuffers.length; i++) {
-                final ByteBuffer source = notNull(sourceBuffers[i]).duplicate();
+                final ByteBuffer source = notNull(sourceBuffers[i]);
                 if (source.position() != 0) {
                     throw new IllegalArgumentException(
                             "import buffers must be normalized to position zero; got %s".formatted(source.position()));
@@ -85,7 +81,7 @@ final class StorageBinaryDataImporter {
                 }
                 final ByteBuffer owned = XMemory.allocateDirectNative(sourceLength);
                 ownedBuffers[i] = owned;
-                owned.put(source).flip();
+                owned.put(0, source, 0, sourceLength);
             }
             return ownedBuffers;
         } catch (final RuntimeException | Error failure) {
@@ -135,9 +131,12 @@ final class StorageBinaryDataImporter {
                 throw new IllegalArgumentException("import buffers must be normalized to position zero");
             }
         }
-        final ByteBuffer[] imported = new ByteBuffer[length];
-        for (int source = offset, target = 0; source < end; source++, target++) {
-            imported[target] = buffers[source].duplicate();
+        final ByteBuffer[] imported;
+        if (offset == 0 && length == buffers.length) {
+            imported = buffers;
+        } else {
+            imported = new ByteBuffer[length];
+            System.arraycopy(buffers, offset, imported, 0, length);
         }
         storage.importData(X.Enum(imported));
         return true;

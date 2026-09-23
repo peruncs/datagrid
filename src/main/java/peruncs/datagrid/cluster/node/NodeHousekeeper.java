@@ -4,42 +4,46 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.eclipse.serializer.util.X.notNull;
 
-/// Runs periodic node maintenance on shared daemon platform threads.
+/// Triggers periodic maintenance on one platform thread and runs the work on virtual threads.
 ///
 /// Each node owns one housekeeper. Callers schedule every task first and
 /// start the housekeeper last; close stops future runs and releases the
-/// threads. Tasks run with a fixed delay, so a slow run postpones its own
-/// next run instead of overlapping it. A task that throws is logged and the
+/// threads. A slow run skips later ticks instead of overlapping itself.
+/// A task that throws is logged and the
 /// remaining tasks keep running; a task that fails [#FAILURE_THRESHOLD]
 /// consecutive runs degrades [#failure()] so readiness reports the node
 /// instead of hiding the repeated failure. Each task clears only its own
 /// failure after it recovers. A fatal [Error] never clears.
 final class NodeHousekeeper implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(NodeHousekeeper.class.getName());
-    private static final int THREADS = 2;
     /// Runs a task must fail consecutively before health degrades.
     static final int FAILURE_THRESHOLD = 3;
     private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
 
     private final ScheduledThreadPoolExecutor scheduler;
+    private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final AtomicReference<Error> fatalFailure = new AtomicReference<>();
     private final ConcurrentHashMap<String, RuntimeException> degradedFailures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> consecutiveFailures = new ConcurrentHashMap<>();
     private final List<ScheduledTask> pending = new ArrayList<>();
     private boolean started;
-    private boolean closing;
-    private boolean closed;
+    private volatile boolean closing;
+    private volatile boolean closed;
 
     private NodeHousekeeper() {
         final AtomicInteger threadCount = new AtomicInteger();
-        this.scheduler = new ScheduledThreadPoolExecutor(THREADS, task ->
+        this.scheduler = new ScheduledThreadPoolExecutor(1, task ->
                 Thread.ofPlatform()
                         .daemon()
                         .name("datagrid-housekeeper-%s".formatted(threadCount.incrementAndGet()))
@@ -47,7 +51,7 @@ final class NodeHousekeeper implements AutoCloseable {
         this.scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
-        /// Creates a housekeeper with two daemon threads.
+        /// Creates a housekeeper with one daemon scheduler and virtual task threads.
     ///
     /// @return a housekeeper ready for scheduling
     public static NodeHousekeeper create() {
@@ -118,7 +122,7 @@ final class NodeHousekeeper implements AutoCloseable {
                     "Housekeeper task '%s' interval must be at least one millisecond".formatted(name));
         }
         LOGGER.log(System.Logger.Level.INFO, "Scheduling housekeeper task '%s' every %s".formatted(name, interval));
-        this.pending.add(new ScheduledTask(name, task, intervalMillis));
+        this.pending.add(new ScheduledTask(name, task, intervalMillis, new AtomicBoolean()));
     }
 
         /// Starts firing the scheduled tasks. The first run of each task waits one interval.
@@ -132,7 +136,21 @@ final class NodeHousekeeper implements AutoCloseable {
         this.started = true;
         for (final ScheduledTask scheduled : this.pending) {
             this.scheduler.scheduleWithFixedDelay(
-                    () -> runGuarded(scheduled),
+                    () -> {
+                        if (this.closed || this.closing || !scheduled.running().compareAndSet(false, true)) return;
+                        try {
+                            this.workers.execute(() -> {
+                                try {
+                                    if (!this.closed && !this.closing) this.runGuarded(scheduled);
+                                } finally {
+                                    scheduled.running().set(false);
+                                }
+                            });
+                        } catch (final RejectedExecutionException rejected) {
+                            scheduled.running().set(false);
+                            if (!this.closing) throw rejected;
+                        }
+                    },
                     scheduled.intervalMillis(),
                     scheduled.intervalMillis(),
                     TimeUnit.MILLISECONDS
@@ -159,8 +177,13 @@ final class NodeHousekeeper implements AutoCloseable {
         }
         LOGGER.log(System.Logger.Level.INFO, "Shutting down node housekeeper");
         this.scheduler.shutdownNow();
+        this.workers.shutdownNow();
         try {
-            if (!this.scheduler.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+            final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLOSE_TIMEOUT_MILLIS);
+            final boolean schedulerStopped = this.scheduler.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            final boolean workersStopped = this.workers.awaitTermination(
+                    Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            if (!schedulerStopped || !workersStopped) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
             }
@@ -175,6 +198,6 @@ final class NodeHousekeeper implements AutoCloseable {
         }
     }
 
-    private record ScheduledTask(String name, Runnable task, long intervalMillis) {
+    private record ScheduledTask(String name, Runnable task, long intervalMillis, AtomicBoolean running) {
     }
 }

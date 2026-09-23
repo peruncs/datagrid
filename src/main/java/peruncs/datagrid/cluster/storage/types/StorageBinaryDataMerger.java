@@ -226,6 +226,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
         private final LockedExecutor materialization = LockedExecutor.New();
         private final BinaryPersistenceFoundation<?> foundation;
         private final StorageConnection storage;
+        private final StorageBinaryDataMaterializer dataMaterializer = new StorageBinaryDataMaterializer();
         private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
         private final StorageGraphCoordinator graphCoordinator;
         private final long cachingTimeoutMs;
@@ -685,7 +686,7 @@ public interface StorageBinaryDataMerger extends StorageBinaryDataReceiver, Disp
                              * the same object. Index views are retired first so
                              * GigaMap's reloaded index state cannot retain a
                              * view over the pre-import files. */
-                            StorageBinaryDataMaterializer.materialize(
+                            this.dataMaterializer.materialize(
                                     this.foundation, this.storage, this.drainBuffers,
                                     transactionOffset, transactionLength);
                             transactionOffset += transactionLength;

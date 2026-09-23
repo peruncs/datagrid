@@ -217,10 +217,12 @@ class NodeHousekeeperTest {
     void slowRunDoesNotOverlapItself() throws InterruptedException {
         final AtomicInteger concurrent = new AtomicInteger();
         final AtomicInteger maxConcurrent = new AtomicInteger();
+        final AtomicBoolean ranOnVirtualThread = new AtomicBoolean();
         try (final NodeHousekeeper housekeeper = NodeHousekeeper.create()) {
             housekeeper.schedule("slow", () ->
             {
                 final int active = concurrent.incrementAndGet();
+                ranOnVirtualThread.set(Thread.currentThread().isVirtual());
                 maxConcurrent.accumulateAndGet(active, Math::max);
                 try {
                     Thread.sleep(150L);
@@ -236,6 +238,7 @@ class NodeHousekeeperTest {
         }
 
         assertEquals(1, maxConcurrent.get());
+        assertTrue(ranOnVirtualThread.get());
     }
 
         /// Controllable backup executor double.

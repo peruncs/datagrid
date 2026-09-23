@@ -10,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -119,6 +120,32 @@ class StorageBinaryDataImporterTest {
             assertThrows(NullPointerException.class, () -> StorageBinaryDataImporter.importDirect(
                     null, new ByteBuffer[0]));
         }
+    }
+
+    @Test
+    void importDirectUsesOriginalViewsWithoutChangingTheirBounds() {
+        final AtomicReference<ByteBuffer[]> imported = new AtomicReference<>();
+        final StorageConnection storage = (StorageConnection) Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{StorageConnection.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("importData")) {
+                        final var views = (Iterable<ByteBuffer>) args[0];
+                        imported.set(java.util.stream.StreamSupport.stream(views.spliterator(), false)
+                                .toArray(ByteBuffer[]::new));
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+        final ByteBuffer first = ByteBuffer.allocateDirect(8);
+        first.limit(3);
+        final ByteBuffer second = ByteBuffer.allocateDirect(8);
+        second.limit(5);
+        assertTrue(StorageBinaryDataImporter.importDirect(storage, new ByteBuffer[]{first, second}));
+        assertSame(first, imported.get()[0]);
+        assertSame(second, imported.get()[1]);
+        assertEquals(0, first.position());
+        assertEquals(3, first.limit());
+        assertEquals(0, second.position());
+        assertEquals(5, second.limit());
     }
 
     private static Object defaultValue(final Class<?> type) {
