@@ -4,6 +4,7 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import org.eclipse.serializer.functional.Action;
 import org.eclipse.serializer.functional.Producer;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
@@ -156,7 +157,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// distinguishable from transport faults.
     private <T> T onAgent(final Producer<T> operation) {
         final RuntimeException failed = this.terminalFailure.get();
-        if (failed != null) throw new IllegalStateException("Aeron retention is unavailable", failed);
+        if (failed != null) throw new ReplicationUnavailableException("Aeron retention is unavailable", failed);
         if (Boolean.TRUE.equals(this.onAgentThread.get())) return operation.produce();
         final Future<T> submitted;
         try {
@@ -169,25 +170,25 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 }
             });
         } catch (final RejectedExecutionException rejected) {
-            throw new IllegalStateException("Aeron retention is closed", rejected);
+            throw new ReplicationUnavailableException("Aeron retention is closed", rejected);
         }
         try {
             return submitted.get(this.operationTimeoutMillis, TimeUnit.MILLISECONDS);
         } catch (final TimeoutException timeout) {
             submitted.cancel(false);
-            final IllegalStateException terminal = new IllegalStateException(
+            final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
                     "Timed out waiting for Aeron retention after %s ms".formatted(this.operationTimeoutMillis),
                     timeout);
             this.terminalFailure.compareAndSet(null, terminal);
             throw terminal;
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while waiting for Aeron retention", interrupted);
+            throw new ReplicationUnavailableException("Interrupted while waiting for Aeron retention", interrupted);
         } catch (final ExecutionException failure) {
             final Throwable cause = failure.getCause();
             if (cause instanceof Error error) throw error;
             if (cause instanceof RuntimeException runtime) throw runtime;
-            throw new IllegalStateException("Aeron retention failed", cause);
+            throw new ReplicationUnavailableException("Aeron retention failed", cause);
         }
     }
 
@@ -289,11 +290,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             throw failure;
         } catch (final RuntimeException failure) {
             if (failure instanceof ArchiveException archiveFailure) {
-                throw new IllegalStateException(
+                throw new ReplicationUnavailableException(
                         "Aeron Archive retention failed closed (errorCode=%s)".formatted(archiveFailure.errorCode()),
-                        archiveFailure);
+                        archiveFailure, archiveFailure.errorCode());
             }
-            throw new IllegalStateException("Aeron Archive retention failed closed", failure);
+            throw new ReplicationUnavailableException("Aeron Archive retention failed closed", failure);
         }
     }
 

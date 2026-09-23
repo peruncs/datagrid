@@ -1,6 +1,7 @@
 package peruncs.datagrid.cluster.node.aeron;
 
 import io.aeron.archive.client.ArchiveException;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.replication.ReplicationLogRetention;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
@@ -286,9 +287,10 @@ class AeronArchiveRetentionTest {
         });
         retention.recordReaderWatermark(AeronReaderWatermark.of(
                 READER, CLUSTER, GENERATION, 1, 17, 4, acknowledgedPosition));
-        final IllegalStateException failure = assertThrows(IllegalStateException.class,
+        final ReplicationUnavailableException failure = assertThrows(ReplicationUnavailableException.class,
                 () -> retention.deleteThrough(deletionCursor(acknowledgedPosition)));
         assertInstanceOf(ArchiveException.class, failure.getCause());
+        assertEquals(ArchiveException.GENERIC, failure.errorCode());
         retention.close();
     }
 
@@ -639,12 +641,13 @@ class AeronArchiveRetentionTest {
                 ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
                 () -> true, null, 50L)) {
             try {
-                final IllegalStateException timeout = assertThrows(IllegalStateException.class,
+                final ReplicationUnavailableException timeout = assertThrows(ReplicationUnavailableException.class,
                         () -> retention.recordReaderWatermark(cursor(READER)));
                 assertTrue(timeout.getMessage().contains("Timed out"));
+                assertInstanceOf(TimeoutException.class, timeout.getCause());
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 assertNotNull(retention.failure());
-                assertThrows(IllegalStateException.class, retention::isSupported,
+                assertThrows(ReplicationUnavailableException.class, retention::isSupported,
                         "a timed-out Archive client must never be reused");
             } finally {
                 release.countDown();
