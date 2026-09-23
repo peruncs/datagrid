@@ -13,7 +13,7 @@ documented in the cluster section below.
 
 ## Build
 
-Requires an exact Java 26 runtime and Maven 3.9+. This artifact uses Java 26
+Requires an exact Java 27 runtime and Maven 3.9+. This artifact uses Java 27
 preview APIs, so both compilation and every consumer JVM must enable preview:
 `--enable-preview`. It is intentionally a pre-release build and is not ready
 for Maven Central publication until the preview dependency is removed or the

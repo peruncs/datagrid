@@ -65,19 +65,10 @@ final class ClusterIndexValidation {
         }
     };
 
-        /* Worker-local validation scratch: the seen set, the traversal queue,
-         * and the discovered collections are reused across scans instead of
-         * allocating them per root on every replicated batch. Each thread holds
-         * its own scratch, and every entry point clears it before and after
-         * use so traversed graph state is never retained. The scan itself is
-         * iterative, so one scratch is never needed reentrantly. */
-    private static final ThreadLocal<ValidationScratch> SCRATCH =
-            ThreadLocal.withInitial(ValidationScratch::new);
-
     private ClusterIndexValidation() {
     }
 
-    /// Reusable per-thread scan state and per-batch discovery sinks.
+    /// Reusable caller-owned scan state and per-batch discovery sinks.
     static final class ValidationScratch {
         final IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
         final ArrayDeque<Object> queue = new ArrayDeque<>();
@@ -88,8 +79,7 @@ final class ClusterIndexValidation {
         final ArrayList<VectorGroup> vectorGroups = new ArrayList<>();
         /* One all-ones probe per discovered vector index, reused across
          * batches: the probe only triggers lazy initialization, so its vector
-         * never needs recreating. Entries stay until the worker thread dies;
-         * the set is bounded by the indexes that thread has seen. */
+         * never needs recreating. Entries stay with the owning merger. */
         final IdentityHashMap<VectorIndex<?>, float[]> vectorProbes = new IdentityHashMap<>();
         final IdentityHashMap<VectorIndex<?>, Long> vectorModCounts = new IdentityHashMap<>();
         /* Reused index enumeration scratch for one vector group. */
@@ -100,10 +90,6 @@ final class ClusterIndexValidation {
 
         /// One vector index group and the map that owns it.
     record VectorGroup(GigaMap<?> map, VectorIndices<?> vectors) {
-    }
-
-    static ValidationScratch scratch() {
-        return SCRATCH.get();
     }
 
         /// Rejects a Lucene context that stores files outside the Store graph.
@@ -170,14 +156,13 @@ final class ClusterIndexValidation {
     ///                                  storage or belongs to an unknown category
     /// @throws IllegalStateException    if index groups cannot be enumerated completely
     static void validateMap(final GigaMap<?> map, final List<VectorGroup> vectorSink) {
-        validateMap(map, vectorSink, SCRATCH.get());
+        validateMap(map, vectorSink, new ValidationScratch());
     }
 
         /// Validates one map's registered index groups against the policy.
     ///
     /// The scratch is passed in by the graph walk, which already owns one for
-    /// the whole scan; reading the thread-local again per map would document
-    /// a non-reentrancy the callers never rely on.
+    /// the whole scan.
     ///
     /// @param map        map whose groups to validate
     /// @param vectorSink optional destination collecting validated vector
@@ -256,7 +241,7 @@ final class ClusterIndexValidation {
     /// bounded number of objects, and fields that cannot be read by the Store
     /// memory accessor fail closed because an incomplete scan is not a proof of
     /// safety. A violation fails closed with [IllegalArgumentException]. The
-    /// traversal reuses worker-local scratch instead of allocating per scan.
+    /// Merger traversal reuses caller-owned scratch instead of allocating per scan.
     ///
     /// @param root               Store root to validate
     /// @param maxValidatedObjects object bound for the scan
@@ -272,8 +257,13 @@ final class ClusterIndexValidation {
 
     static void validateGraph(final Object root, final int maxValidatedObjects,
                               final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink) {
+        validateGraph(root, maxValidatedObjects, vectorSink, visitedSink, new ValidationScratch());
+    }
+
+    static void validateGraph(final Object root, final int maxValidatedObjects,
+                              final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink,
+                              final ValidationScratch scratch) {
         if (root == null) return;
-        final ValidationScratch scratch = SCRATCH.get();
         scratch.seen.clear();
         scratch.queue.clear();
         try {
@@ -332,11 +322,17 @@ final class ClusterIndexValidation {
 
     static void validateStorageRoots(final StorageConnection storage, final int maxValidatedObjects,
                                      final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink) {
+        validateStorageRoots(storage, maxValidatedObjects, vectorSink, visitedSink, new ValidationScratch());
+    }
+
+    static void validateStorageRoots(final StorageConnection storage, final int maxValidatedObjects,
+                                     final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink,
+                                     final ValidationScratch scratch) {
         final StorageConnection checked = Objects.requireNonNull(storage, "storage");
         checked.persistenceManager()
                 .viewRoots()
                 .iterateEntries((identifier, value) -> {
-                    if (value != null) validateGraph(value, maxValidatedObjects, vectorSink, visitedSink);
+                    if (value != null) validateGraph(value, maxValidatedObjects, vectorSink, visitedSink, scratch);
                 });
     }
 

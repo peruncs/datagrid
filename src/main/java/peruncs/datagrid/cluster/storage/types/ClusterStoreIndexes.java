@@ -311,6 +311,7 @@ public final class ClusterStoreIndexes {
     /// @param storage             storage connection owning the materialized graph
     /// @param maxValidatedObjects object bound for the scan
     static void validateAndRebuildImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
-        ClusterIndexMaintenance.validateAndRebuildImportedIndexes(storage, maxValidatedObjects);
+        ClusterIndexMaintenance.validateAndRebuildImportedIndexes(
+                storage, maxValidatedObjects, new ClusterIndexValidation.ValidationScratch());
     }
 }

@@ -148,34 +148,34 @@ public interface ClusterFoundation extends AutoCloseable {
     final class Node implements ClusterFoundation, Unpersistable {
         private static final System.Logger LOGGER = System.getLogger(ClusterFoundation.class.getName());
 
-        private final LazyConstant<StorageBackupBackend> backupBackend;
-        private final LazyConstant<EmbeddedStorageFoundation<?>> embeddedStorageFoundation;
-        private final LazyConstant<NodeHousekeeper> housekeeper;
-        private final LazyConstant<StorageLimitGate> storageLimitGate;
-        private final LazyConstant<BackupNodeManager> backupNodeManager;
-        private final LazyConstant<StorageBinaryDataClient> dataClient;
-        private final LazyConstant<StorageBinaryDataDistributor> dataDistributor;
-        private final LazyConstant<StorageNodeHealthCheck> healthCheck;
-        private final LazyConstant<NodeLibraryPropertiesProvider> propertiesProvider;
-        private final LazyConstant<StorageTaskExecutor> storageTaskExecutor;
-        private final LazyConstant<StorageBackupTaskExecutor> storageBackupTaskExecutor;
-        private final LazyConstant<StorageDiskSpaceReader> storageDiskSpaceReader;
-        private final LazyConstant<StorageNodeManager> storageNodeManager;
-        private final LazyConstant<Supplier<Object>> rootSupplier;
-        private final LazyConstant<ObjectGraphUpdateHandler> graphUpdateHandler;
-        private final LazyConstant<StorageBackupManager> storageBackupManager;
-        private final LazyConstant<DataMessageAppliedListener> dataMessageAppliedListener;
-        private final LazyConstant<StorageBinaryDataMerger> dataMerger;
-        private final LazyConstant<BackupRestorePolicy> backupRestorePolicy;
+        private final LazyHolder<StorageBackupBackend> backupBackend;
+        private final LazyHolder<EmbeddedStorageFoundation<?>> embeddedStorageFoundation;
+        private final LazyHolder<NodeHousekeeper> housekeeper;
+        private final LazyHolder<StorageLimitGate> storageLimitGate;
+        private final LazyHolder<BackupNodeManager> backupNodeManager;
+        private final LazyHolder<StorageBinaryDataClient> dataClient;
+        private final LazyHolder<StorageBinaryDataDistributor> dataDistributor;
+        private final LazyHolder<StorageNodeHealthCheck> healthCheck;
+        private final LazyHolder<NodeLibraryPropertiesProvider> propertiesProvider;
+        private final LazyHolder<StorageTaskExecutor> storageTaskExecutor;
+        private final LazyHolder<StorageBackupTaskExecutor> storageBackupTaskExecutor;
+        private final LazyHolder<StorageDiskSpaceReader> storageDiskSpaceReader;
+        private final LazyHolder<StorageNodeManager> storageNodeManager;
+        private final LazyHolder<Supplier<Object>> rootSupplier;
+        private final LazyHolder<ObjectGraphUpdateHandler> graphUpdateHandler;
+        private final LazyHolder<StorageBackupManager> storageBackupManager;
+        private final LazyHolder<DataMessageAppliedListener> dataMessageAppliedListener;
+        private final LazyHolder<StorageBinaryDataMerger> dataMerger;
+        private final LazyHolder<BackupRestorePolicy> backupRestorePolicy;
         private final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
-        /* Intentionally not a LazyConstant: a backup restore closes and replaces
+        /* Intentionally not a LazyHolder: a backup restore closes and replaces
          * this manager, which a one-shot memoized holder cannot express. The
          * volatile field with double-checked locking gives the same safe
          * publication without a per-access lock. */
         private volatile StoredReplicationCursorManager storedReplicationCursorManager;
-        private final LazyConstant<ClusterReplicationTransport> replicationTransport;
-        private final LazyConstant<ReplicationPositionProvider> positionProvider;
-        private final LazyConstant<ReplicationLogRetention> replicationRetention;
+        private final LazyHolder<ClusterReplicationTransport> replicationTransport;
+        private final LazyHolder<ReplicationPositionProvider> positionProvider;
+        private final LazyHolder<ReplicationLogRetention> replicationRetention;
         private final NodeRole nodeRole;
 
         // cached created types
@@ -195,33 +195,63 @@ public interface ClusterFoundation extends AutoCloseable {
         private Node(final Supplier<Object> configuredRoot,
                      final EmbeddedStorageFoundation<?> configuredFoundation,
                      final NodeLibraryPropertiesProvider configuredProperties) {
-            this.backupBackend = LazyConstant.of(this::ensureBackupBackend);
-            this.storageTaskExecutor = LazyConstant.of(this::ensureStorageTaskExecutor);
-            this.storageBackupTaskExecutor = LazyConstant.of(this::ensureStorageBackupTaskExecutor);
-            this.housekeeper = LazyConstant.of(this::ensureNodeHousekeeper);
-            this.storageLimitGate = LazyConstant.of(this::ensureStorageLimitGate);
-            this.replicationTransport = LazyConstant.of(this::ensureClusterReplicationTransport);
-            this.dataMerger = LazyConstant.of(this::ensureStorageBinaryDataMerger);
-            this.dataMessageAppliedListener = LazyConstant.of(this::ensureDataMessageAppliedListener);
-            this.storageBackupManager = LazyConstant.of(this::ensureStorageBackupManager);
+            this.backupBackend = LazyHolder.of(this::ensureBackupBackend);
+            this.storageTaskExecutor = LazyHolder.of(this::ensureStorageTaskExecutor);
+            this.storageBackupTaskExecutor = LazyHolder.of(this::ensureStorageBackupTaskExecutor);
+            this.housekeeper = LazyHolder.of(this::ensureNodeHousekeeper);
+            this.storageLimitGate = LazyHolder.of(this::ensureStorageLimitGate);
+            this.replicationTransport = LazyHolder.of(this::ensureClusterReplicationTransport);
+            this.dataMerger = LazyHolder.of(this::ensureStorageBinaryDataMerger);
+            this.dataMessageAppliedListener = LazyHolder.of(this::ensureDataMessageAppliedListener);
+            this.storageBackupManager = LazyHolder.of(this::ensureStorageBackupManager);
             this.rootSupplier = lazy(configuredRoot, this::ensureRootSupplier);
-            this.graphUpdateHandler = LazyConstant.of(this::ensureGraphUpdateHandler);
+            this.graphUpdateHandler = LazyHolder.of(this::ensureGraphUpdateHandler);
             this.embeddedStorageFoundation = lazy(configuredFoundation, this::ensureEmbeddedStorageFoundation);
-            this.backupNodeManager = LazyConstant.of(this::ensureBackupNodeManager);
-            this.dataClient = LazyConstant.of(this::ensureStorageBinaryDataClient);
-            this.dataDistributor = LazyConstant.of(this::ensureDataDistributor);
-            this.healthCheck = LazyConstant.of(this::ensureStorageNodeHealthCheck);
+            this.backupNodeManager = LazyHolder.of(this::ensureBackupNodeManager);
+            this.dataClient = LazyHolder.of(this::ensureStorageBinaryDataClient);
+            this.dataDistributor = LazyHolder.of(this::ensureDataDistributor);
+            this.healthCheck = LazyHolder.of(this::ensureStorageNodeHealthCheck);
             this.propertiesProvider = lazy(configuredProperties, this::ensureNodeLibraryPropertiesProvider);
-            this.storageDiskSpaceReader = LazyConstant.of(this::ensureStorageDiskSpaceReader);
-            this.storageNodeManager = LazyConstant.of(this::ensureStorageNodeManager);
-            this.positionProvider = LazyConstant.of(this::ensureReplicationPositionProvider);
-            this.replicationRetention = LazyConstant.of(this::ensureReplicationLogRetention);
-            this.backupRestorePolicy = LazyConstant.of(this::ensureBackupRestorePolicy);
+            this.storageDiskSpaceReader = LazyHolder.of(this::ensureStorageDiskSpaceReader);
+            this.storageNodeManager = LazyHolder.of(this::ensureStorageNodeManager);
+            this.positionProvider = LazyHolder.of(this::ensureReplicationPositionProvider);
+            this.replicationRetention = LazyHolder.of(this::ensureReplicationLogRetention);
+            this.backupRestorePolicy = LazyHolder.of(this::ensureBackupRestorePolicy);
             this.nodeRole = this.propertiesProvider.get().nodeRole();
         }
 
-        private static <T> LazyConstant<T> lazy(final T configured, final Supplier<? extends T> factory) {
-            return LazyConstant.of(() -> configured == null ? factory.get() : configured);
+        private static <T> LazyHolder<T> lazy(final T configured, final Supplier<? extends T> factory) {
+            return LazyHolder.of(() -> configured == null ? factory.get() : configured);
+        }
+
+        /// Memoized holder that remembers whether it was computed.
+        ///
+        /// `java.lang.LazyConstant` (JDK 27 third preview, JEP 531) deliberately
+        /// offers no initialization query — `isInitialized` was removed. The close
+        /// path must dispose only resources the node created, without creating
+        /// them, so this holder records successful computation around the constant.
+        private static final class LazyHolder<T> implements Supplier<T> {
+            private final LazyConstant<T> constant;
+            private volatile boolean initialized;
+
+            private LazyHolder(final Supplier<? extends T> computingFunction) {
+                this.constant = LazyConstant.of(computingFunction);
+            }
+
+            private static <T> LazyHolder<T> of(final Supplier<? extends T> computingFunction) {
+                return new LazyHolder<>(computingFunction);
+            }
+
+            @Override
+            public T get() {
+                final T value = this.constant.get();
+                this.initialized = true;
+                return value;
+            }
+
+            private boolean isInitialized() {
+                return this.initialized;
+            }
         }
 
         private static Path backupVolumePath(final NodeLibraryPropertiesProvider properties) {

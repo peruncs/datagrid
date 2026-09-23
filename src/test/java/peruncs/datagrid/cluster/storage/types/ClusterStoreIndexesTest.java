@@ -283,8 +283,8 @@ class ClusterStoreIndexesTest {
             final Object graph = StoreIndexReflection.read(index, graphField);
             assertNotNull(graph);
 
-            ClusterIndexMaintenance.refreshImportedIndexes(connection, 4096);
-            ClusterIndexMaintenance.validateAndRebuildImportedIndexes(connection, 4096);
+            final var scratch = ClusterIndexMaintenance.refreshImportedIndexes(connection, 4096);
+            ClusterIndexMaintenance.validateAndRebuildImportedIndexes(connection, 4096, scratch);
 
             assertSame(graph, StoreIndexReflection.read(index, graphField),
                     "an unchanged vector index must not pay for a graph rebuild");

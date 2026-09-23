@@ -36,6 +36,7 @@ import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
 final class ClusterIndexMaintenance {
     private static final BinaryEntityRawDataIterator ITERATOR = BinaryEntityRawDataIterator.New();
     private final ArrayList<GigaMap<?>> cachedMaps = new ArrayList<>();
+    private final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
     private final IdentityHashMap<GigaMap<?>, Boolean> knownMaps = new IdentityHashMap<>();
     private final Set_long reachableIds = Set_long.New();
     private final Map<String, Object> rootValues = new HashMap<>();
@@ -70,12 +71,12 @@ final class ClusterIndexMaintenance {
                 }
             }
         }
-        refreshMaps(this.cachedMaps, ClusterIndexValidation.scratch());
+        refreshMaps(this.cachedMaps, this.scratch);
     }
 
     /// Validates changed roots and rebuilds only changed vector graphs.
     void afterApply(final StorageConnection storage, final int maxValidatedObjects) {
-        final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
+        final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
         scratch.vectorGroups.clear();
         scratch.rebuiltGroups.clear();
         try {
@@ -112,7 +113,7 @@ final class ClusterIndexMaintenance {
 
     private void scanRoots(final StorageConnection storage, final int maxValidatedObjects) {
         final var manager = storage.persistenceManager();
-        final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
+        final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
         this.cachedMaps.clear();
         this.knownMaps.clear();
         this.reachableIds.truncate();
@@ -123,7 +124,7 @@ final class ClusterIndexMaintenance {
             }
             final long id = manager.lookupObjectId(current);
             if (id > 0L) this.reachableIds.add(id);
-        });
+        }, scratch);
         this.rootValues.clear();
         manager.viewRoots().iterateEntries((identifier, value) -> this.rootValues.put(identifier, value));
         this.initialized = true;
@@ -161,9 +162,10 @@ final class ClusterIndexMaintenance {
     ///
     /// @param storage             storage connection owning the materialized graph
     /// @param maxValidatedObjects object bound for the discovery scan
-    static void refreshImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
+    static ClusterIndexValidation.ValidationScratch refreshImportedIndexes(
+            final StorageConnection storage, final int maxValidatedObjects) {
         Objects.requireNonNull(storage, "storage");
-        final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
+        final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
         scratch.vectorModCounts.clear();
         collectMaps(storage, scratch, maxValidatedObjects);
         try {
@@ -171,6 +173,7 @@ final class ClusterIndexMaintenance {
         } finally {
             scratch.maps.clear();
         }
+        return scratch;
     }
 
     private static void refreshMaps(final ArrayList<GigaMap<?>> maps,
@@ -217,9 +220,9 @@ final class ClusterIndexMaintenance {
     /// @param maxValidatedObjects object bound for the scan
     /// @throws IllegalArgumentException if a root violates the index policy
     /// @throws IllegalStateException    if the scan cannot complete or the rebuild fails
-    static void validateAndRebuildImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
+    static void validateAndRebuildImportedIndexes(final StorageConnection storage, final int maxValidatedObjects,
+                                                  final ClusterIndexValidation.ValidationScratch scratch) {
         Objects.requireNonNull(storage, "storage");
-        final ClusterIndexValidation.ValidationScratch scratch = ClusterIndexValidation.scratch();
         scratch.vectorGroups.clear();
         scratch.rebuiltGroups.clear();
         try {

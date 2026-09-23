@@ -64,7 +64,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private boolean stateRestored;
     private AeronReaderWatermark persistedBoundary;
     private final ThreadPoolExecutor agent;
-    private final ThreadLocal<Boolean> onAgentThread = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private volatile Thread agentThread;
     private final AtomicReference<RuntimeException> terminalFailure = new AtomicReference<>();
     private final AtomicReference<RuntimeException> watermarkFailure = new AtomicReference<>();
     /* Once the polling thread accepts a watermark, retention owns its retry.
@@ -128,7 +128,11 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         this.operationTimeoutMillis = operationTimeoutMillis;
         this.agent = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(Math.max(16, readers.size() * 2)),
-                Thread.ofVirtual().name("datagrid-retention-agent", 0L).factory(),
+                task -> {
+                    final Thread thread = Thread.ofVirtual().name("datagrid-retention-agent").unstarted(task);
+                    this.agentThread = thread;
+                    return thread;
+                },
                 new ThreadPoolExecutor.AbortPolicy());
     }
 
@@ -151,17 +155,10 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private <T> T onAgent(final Producer<T> operation) {
         final RuntimeException failed = this.terminalFailure.get();
         if (failed != null) throw new ReplicationUnavailableException("Aeron retention is unavailable", failed);
-        if (Boolean.TRUE.equals(this.onAgentThread.get())) return operation.produce();
+        if (Thread.currentThread() == this.agentThread) return operation.produce();
         final Future<T> submitted;
         try {
-            submitted = this.agent.submit(() -> {
-                this.onAgentThread.set(Boolean.TRUE);
-                try {
-                    return operation.produce();
-                } finally {
-                    this.onAgentThread.remove();
-                }
-            });
+            submitted = this.agent.submit(operation::produce);
         } catch (final RejectedExecutionException rejected) {
             throw new ReplicationUnavailableException("Aeron retention is closed", rejected);
         }
@@ -378,14 +375,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     }
 
     private void enqueueWatermarkDrain() {
-        this.agent.execute(() -> {
-            this.onAgentThread.set(Boolean.TRUE);
-            try {
-                this.drainPendingWatermarks();
-            } finally {
-                this.onAgentThread.remove();
-            }
-        });
+        this.agent.execute(this::drainPendingWatermarks);
     }
 
     private void scheduleWatermarkRetry() {

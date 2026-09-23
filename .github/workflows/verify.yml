@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '26'
+          java-version: '27'
           cache: maven
       - run: mvn --batch-mode verify
 
@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '26'
+          java-version: '27'
           cache: maven
       - run: mvn --batch-mode -Pintegration verify
 
@@ -36,6 +36,6 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '26'
+          java-version: '27'
           cache: maven
       - run: mvn --batch-mode -Pcrashmatrix verify
