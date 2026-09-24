@@ -7,8 +7,9 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
 
 /// Covers the JFR budget verdict and, when a soak recording exists, the
 /// aggregation pass itself. Without `target/soak.jfr` (no `-Psoak` run yet)

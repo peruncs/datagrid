@@ -4,6 +4,7 @@ import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import peruncs.datagrid.cluster.errors.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
@@ -331,6 +332,21 @@ final class AeronReplicationPublisher implements AutoCloseable {
             synchronized (this) {
                 pending = this.pendingTransaction;
                 this.failedPrepare = new FailedPrepare(sequence, dataLength, dataChunks, failedCrc32c);
+            }
+            if (failure instanceof WriterFencedException) {
+                /* Fencing loss must never be followed by an old-token terminal
+                 * marker: the deposed writer stops offering immediately and
+                 * recovery reads the durable PREPARING fence instead. */
+                synchronized (this) {
+                    if (pending != null) {
+                        pending.terminal = true;
+                        this.pendingTransaction = null;
+                    }
+                    if (this.reservedSequence == sequence) this.reservedSequence = -1L;
+                    this.preparing = false;
+                    this.failed = true;
+                }
+                throw failure;
             }
             try {
                 // Clear any transaction prefix that reached the log. If the publication

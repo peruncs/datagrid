@@ -26,7 +26,6 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -67,6 +66,11 @@ final class AeronWriterTransport {
     private volatile AeronWriterBoundary writerBoundary = new AeronWriterBoundary(-1, -1, -1);
     private volatile boolean writerRecoveryInProgress;
     private volatile ReplicationState writerRecoveryState;
+    /* The classified failure behind writerRecoveryState. A later ensureWriter
+     * rethrows it instead of retrying recovery: a RESEED_REQUIRED or terminal
+     * FAILED outcome is sticky by contract, and the operator restart is the
+     * only retry. */
+    private volatile RuntimeException writerRecoveryFailure;
     private ReplicationPublisher distributor;
     private ReplicationPositionProvider positionProvider;
 
@@ -255,7 +259,8 @@ final class AeronWriterTransport {
     /// @return `true` while a healthy writer is installed and not recovering
     boolean writerReady() {
         return settings().topology().role().isWriter() && !this.writerRecoveryInProgress &&
-               this.writerRecoveryState == null && this.writer != null && !this.writer.isFailed();
+               this.writerRecoveryState == null && this.writer != null && !this.writer.isFailed() &&
+               this.runtime().driverFailure() == null;
     }
 
     /// Reports current writer readiness without starting the runtime. Lifecycle
@@ -341,6 +346,13 @@ final class AeronWriterTransport {
             }
             return this.writer;
         }
+        if (this.writerRecoveryState != null) {
+            /* A previous recovery attempt failed terminally. Never retry from
+             * scratch and never return a partially recovered writer: the same
+             * typed failure is rethrown so health probes and callers keep
+             * reporting the original cause. */
+            throw this.writerRecoveryFailure;
+        }
         /* Fence before any publication path exists: a second writer for
          * the same cluster/generation fails here while the first writer's
          * heartbeat is fresh, instead of publishing concurrently. */
@@ -400,11 +412,19 @@ final class AeronWriterTransport {
                 recoveredBoundary = new AeronWriterBoundary(initialSequence - 1,
                         recoveredRecordingId, startPosition);
             }
+            CrashHook.invoke("AFTER_RECOVERY_PUBLISHER_CREATED", initialSequence);
+            /* Claim the fencing token before the writer becomes visible: no
+             * publication path can exist while the publisher still carries the
+             * neutral default token, and every subsequent recovery milestone
+             * runs against a candidate that is fenced exactly like the
+             * published writer would be. */
+            candidate.claimFencingToken(this.heldWriterFencingToken());
             this.writerRecordingId.set(recoveredRecordingId);
             this.writerBoundary = recoveredBoundary;
             this.writer = candidate;
             candidate = null;
             this.writerRecoveryState = null;
+            this.writerRecoveryFailure = null;
             /* Publish the recovered boundary before the outer method drains
              * deferred reader watermarks. */
             this.writerRecoveryInProgress = false;
@@ -414,10 +434,13 @@ final class AeronWriterTransport {
             closeFailedWriter(candidate, classified);
             this.writerRecoveryState = classified instanceof ReseedRequiredException
                     ? ReplicationState.RESEED_REQUIRED : ReplicationState.FAILED;
+            this.writerRecoveryFailure = classified;
             throw classified;
         } catch (final Error failure) {
             closeFailedWriter(candidate, failure);
             this.writerRecoveryState = ReplicationState.FAILED;
+            this.writerRecoveryFailure =
+                    new IllegalStateException("Aeron writer recovery failed", failure);
             throw failure;
         } finally {
             this.writerRecoveryInProgress = false;
@@ -484,7 +507,7 @@ final class AeronWriterTransport {
     /// background-check interval expires.
     private boolean writerFencingTokenValid() {
         final WriterFencingLease lease = this.writerLease;
-        return lease != null && lease.isCurrentUncached();
+        return lease != null && lease.isCurrent();
     }
 
     private WriterLeaseGate writerLeaseGate() {
@@ -501,13 +524,8 @@ final class AeronWriterTransport {
             }
 
             @Override
-            public long offerUnderOwnership(final LongSupplier offer) {
-                final WriterFencingLease lease = writerLease;
-                if (lease == null) {
-                    throw new WriterFencedException(
-                            "writer fencing lease lost before commit; restart required");
-                }
-                return lease.executeUnderOwnership(ignored -> offer.getAsLong());
+            public RuntimeException terminalFailure() {
+                return runtime().driverFailure();
             }
 
             @Override
@@ -533,6 +551,11 @@ final class AeronWriterTransport {
             throw new IllegalStateException(
                     "Aeron retention requires the coordinator-backed Store writer");
         }
+        final RuntimeException terminalFailure = this.runtime().driverFailure();
+        if (terminalFailure != null) {
+            throw new ReplicationUnavailableException(
+                    "Aeron MediaDriver is unavailable; retention is closed", terminalFailure);
+        }
         return currentCoordinator.withWritesPaused(
                 () -> currentWriter.purgeSegmentsWhileWritesPaused(boundary));
     }
@@ -551,25 +574,25 @@ final class AeronWriterTransport {
                             }
 
                             @Override
-                            public void clearEnqueueFence() {
+                            public void clearInFlightFence() {
                                 try {
                                     AtomicFileWriter.delete(inFlightCheckpointPath());
                                 } catch (final IOException failure) {
-                                    throw new IllegalStateException("cannot clear local enqueue fence", failure);
+                                    throw new ReseedRequiredException(
+                                            "cannot clear in-flight writer checkpoint %s".formatted(inFlightCheckpointPath()),
+                                            failure);
                                 }
                             }
                         };
                 final AeronArchiveReplicationPublisher writer = this.ensureWriterLocked();
-                /* Claim the lease token before the coordinator admits its
-                 * first transaction, and suspend admission once the lease
-                 * is lost: a writer that lost a steal race must stop, not
-                 * keep publishing with a stale token readers will reject.
-                 * Lease validity is checked before Archive capacity so a
-                 * fenced writer fails with a distinct lease-lost error,
-                 * never a misleading capacity message. */
+                /* ensureWriterLocked claimed the lease token before the writer
+                 * was published; the re-claim below is an idempotent assertion
+                 * of the same token. Lease validity is checked before Archive
+                 * capacity so a fenced writer fails with a distinct
+                 * lease-lost error, never a misleading capacity message. */
                 writer.claimFencingToken(this.heldWriterFencingToken());
                 this.coordinator = writer.newWriteCoordinator(
-                        settings().replication().durabilityMode(), checkpointWriter,
+                        checkpointWriter,
                         requiredBytes -> {
                             final RuntimeException terminalFailure = runtime().driverFailure();
                             if (terminalFailure != null) {
@@ -650,7 +673,6 @@ final class AeronWriterTransport {
 
     private void validateWriterCheckpointIdentity(final AeronReplicationCheckpoint checkpoint) {
         if (checkpoint.recordType() != AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT ||
-            checkpoint.durabilityMode() != settings().replication().durabilityMode() ||
             !checkpoint.clusterId().equals(settings().topology().clusterId()) ||
             !checkpoint.nodeId().equals(settings().topology().identity().nodeId()) ||
             !checkpoint.storeGeneration().equals(settings().topology().identity().storeGeneration()) ||
@@ -734,7 +756,13 @@ final class AeronWriterTransport {
         try {
             AtomicFileWriter.delete(this.inFlightCheckpointPath());
         } catch (final IOException failure) {
-            throw new IllegalStateException("cannot clear in-flight writer checkpoint", failure);
+            /* Self-healing cleanup: restart deletes a covered in-flight fence
+             * before resuming, so a transient deletion failure must not make a
+             * durable commit look unavailable. */
+            System.getLogger(AeronWriterTransport.class.getName()).log(
+                    java.lang.System.Logger.Level.WARNING,
+                    "cannot clear in-flight writer checkpoint %s; restart recovery will retry".formatted(
+                            this.inFlightCheckpointPath()), failure);
         }
     }
 
@@ -756,7 +784,8 @@ final class AeronWriterTransport {
             try {
                 AeronReplicationCheckpointStore.write(path, checkpoint);
             } catch (final IOException failure) {
-                throw new IllegalStateException("cannot persist writer checkpoint", failure);
+                throw new ReseedRequiredException(
+                        "cannot persist writer checkpoint %s; restart must fail closed".formatted(path), failure);
             }
         });
     }
@@ -769,7 +798,6 @@ final class AeronWriterTransport {
         final long recordingId = writerRecordingId >= 0 ? writerRecordingId : settings().topology().recordingId();
         return new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                settings().replication().durabilityMode(),
                 state, settings().topology().clusterId(), settings().topology().identity().nodeId(), settings().topology().identity().storeGeneration(),
                 recordingId, settings().topology().epoch(), this.heldWriterFencingToken(), sequence, position,
                 dataLength, dataChunkCount, dataCrc32c);

@@ -37,7 +37,7 @@ For code intelligence (symbols, call chains, architecture, impact), use the code
 28. Cluster constraints are strictly obeyed: 1-writer/N-reader nodes. No node authentication features, no transport level encryption.
 29. Memory inefficiencies when packing data in Aeron and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want to avoid allocating objects (even temporary) on the JVM heap.
 30. Avoid using unsafe/internal jdk apis for accessing off-the-heap memory. 
-31. Prefer modern java Memory (FFM) API (MemorySegment, Arena, SegmentAllocator, see:  https://docs.oracle.com/en/java/javase/21/core/memory-segments-and-arenas.html , https://dev.java/learn/ffm/access-memory/) over legacy native memory/byte bufffer utilities from Aeron/Agrona or Ecipse Serializer.
+31. Use native memory/byte bufffer utilities from Aeron/Agrona or Ecipse Serializer, if you can.
 32. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
 33. Correctness of the  cluster code
 34. Cluster performance - liveliness, throughput, threading.

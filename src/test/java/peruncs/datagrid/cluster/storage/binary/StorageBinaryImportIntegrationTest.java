@@ -19,7 +19,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
 
 /// Proves the Store-level replacement contract used by at-least-once replay.
 class StorageBinaryImportIntegrationTest {

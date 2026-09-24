@@ -3,11 +3,13 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import io.aeron.Publication;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Verifies that terminal publication retries stop as soon as writer ownership is lost.
 class AeronOfferRetryerOwnershipTest {
@@ -22,7 +24,7 @@ class AeronOfferRetryerOwnershipTest {
                 }, AeronReplicationConfiguration.defaults());
         final AtomicInteger checks = new AtomicInteger();
 
-        final IllegalStateException failure = assertThrows(IllegalStateException.class, () -> retryer.offer(
+        final WriterFencedException failure = assertThrows(WriterFencedException.class, () -> retryer.offer(
                 new UnsafeBuffer(new byte[64]), 64, () -> checks.incrementAndGet() == 1));
 
         assertTrue(failure.getMessage().contains("lease lost"), failure::getMessage);

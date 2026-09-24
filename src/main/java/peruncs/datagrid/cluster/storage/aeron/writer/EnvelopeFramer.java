@@ -33,10 +33,13 @@ final class EnvelopeFramer implements AutoCloseable {
     private final int maxMessageLength;
     private final long offerTimeoutNanos;
     private final AeronOfferRetryer offerer;
-    /* Read at encode time on every frame so a late lease claim is never masked
-     * by a stale snapshot. Both suppliers are captured once by the publisher,
-     * so this adds no per-transaction allocation. */
-    private final LongSupplier fencingToken;
+    /* Captured once at framer construction: every frame of one transaction
+     * carries exactly one fencing token by construction. Production claims the
+     * lease (and its token) before the coordinator — and therefore before any
+     * framer — exists, and the coordinator re-asserts that the captured token
+     * still matches the reserved write, so a mid-transaction steal can never
+     * produce a mixed-token frame series. */
+    private final long fencingToken;
     private final Supplier<WriterLeaseGate> leaseGate;
     private final ByteBuffer storage;
     private final UnsafeBuffer buffer;
@@ -59,7 +62,8 @@ final class EnvelopeFramer implements AutoCloseable {
         this.maxMessageLength = maxMessageLength;
         this.offerTimeoutNanos = offerTimeoutNanos;
         this.offerer = Objects.requireNonNull(offerer, "offerer");
-        this.fencingToken = Objects.requireNonNull(fencingToken, "fencingToken");
+        Objects.requireNonNull(fencingToken, "fencingToken");
+        this.fencingToken = fencingToken.getAsLong();
         this.leaseGate = Objects.requireNonNull(leaseGate, "leaseGate");
         this.storage = ByteBuffer.allocateDirect(chunkSize + AeronReplicationEnvelope.HEADER_LENGTH);
         this.buffer = new UnsafeBuffer(this.storage);
@@ -190,7 +194,7 @@ final class EnvelopeFramer implements AutoCloseable {
                               final DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
         final int encodedLength = AeronReplicationEnvelope.encode(this.buffer, 0, this.clusterId,
-                this.epoch, this.fencingToken.getAsLong(), this.wireNonce, this.sequence, kind,
+                this.epoch, this.fencingToken, this.wireNonce, this.sequence, kind,
                 payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
                 payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength,
                 this.checksum);
@@ -208,7 +212,7 @@ final class EnvelopeFramer implements AutoCloseable {
                                 final int chunkCount, final int chunkOffset,
                                 final int payloadChunkLength, final int payloadCrc32c) {
         final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.buffer, 0,
-                this.clusterId, this.epoch, this.fencingToken.getAsLong(), this.wireNonce, this.sequence,
+                this.clusterId, this.epoch, this.fencingToken, this.wireNonce, this.sequence,
                 AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
                 chunkIndex, chunkCount, chunkOffset, 0, this.buffer,
                 AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,

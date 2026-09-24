@@ -150,6 +150,10 @@ class StorageWriteGatingTest {
                     ClusterStorageManager.create(delegate, () -> false, ClusterStorageManager.ShutdownCallback.noOp());
 
             manager.persistenceManager().close();
+            /* The borrowed target view is non-owning one level down as well:
+             * closing it through the persistence manager must not release
+             * the shared live target. */
+            manager.persistenceManager().target().closeTarget();
 
             assertTrue(manager.isRunning());
             assertDoesNotThrow(() -> manager.store(new Payload("still-open")));

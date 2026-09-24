@@ -12,8 +12,8 @@ import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Verifies backup-identity resolution never reports a healthy cursor as the
 /// cause of an identity failure and never lets an unreadable cursor hide a

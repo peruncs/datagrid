@@ -23,7 +23,9 @@ class StorageNodeManagerRolesTest {
         final StorageNodeManager manager = manager(StorageNodeManager.Role.READER, "aeron");
 
         assertFalse(manager.isWriter());
-        assertEquals("aeron", manager.replicationTransport());
+        /* The transport is no longer a monitoring surface: metrics compose
+         * from the state, sequence, and readiness components only. */
+        assertFalse(manager.isRunningStorageChecks());
     }
 
         /// A fixed writer reports itself as the writer and derives its

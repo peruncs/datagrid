@@ -119,7 +119,7 @@ final class ApplyQueue {
              * ownership hand-off.  Reject before enqueueing so a caller never
              * loses the native buffers into a dead queue. */
             if (this.owner.failure() != null) {
-                throw new IllegalStateException("Storage binary merger has failed", this.owner.failure());
+                throw this.owner.failure();
             }
             if (this.owner.isDisposed()) {
                 throw new ReplicationUnavailableException("Storage binary merger is disposed");
@@ -276,15 +276,40 @@ final class ApplyQueue {
             if (countedBuffers != pending) {
                 throw new IllegalStateException("Store transaction boundaries do not match queued buffers");
             }
-            for (int index = 0; index < pending; index++) {
-                final ByteBuffer next = this.cachedData.poll();
-                if (next == null) {
-                    throw new IllegalStateException("Storage binary materialization queue shrank during drain");
+            int drained = 0;
+            long drainedBytes = 0L;
+            try {
+                for (int index = 0; index < pending; index++) {
+                    final ByteBuffer next = this.cachedData.poll();
+                    if (next == null) {
+                        throw new IllegalStateException("Storage binary materialization queue shrank during drain");
+                    }
+                    this.cachedBufferCount--;
+                    this.cachedBytes = Math.subtractExact(this.cachedBytes, next.remaining());
+                    drainedBytes = Math.addExact(drainedBytes, next.remaining());
+                    drain.batchBytes = Math.addExact(drain.batchBytes, next.remaining());
+                    drain.buffers[index] = next;
+                    drained++;
                 }
-                this.cachedBufferCount--;
-                this.cachedBytes = Math.subtractExact(this.cachedBytes, next.remaining());
-                drain.batchBytes = Math.addExact(drain.batchBytes, next.remaining());
-                drain.buffers[index] = next;
+            } catch (final RuntimeException | Error failure) {
+                /* The defensive guard in this loop must not orphan a
+                 * partially drained prefix: it left the queue and its
+                 * bytes left the queued counter, but the worker's
+                 * try/finally has not started yet. Collect, release, and
+                 * restore every counter under this lock so the resident
+                 * invariant holds on the way out. */
+                final ByteBuffer[] prefix = new ByteBuffer[drained];
+                for (int index = 0; index < drained; index++) {
+                    this.cachedBufferCount++;
+                    prefix[index] = drain.buffers[index];
+                    drain.buffers[index] = null;
+                }
+                this.cachedBytes = Math.addExact(this.cachedBytes, drainedBytes);
+                drain.batchBytes = 0L;
+                drain.bufferCount = 0;
+                drain.transactionCount = 0;
+                StorageBinaryDataImporter.release(prefix);
+                throw failure;
             }
             this.inFlightBytes = Math.addExact(this.inFlightBytes, drain.batchBytes);
             drain.startedNanos = System.nanoTime();
@@ -338,7 +363,7 @@ final class ApplyQueue {
              * backpressure. Both signals arrive via drainedCondition. */
             while (Math.addExact(this.cachedBytes, this.inFlightBytes) > this.cacheBytesLimit) {
                 if (this.owner.failure() != null) {
-                    throw new IllegalStateException("Storage binary merger has failed", this.owner.failure());
+                    throw this.owner.failure();
                 }
                 if (this.owner.isDisposed()) {
                     throw new ReplicationUnavailableException("Storage binary merger is disposed");
@@ -421,6 +446,26 @@ final class ApplyQueue {
                 cursor.remove();
                 return;
             }
+        }
+    }
+
+    /// Test-visible snapshot of the queued byte counter.
+    long queuedBytes() {
+        this.queueLock.lock();
+        try {
+            return this.cachedBytes;
+        } finally {
+            this.queueLock.unlock();
+        }
+    }
+
+    /// Test-visible snapshot of the in-flight byte counter.
+    long inFlightBytes() {
+        this.queueLock.lock();
+        try {
+            return this.inFlightBytes;
+        } finally {
+            this.queueLock.unlock();
         }
     }
 }

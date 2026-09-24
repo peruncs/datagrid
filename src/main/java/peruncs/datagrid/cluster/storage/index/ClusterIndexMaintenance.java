@@ -66,7 +66,14 @@ public final class ClusterIndexMaintenance {
                 }
             }
         }
-        refreshMaps(this.cachedMaps, this.scratch);
+        /* Dirty-gated retirement: a batch that touched no reachable entity
+         * and left the roots stable cannot have changed any index view, so it
+         * must not pay Lucene close/reopen churn on the next query. The
+         * imported-id check above supplies the dirtiness signal; the first
+         * batch after a root scan always retires. */
+        if (!this.initialized || this.rootsDiffer || this.reachabilityChanged) {
+            refreshMaps(this.cachedMaps, this.scratch);
+        }
     }
 
     /// Validates changed roots and rebuilds only changed vector graphs.
@@ -131,9 +138,9 @@ public final class ClusterIndexMaintenance {
     /// API, so no index group observes the change and both search views freeze
     /// at whatever the first query built: Lucene's cached near-real-time reader
     /// reopens only when a write-path mutation marks it stale, and JVector's
-    /// transient graph rebuilds exactly once after load. The chaos soak proved
-    /// a commit-only refresh insufficient: the graph converged with zero misses
-    /// while both indexes missed 327 of 370 live articles on every reader.
+    /// transient graph rebuilds exactly once after load. A commit-only
+    /// refresh is therefore insufficient by construction — retirement and
+    /// rebuild are mandatory on the import path.
     ///
     /// The refresh is two-tracked because the two indexes replicate
     /// differently. Lucene's complete directory content ships inside the Store
@@ -146,14 +153,17 @@ public final class ClusterIndexMaintenance {
     /// but not its search graph; the refresh records its change counter so the
     /// post-import pass can rebuild only graphs that changed.
     ///
-    /// Everything runs under the map monitor, the same lock queries use, and
-    /// the merger holds one coordinator write section across retirement,
-    /// materialization, and validation, so joined application reads observe
-    /// either the pre-batch or the post-batch boundary — never a materialized
-    /// graph with stale search views. Retirement precedes the swap: the
-    /// caller runs this before materializing, so every close still observes
-    /// the directory state its handles reference. Callers invoke this only
-    /// for non-empty batches.
+    /// The merger holds one coordinator write section across retirement,
+    /// materialization, and validation. Application reads that join the
+    /// coordinator's read side are excluded for the whole section, so they
+    /// observe either the pre-batch or the post-batch boundary — never a
+    /// materialized graph with stale search views. No map monitor is taken:
+    /// a GigaMap reader that did not join the coordinator can race this
+    /// close, which is the documented cost of the borrowed-view design —
+    /// upstream queries are safe only inside the coordinator section.
+    /// Retirement precedes the swap: the caller runs this before
+    /// materializing, so every close still observes the directory state its
+    /// handles reference. Callers invoke this only for non-empty batches.
     ///
     /// @param storage             storage connection owning the materialized graph
     /// @param maxValidatedObjects object bound for the discovery scan
@@ -197,8 +207,9 @@ public final class ClusterIndexMaintenance {
 
         /// Validates this Store's index boundary and rebuilds changed vector graphs.
     ///
-    /// The rebuild runs here — inside the merger's coordinator write section
-    /// and under the map monitor — instead of lazily on the next query. A
+    /// The rebuild runs here — inside the merger's coordinator write
+    /// section, with no map monitor held — instead of lazily on the next
+    /// query. A
     /// lazy rebuild scans the whole store while holding the map monitor and
     /// performs storage reads; racing it with the next batch's bulk
     /// materialization deadlocks the two (map monitor against the object
@@ -332,9 +343,9 @@ public final class ClusterIndexMaintenance {
         if (deferred instanceof ConcurrentLinkedQueue<?> queued) queued.clear();
         /* Same order as the upstream close: release the builder and the graph
          * eagerly instead of abandoning them, then clear the rebuild guard so
-         * the next access re-initializes over current state. Only the map
-         * monitor is held here, matching every other refresh mutation; the
-         * merger's write section keeps joined reads out until this returns. */
+         * the next access re-initializes over current state. No map monitor
+         * is held: the merger's coordinator write section is what keeps
+         * joined application reads out until this returns. */
         if (builder != null) {
             try {
                 builder.close();
@@ -413,8 +424,9 @@ public final class ClusterIndexMaintenance {
     /// closing commits nothing new. Closing the directory is safe: the graph
     /// directory's files live in the persisted file-entries registry, which
     /// close does not touch, so the next query recreates the directory over
-    /// the same current files. The map monitor is already held by the caller,
-    /// matching the synchronization upstream close performs.
+    /// the same current files. The caller's coordinator write section is the
+    /// only synchronization: no map monitor is taken, because this code
+    /// performs no map mutation upstream close would race.
     ///
     /// @param lucene index whose cached view to retire
     /// @throws IllegalStateException if retiring the view fails

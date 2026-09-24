@@ -5,7 +5,6 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
@@ -333,7 +332,6 @@ public final class ReaderCrashChildMain {
             try {
                 final AeronReplicationCheckpoint marker = new AeronReplicationCheckpoint(
                         AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                        ReplicationDurabilityMode.ARCHIVE_FIRST,
                         AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                         CLUSTER_ID, java.util.UUID.nameUUIDFromBytes("reader-crash-node".getBytes(StandardCharsets.UTF_8)),
                         java.util.UUID.nameUUIDFromBytes("reader-crash-generation".getBytes(StandardCharsets.UTF_8)),

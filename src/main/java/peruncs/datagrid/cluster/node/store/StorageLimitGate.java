@@ -12,6 +12,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /// writable and read-only.
 public final class StorageLimitGate {
     private static final System.Logger LOGGER = System.getLogger(StorageLimitGate.class.getName());
+    /// Wall-clock spacing between "still full" reminders while the limit stays reached.
+    private static final long FULL_REMINDER_INTERVAL_MILLIS = 600_000L;
+    private long lastFullLogMillis;
     private static final long BYTES_PER_GIGABYTE = 1_000_000_000L;
     private static final int DEFAULT_RELEASE_PERMILLE = 100;
 
@@ -98,6 +101,7 @@ public final class StorageLimitGate {
             if (LOGGER.isLoggable(System.Logger.Level.TRACE)) {
                 LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
             }
+            final long nowMillis = System.currentTimeMillis();
             final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
             final long usedGb = usedBytes / BYTES_PER_GIGABYTE;
             if (LOGGER.isLoggable(System.Logger.Level.DEBUG)) {
@@ -107,7 +111,16 @@ public final class StorageLimitGate {
             final boolean wasLimited = this.limitReached();
             this.updateUsage(usedBytes);
             if (!wasLimited && this.limitReached()) {
+                this.lastFullLogMillis = nowMillis;
                 LOGGER.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
+            } else if (wasLimited && !this.limitReached()) {
+                LOGGER.log(System.Logger.Level.INFO, "Storage usage fell back below the %s GB limit; storing resumes".formatted(this.limitGb()));
+            } else if (this.limitReached() && nowMillis - this.lastFullLogMillis >= FULL_REMINDER_INTERVAL_MILLIS) {
+                /* Operators get a throttled reminder while the node stays
+                 * full instead of one warning followed by silence. */
+                this.lastFullLogMillis = nowMillis;
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Storage limit still reached! No more data will be stored!");
             }
         };
     }

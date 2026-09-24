@@ -3,13 +3,13 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import io.aeron.Publication;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.errors.WriterFencedException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.LongSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -25,8 +25,8 @@ class AeronOfferRetryerTest {
                 AeronReplicationConfiguration.defaults(),
                 () -> now.getAndAdd(1_000_000_000L));
 
-        final var failure = assertThrows(IllegalStateException.class,
-                () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+        final var failure = assertThrows(ReplicationUnavailableException.class,
+                () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> true));
         assertTrue(failure.getMessage().startsWith("Aeron offer timed out"),
                 () -> "unexpected failure: " + failure.getMessage());
     }
@@ -38,7 +38,7 @@ class AeronOfferRetryerTest {
                 (buffer, offset, length) -> 42L,
                 AeronReplicationConfiguration.defaults());
 
-        assertEquals(42L, retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+        assertEquals(42L, retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> true));
     }
 
     /// Full-jitter spacing must keep a persistent back-pressure loop from
@@ -64,8 +64,8 @@ class AeronOfferRetryerTest {
                         attemptsCounter.incrementAndGet();
                         return Publication.BACK_PRESSURED;
                     }, configuration);
-            assertThrows(IllegalStateException.class,
-                    () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+            assertThrows(ReplicationUnavailableException.class,
+                    () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> true));
             attempts = attemptsCounter.get();
         }
         /* Each retry parks uniform in [0, cap); reaching 30 attempts would
@@ -101,11 +101,6 @@ class AeronOfferRetryerTest {
             public boolean isValid() { return true; }
 
             @Override
-            public long offerUnderOwnership(final LongSupplier offer) {
-                throw new AssertionError("the ungated overload must not be used");
-            }
-
-            @Override
             public long offerUnderOwnership(final OwnedOffer offer) {
                 claims.incrementAndGet();
                 return offer.offer(() -> true);
@@ -127,7 +122,7 @@ class AeronOfferRetryerTest {
                     attempts.incrementAndGet();
                     return Publication.BACK_PRESSURED;
                 }, AeronReplicationConfiguration.defaults(), () -> now.getAndAdd(1_000_000L));
-        assertThrows(IllegalStateException.class, () -> retryer.offerGated(
+        assertThrows(ReplicationUnavailableException.class, () -> retryer.offerGated(
                 new UnsafeBuffer(new byte[64]), 64, WriterLeaseGate.alwaysValid(), 1_000L));
         assertEquals(1, attempts.get());
     }
@@ -135,7 +130,7 @@ class AeronOfferRetryerTest {
     /// Verifies the default retry policy preserves the historical idle, jitter, and probe pacing.
     @Test
     void policyDefaultsPreserveHistoricalPacing() {
-        final AeronRetryPolicy policy = AeronRetryPolicy.Default();
+        final AeronRetryPolicy policy = AeronRetryPolicy.defaults();
 
         assertEquals(1, policy.idleMaxSpins());
         assertEquals(10, policy.idleMaxYields());

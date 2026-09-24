@@ -37,7 +37,8 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32C;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Soak test: one writer, `-Dsoak.readers` readers (default three), threaded
 /// load with jitter, index queries served while replication lands, and seeded

@@ -4,7 +4,6 @@ import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
@@ -300,7 +299,6 @@ final class WriterTakeoverCrashMatrixIT {
                 "-Ddg.crash.barrier=%s".formatted(point),
                 "-Ddg.crash.sequence=1",
                 "-Ddg.crash.writes=%s".formatted(writes),
-                "-Ddg.crash.durability=%s".formatted(ReplicationDurabilityMode.ARCHIVE_FIRST),
                 "-Ddg.crash.leaseStalenessMillis=%s".formatted(LEASE_STALENESS_MILLIS),
                 "-Ddg.crash.nodeSalt=%s".formatted(nodeSalt),
                 "-Ddg.crash.livePort=%s".formatted(layout.livePort()),

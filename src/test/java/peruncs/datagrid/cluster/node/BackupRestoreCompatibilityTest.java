@@ -18,8 +18,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Verifies generation-filtered restores: on a shared backup volume a node
 /// selects the newest backup of its own cluster, generation, epoch, and

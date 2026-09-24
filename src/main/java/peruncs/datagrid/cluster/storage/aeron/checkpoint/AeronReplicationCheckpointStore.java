@@ -1,7 +1,7 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
+import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
 import peruncs.datagrid.cluster.storage.Crc32C;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
@@ -13,7 +13,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 
 import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
@@ -25,7 +24,20 @@ import static peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronCheckpointC
 public final class AeronReplicationCheckpointStore {
     private static final int SLOT_BYTES = Long.BYTES + AeronReplicationCheckpoint.ENCODED_BYTES + Integer.BYTES;
     private static final int JOURNAL_BYTES = SLOT_BYTES * 2;
-    private static final ConcurrentHashMap<Path, Object> LOCKS = new ConcurrentHashMap<>();
+    /* Fixed monitor stripes instead of one monitor per distinct path: the
+     * journal is written at commit cadence, and a bounded stripe array
+     * cannot retain one monitor per path forever. Writers for different
+     * paths rarely collide, and when they do they only serialize briefly. */
+    private static final int LOCK_STRIPES = 16;
+    private static final Object[] LOCKS = new Object[LOCK_STRIPES];
+
+    static {
+        for (int index = 0; index < LOCK_STRIPES; index++) LOCKS[index] = new Object();
+    }
+
+    private static Object lockFor(final Path canonical) {
+        return LOCKS[Math.floorMod(canonical.hashCode(), LOCK_STRIPES)];
+    }
     private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
 
     private AeronReplicationCheckpointStore() {
@@ -48,7 +60,7 @@ public final class AeronReplicationCheckpointStore {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(checkpoint, "checkpoint");
         final Path canonical = path.toAbsolutePath().normalize();
-        synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
+        synchronized (lockFor(canonical)) {
             final Path parent = canonical.getParent();
             if (parent != null) Files.createDirectories(parent);
             AtomicFileWriter.ensureNoSymbolicLinks(canonical);
@@ -96,7 +108,7 @@ public final class AeronReplicationCheckpointStore {
         final byte[] encoded = new byte[AeronReplicationCheckpoint.ENCODED_BYTES];
         int offset = putHeader(encoded, 0, AeronReplicationCheckpoint.MAGIC, AeronReplicationCheckpoint.VERSION);
         offset = putByte(encoded, offset, (byte) checkpoint.recordTypeCode());
-        offset = putByte(encoded, offset, (byte) checkpoint.durabilityModeCode());
+        offset = putByte(encoded, offset, (byte) AeronReplicationCheckpoint.DURABILITY_ARCHIVE_FIRST);
         offset = putByte(encoded, offset, (byte) checkpoint.stateCode());
         offset = putUuid(encoded, offset, checkpoint.clusterId());
         offset = putUuid(encoded, offset, checkpoint.nodeId());
@@ -122,7 +134,7 @@ public final class AeronReplicationCheckpointStore {
         final Path canonical = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
         AtomicFileWriter.ensureNoSymbolicLinks(canonical);
         final byte[] bytes;
-        synchronized (LOCKS.computeIfAbsent(canonical, ignored -> new Object())) {
+        synchronized (lockFor(canonical)) {
             try (FileChannel channel = FileChannel.open(canonical, StandardOpenOption.READ,
                     LinkOption.NOFOLLOW_LINKS)) {
                 if (channel.size() != JOURNAL_BYTES) {
@@ -150,7 +162,11 @@ public final class AeronReplicationCheckpointStore {
             }
             final var reader = new FrameReader(bytes, AeronCheckpointCodec.HEADER_LENGTH);
             final var recordType = AeronReplicationCheckpoint.RecordType.from(Byte.toUnsignedInt(reader.readByte()));
-            final var mode = ReplicationDurabilityMode.fromCode(Byte.toUnsignedInt(reader.readByte()));
+            final int durabilityCode = Byte.toUnsignedInt(reader.readByte());
+            if (durabilityCode != AeronReplicationCheckpoint.DURABILITY_ARCHIVE_FIRST) {
+                throw new CorruptReplicationDataException(
+                        "unknown replication durability mode: %s".formatted(durabilityCode));
+            }
             final var state = AeronReplicationCheckpoint.State.from(Byte.toUnsignedInt(reader.readByte()));
             final UUID clusterId = reader.readUuid();
             final UUID nodeId = reader.readUuid();
@@ -163,7 +179,7 @@ public final class AeronReplicationCheckpointStore {
             final int dataLength = reader.readInt();
             final int dataChunkCount = reader.readInt();
             final int resolutionCrc32c = reader.readInt();
-            return new AeronReplicationCheckpoint(recordType, mode, state,
+            return new AeronReplicationCheckpoint(recordType, state,
                     clusterId, nodeId, storeGeneration,
                     recordingId, writerEpoch, fencingToken, transactionSequence, recordingPosition,
                     dataLength, dataChunkCount, resolutionCrc32c);

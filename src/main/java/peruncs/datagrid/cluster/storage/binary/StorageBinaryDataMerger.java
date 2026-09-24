@@ -16,7 +16,8 @@ import peruncs.datagrid.cluster.storage.StorageGraphCoordinator;
 
 import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -267,7 +268,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
     @Override
     public void receiveData(final Binary data) {
         if (this.failure.get() != null) {
-            throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
+            throw this.failure.get();
         }
         if (this.disposed) {
             /* A disposed receiver must not acknowledge data. Returning normally
@@ -304,7 +305,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         try {
             buffers = StorageBinaryBuffers.ownedArray(notNull(data));
             if (this.failure.get() != null) {
-                throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
+                throw this.failure.get();
             }
             if (this.disposed) {
                 throw new ReplicationUnavailableException("Storage binary merger is disposed");
@@ -335,7 +336,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
     private void scheduleMaterialization(final ByteBuffer[] ownedBuffers) {
         if (this.failure.get() != null) {
             StorageBinaryDataImporter.release(ownedBuffers);
-            throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
+            throw this.failure.get();
         }
         if (this.disposed) {
             StorageBinaryDataImporter.release(ownedBuffers);
@@ -405,6 +406,16 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         return this.failure.get();
     }
 
+    /// Test-visible snapshot of the queued byte counter (queued but not yet drained).
+    long queuedBytes() {
+        return this.queue.queuedBytes();
+    }
+
+    /// Test-visible snapshot of the in-flight byte counter (held by the worker's batch).
+    long inFlightBytes() {
+        return this.queue.inFlightBytes();
+    }
+
         /// Returns the graph coordinator this merger joins for its own Store reads.
     ///
     /// Node-owned read paths adopt the read side through the returned
@@ -446,7 +457,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
     @Override
     public void receiveTypeDictionary(final String typeDictionaryData) {
         if (this.failure.get() != null) {
-            throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
+            throw this.failure.get();
         }
         if (this.disposed) {
             throw new ReplicationUnavailableException("Storage binary merger is disposed");
@@ -660,7 +671,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
              * Release buffers accepted after the worker's failure cleanup so the
              * assembler's ownership transfer cannot turn into a native leak. */
             this.queue.releaseAll();
-            throw new IllegalStateException("Storage binary merger has failed", this.failure.get());
+            throw this.failure.get();
         }
         if (this.disposed) {
             throw new ReplicationUnavailableException("Storage binary merger is disposed");
@@ -704,7 +715,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         } catch (final ExecutionException e) {
             final RuntimeException mergerFailure = this.failure.get();
             if (mergerFailure != null) {
-                throw new IllegalStateException("Storage binary merger has failed", mergerFailure);
+                throw mergerFailure;
             }
             final RuntimeException terminal = this.recordFailure("Failed to materialize imported Store data", e.getCause() == null ? e : e.getCause());
             this.queue.releaseAll();

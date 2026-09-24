@@ -6,14 +6,15 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.errors.CorruptReplicationDataException;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.storage.StorageGraphCoordinator;
 
 import java.lang.reflect.Field;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Proves owned deliveries fail closed without leaking native memory.
 ///
@@ -139,8 +140,8 @@ class StorageBinaryDataOwnedReleaseTest {
     void refusedOwnedDeliveryOnDisposedMergerStaysClean() {
         final StorageBinaryDataMerger merger = merger();
         merger.dispose();
-        final IllegalStateException failure = assertThrows(
-                IllegalStateException.class, () -> merger.receiveDataOwned(ChunksWrapper.New(direct(16))));
+        final ReplicationUnavailableException failure = assertThrows(
+                ReplicationUnavailableException.class, () -> merger.receiveDataOwned(ChunksWrapper.New(direct(16))));
         assertTrue(failure.getMessage().contains("disposed"),
                 "an owned delivery after disposal must report the disposal: " + failure.getMessage());
     }

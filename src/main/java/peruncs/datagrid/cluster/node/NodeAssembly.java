@@ -332,7 +332,7 @@ final class NodeCollaborators {
     ///
     /// @return storage task executor
     private StorageTaskExecutor ensureStorageTaskExecutor() {
-        if (this.getNodeSettingsSource().nodeRole() == NodeRole.BACKUP_READER) {
+        if (this.nodeRole == NodeRole.BACKUP_READER) {
             return this.getStorageBackupTaskExecutor();
         }
         return StorageTaskExecutor.create(this.clusterStorageManager);
@@ -509,7 +509,7 @@ final class NodeCollaborators {
     /// @return replication data client
     private ReplicationApplier ensureReplicationApplier() {
         final var props = this.getNodeSettingsSource();
-        final boolean commitPosition = props.nodeRole() == NodeRole.BACKUP_READER;
+        final boolean commitPosition = this.nodeRole == NodeRole.BACKUP_READER;
         return this.getClusterReplicationTransport().client(
                 this.getStorageBinaryDataMerger(),
                 props.replicationStreamName(),
@@ -558,8 +558,7 @@ final class NodeCollaborators {
     /// @return storage node manager
     private StorageNodeManager ensureStorageNodeManager() {
         final String transport = this.getClusterReplicationTransport().id();
-        final boolean writer =
-                this.getNodeSettingsSource().nodeRole() == NodeRole.WRITER;
+        final boolean writer = this.nodeRole == NodeRole.WRITER;
         return StorageNodeManager.create(new StorageNodeManager.Configuration(
                 this.getReplicationPublisher(),
                 this.getStorageTaskExecutor(),
@@ -650,7 +649,7 @@ final class NodeCollaborators {
     ///
     /// @return `true` only for the writer role
     boolean mayCreateRoot() {
-        return this.getNodeSettingsSource().nodeRole() == NodeRole.WRITER;
+        return this.nodeRole == NodeRole.WRITER;
     }
 
     /// Reports whether this node replicates through the Aeron transport.

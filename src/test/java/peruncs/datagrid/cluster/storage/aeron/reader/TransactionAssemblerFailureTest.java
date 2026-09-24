@@ -36,6 +36,9 @@ class TransactionAssemblerFailureTest {
 
     private static void accept(final TransactionAssembler assembler, final byte[] bytes) {
         assembler.onFragment(new UnsafeBuffer(bytes), 0, bytes.length, null);
+        if (assembler.deliveryBarrierFull()) {
+            assembler.flushDeliveries();
+        }
     }
 
     /// Proves `failure()` returns promptly while the delivery thread is parked in `awaitApplied()`.

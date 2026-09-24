@@ -64,26 +64,18 @@ public interface StorageUsageGauge {
             if (measuredAt != 0L && now - measuredAt >= 0L && now - measuredAt < this.cacheNanos) {
                 return this.cachedBytes;
             }
-            if (measuredAt != 0L) {
-                if (this.refreshRunning.compareAndSet(false, true)) {
-                    Thread.startVirtualThread(() -> {
-                        try {
-                            this.measure();
-                        } finally {
-                            this.refreshRunning.set(false);
-                        }
-                    });
-                }
-                return this.cachedBytes;
-            }
-            synchronized (this) {
-                final long secondMeasuredAt = this.measuredAtNanos;
-                final long secondNow = System.nanoTime();
-                if (secondMeasuredAt != 0L && secondNow - secondMeasuredAt >= 0L &&
-                    secondNow - secondMeasuredAt < this.cacheNanos) {
-                    return this.cachedBytes;
-                }
-                if (secondMeasuredAt == 0L) this.measure();
+            /* Single-flight refresh for the stale and the cold case alike: the
+             * first measurement never walks the directory on the caller's
+             * thread, so a slow volume cannot block health or limit checks.
+             * A cold gauge reports zero until the first refresh lands. */
+            if (this.refreshRunning.compareAndSet(false, true)) {
+                Thread.startVirtualThread(() -> {
+                    try {
+                        this.measure();
+                    } finally {
+                        this.refreshRunning.set(false);
+                    }
+                });
             }
             return this.cachedBytes;
         }
@@ -104,6 +96,12 @@ public interface StorageUsageGauge {
             final long[] total = {
                     0L
             };
+            /* Overflow is latched, not repeatedly logged: once usage
+             * saturates the long space, every file of every refresh would
+             * otherwise warn again. */
+            final boolean[] overflowLogged = {
+                    false
+            };
             dir.iterateFiles(f ->
             {
                 try {
@@ -111,7 +109,10 @@ public interface StorageUsageGauge {
                         total[0] = Math.addExact(total[0], f.size());
                     } catch (final ArithmeticException overflow) {
                         total[0] = Long.MAX_VALUE;
-                        LOGGER.log(System.Logger.Level.WARNING, "Storage size overflow while measuring %s".formatted(f));
+                        if (!overflowLogged[0]) {
+                            overflowLogged[0] = true;
+                            LOGGER.log(System.Logger.Level.WARNING, "Storage size overflow while measuring %s".formatted(f));
+                        }
                     }
                 } catch (final RuntimeException e) {
                     LOGGER.log(System.Logger.Level.DEBUG, "Could not measure storage file %s; it may have been removed".formatted(f), e);

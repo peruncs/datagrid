@@ -20,10 +20,8 @@ import java.util.OptionalLong;
 /// @param latestSequence latest observed writer sequence
 /// @param archiveUsableBytes local Archive usable bytes, empty when
 /// unavailable for this role
-/// @param writerDurablePosition durable writer recording position, empty
-/// when unavailable for this role
-/// @param writerDurableSequence durable writer sequence, empty when
-/// unavailable for this role
+/// @param writerDurableBoundary the writer's durable position and sequence
+/// sampled together, empty components when unavailable for this role
 /// @param appliedSequence locally applied sequence, empty when unavailable
 /// for this role
 public record ReplicationStatus(
@@ -31,17 +29,33 @@ public record ReplicationStatus(
         long currentSequence,
         long latestSequence,
         OptionalLong archiveUsableBytes,
-        OptionalLong writerDurablePosition,
-        OptionalLong writerDurableSequence,
+        WriterDurableBoundary writerDurableBoundary,
         OptionalLong appliedSequence
 ) {
     /// Validates the immutable replication status.
     public ReplicationStatus {
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(archiveUsableBytes, "archiveUsableBytes");
-        Objects.requireNonNull(writerDurablePosition, "writerDurablePosition");
-        Objects.requireNonNull(writerDurableSequence, "writerDurableSequence");
+        Objects.requireNonNull(writerDurableBoundary, "writerDurableBoundary");
         Objects.requireNonNull(appliedSequence, "appliedSequence");
+    }
+
+    /// The writer's durable recording position and transaction sequence,
+    /// sampled as one pair so a snapshot can never mix two samples.
+    ///
+    /// @param position durable writer recording position, empty when
+    /// unavailable for this role
+    /// @param sequence durable writer sequence, empty when unavailable for
+    /// this role
+    public record WriterDurableBoundary(
+            OptionalLong position,
+            OptionalLong sequence
+    ) {
+        /// Validates the immutable sampled pair.
+        public WriterDurableBoundary {
+            Objects.requireNonNull(position, "position");
+            Objects.requireNonNull(sequence, "sequence");
+        }
     }
 
     /// Derives the replication lag as `latestSequence - currentSequence`:

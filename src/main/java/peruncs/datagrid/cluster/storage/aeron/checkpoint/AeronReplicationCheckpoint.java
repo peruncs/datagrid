@@ -1,7 +1,5 @@
 package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
-
 import java.util.UUID;
 
 /// The restart record for one writer or reader.
@@ -13,7 +11,8 @@ import java.util.UUID;
 /// Startup refuses an incomplete or mismatched record instead of guessing.
 ///
 /// @param recordType          whether this is writer or reader state
-/// @param durabilityMode      ordering selected for the writer
+/// The checkpoint format persists the durability-ordering code as a fixed
+/// byte; archive-first (code `1`) is the only ordering this build supports.
 /// @param state               last durable state transition
 /// @param clusterId           fixed-topology cluster identity
 /// @param nodeId              node that owns the record
@@ -35,7 +34,6 @@ import java.util.UUID;
 ///                            payload CRC
 public record AeronReplicationCheckpoint(
         RecordType recordType,
-        ReplicationDurabilityMode durabilityMode,
         State state,
         UUID clusterId,
         UUID nodeId,
@@ -51,6 +49,8 @@ public record AeronReplicationCheckpoint(
 ) {
     static final int MAGIC = 0x44474350; // DGCP
     static final short VERSION = 2;
+    /// Persisted durability-ordering code; archive-first is the only mode.
+    static final int DURABILITY_ARCHIVE_FIRST = 1;
     /// Shared header, three state bytes, three UUIDs, five longs, the three
     /// data fields, and the trailing CRC32C.
     static final int ENCODED_BYTES = AeronCheckpointCodec.HEADER_LENGTH
@@ -62,7 +62,7 @@ public record AeronReplicationCheckpoint(
         /// Validates the restart record and keeps its state machine closed over the
     /// writer and reader recovery domains.
     public AeronReplicationCheckpoint {
-        if (recordType == null || durabilityMode == null || state == null || clusterId == null ||
+        if (recordType == null || state == null || clusterId == null ||
             nodeId == null || storeGeneration == null || recordingId < -1 || writerEpoch < 0 ||
             fencingToken < 0 || transactionSequence < -1 || transactionSequence == Long.MAX_VALUE ||
             recordingPosition < -1 || dataLength < 0 || dataChunkCount < 0) {
@@ -96,10 +96,6 @@ public record AeronReplicationCheckpoint(
 
     int recordTypeCode() {
         return this.recordType.code;
-    }
-
-    int durabilityModeCode() {
-        return this.durabilityMode.code();
     }
 
     int stateCode() {

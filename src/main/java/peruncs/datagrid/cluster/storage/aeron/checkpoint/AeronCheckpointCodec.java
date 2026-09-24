@@ -8,7 +8,7 @@ import java.util.UUID;
 /// magic int, a version short, and a flags short that must be zero until a
 /// format revision assigns a bit meaning. The watermark, replication cursor,
 /// and checkpoint store all encode and validate that header through this
-/// interface so the three formats can never drift apart.
+/// shared codec so the three formats can never drift apart.
 final class AeronCheckpointCodec {
     private AeronCheckpointCodec() {
     }

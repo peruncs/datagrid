@@ -17,15 +17,18 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
-import java.util.function.LongSupplier;
 
 import static java.lang.System.Logger.Level.WARNING;
 
@@ -149,10 +152,15 @@ final class WriterFencingLease implements AutoCloseable {
         if (lockTimeout.isZero() || lockTimeout.isNegative()) {
             throw new IllegalArgumentException("lease lock wait must be positive");
         }
-        final Path canonicalVolume = volumeDirectory.toAbsolutePath().normalize();
+        Path canonicalVolume = volumeDirectory.toAbsolutePath().normalize();
         try {
             Files.createDirectories(canonicalVolume);
             AtomicFileWriter.ensureNoSymbolicLinks(canonicalVolume);
+            /* One canonical path per physical directory: `/tmp` and
+             * `/private/tmp` are the same volume on macOS, and without
+             * toRealPath they would mint two PATH_MUTEXES/ACTIVE keys so an
+             * orphan recorded under one alias would not block the other. */
+            canonicalVolume = canonicalVolume.toRealPath();
         } catch (final IOException failure) {
             throw new IllegalStateException("cannot create writer lease directory %s".formatted(canonicalVolume), failure);
         }
@@ -183,8 +191,7 @@ final class WriterFencingLease implements AutoCloseable {
         final long token;
         final long writeNanos;
         final long now;
-        try (final FileChannel lockChannel = FileChannel.open(
-                rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try (final FileChannel lockChannel = openLockChannel(lockPath);
              final FileLock ignored = lockFile(lockChannel, lockTimeout)) {
             /* Sample the wall clock only once the interprocess lock is held: a
              * long wait for another writer must not make the freshly written
@@ -379,10 +386,6 @@ final class WriterFencingLease implements AutoCloseable {
     /// A closed lease is never current.
     ///
     /// @return `true` while the lease file still names this holder with a fresh heartbeat
-    boolean isCurrent() {
-        return this.isCurrentUncached();
-    }
-
         /// Re-reads the lease file with a rate-limited ownership proof.
     ///
     /// The physical re-read runs at most once per third of the staleness
@@ -393,10 +396,10 @@ final class WriterFencingLease implements AutoCloseable {
     /// acquisition and takeover.
     ///
     /// @return `true` while this holder owns a fresh lease
-    boolean isCurrentUncached() {
+    boolean isCurrent() {
         final long nowNanos = System.nanoTime();
         synchronized (this.stateLock) {
-            if (this.closed) return false;
+            if (this.closed || this.releaseUnproven) return false;
             if (this.hasCheck && nowNanos - this.lastCheckNanos < this.checkIntervalNanos) {
                 return this.lastCheckResult;
             }
@@ -404,7 +407,7 @@ final class WriterFencingLease implements AutoCloseable {
         final LeaseFile current = readQuietly(this.path);
         final boolean result = current != null && this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
         synchronized (this.stateLock) {
-            if (this.closed) return false;
+            if (this.closed || this.releaseUnproven) return false;
             this.hasCheck = true;
             this.lastCheckNanos = nowNanos;
             this.lastCheckResult = result;
@@ -439,10 +442,9 @@ final class WriterFencingLease implements AutoCloseable {
         final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
         synchronized (mutexFor(this.path)) {
             synchronized (this.stateLock) {
-                if (this.closed) return;
+                if (this.closed || this.releaseUnproven) return;
             }
-            try (final FileChannel lockChannel = FileChannel.open(
-                    rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            try (final FileChannel lockChannel = openLockChannel(lockPath);
                  final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
                 final LeaseFile current = readForAcquire(this.path);
                 if (!this.matchesHolder(current)) {
@@ -511,11 +513,6 @@ final class WriterFencingLease implements AutoCloseable {
     /// @param offer one publication attempt returning an Aeron result
     /// @return Aeron position returned by the offer
     /// @throws WriterFencedException when this holder no longer owns a fresh lease
-    long executeUnderOwnership(final LongSupplier offer) {
-        Objects.requireNonNull(offer, "offer");
-        return this.executeUnderOwnership(ignored -> offer.getAsLong());
-    }
-
     /// Leaves room for renewal and takeover before the lease can become stale.
     long terminalOfferBudgetNanos() {
         return Math.max(1L, this.maxStalenessNanos / 3L);
@@ -533,10 +530,13 @@ final class WriterFencingLease implements AutoCloseable {
                 if (this.closed) {
                     throw new WriterFencedException("writer fencing lease is closed");
                 }
+                if (this.releaseUnproven) {
+                    throw new WriterFencedException(
+                            "writer fencing lease release was unresolved; this writer is fenced");
+                }
             }
             final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
-            try (final FileChannel lockChannel = FileChannel.open(
-                    rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            try (final FileChannel lockChannel = openLockChannel(lockPath);
                  final FileLock ignored = lockFile(lockChannel,
                          Duration.ofNanos(Math.min(this.lockTimeout.toNanos(), this.terminalOfferBudgetNanos())))) {
                 final LeaseFile current = readForAcquire(this.path);
@@ -549,7 +549,7 @@ final class WriterFencingLease implements AutoCloseable {
                 }
                 this.refreshHeartbeatIfDueLocked();
                 try {
-                    final long position = offer.offer(this::isCurrentUncached);
+                    final long position = offer.offer(this::isCurrent);
                     /* Post-offer window: the terminal marker is offered while
                      * the interprocess lock is still held, but the protecting
                      * heartbeat refresh has not run yet. */
@@ -616,7 +616,7 @@ final class WriterFencingLease implements AutoCloseable {
         }
         final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
         boolean releaseProven = false;
-        try (final FileChannel lockChannel = FileChannel.open(rejectSymbolicLink(lockPath), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try (final FileChannel lockChannel = openLockChannel(lockPath);
              final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
             /* Nothing to write: the file intentionally survives release.
              * Holding the interprocess lock here proves that a renewal or
@@ -722,9 +722,17 @@ final class WriterFencingLease implements AutoCloseable {
         return new LeaseFile(token, nodeId, holderId, heartbeat);
     }
 
-    private static Path rejectSymbolicLink(final Path path) throws IOException {
-        AtomicFileWriter.ensureNoSymbolicLinks(path);
-        return path;
+    private static final FileAttribute<Set<PosixFilePermission>> LOCK_FILE_PERMISSIONS =
+            PosixFilePermissions.asFileAttribute(Set.of(
+                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+
+    /// Opens the interprocess lock file with owner-only permissions, matching
+    /// the lease file itself: a world-writable lock file would let any local
+    /// account hold the writer's fencing lock.
+    private static FileChannel openLockChannel(final Path lockPath) throws IOException {
+        AtomicFileWriter.ensureNoSymbolicLinks(lockPath);
+        return (FileChannel) Files.newByteChannel(lockPath,
+                Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE), LOCK_FILE_PERMISSIONS);
     }
 
     private static void writeAtomically(final Path path, final LeaseFile lease) {

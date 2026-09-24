@@ -5,9 +5,9 @@ import org.agrona.concurrent.IdleStrategy;
 
 /// Idle pacing and probe spacing for bounded Aeron retry loops.
 ///
-/// All values are nanoseconds. The defaults preserve the historical behavior
-/// of the writer and Archive await loops; override them only to trade CPU
-/// burn against reaction time on slow or distant Archives.
+/// All values are nanoseconds. The defaults pace the writer and Archive
+/// await loops; override them only to trade CPU burn against reaction time
+/// on slow or distant Archives.
 ///
 /// @param idleMaxSpins                   maximum spin iterations before yielding in one idle step
 /// @param idleMaxYields                  maximum yield iterations before parking in one idle step
@@ -29,10 +29,10 @@ public record AeronRetryPolicy(
         long catalogProbeInitialDelayNanos,
         long catalogProbeMaxDelayNanos
 ) {
-    /// Creates the historical retry pacing.
+    /// Creates the default retry pacing.
     ///
     /// @return default retry policy
-    public static AeronRetryPolicy Default() {
+    public static AeronRetryPolicy defaults() {
         return new AeronRetryPolicy(
                 1, 10, 1L, 1_000_000L,
                 1_000L, 1_000_000L,

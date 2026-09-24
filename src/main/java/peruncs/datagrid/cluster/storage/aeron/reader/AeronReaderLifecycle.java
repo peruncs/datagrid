@@ -1,8 +1,8 @@
 package peruncs.datagrid.cluster.storage.aeron.reader;
 
 import org.agrona.concurrent.IdleStrategy;
-import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.datagrid.cluster.storage.ReplicationRetry;
+import peruncs.datagrid.cluster.storage.aeron.config.AeronRetryPolicy;
 
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;

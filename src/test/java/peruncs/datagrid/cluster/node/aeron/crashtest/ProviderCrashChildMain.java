@@ -8,7 +8,6 @@ import peruncs.datagrid.cluster.node.aeron.AeronCrashHooks;
 import peruncs.datagrid.cluster.node.aeron.AeronTransport;
 import peruncs.datagrid.cluster.node.aeron.TestNodeProperties;
 import peruncs.datagrid.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.CheckpointJournalCrashHooks;
@@ -65,23 +64,19 @@ public final class ProviderCrashChildMain {
             (!"NONE".equals(point) && !ChildMilestone.supports(point))) {
             throw new IllegalArgumentException("unsupported or unencodable provider crash point: %s".formatted(point));
         }
-        final ReplicationDurabilityMode durability = ReplicationDurabilityMode.valueOf(
-                System.getProperty("dg.crash.durability", ReplicationDurabilityMode.ARCHIVE_FIRST.name()));
-
         if ("phase1".equals(mode)) {
-            runPhase1(base, control, point, durability);
+            runPhase1(base, control, point);
             return;
         }
         if ("phase2".equals(mode)) {
-            runPhase2(base, control, durability, point);
+            runPhase2(base, control, point);
             return;
         }
         throw new IllegalArgumentException("unknown dg.crash.mode: %s".formatted(mode));
     }
 
-    private static void runPhase1(final Path base, final Path control, final String point,
-                                  final ReplicationDurabilityMode durability) {
-        try (final ChildRuntime runtime = new ChildRuntime(base, control, durability, point)) {
+    private static void runPhase1(final Path base, final Path control, final String point) {
+        try (final ChildRuntime runtime = new ChildRuntime(base, control, point)) {
             runtime.start();
             mark(control.resolve("ready"), "ready");
             final int writes = Integer.getInteger("dg.crash.writes", 2);
@@ -112,9 +107,8 @@ public final class ProviderCrashChildMain {
         }
     }
 
-    private static void runPhase2(final Path base, final Path control,
-                                  final ReplicationDurabilityMode durability, final String point) {
-        final ChildRuntime runtime = new ChildRuntime(base, control, durability, point);
+    private static void runPhase2(final Path base, final Path control, final String point) {
+        final ChildRuntime runtime = new ChildRuntime(base, control, point);
         try (runtime) {
             runtime.start();
             mark(control.resolve("ready-phase2"), "ready-phase2");
@@ -343,7 +337,6 @@ public final class ProviderCrashChildMain {
 
     private static final class ChildRuntime implements AutoCloseable {
         private final Path base;
-        private final ReplicationDurabilityMode durability;
         private final String barrierPoint;
         private final BiConsumer<String, Long> crashHook;
         private final BiConsumer<String, Path> journalHook;
@@ -355,10 +348,8 @@ public final class ProviderCrashChildMain {
         private volatile Throwable subscriberFailure;
         private int writes;
 
-        private ChildRuntime(final Path base, final Path control,
-                             final ReplicationDurabilityMode durability, final String barrierPoint) {
+        private ChildRuntime(final Path base, final Path control, final String barrierPoint) {
             this.base = base;
-            this.durability = durability;
             this.barrierPoint = barrierPoint;
             this.crashHook = crashHook(control, barrierPoint);
             this.journalHook = journalHook(control, barrierPoint);
@@ -370,7 +361,7 @@ public final class ProviderCrashChildMain {
         }
 
         private void startInternal() {
-            this.transport = new AeronTransport(new ChildProperties(this.base, this.durability));
+            this.transport = new AeronTransport(new ChildProperties(this.base));
             /* The subscriber must be allowed to connect before the writer factory
              * waits for the Archive recording to become active. Waiting for the
              * persistence target first creates a circular startup dependency. */
@@ -563,15 +554,13 @@ public final class ProviderCrashChildMain {
 
     private static final class ChildProperties extends TestNodeProperties {
         private final Path base;
-        private final ReplicationDurabilityMode durability;
         private final boolean externalArchive;
         private final UUID clusterId = UUID.nameUUIDFromBytes("crash-matrix-cluster".getBytes(StandardCharsets.UTF_8));
         private final UUID nodeId;
         private final UUID generation;
 
-        private ChildProperties(final Path base, final ReplicationDurabilityMode durability) {
+        private ChildProperties(final Path base) {
             this.base = base;
-            this.durability = durability;
             this.externalArchive = Boolean.getBoolean("dg.crash.externalArchive");
             /* A takeover successor deliberately carries a different node id:
              * while node identity is the fencing principal, a crashed writer
@@ -649,8 +638,6 @@ public final class ProviderCrashChildMain {
                         Integer.getInteger("dg.crash.chunkSize", 16384));
                 case "ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES" -> "262144";
                 case "ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS" -> "5000000000";
-                case "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE",
-                     "ECLIPSE_DATAGRID_AERON_DURABILITY_MODE" -> this.durability.name();
                 case "ECLIPSE_DATAGRID_AERON_EXTERNAL_ARCHIVE" -> Boolean.toString(this.externalArchive);
                 default -> null;
             };

@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.datagrid.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.datagrid.cluster.storage.aeron.writer.RawArchivePublisher;
 import peruncs.datagrid.cluster.test.ChildJava;
@@ -27,8 +28,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.zip.CRC32C;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Crash matrix for the replication reader: proves every kill boundary on the
 /// reader's apply path ends in a safe recovery outcome, never in silent data
@@ -326,7 +327,7 @@ class AeronReaderCrashMatrixIT {
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
             try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))) {
                 for (byte[] payload : payloads) {
                     RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
                 }
@@ -396,7 +397,7 @@ class AeronReaderCrashMatrixIT {
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
             try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
                 final long recordingId = awaitRecordingId(publisher);
@@ -482,7 +483,7 @@ class AeronReaderCrashMatrixIT {
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
             try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
                 final long recordingId = awaitRecordingId(publisher);
@@ -646,7 +647,7 @@ class AeronReaderCrashMatrixIT {
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
             try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))) {
                 for (byte[] payload : payloads) {
                     RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
                 }
@@ -798,7 +799,7 @@ class AeronReaderCrashMatrixIT {
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
             try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
                 final long recordingId = awaitRecordingId(publisher);
@@ -895,7 +896,7 @@ class AeronReaderCrashMatrixIT {
                      .controlResponseChannel(CONTROL_RESPONSE_CHANNEL)
                      .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
             try (final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0)) {
+                    archive, LIVE_CHANNEL, 1001, configuration, CLUSTER_ID, EPOCH, 0, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))) {
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(0))});
                 RawArchivePublisher.publish(publisher, null, new ByteBuffer[]{ByteBuffer.wrap(payload(1))});
                 final long recordingId = awaitRecordingId(publisher);

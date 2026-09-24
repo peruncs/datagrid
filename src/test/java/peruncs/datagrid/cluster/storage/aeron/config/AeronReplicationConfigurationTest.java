@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.config;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -15,7 +14,6 @@ class AeronReplicationConfigurationTest {
         assertEquals(16 * 1024 * 1024, configuration.termLength());
         assertEquals(1408, configuration.mtuLength());
         assertEquals(2 * 1024 * 1024, configuration.maxMessageLength());
-        assertEquals(ReplicationDurabilityMode.ARCHIVE_FIRST, configuration.durabilityMode());
         assertEquals(256, configuration.readerFragmentsPerPoll(),
                 "a replay backlog must drain in a few polls rather than ten fragments at a time");
     }
@@ -77,7 +75,6 @@ class AeronReplicationConfigurationTest {
                 .recordingStartTimeoutNanos(6000)
                 .recordedPositionTimeoutNanos(7000)
                 .recordingStopTimeoutNanos(8000)
-                .durabilityMode(ReplicationDurabilityMode.ARCHIVE_FIRST)
                 .build();
         assertEquals(1024, configuration.mtuLength());
         assertEquals(32768, configuration.chunkSize());
@@ -86,7 +83,6 @@ class AeronReplicationConfigurationTest {
         assertEquals(6000, configuration.recordingStartTimeoutNanos());
         assertEquals(7000, configuration.recordedPositionTimeoutNanos());
         assertEquals(8000, configuration.recordingStopTimeoutNanos());
-        assertEquals(ReplicationDurabilityMode.ARCHIVE_FIRST, configuration.durabilityMode());
     }
 
         /// Verifies rejection of invalid term mtu chunk and timeout values.
@@ -128,11 +124,6 @@ class AeronReplicationConfigurationTest {
     }
 
         /// Verifies rejection of a null durability mode through the builder.
-    @Test
-    void rejectsNullDurabilityMode() {
-        assertThrows(NullPointerException.class, () -> AeronReplicationConfiguration.builder()
-                .durabilityMode(null));
-    }
 
         /// Verifies a custom retry policy is carried into the built configuration
         /// and drives the reader idle strategy.

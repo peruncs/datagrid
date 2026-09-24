@@ -65,7 +65,6 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private AeronReaderWatermark persistedBoundary;
     private final ThreadPoolExecutor agent;
     private volatile Thread agentThread;
-    private final AtomicReference<RuntimeException> terminalFailure = new AtomicReference<>();
     private final AtomicReference<RuntimeException> watermarkFailure = new AtomicReference<>();
     /* Once the polling thread accepts a watermark, retention owns its retry.
      * Keep at most one value per configured reader until the agent persists it. */
@@ -142,19 +141,16 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// directly; every other caller queues behind ongoing Archive work and
     /// waits at most the configured operation timeout for its outcome.
     ///
-    /// A timed-out wait does not interrupt the agent thread: Archive control
-    /// RPCs are not interrupt-safe and interrupting one mid-protocol can leave
-    /// the AeronArchive client in an unknown state. Instead the wait fails,
-    /// the future is cancelled without interruption (so a command that has not
-    /// started yet never runs), and a running command is allowed to finish.
-    /// The controller becomes terminal after a timeout because the Archive
-    /// client's protocol state and any held writer-maintenance fence are no
-    /// longer safe to reuse.
+    /// A timed-out wait does not interrupt the agent thread and does not
+    /// latch the controller: Archive control RPCs are not interrupt-safe,
+    /// the running command is allowed to finish and publish its result, and
+    /// a later caller can wait for its outcome again. One slow purge on a
+    /// large history therefore fails only the caller that timed out — it
+    /// must not permanently kill retention or watermark acceptance until a
+    /// restart.
     /// Failures keep their original type so policy rejections stay
     /// distinguishable from transport faults.
     private <T> T onAgent(final Producer<T> operation) {
-        final RuntimeException failed = this.terminalFailure.get();
-        if (failed != null) throw new ReplicationUnavailableException("Aeron retention is unavailable", failed);
         if (Thread.currentThread() == this.agentThread) return operation.produce();
         final Future<T> submitted;
         try {
@@ -165,12 +161,12 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         try {
             return submitted.get(this.operationTimeoutMillis, TimeUnit.MILLISECONDS);
         } catch (final TimeoutException timeout) {
+            /* Fail this caller only: the queued command may still complete and
+             * publish its result, so the controller stays reusable. */
             submitted.cancel(false);
-            final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
+            throw new ReplicationUnavailableException(
                     "Timed out waiting for Aeron retention after %s ms".formatted(this.operationTimeoutMillis),
                     timeout);
-            this.terminalFailure.compareAndSet(null, terminal);
-            throw terminal;
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new ReplicationUnavailableException("Interrupted while waiting for Aeron retention", interrupted);
@@ -182,10 +178,9 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         }
     }
 
-    /// Returns the terminal retention failure, or `null` while available.
+    /// Returns the retention failure surface, or `null` while available.
     RuntimeException failure() {
-        final RuntimeException terminal = this.terminalFailure.get();
-        return terminal != null ? terminal : this.watermarkFailure.get();
+        return this.watermarkFailure.get();
     }
 
         /// Runs one void retention command on the single agent thread.
@@ -358,7 +353,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
 
     /// Queues reader progress without blocking the Aeron polling thread.
     boolean offerReaderWatermark(final AeronReaderWatermark watermark) {
-        if (this.closed || this.terminalFailure.get() != null) return false;
+        if (this.closed) return false;
         Objects.requireNonNull(watermark, "watermark");
         if (!this.configuredReaders.contains(watermark.readerId()) || this.differsFromWriter(watermark)) {
             throw new IllegalArgumentException("reader watermark identity is invalid");
@@ -379,12 +374,12 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     }
 
     private void scheduleWatermarkRetry() {
-        if (this.closed || this.agent.isShutdown() || this.terminalFailure.get() != null ||
+        if (this.closed || this.agent.isShutdown() ||
             this.pendingWatermarks.isEmpty() ||
             !this.watermarkRetryScheduled.compareAndSet(false, true)) return;
         CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS).execute(() -> {
             this.watermarkRetryScheduled.set(false);
-            if (this.closed || this.agent.isShutdown() || this.terminalFailure.get() != null ||
+            if (this.closed || this.agent.isShutdown() ||
                 this.pendingWatermarks.isEmpty()) return;
             try {
                 this.enqueueWatermarkDrain();

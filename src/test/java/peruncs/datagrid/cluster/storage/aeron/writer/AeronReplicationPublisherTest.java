@@ -4,6 +4,7 @@ import io.aeron.Publication;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
@@ -87,7 +88,7 @@ class AeronReplicationPublisherTest {
                 (buffer, offset, length) -> Publication.BACK_PRESSURED,
                 configuration(1_000_000L).maxMessageLength(), configuration(1_000_000L), CLUSTER, 1, 0
         )) {
-            assertThrows(IllegalStateException.class,
+            assertThrows(ReplicationUnavailableException.class,
                     () -> publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
             assertThrows(IllegalStateException.class,
                     () -> publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{2})}));
@@ -109,9 +110,9 @@ class AeronReplicationPublisherTest {
                 return false;
             }
         };
-        final IllegalStateException failure = assertThrows(IllegalStateException.class,
+        final ReplicationUnavailableException failure = assertThrows(ReplicationUnavailableException.class,
                 () -> new AeronOfferRetryer(offerer, configuration).offer(
-                        new UnsafeBuffer(new byte[]{1}), 1));
+                        new UnsafeBuffer(new byte[]{1}), 1, () -> true));
         assertTrue(failure.getMessage().contains("NOT_CONNECTED"));
         assertTrue(failure.getMessage().contains("connected=false"));
     }
@@ -124,7 +125,7 @@ class AeronReplicationPublisherTest {
                     (buffer, offset, length) -> status,
                     configuration(50_000_000L).maxMessageLength(), configuration(50_000_000L), CLUSTER, 1, 0
             )) {
-                assertThrows(IllegalStateException.class,
+                assertThrows(ReplicationUnavailableException.class,
                         () -> publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
             }
         }
@@ -296,7 +297,7 @@ class AeronReplicationPublisherTest {
         final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
                 null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{6})});
 
-        assertThrows(IllegalStateException.class, publisher::close);
+        assertThrows(ReplicationUnavailableException.class, publisher::close);
         assertTrue(publisher.hasPendingTransaction(), "a marker that was never accepted must remain retryable");
         failAbort.set(false);
         assertDoesNotThrow(publisher::close);
@@ -410,7 +411,9 @@ class AeronReplicationPublisherTest {
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})});
-            assertThrows(IllegalStateException.class, () -> publisher.commit(prepared));
+            assertThrows(ReplicationUnavailableException.class, () -> publisher.commit(prepared));
+            /* The publisher is already failed closed: further terminals are a
+             * state-machine violation, not another transport failure. */
             assertThrows(IllegalStateException.class, () -> publisher.abort(prepared));
         }
     }
@@ -423,7 +426,7 @@ class AeronReplicationPublisherTest {
         try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
+            assertThrows(ReplicationUnavailableException.class, () -> publisher.prepareTransaction(
                     new byte[]{9}, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
             assertTrue(offers.get() >= 2, "the failure must occur after a partial publication");
             assertThrows(IllegalStateException.class, () -> publisher.publishTransaction(
@@ -441,7 +444,7 @@ class AeronReplicationPublisherTest {
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})});
-            assertThrows(IllegalStateException.class, () -> publisher.abort(prepared));
+            assertThrows(ReplicationUnavailableException.class, () -> publisher.abort(prepared));
             assertThrows(IllegalStateException.class, () -> publisher.commit(prepared));
         }
     }

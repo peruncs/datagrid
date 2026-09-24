@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron.crashtest;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
@@ -51,7 +50,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Store prefixes, and unexpected recovery policies are test failures.
 ///
 /// The deterministic cells cover publication, prepare/local-write/commit
-/// seams, Archive-first and enqueue-then-Archive ordering, prepare rejection,
+/// seams, archive-first ordering, prepare rejection,
 /// backpressure with no subscriber, checkpoint temp-write/rename/directory-sync
 /// seams, payload sizes from one byte through 200 KiB, chunk boundaries,
 /// checkpoint and Archive-tail corruption, reader-side corruption, deleted
@@ -165,108 +164,106 @@ class ProviderCrashMatrixIT {
         /// Verifies prepared data tail requires reseed.
     @Test
     void preparedDataTailRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_DATA_CHUNKS", false);
     }
 
         /// Verifies dictionary data tail requires reseed.
     @Test
     void dictionaryDataTailRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_DICTIONARY_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_DICTIONARY_CHUNKS", false);
     }
 
         /// Verifies prepared before local write requires reseed.
     @Test
     void preparedBeforeLocalWriteRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_PREPARE_BEFORE_LOCAL_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_PREPARE_BEFORE_LOCAL_WRITE", false);
     }
 
         /// Verifies the pre-publication fence refuses an ambiguous restart.
     @Test
     void crashBeforePrepareRequiresReseed() throws Exception {
-        this.assertOutcome("BEFORE_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "RESEED_REQUIRED");
+        this.assertOutcome("BEFORE_PREPARE", false, false, "RESEED_REQUIRED");
     }
 
         /// Verifies a crash before the first publication connection leaves no writer state.
     @Test
     void beforePublicationConnectionLeavesNoWriterState() throws Exception {
-        this.assertOutcome("BEFORE_PUBLICATION_CONNECTED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                false, false, "CONTINUE");
+        this.assertOutcome("BEFORE_PUBLICATION_CONNECTED", false, false, "CONTINUE");
     }
 
         /// Verifies local rejection after abort offer requires reseed.
     @Test
     void localRejectionAfterAbortOfferRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST, false, true,
+        this.assertOutcome("AFTER_ABORT_OFFERED", false, true,
                 "RESEED_REQUIRED");
     }
 
         /// Verifies archive recorded before checkpoint requires reseed.
     @Test
     void archiveRecordedBeforeCheckpointRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", false);
     }
 
         /// Verifies ambiguous commit offer requires reseed.
     @Test
     void ambiguousCommitOfferRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_COMMIT_OFFER", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_COMMIT_OFFER", false);
     }
 
         /// Verifies a recorded commit without a coordinator return requires reseed.
     @Test
     void recordedCommitBeforeCoordinatorReturnRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_COMMIT_RECORDED", false);
     }
 
         /// Verifies the commit-offer boundary fails closed before recording.
     @Test
     void beforeCommitOfferRequiresReseed() throws Exception {
-        this.assertReseed("BEFORE_COMMIT_OFFER", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("BEFORE_COMMIT_OFFER", false);
     }
 
         /// Verifies a prepared transaction that never reaches local Store write requires reseed.
     @Test
     void afterPrepareRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_PREPARE", false);
     }
 
         /// Verifies local write ahead fence requires reseed.
     @Test
     void localWriteAheadFenceRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_LOCAL_WRITE_BEFORE_COMMIT", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("AFTER_LOCAL_WRITE_BEFORE_COMMIT", false);
     }
 
         /// Verifies a kill before the next journal slot is written preserves the prior boundary.
     @Test
     void checkpointBeforeJournalSlotRequiresReseed() throws Exception {
-        this.assertReseed("BEFORE_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("BEFORE_JOURNAL_SLOT_WRITE", false);
     }
 
         /// Verifies a partial inactive journal slot cannot advance the durable boundary.
     @Test
     void checkpointDuringJournalSlotRequiresReseed() throws Exception {
-        this.assertReseed("DURING_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+        this.assertReseed("DURING_JOURNAL_SLOT_WRITE", false);
     }
 
         /// Verifies a forced journal slot remains restartable before in-memory publication.
     @Test
     void checkpointAfterJournalForceContinues() throws Exception {
         this.assertOutcome("AFTER_JOURNAL_SLOT_FORCE",
-                ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "CONTINUE");
+                false, false, "CONTINUE");
     }
 
         /// Verifies a durable checkpoint remains restartable before in-memory sequence publication.
     @Test
     void checkpointBeforeSequenceUpdateContinues() throws Exception {
         this.assertOutcome("AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
-                ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "CONTINUE");
+                false, false, "CONTINUE");
     }
 
         /// Verifies that an orphaned first transaction is never silently reused.
     @Test
     void firstTransactionOrphanRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                false, false, "RESEED_REQUIRED", null, 1, 0);
+        this.assertOutcome("AFTER_DATA_CHUNKS", false, false, "RESEED_REQUIRED", null, 1, 0);
     }
 
         /// Verifies a first-transaction orphan under publication backpressure
@@ -276,8 +273,7 @@ class ProviderCrashMatrixIT {
         final String previous = System.getProperty("crash.matrix.subscriber");
         System.setProperty("crash.matrix.subscriber", "false");
         try {
-            this.assertOutcome("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                    false, false, "RESEED_REQUIRED", "backpressure-first-tx", 1, 0);
+            this.assertOutcome("AFTER_DATA_CHUNKS", false, false, "RESEED_REQUIRED", "backpressure-first-tx", 1, 0);
         } finally {
             if (previous == null) System.clearProperty("crash.matrix.subscriber");
             else System.setProperty("crash.matrix.subscriber", previous);
@@ -288,36 +284,31 @@ class ProviderCrashMatrixIT {
     /// commit that never reached the coordinator.
     @Test
     void minPayloadRecordedCommitRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                false, false, "RESEED_REQUIRED", "payload=1", 2, 1, 1, "digest", 0);
+        this.assertOutcome("AFTER_COMMIT_RECORDED", false, false, "RESEED_REQUIRED", "payload=1", 2, 1, 1, "digest", 0);
     }
 
         /// Verifies a chunk-size-minus-one payload fails closed like any other tail.
     @Test
     void chunkMinusOneRecordedCommitRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                false, false, "RESEED_REQUIRED", "payload=16383", 2, 1, 16383, "digest", 0);
+        this.assertOutcome("AFTER_COMMIT_RECORDED", false, false, "RESEED_REQUIRED", "payload=16383", 2, 1, 16383, "digest", 0);
     }
 
         /// Verifies a chunk-size-plus-one payload (two chunks) fails closed.
     @Test
     void chunkPlusOneRecordedCommitRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                false, false, "RESEED_REQUIRED", "payload=16385", 2, 1, 16385, "digest", 0);
+        this.assertOutcome("AFTER_COMMIT_RECORDED", false, false, "RESEED_REQUIRED", "payload=16385", 2, 1, 16385, "digest", 0);
     }
 
         /// Verifies a multi-chunk payload fails closed on the recorded tail.
     @Test
     void multiChunkRecordedCommitRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                false, false, "RESEED_REQUIRED", "payload=65536", 2, 1, 65536, "digest", 0);
+        this.assertOutcome("AFTER_COMMIT_RECORDED", false, false, "RESEED_REQUIRED", "payload=65536", 2, 1, 65536, "digest", 0);
     }
 
         /// Verifies incompressible bytes fail closed exactly like digests.
     @Test
     void randomBytesRecordedCommitRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                false, false, "RESEED_REQUIRED", "payload=random", 2, 1, 4096, "random", 0);
+        this.assertOutcome("AFTER_COMMIT_RECORDED", false, false, "RESEED_REQUIRED", "payload=random", 2, 1, 4096, "random", 0);
     }
 
         /// Verifies a large multi-chunk transaction recovers end to end: no
@@ -333,8 +324,7 @@ class ProviderCrashMatrixIT {
                     "large-recovery payload=%d".formatted(size));
             Process child = null;
             try {
-                child = this.launch(base, "phase1", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                        false, false, livePort, controlPort, 2, 1, size, "digest", 0);
+                child = this.launch(base, "phase1", "NONE", false, false, livePort, controlPort, 2, 1, size, "digest", 0);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                 assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase1 child did not exit");
@@ -349,8 +339,7 @@ class ProviderCrashMatrixIT {
                 int restartAttempts = 0;
                 do {
                     restartAttempts++;
-                    child = this.launch(base, "phase2", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                            false, false, livePort, controlPort, 2, 1, size, "digest", 0);
+                    child = this.launch(base, "phase2", "NONE", false, false, livePort, controlPort, 2, 1, size, "digest", 0);
                     this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                     assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
                     outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
@@ -386,8 +375,7 @@ class ProviderCrashMatrixIT {
         final String previous = System.getProperty("crash.matrix.termLength");
         System.setProperty("crash.matrix.termLength", "65536");
         try {
-            this.assertOutcome("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                    false, false, "RESEED_REQUIRED", "tiny-term-boundary", 2, 1,
+            this.assertOutcome("AFTER_COMMIT_RECORDED", false, false, "RESEED_REQUIRED", "tiny-term-boundary", 2, 1,
                     65536, "digest", 0);
         } finally {
             if (previous == null) System.clearProperty("crash.matrix.termLength");
@@ -402,7 +390,7 @@ class ProviderCrashMatrixIT {
     @Test
     void checkpointByteFlipFailsClosed() throws Exception {
         this.assertSafeOutcomeAfterMutation("AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
-                ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+                base -> {
                     final Path checkpoint = base.resolve("checkpoint/writer.checkpoint");
                     assertTrue(Files.exists(checkpoint), "expected a durable checkpoint to corrupt");
                     final byte[] bytes = Files.readAllBytes(checkpoint);
@@ -421,7 +409,7 @@ class ProviderCrashMatrixIT {
     @Test
     void archiveTailCorruptionFailsClosed() throws Exception {
         this.assertSafeOutcomeAfterMutation("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT",
-                ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+                base -> {
                     final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
                             base.resolve("checkpoint/writer.checkpoint"));
                     final List<Path> segments = ArchiveArtifactMutator.segments(
@@ -469,7 +457,7 @@ class ProviderCrashMatrixIT {
                                         field == HeaderField.PAYLOAD_CRC ||
                                         field == HeaderField.COMMIT_CRC;
             this.assertSafeOutcomeAfterMutation("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT",
-                    ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+                    base -> {
                         final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
                                 base.resolve("checkpoint/writer.checkpoint"));
                         final List<Path> segments = ArchiveArtifactMutator.segments(
@@ -497,7 +485,7 @@ class ProviderCrashMatrixIT {
              * two transactions actually publish, or the barrier never fires. */
             final int totalChunks = 2 * Math.max(1, (size + 16383) / 16384);
             final int chunksBudget = 1 + random.nextInt(totalChunks);
-            this.assertOutcome("NONE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+            this.assertOutcome("NONE", false, false,
                     "RESEED_REQUIRED", "budget=%d,size=%d,iter=%d".formatted(chunksBudget, size, iteration),
                     2, 1, size, "digest", chunksBudget);
         }
@@ -507,14 +495,12 @@ class ProviderCrashMatrixIT {
     /// durable state between the kill and the recovery. The Store fixture must
     /// be byte-identical to the pre-mutation evidence: recovery may refuse to
     /// continue, but it must never silently extend history.
-    private void assertSafeOutcomeAfterMutation(final String point, final ReplicationDurabilityMode durability,
-                                                final ThrowingConsumer<Path> mutator) throws Exception {
-        this.assertSafeOutcomeAfterMutation(point, durability, mutator,
+    private void assertSafeOutcomeAfterMutation(final String point, final ThrowingConsumer<Path> mutator) throws Exception {
+        this.assertSafeOutcomeAfterMutation(point, mutator,
                 java.util.Set.of(RecoveryPolicy.RESEED_REQUIRED, RecoveryPolicy.FAIL_CLOSED));
     }
 
-    private void assertSafeOutcomeAfterMutation(final String point, final ReplicationDurabilityMode durability,
-                                                final ThrowingConsumer<Path> mutator,
+    private void assertSafeOutcomeAfterMutation(final String point, final ThrowingConsumer<Path> mutator,
                                                 final java.util.Set<RecoveryPolicy> allowed) throws Exception {
         try (DirectoryLayout layout = DirectoryLayout.create()) {
             final Path base = layout.root();
@@ -523,7 +509,7 @@ class ProviderCrashMatrixIT {
             CrashEventLog.append(base.resolve("control"), "selection", "mutation point=%s".formatted(point));
             Process child = null;
             try {
-                child = this.launch(base, "phase1", point, durability, livePort, controlPort);
+                child = this.launch(base, "phase1", point, livePort, controlPort);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 final Path milestone = base.resolve("control/milestone.reached");
                 this.await(milestone, child, budget("crash.budget.milestone", 60_000L));
@@ -542,7 +528,7 @@ class ProviderCrashMatrixIT {
                 int restartAttempts = 0;
                 do {
                     restartAttempts++;
-                    child = this.launch(base, "phase2", "NONE", durability, livePort, controlPort);
+                    child = this.launch(base, "phase2", "NONE", livePort, controlPort);
                     this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                     assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
                     outcome = Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8);
@@ -584,7 +570,7 @@ class ProviderCrashMatrixIT {
         final String previousTerm = System.getProperty("crash.matrix.termLength");
         System.setProperty("crash.matrix.termLength", "65536");
         try {
-            this.assertSafeOutcomeAfterMutation("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST, base -> {
+            this.assertSafeOutcomeAfterMutation("AFTER_COMMIT_RECORDED", base -> {
                 final AeronReplicationCheckpoint checkpoint = AeronReplicationCheckpointStore.read(
                         base.resolve("checkpoint/writer.checkpoint"));
                 final List<Path> segments = ArchiveArtifactMutator.segments(
@@ -663,7 +649,7 @@ class ProviderCrashMatrixIT {
         final String previous = System.getProperty("crash.matrix.subscriber");
         System.setProperty("crash.matrix.subscriber", "false");
         try {
-            this.assertReseed("AFTER_COMMIT_OFFER", ReplicationDurabilityMode.ARCHIVE_FIRST, false);
+            this.assertReseed("AFTER_COMMIT_OFFER", false);
         } finally {
             if (previous == null) System.clearProperty("crash.matrix.subscriber");
             else System.setProperty("crash.matrix.subscriber", previous);
@@ -673,7 +659,7 @@ class ProviderCrashMatrixIT {
         /// Verifies failed prepare abort boundary requires reseed.
     @Test
     void failedPrepareAbortBoundaryRequiresReseed() throws Exception {
-        this.assertReseed("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST, true);
+        this.assertReseed("AFTER_PREPARE_FAILURE_ABORT_OFFERED", true);
     }
 
         /// Seeded process-kill soak.  It is enabled by the crashmatrix profile and
@@ -690,40 +676,35 @@ class ProviderCrashMatrixIT {
          * because it temporarily changes a process-wide system property. */
         final CrashScenario[] scenarios =
                 {
-                        new CrashScenario("BEFORE_PUBLICATION_CONNECTED", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("BEFORE_PUBLICATION_CONNECTED", false, false,
                                 "CONTINUE"),
-                        new CrashScenario("BEFORE_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_DICTIONARY_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("BEFORE_PREPARE", false, false, "RESEED_REQUIRED"),
+                        new CrashScenario("AFTER_DICTIONARY_CHUNKS", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("AFTER_DATA_CHUNKS", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_PREPARE_BEFORE_LOCAL_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                false, false, "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_LOCAL_WRITE_BEFORE_COMMIT", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                false, false, "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_COMMIT_OFFER", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("AFTER_PREPARE_BEFORE_LOCAL_WRITE", false, false, "RESEED_REQUIRED"),
+                        new CrashScenario("AFTER_LOCAL_WRITE_BEFORE_COMMIT", false, false, "RESEED_REQUIRED"),
+                        new CrashScenario("AFTER_COMMIT_OFFER", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                false, false, "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_COMMIT_RECORDED", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", false, false, "RESEED_REQUIRED"),
+                        new CrashScenario("AFTER_COMMIT_RECORDED", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("BEFORE_COMMIT_OFFER", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("BEFORE_COMMIT_OFFER", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_PREPARE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("AFTER_PREPARE", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST, false, true,
+                        new CrashScenario("AFTER_ABORT_OFFERED", false, true,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_PREPARE_FAILURE_ABORT_OFFERED", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                true, false, "RESEED_REQUIRED"),
-                        new CrashScenario("BEFORE_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("AFTER_PREPARE_FAILURE_ABORT_OFFERED", true, false, "RESEED_REQUIRED"),
+                        new CrashScenario("BEFORE_JOURNAL_SLOT_WRITE", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("DURING_JOURNAL_SLOT_WRITE", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                        new CrashScenario("DURING_JOURNAL_SLOT_WRITE", false, false,
                                 "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_JOURNAL_SLOT_FORCE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                                false, false, "CONTINUE"),
+                        new CrashScenario("AFTER_JOURNAL_SLOT_FORCE", false, false, "CONTINUE"),
                         new CrashScenario("AFTER_CHECKPOINT_WRITE_BEFORE_COMMITTED_SEQUENCE_UPDATE",
-                                ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, "CONTINUE"),
-                        new CrashScenario("AFTER_DATA_CHUNKS", ReplicationDurabilityMode.ARCHIVE_FIRST, false, false,
+                                false, false, "CONTINUE"),
+                        new CrashScenario("AFTER_DATA_CHUNKS", false, false,
                                 "RESEED_REQUIRED", 1, 0)
                 };
         final long baseSeed = Long.getLong("crash.matrix.seed", 1L);
@@ -731,7 +712,7 @@ class ProviderCrashMatrixIT {
             final Random random = new Random(baseSeed + seedIndex);
             for (int iteration = 0; iteration < iterations; iteration++) {
                 final CrashScenario scenario = scenarios[random.nextInt(scenarios.length)];
-                this.assertOutcome(scenario.point(), scenario.durability(), scenario.injectPrepareFailure(),
+                this.assertOutcome(scenario.point(), scenario.injectPrepareFailure(),
                         scenario.rejectLocal(), scenario.expectedOutcome(),
                         "seed=%s,iteration=%s".formatted((baseSeed + seedIndex), iteration),
                         scenario.writes(), scenario.targetSequence());
@@ -749,7 +730,7 @@ class ProviderCrashMatrixIT {
             Process child = null;
             try {
                 child = this.launch(base, "phase1", "AFTER_JOURNAL_SLOT_FORCE",
-                        ReplicationDurabilityMode.ARCHIVE_FIRST, livePort, controlPort);
+                        livePort, controlPort);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 this.await(base.resolve("control/milestone.reached"), child, budget("crash.budget.milestone", 60_000L));
                 child.destroyForcibly();
@@ -775,8 +756,7 @@ class ProviderCrashMatrixIT {
                 do {
                     final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
                     restartAttempts++;
-                    child = this.launch(base, "phase2", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                            livePort, controlPort);
+                    child = this.launch(base, "phase2", "NONE", livePort, controlPort);
                     this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                     if (!child.waitFor(10, TimeUnit.SECONDS)) {
                         child.destroyForcibly();
@@ -827,7 +807,7 @@ class ProviderCrashMatrixIT {
             Process child = null;
             try {
                 child = this.launch(base, "phase1", "AFTER_JOURNAL_SLOT_FORCE",
-                        ReplicationDurabilityMode.ARCHIVE_FIRST, livePort, controlPort);
+                        livePort, controlPort);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 this.await(base.resolve("control/milestone.reached"), child, budget("crash.budget.milestone", 60_000L));
                 child.destroyForcibly();
@@ -857,8 +837,7 @@ class ProviderCrashMatrixIT {
                 do {
                     final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
                     restartAttempts++;
-                    child = this.launch(base, "phase2", "NONE", ReplicationDurabilityMode.ARCHIVE_FIRST,
-                            livePort, controlPort);
+                    child = this.launch(base, "phase2", "NONE", livePort, controlPort);
                     this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                     if (!child.waitFor(10, TimeUnit.SECONDS)) {
                         child.destroyForcibly();
@@ -893,26 +872,22 @@ class ProviderCrashMatrixIT {
         }
     }
 
-    private void assertReseed(final String point, final ReplicationDurabilityMode durability,
-                              final boolean injectPrepareFailure) throws Exception {
-        this.assertOutcome(point, durability, injectPrepareFailure, false, "RESEED_REQUIRED");
+    private void assertReseed(final String point, final boolean injectPrepareFailure) throws Exception {
+        this.assertOutcome(point, injectPrepareFailure, false, "RESEED_REQUIRED");
     }
 
-    private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
-                               final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome) throws Exception {
-        this.assertOutcome(point, durability, injectPrepareFailure, rejectLocal, expectedOutcome, null, 2, 1);
+    private void assertOutcome(final String point, final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome) throws Exception {
+        this.assertOutcome(point, injectPrepareFailure, rejectLocal, expectedOutcome, null, 2, 1);
     }
 
-    private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
-                               final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome,
+    private void assertOutcome(final String point, final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome,
                                final String runLabel, final int writes, final int targetSequence) throws Exception {
-        this.assertOutcome(point, durability, injectPrepareFailure, rejectLocal, expectedOutcome,
+        this.assertOutcome(point, injectPrepareFailure, rejectLocal, expectedOutcome,
                 runLabel, writes, targetSequence,
                 CrashPayloads.DEFAULT_SIZE, CrashPayloads.DEFAULT_KIND, 0);
     }
 
-    private void assertOutcome(final String point, final ReplicationDurabilityMode durability,
-                               final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome,
+    private void assertOutcome(final String point, final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome,
                                final String runLabel, final int writes, final int targetSequence,
                                final int payloadSize, final String payloadKind, final int budgetChunks) throws Exception {
         try (DirectoryLayout layout = DirectoryLayout.create()) {
@@ -923,13 +898,13 @@ class ProviderCrashMatrixIT {
                         StandardCharsets.UTF_8);
             }
             CrashEventLog.append(base.resolve("control"), "selection",
-                    "point=%s durability=%s writes=%d target=%d payload=%d/%s budget=%d label=%s".formatted(
-                            point, durability, writes, targetSequence, payloadSize, payloadKind, budgetChunks, runLabel));
+                    "point=%s writes=%d target=%d payload=%d/%s budget=%d label=%s".formatted(
+                            point, writes, targetSequence, payloadSize, payloadKind, budgetChunks, runLabel));
             final int livePort = layout.livePort();
             final int controlPort = layout.controlPort();
             Process child = null;
             try {
-                child = this.launch(base, "phase1", point, durability, injectPrepareFailure, rejectLocal,
+                child = this.launch(base, "phase1", point, injectPrepareFailure, rejectLocal,
                         livePort, controlPort, writes, targetSequence, payloadSize, payloadKind, budgetChunks);
                 this.await(base.resolve("control/ready"), child, budget("crash.budget.startup", 120_000L));
                 final Path milestone = base.resolve("control/milestone.reached");
@@ -963,7 +938,7 @@ class ProviderCrashMatrixIT {
                 do {
                     final long storeSizeBeforeRetry = fileSize(base.resolve("store.records"));
                     restartAttempts++;
-                    child = this.launch(base, "phase2", "NONE", durability, false, false,
+                    child = this.launch(base, "phase2", "NONE", false, false,
                             livePort, controlPort, 2, 1, payloadSize, payloadKind, 0);
                     this.await(base.resolve("control/outcome"), child, budget("crash.budget.startup", 120_000L));
                     assertTrue(child.waitFor(10, TimeUnit.SECONDS), "phase2 child did not exit");
@@ -1031,7 +1006,7 @@ class ProviderCrashMatrixIT {
         do {
             final long storeSize = fileSize(base.resolve("store.records"));
             final Process child = this.launch(base, "phase2", "AFTER_RECOVERY_CHECKPOINT_READ",
-                    ReplicationDurabilityMode.ARCHIVE_FIRST, false, false, livePort, controlPort, 2, sequence);
+                    false, false, livePort, controlPort, 2, sequence);
             try {
                 this.await(base.resolve("control/milestone.reached"), child,
                         budget("crash.budget.milestone", 60_000L));
@@ -1054,22 +1029,22 @@ class ProviderCrashMatrixIT {
     }
 
     private Process launch(final Path base, final String mode, final String point,
-                           final ReplicationDurabilityMode durability, final int livePort, final int controlPort) throws IOException {
-        return this.launch(base, mode, point, durability, false, false, livePort, controlPort, 2, 1,
+                           final int livePort, final int controlPort) throws IOException {
+        return this.launch(base, mode, point, false, false, livePort, controlPort, 2, 1,
                 CrashPayloads.DEFAULT_SIZE, CrashPayloads.DEFAULT_KIND, 0);
     }
 
     private Process launch(final Path base, final String mode, final String point,
-                           final ReplicationDurabilityMode durability, final boolean injectPrepareFailure,
+                           final boolean injectPrepareFailure,
                            final boolean rejectLocal, final int livePort, final int controlPort,
                            final int writes, final int targetSequence) throws IOException {
-        return this.launch(base, mode, point, durability, injectPrepareFailure, rejectLocal,
+        return this.launch(base, mode, point, injectPrepareFailure, rejectLocal,
                 livePort, controlPort, writes, targetSequence,
                 CrashPayloads.DEFAULT_SIZE, CrashPayloads.DEFAULT_KIND, 0);
     }
 
     private Process launch(final Path base, final String mode, final String point,
-                           final ReplicationDurabilityMode durability, final boolean injectPrepareFailure,
+                           final boolean injectPrepareFailure,
                            final boolean rejectLocal, final int livePort, final int controlPort,
                            final int writes, final int targetSequence,
                            final int payloadSize, final String payloadKind, final int budgetChunks) throws IOException {
@@ -1095,8 +1070,7 @@ class ProviderCrashMatrixIT {
                 "-Ddg.crash.barrier=%s".formatted(point),
                 "-Ddg.crash.sequence=%s".formatted(targetSequence),
                 "-Ddg.crash.writes=%s".formatted(writes),
-                "-Ddg.crash.durability=%s".formatted(durability),
-                "-Ddg.crash.injectPrepareFailure=%s".formatted(injectPrepareFailure),
+                                "-Ddg.crash.injectPrepareFailure=%s".formatted(injectPrepareFailure),
                 "-Ddg.crash.rejectLocal=%s".formatted(rejectLocal),
                 "-Ddg.crash.rejectSequence=%s".formatted((rejectLocal ? 1 : -1)),
                 "-Ddg.crash.payloadSize=%s".formatted(payloadSize),
@@ -1128,16 +1102,14 @@ class ProviderCrashMatrixIT {
 
     private record CrashScenario(
             String point,
-            ReplicationDurabilityMode durability,
             boolean injectPrepareFailure,
             boolean rejectLocal,
             String expectedOutcome,
             int writes,
             int targetSequence
     ) {
-        private CrashScenario(final String point, final ReplicationDurabilityMode durability,
-                              final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome) {
-            this(point, durability, injectPrepareFailure, rejectLocal, expectedOutcome, 2, 1);
+        private CrashScenario(final String point, final boolean injectPrepareFailure, final boolean rejectLocal, final String expectedOutcome) {
+            this(point, injectPrepareFailure, rejectLocal, expectedOutcome, 2, 1);
         }
     }
 

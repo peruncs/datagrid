@@ -1,7 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron.crashtest;
 
 import org.junit.jupiter.api.Test;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.io.IOException;
@@ -51,7 +50,6 @@ class ExternalArchiveCrashIT {
                 "-Ddg.crash.mode=%s".formatted(mode),
                 "-Ddg.crash.barrier=%s".formatted(point),
                 "-Ddg.crash.externalArchive=true",
-                "-Ddg.crash.durability=%s".formatted(ReplicationDurabilityMode.ARCHIVE_FIRST),
                 "-Ddg.crash.livePort=%s".formatted(livePort),
                 "-Ddg.crash.controlPort=%s".formatted(controlPort),
                 ProviderCrashChildMain.class.getName())

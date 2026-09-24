@@ -18,7 +18,6 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
@@ -31,7 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Proves writer-side index enforcement fails before publication.
 ///
@@ -116,13 +116,12 @@ class WriterIndexValidationTest {
     void unwiredTargetSkipsWriterValidation() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
-                .durabilityMode(ReplicationDurabilityMode.ARCHIVE_FIRST)
                 .build();
         final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-                publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> {
+                publisher, (state, sequence, length, chunks, crc, position) -> {
         });
         try {
             final List<String> localWrites = new ArrayList<>();
@@ -167,7 +166,6 @@ class WriterIndexValidationTest {
         Probe(final StorageConnection connection) {
             final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                     .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
-                    .durabilityMode(ReplicationDurabilityMode.ARCHIVE_FIRST)
                     .build();
             final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
                     (buffer, offset, length) ->
@@ -177,7 +175,7 @@ class WriterIndexValidationTest {
                     }, configuration.maxMessageLength(), configuration,
                     UUID.randomUUID(), 1, 0);
             this.coordinator = new AeronReplicationWriteCoordinator(
-                    publisher, configuration.durabilityMode(), (state, sequence, length, chunks, crc, position) -> {
+                    publisher, (state, sequence, length, chunks, crc, position) -> {
             });
             this.target = new AeronStorageBinaryReplicationTarget(
                     recordingTarget(this.localWrites),

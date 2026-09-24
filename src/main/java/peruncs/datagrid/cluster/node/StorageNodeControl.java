@@ -14,6 +14,12 @@ import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 ///
 /// @since 1.0
 public interface StorageNodeControl {
+    /// Internal unknown-value sentinel for the raw long metrics: the single
+    /// convention every hook uses, mapped to an empty [java.util.OptionalLong]
+    /// once at the exported [peruncs.datagrid.cluster.api.ReplicationStatus]
+    /// boundary.
+    long MISSING = -1L;
+
     /// Reports whether this node owns the single writer role.
     ///
     /// @return `true` for the writer, `false` for readers and backup readers
@@ -64,14 +70,15 @@ public interface StorageNodeControl {
     ///
     /// The values are sampled independently and may be torn across a
     /// transition; implementations that can snapshot their collaborators
-    /// consistently should override this method.
+    /// consistently should override this method. Returns `null` when this
+    /// node runs without replication, so the exported status carries no
+    /// placeholder metrics.
     ///
-    /// @return raw replication metrics
+    /// @return raw replication metrics, or `null` without replication
     default ReplicationMetrics replicationMetrics() {
         return new ReplicationMetrics(
                 this.currentSequence(),
                 this.latestSequence(),
-                this.replicationTransport(),
                 this.replicationState(),
                 this.isReady(),
                 this.isHealthy(),
@@ -79,13 +86,6 @@ public interface StorageNodeControl {
                 this.writerDurablePosition(),
                 this.writerDurableSequence(),
                 this.appliedSequence());
-    }
-
-        /// Monitoring hook for the selected provider.
-    ///
-    /// @return replication transport name
-    default String replicationTransport() {
-        return "none";
     }
 
         /// Monitoring hook for provider lifecycle state.

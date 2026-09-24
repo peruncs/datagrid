@@ -159,20 +159,26 @@ final class StoreIndexReflection {
     ///
     /// The group snapshot runs on every validated map; the superclass walk to
     /// locate the field is resolved once per indices class instead of per
-    /// call.
+    /// call. Every same-named candidate is collected across the whole
+    /// hierarchy — a shadowing subclass field must fail closed as an
+    /// ambiguous layout instead of silently binding the shadow, exactly like
+    /// the vector and Lucene resolvers above.
     private static final ClassValue<Field> INDEX_GROUPS_FIELD = new ClassValue<>() {
         @Override
         protected Field computeValue(final Class<?> type) {
+            Field match = null;
             for (Class<?> cursor = type; cursor != null && cursor != Object.class;
                  cursor = cursor.getSuperclass()) {
                 for (final Field field : cursor.getDeclaredFields()) {
                     if (!Modifier.isStatic(field.getModifiers()) &&
                         "indexGroups".equals(field.getName()) &&
                         Iterable.class.isAssignableFrom(field.getType())) {
-                        return field;
+                        if (match != null) throw ambiguous(type, "indexGroups");
+                        match = field;
                     }
                 }
             }
+            if (match != null) return match;
             throw new IllegalStateException(
                     "GigaMap index groups not found on %s; unsupported upstream layout"
                             .formatted(type.getName()));

@@ -12,8 +12,10 @@ import java.util.UUID;
 /// watermarks retain history and report retention as unsupported.
 public interface ReplicationLogRetention extends AutoCloseable {
         /// Returns whether this transport can safely delete replicated history. A
-    /// provider that cannot establish authenticated reader watermarks must return
-    /// `false`; lifecycle code will retain history and continue backups.
+    /// provider that cannot prove durable, quorum-verified reader watermarks
+    /// must return `false`; lifecycle code will retain history and continue
+    /// backups. Replication traffic carries no authentication by design —
+    /// see the module's trusted-network boundary note.
     ///
     /// @return `true` when safe retention is supported
     default boolean isSupported() {
@@ -27,7 +29,7 @@ public interface ReplicationLogRetention extends AutoCloseable {
     /// @throws NodeException if deletion fails
     MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodeException;
 
-        /// Records one authenticated reader acknowledgement for a later aggregate
+        /// Records one durable, quorum-proven reader acknowledgement for a later aggregate
     /// retention request. Providers without reader-watermark support reject this
     /// operation explicitly.
     ///

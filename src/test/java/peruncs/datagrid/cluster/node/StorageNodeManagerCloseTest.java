@@ -89,10 +89,11 @@ class StorageNodeManagerCloseTest {
         return manager(StorageNodeManager.Role.READER, distributor, client, health, position);
     }
 
-        /// A close that fails mid-way still releases everything exactly once;
-        /// a retry is a no-op instead of re-disposing.
+        /// A close that fails mid-way stays retryable: the completed
+        /// disposals are never repeated and a later retry finishes exactly
+        /// the disposal that failed.
     @Test
-    void failedCloseIsNotRetried() {
+    void failedCloseIsRetryableAndCompletesTheRemainder() {
         final CountingHandler distributor = new CountingHandler();
         final CountingHandler client = new CountingHandler();
         final CountingHandler health = new CountingHandler();
@@ -101,12 +102,23 @@ class StorageNodeManagerCloseTest {
         final StorageNodeManager manager = reader(distributor, client, health, position);
 
         assertThrows(NodeException.class, manager::close);
+        assertEquals(1, client.disposeCalls.get(), "data client disposed on the first attempt");
+        assertEquals(1, health.closeCalls.get(), "health check closed on the first attempt");
+        assertEquals(1, position.closeCalls.get(), "position provider closed on the first attempt");
+
+        /* A transient failure clears: the retry must finish the distributor
+         * without re-disposing anything that already completed. */
+        distributor.disposeFailure = null;
         manager.close();
 
-        assertEquals(1, distributor.disposeCalls.get(), "distributor re-disposed on retry");
+        assertEquals(2, distributor.disposeCalls.get(), "the failed disposal must be retried");
         assertEquals(1, client.disposeCalls.get(), "data client re-disposed on retry");
         assertEquals(1, health.closeCalls.get(), "health check re-closed on retry");
         assertEquals(1, position.closeCalls.get(), "position provider re-closed on retry");
+
+        /* A fully completed close is idempotent. */
+        manager.close();
+        assertEquals(2, distributor.disposeCalls.get());
     }
 
         /// Any provider fault — unavailable boundary or transport failure —

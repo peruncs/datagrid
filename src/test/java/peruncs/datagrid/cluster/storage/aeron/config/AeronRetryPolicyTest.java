@@ -10,7 +10,7 @@ class AeronRetryPolicyTest {
         /// Verifies that defaults are accepted and produce a backoff strategy.
     @Test
     void defaultsAreValidAndExposeAnIdleStrategy() {
-        final AeronRetryPolicy policy = AeronRetryPolicy.Default();
+        final AeronRetryPolicy policy = AeronRetryPolicy.defaults();
 
         assertEquals(1, policy.idleMaxSpins());
         assertEquals(10, policy.idleMaxYields());

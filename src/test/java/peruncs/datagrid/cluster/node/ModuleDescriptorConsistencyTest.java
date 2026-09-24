@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.node;
 
+
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 
@@ -12,6 +13,8 @@ import java.nio.file.Paths;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Guards the JPMS descriptor against drift without running tests on the
 /// module path.

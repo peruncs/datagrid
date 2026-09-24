@@ -625,9 +625,11 @@ class AeronArchiveRetentionTest {
         }
     }
 
-    /// An operation that exceeds the controller budget permanently fails retention.
+    /// A slow command fails only the caller that timed out: the controller
+    /// itself stays reusable, the stuck command finishes and publishes its
+    /// result, and watermark acceptance never dies behind one slow purge.
     @Test
-    void operationTimeoutFailsRetentionClosed() throws Exception {
+    void operationTimeoutFailsTheCallerWithoutLatchingRetention() throws Exception {
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
         try (final AeronArchiveRetention retention = new AeronArchiveRetention(Set.of(READER), () -> {
@@ -646,12 +648,18 @@ class AeronArchiveRetentionTest {
                 assertTrue(timeout.getMessage().contains("Timed out"));
                 assertInstanceOf(TimeoutException.class, timeout.getCause());
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
-                assertNotNull(retention.failure());
-                assertThrows(ReplicationUnavailableException.class, retention::isSupported,
-                        "a timed-out Archive client must never be reused");
+                /* The timeout failed one caller only: retention has no
+                 * permanent terminal failure and watermarks stay acceptable
+                 * while the slow command drains. */
+                assertNull(retention.failure());
+                assertTrue(retention.offerReaderWatermark(AeronReaderWatermark.of(
+                        READER, CLUSTER, GENERATION, 1, 17, 4, 4_096)),
+                        "a timed-out maintenance wait must not reject watermark drains");
             } finally {
                 release.countDown();
             }
+            /* Once the slow command finished, retention serves calls again. */
+            assertTrue(retention.isSupported());
         }
     }
 
@@ -702,7 +710,7 @@ class AeronArchiveRetentionTest {
             retention.close();
             assertTrue(retentionAgent(retention).isTerminated(),
                     "retryable close did not terminate the agent");
-            assertThrows(IllegalStateException.class,
+            assertThrows(ReplicationUnavailableException.class,
                     () -> retention.recordReaderWatermark(cursor(READER)),
                     "closed retention kept accepting commands");
             retention.close();

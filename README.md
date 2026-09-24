@@ -50,14 +50,20 @@ deliberately remain inaccessible:
 
 ```java
 try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
-    MyRoot root = node.store().read(java.util.function.Function.identity());
-    root.add("value");
-    node.store().store(root);
+    // Writer: mutate inside the read boundary, then persist the change.
+    int size = node.store().withRootRead(root -> {
+        root.add("value");
+        return root.size();
+    });
+    node.store().storeRoot();
+    // Reader: copy what you need inside the callback — never return a
+    // live graph object.
+    int seen = node.store().withRootRead(root -> root.size());
     NodeStatus status = node.status();
 }
 ```
 
-`ClusterStore.read` is the required reader-side graph boundary: run the whole
+`ClusterStore.withRootRead` is the required reader-side graph boundary: run the whole
 traversal inside the callback, and return only copied values — never a live
 graph object. Mutations are accepted only on the writer; a reader fails
 writes with `ReaderWriteRejectedException`, a fenced writer with
@@ -499,7 +505,6 @@ unexpected policy are failures rather than acceptable crash variation.
 Deterministic cells cover:
 
 - publication, prepare, local-write, commit-offer, recorded-commit, abort,
-  enqueue-then-Archive, and prepare-failure seams;
 - checkpoint temp-write, rename, directory-sync, and committed-sequence seams;
 - one-byte, chunk-minus-one, chunk-plus-one, multi-chunk, random, tiny-term,
   and 200 KiB payloads;

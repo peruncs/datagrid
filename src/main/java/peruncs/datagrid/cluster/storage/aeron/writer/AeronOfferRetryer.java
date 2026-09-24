@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 
 import io.aeron.Publication;
 import org.agrona.DirectBuffer;
+import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.errors.WriterFencedException;
 import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
@@ -11,6 +12,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /// The bounded retry policy used by the writer's Aeron publications.
 ///
@@ -38,37 +40,23 @@ final class AeronOfferRetryer {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    /// Offers the first `length` bytes of a buffer until Aeron accepts them
-    /// or the configured deadline expires.
-    ///
-    /// The buffer is read synchronously and is not retained after this method
-    /// returns. The caller must keep it valid and unchanged for the duration of
-    /// the call. No heap copy is made. The helper is not thread-safe.
-    ///
-    /// @param source buffer containing the frame to offer
-    /// @param length number of bytes to offer, starting at offset zero
-    /// @return the Aeron publication position
-    /// @throws IllegalArgumentException if `source` is null or the length
-    ///                                  is outside the buffer capacity
-    /// @throws IllegalStateException    if the publication closes, exceeds its
-    ///                                  maximum position, or does not accept the frame before timeout
-    long offer(final DirectBuffer source, final int length) {
-        return this.offer(source, length, () -> true);
-    }
-
     /// Offers until Aeron accepts the frame, the deadline expires, or ownership is lost.
     ///
     /// The ownership callback is evaluated before every publication attempt. It is
     /// intentionally part of this loop rather than a one-time caller check: a
     /// terminal marker must not be retried after its writer lease has been fenced.
     ///
-    /// @throws WriterFencedException when `stillOwner` reports that the lease was lost
+    /// @throws WriterFencedException         when `stillOwner` reports that the lease was lost
+    /// @throws ReplicationUnavailableException when the thread is interrupted, the
+    ///                                       publication closes, or the frame is not
+    ///                                       accepted before the deadline
     long offer(final DirectBuffer source, final int length, final BooleanSupplier stillOwner) {
         if (source == null || length < 0 || length > source.capacity()) {
             throw new IllegalArgumentException("invalid Aeron offer length");
         }
         Objects.requireNonNull(stillOwner, "stillOwner");
-        return this.offerLoop(source, length, stillOwner, () -> this.offerer.offer(source, 0, length),
+        return this.offerLoop(() -> null, stillOwner,
+                () -> this.offerer.offer(source, 0, length),
                 this.configuration.offerTimeoutNanos());
     }
 
@@ -80,7 +68,7 @@ final class AeronOfferRetryer {
         }
         Objects.requireNonNull(gate, "gate");
         if (budgetNanos <= 0) throw new IllegalArgumentException("offer budget must be positive");
-        return this.offerLoop(source, length, () -> true,
+        return this.offerLoop(gate::terminalFailure, () -> true,
                 () -> gate.offerUnderOwnership(owner -> {
                     if (!owner.getAsBoolean()) {
                         throw new WriterFencedException("writer fencing lease lost during Aeron offer retry");
@@ -89,7 +77,8 @@ final class AeronOfferRetryer {
                 }), Math.min(budgetNanos, this.configuration.offerTimeoutNanos()));
     }
 
-    private long offerLoop(final DirectBuffer source, final int length, final BooleanSupplier stillOwner,
+    private long offerLoop(final Supplier<RuntimeException> terminalFailure,
+                           final BooleanSupplier stillOwner,
                            final LongSupplier attemptOffer, final long timeoutNanos) {
         final AeronRetryPolicy policy = this.configuration.retryPolicy();
         final long deadline = ReplicationRetry.deadlineNanos(timeoutNanos, this.clock);
@@ -101,14 +90,21 @@ final class AeronOfferRetryer {
             if (!stillOwner.getAsBoolean()) {
                 throw new WriterFencedException("writer fencing lease lost during Aeron offer retry");
             }
+            /* A terminal driver failure must not be retried to the full offer
+             * deadline: Aeron only surfaces it through NOT_CONNECTED, so the
+             * wedged offer would otherwise park until the deadline expires. */
+            final RuntimeException terminal = terminalFailure.get();
+            if (terminal != null) {
+                throw terminal;
+            }
             if (Thread.currentThread().isInterrupted()) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("interrupted while offering Aeron replication frame");
+                throw new ReplicationUnavailableException("interrupted while offering Aeron replication frame");
             }
             final long position = attemptOffer.getAsLong();
             if (position >= 0) return position;
             if (position == Publication.CLOSED || position == Publication.MAX_POSITION_EXCEEDED) {
-                throw new IllegalStateException("Aeron publication failed: %s".formatted(position));
+                throw new ReplicationUnavailableException(
+                        "Aeron publication failed: %s".formatted(position));
             }
             if (position == Publication.BACK_PRESSURED) backPressured++;
             else if (position == Publication.NOT_CONNECTED) notConnected++;
@@ -116,7 +112,8 @@ final class AeronOfferRetryer {
             else {
                 /* Aeron adds result codes rarely; retrying an unknown value would
                  * hide a protocol/API change behind a misleading timeout. */
-                throw new IllegalStateException("unknown Aeron publication result: %s".formatted(position));
+                throw new ReplicationUnavailableException(
+                        "unknown Aeron publication result: %s".formatted(position));
             }
             if (ReplicationRetry.expired(deadline, this.clock)) {
                 final String reason;
@@ -127,7 +124,8 @@ final class AeronOfferRetryer {
                 } else {
                     reason = "ADMIN_ACTION retries=%s".formatted(adminActions);
                 }
-                throw new IllegalStateException("Aeron offer timed out: %s, connected=%s".formatted(reason, this.offerer.isConnected()));
+                throw new ReplicationUnavailableException(
+                        "Aeron offer timed out: %s, connected=%s".formatted(reason, this.offerer.isConnected()));
             }
             /* Full jitter is the single pacing mechanism: it spreads retries of
              * writers that share an outage instead of letting them collide on

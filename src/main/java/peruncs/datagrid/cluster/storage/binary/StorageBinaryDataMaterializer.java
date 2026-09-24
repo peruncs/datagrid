@@ -82,6 +82,9 @@ final class StorageBinaryDataMaterializer {
         }
         /* The imported bytes must be the loader's first source; Store's normal
          * source can still hold the old cached version of an updated object. */
+        /* The imported source consumes the whole array, so the Store API pins
+         * the views to the transaction's exact buffer count; a grow-only
+         * array would smuggle a stale null tail into the import. */
         if (this.batchViews.length != length) this.batchViews = new ByteBuffer[length];
         final ByteBuffer[] batch = this.batchViews;
         System.arraycopy(buffers, offset, batch, 0, length);

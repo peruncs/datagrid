@@ -99,8 +99,8 @@ class StorageBinaryDataMergerTest {
 
         merger.dispose();
 
-        assertThrows(IllegalStateException.class, () -> merger.receiveData(binary(1)));
-        assertThrows(IllegalStateException.class, () -> merger.receiveTypeDictionary("{}"));
+        assertThrows(ReplicationUnavailableException.class, () -> merger.receiveData(binary(1)));
+        assertThrows(ReplicationUnavailableException.class, () -> merger.receiveTypeDictionary("{}"));
     }
 
         /// One materialization timeout latches a terminal failure: the merger
@@ -124,7 +124,7 @@ class StorageBinaryDataMergerTest {
         };
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), blockingHandler, 0L, 1L, 50L));
         try {
-            assertThrows(IllegalStateException.class, () -> merger.receiveData(binary(2)),
+            assertThrows(ReplicationUnavailableException.class, () -> merger.receiveData(binary(2)),
                     "a materialization timeout must fail the delivery call");
             assertTrue(handlerEntered.await(10, TimeUnit.SECONDS), "the worker never entered the handler");
             assertNotNull(merger.failure(), "the timeout must latch a terminal merger failure");
@@ -134,9 +134,9 @@ class StorageBinaryDataMergerTest {
                     "a timeout must say timed out: " + merger.failure().getMessage());
             assertFalse(merger.failure().getMessage().contains("or failed"),
                     "a timeout must not be mislabeled as a genuine failure: " + merger.failure().getMessage());
-            assertThrows(IllegalStateException.class, merger::awaitApplied);
-            assertThrows(IllegalStateException.class, () -> merger.receiveData(binary(1)));
-            assertThrows(IllegalStateException.class, () -> merger.receiveTypeDictionary("{}"));
+            assertThrows(ReplicationUnavailableException.class, merger::awaitApplied);
+            assertThrows(ReplicationUnavailableException.class, () -> merger.receiveData(binary(1)));
+            assertThrows(ReplicationUnavailableException.class, () -> merger.receiveTypeDictionary("{}"));
         } finally {
             releaseHandler.countDown();
             merger.dispose();
@@ -234,8 +234,8 @@ class StorageBinaryDataMergerTest {
                 await(start);
                 try {
                     merger.receiveData(binary(2));
-                } catch (final IllegalStateException expected) {
-                    /* Disposed or failed: a clean refusal, not a corruption. */
+                } catch (final RuntimeException expected) {
+                    /* Disposed, failed, or fenced: a clean refusal, not a corruption. */
                 } catch (final Throwable failure) {
                     unexpected.set(failure);
                 }
@@ -257,8 +257,8 @@ class StorageBinaryDataMergerTest {
 
         merger.dispose();
 
-        final IllegalStateException failure = assertThrows(
-                IllegalStateException.class, () -> merger.receiveDataOwned(binary(2)));
+        final ReplicationUnavailableException failure = assertThrows(
+                ReplicationUnavailableException.class, () -> merger.receiveDataOwned(binary(2)));
         assertTrue(failure.getMessage().contains("disposed"),
                 "an owned delivery after disposal must report the disposal: " + failure.getMessage());
         assertEquals(0, failure.getSuppressed().length,

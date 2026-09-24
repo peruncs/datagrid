@@ -1,14 +1,13 @@
-package peruncs.datagrid.cluster.node.replication;
+package peruncs.datagrid.cluster.node;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.api.ReplicationState;
-import peruncs.datagrid.cluster.node.StorageNodeManager;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /// Tests replication monitoring behavior.
 class ReplicationMonitoringTest {
-        /// Verifies that Aeron transport state, lag, and readiness are exposed as raw values.
+        /// Verifies that Aeron state, lag, and readiness are exposed as raw values.
     @Test
     void exposesAeronTransportStateLagAndReadinessAsRawValues() throws Exception {
         final StorageNodeManager manager = new StorageNodeManager() {
@@ -19,10 +18,6 @@ class ReplicationMonitoringTest {
 
             public long latestSequence() {
                 return 10;
-            }
-
-            public String replicationTransport() {
-                return "aeron";
             }
 
             public ReplicationState replicationState() {
@@ -56,7 +51,6 @@ class ReplicationMonitoringTest {
         assertEquals(7, metrics.currentSequence());
         assertEquals(10, metrics.latestSequence());
         assertEquals(3, metrics.lagTransactions());
-        assertEquals("aeron", metrics.transport());
         assertEquals(ReplicationState.REPLAYING, metrics.state());
         assertFalse(metrics.ready());
         assertTrue(metrics.healthy());
@@ -70,10 +64,6 @@ class ReplicationMonitoringTest {
 
             public long currentSequence() {
                 return 7;
-            }
-
-            public String replicationTransport() {
-                return "aeron";
             }
 
             public ReplicationState replicationState() {

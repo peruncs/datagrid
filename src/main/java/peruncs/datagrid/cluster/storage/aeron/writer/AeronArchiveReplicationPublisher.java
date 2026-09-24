@@ -10,11 +10,9 @@ import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.archive.status.RecordingPos;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
-import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
@@ -69,20 +67,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @param clusterId       replication cluster identity
     /// @param epoch           writer epoch
     /// @param initialSequence first sequence to publish
-    /// @return a publisher that owns the publication and recording
-    public static AeronArchiveReplicationPublisher create(
-            final AeronArchive archive,
-            final String channel,
-            final int streamId,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence
-    ) {
-        return create(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.LOCAL, AeronReplicationEnvelope.defaultWireNonce(clusterId));
-    }
-
     public static AeronArchiveReplicationPublisher create(
             final AeronArchive archive, final String channel, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
@@ -102,20 +86,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @param clusterId       replication cluster identity
     /// @param epoch           writer epoch
     /// @param initialSequence first sequence to publish
-    /// @return a publisher that owns the publication and recording
-    public static AeronArchiveReplicationPublisher createRemote(
-            final AeronArchive archive,
-            final String channel,
-            final int streamId,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence
-    ) {
-        return create(archive, channel, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.REMOTE, AeronReplicationEnvelope.defaultWireNonce(clusterId));
-    }
-
     public static AeronArchiveReplicationPublisher createRemote(
             final AeronArchive archive, final String channel, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
@@ -188,20 +158,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @return a publisher that owns the extended publication and recording
     /// @throws IllegalArgumentException if the recording is unknown, uses another
     ///                                  stream, or has different framing
-    /// @throws IllegalStateException    if the recording is still active
-    public static AeronArchiveReplicationPublisher extend(
-            final AeronArchive archive,
-            final long recordingId,
-            final int streamId,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence
-    ) {
-        return extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.LOCAL, AeronReplicationEnvelope.defaultWireNonce(clusterId));
-    }
-
     public static AeronArchiveReplicationPublisher extend(
             final AeronArchive archive, final long recordingId, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
@@ -219,20 +175,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// @param clusterId       replication cluster identity
     /// @param epoch           writer epoch
     /// @param initialSequence first sequence to publish
-    /// @return a publisher that owns the extended publication and recording
-    public static AeronArchiveReplicationPublisher extendRemote(
-            final AeronArchive archive,
-            final long recordingId,
-            final int streamId,
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence
-    ) {
-        return extend(archive, recordingId, streamId, configuration, clusterId, epoch, initialSequence,
-                SourceLocation.REMOTE, AeronReplicationEnvelope.defaultWireNonce(clusterId));
-    }
-
     public static AeronArchiveReplicationPublisher extendRemote(
             final AeronArchive archive, final long recordingId, final int streamId,
             final AeronReplicationConfiguration configuration, final UUID clusterId,
@@ -399,8 +341,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             }
             /* The local counter is checked first, so an ordinary successful commit
              * returns without touching the control subscription. While the recording
-             * is behind, however, the counter can remain allocated after an external
-             * Archive dies. Poll the control session on every such duty cycle so a
+             * is behind, the counter can remain allocated after an external Archive
+             * dies, so the control session is probed on the configured cadence: a
              * disconnected Archive fails promptly instead of masquerading as a slow
              * recording until the complete commit deadline expires. */
             final long errorNow = System.nanoTime();
@@ -759,19 +701,17 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
 
     /// Creates a coordinator whose terminal markers run under lease ownership.
     ///
-    /// @param durabilityMode ordering between local acceptance and Archive
     /// @param writer         receiver for checkpoint transitions
     /// @param writeAdmission predicate receiving payload plus dictionary bytes before local acceptance
     /// @param leaseGate      gate serializing marker offers with lease takeovers
     /// @return a coordinator backed by this publisher
     public AeronReplicationWriteCoordinator newWriteCoordinator(
-            final ReplicationDurabilityMode durabilityMode,
             final CheckpointWriter writer,
             final LongPredicate writeAdmission,
             final WriterLeaseGate leaseGate) {
         Objects.requireNonNull(writer, "writer");
         Objects.requireNonNull(leaseGate, "leaseGate");
-        return new AeronReplicationWriteCoordinator(this.publisher, durabilityMode, writer,
+        return new AeronReplicationWriteCoordinator(this.publisher, writer,
                 writeAdmission, leaseGate);
     }
 
@@ -932,8 +872,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         void onState(AeronReplicationCheckpoint.State state, long sequence, int dataLength,
                      int dataChunkCount, int dataCrc32c, long position);
 
-                /// Removes a local acceptance fence for a Store write that was rejected.
-        default void clearEnqueueFence() {
+                /// Removes the in-flight checkpoint fence for a Store write that was rejected.
+        default void clearInFlightFence() {
         }
     }
 

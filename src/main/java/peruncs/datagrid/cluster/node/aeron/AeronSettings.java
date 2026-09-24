@@ -10,7 +10,6 @@ import io.aeron.security.*;
 import org.agrona.SystemUtil;
 import peruncs.datagrid.cluster.node.NodeRole;
 import peruncs.datagrid.cluster.node.NodeSettingsSource;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
@@ -337,7 +336,7 @@ record AeronSettings(
                 builder::recordingStopTimeoutNanos);
         longSetting(properties, "ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS",
                 builder::readerStopTimeoutNanos);
-        builder.durabilityMode(durabilityMode(properties));
+        requireSupportedDurabilityMode(properties);
         return builder.build();
     }
 
@@ -458,9 +457,17 @@ record AeronSettings(
             throw new IllegalArgumentException(
                     "Archive segment length must be a positive power of two; low-storage threshold must not be negative; max concurrent replays must be positive");
         }
+        /* Readers configured without the trusted-network acknowledgement must
+         * fail startup loudly: silently ignoring them would disable retention
+         * while the operator believes reader watermarks are being counted. */
+        final Set<UUID> readers = retentionReaders(properties);
+        if (!trustedNetwork && !readers.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "ECLIPSE_DATAGRID_AERON_RETENTION_READERS is configured but ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK is not acknowledged; retention requires the trusted-network acknowledgement");
+        }
         return new ArchivePolicy(archiveFileSyncLevel, minimumArchiveFreeBytes, externalArchive,
                 archiveSegmentFileLength, archiveLowStorageSpaceThreshold, maxConcurrentReplays,
-                trustedNetwork ? retentionReaders(properties) : Set.of());
+                trustedNetwork ? readers : Set.of());
     }
 
     /// Parses the per-concern timeout budgets.
@@ -818,8 +825,13 @@ record AeronSettings(
         }
     }
 
-        /// Accepts only archive-first durability.
-    private static ReplicationDurabilityMode durabilityMode(final NodeSettingsSource properties) {
+    /// Fails closed on a configured durability mode other than archive-first.
+    ///
+    /// Archive-first is the only ordering this build implements, so the
+    /// environment keys are validation-only: an operator who still sets them
+    /// must learn at startup, not silently, that any other value is
+    /// unsupported.
+    private static void requireSupportedDurabilityMode(final NodeSettingsSource properties) {
         final String primary = value(properties, "ECLIPSE_DATAGRID_AERON_REPLICATION_DURABILITY_MODE", null);
         final String legacy = value(properties, "ECLIPSE_DATAGRID_AERON_DURABILITY_MODE", null);
         if (primary != null && legacy != null && !equivalentSetting(primary, legacy)) {
@@ -827,12 +839,14 @@ record AeronSettings(
                     "Conflicting Aeron settings for durability mode: %s and %s".formatted(primary, legacy));
         }
         final String selected = primary != null ? primary : legacy;
-        if (selected == null || selected.isBlank()) return ReplicationDurabilityMode.ARCHIVE_FIRST;
-        return switch (selected.trim().toLowerCase(Locale.ROOT)) {
-            case "archive-first", "archive_first" -> ReplicationDurabilityMode.ARCHIVE_FIRST;
+        if (selected == null || selected.isBlank()) return;
+        switch (selected.trim().toLowerCase(Locale.ROOT)) {
+            case "archive-first", "archive_first" -> {
+                /* The only supported mode: nothing to configure. */
+            }
             default -> throw new IllegalArgumentException(
                     "Unsupported replication durability mode '%s'; only archive-first is supported".formatted(selected));
-        };
+        }
     }
 
     private static boolean equivalentSetting(final String left, final String right) {

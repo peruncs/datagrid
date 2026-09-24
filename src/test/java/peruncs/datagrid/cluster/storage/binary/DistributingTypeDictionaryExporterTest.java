@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.storage.binary;
 
+
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryAssembler;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
@@ -9,6 +10,8 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /// Verifies the distributing exporter updates the local delegate before
 /// publishing, so receivers learn type definitions first.

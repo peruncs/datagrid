@@ -6,7 +6,7 @@ package peruncs.datagrid.cluster.node.backup;
 /// its entries do not declare trustworthy sizes; the entry budget bounds how
 /// many files an archive may declare, so a hostile archive cannot exhaust
 /// inodes while staying inside a large byte budget. Both bounds are
-/// configurable by operators through [FilesystemVolumeBackupBackend#New(java.nio.file.Path, BackupArchiveLimits)],
+/// configurable by operators through the explicit-budget factory on [FilesystemVolumeBackupBackend],
 /// while [defaults()] keeps the previous behavior for callers that do not
 /// choose explicit budgets.
 ///

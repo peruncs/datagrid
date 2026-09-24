@@ -2,6 +2,7 @@ package peruncs.datagrid.cluster.node;
 
 import peruncs.datagrid.cluster.api.ReplicationState;
 import peruncs.datagrid.cluster.errors.NodeException;
+import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 import peruncs.datagrid.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.datagrid.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
@@ -20,7 +21,7 @@ import java.util.Objects;
 /// role, so an unsupported transition is unrepresentable.
 ///
 /// @since 1.0
-public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
+interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         /// The fixed replication role a storage node manager is created for.
     enum Role {
             /// Applies replicated writes and never distributes.
@@ -84,7 +85,7 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
     void close();
 
         /// Shared reader monitoring, health, and lifecycle for both roles.
-    final class Default implements StorageNodeManager {
+    static final class Default implements StorageNodeManager {
         private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
         private final ReplicationPublisher dataDistributor;
@@ -97,6 +98,13 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         private final Role role;
 
         private volatile boolean closed;
+        /* Per-collaborator completion: a failed close must stay retryable so
+         * the remaining disposals finish on a later attempt instead of being
+         * silently swallowed by a fail-final flag. */
+        private boolean distributorDisposed;
+        private boolean clientDisposed;
+        private boolean healthCheckClosed;
+        private boolean positionProviderClosed;
 
         /// Creates a manager for the configured fixed role.
         ///
@@ -175,9 +183,17 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
             }
         }
 
+        /// Reports no metrics at all for a node without replication; the
+        /// exported status then carries no placeholder values.
         @Override
-        public String replicationTransport() {
-            return this.replicationTransport;
+        public ReplicationMetrics replicationMetrics() {
+            if ("none".equalsIgnoreCase(this.replicationTransport)) {
+                return null;
+            }
+            return new ReplicationMetrics(
+                    this.currentSequence(), this.latestSequence(), this.replicationState(),
+                    this.isReady(), this.isHealthy(), this.archiveUsableSpaceBytes(),
+                    this.writerDurablePosition(), this.writerDurableSequence(), this.appliedSequence());
         }
 
         @Override
@@ -221,36 +237,49 @@ public interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         }
 
         /// Closes publisher, reader, health check, and position provider,
-        /// aggregating every failure. The first `close()` call performs every
-        /// disposal; later calls return immediately, even when the first call
-        /// failed, so callers must treat a failed close as final.
+        /// aggregating every failure. Each disposal is tracked separately, so
+        /// a failed close is retryable: a later call finishes exactly the
+        /// disposals that did not complete instead of returning silently.
         @Override
         public synchronized void close() {
-            LOGGER.log(System.Logger.Level.INFO, "Closing StorageNodeManager");
-            if (this.closed) {
+            if (this.closed && this.distributorDisposed && this.clientDisposed &&
+                this.healthCheckClosed && this.positionProviderClosed) {
                 return;
             }
             this.closed = true;
+            LOGGER.log(System.Logger.Level.INFO, "Closing StorageNodeManager");
             final CloseFailures failures = new CloseFailures();
-            try {
-                this.dataDistributor.dispose();
-            } catch (final RuntimeException | Error closeFailure) {
-                failures.add(closeFailure);
+            if (!this.distributorDisposed) {
+                try {
+                    this.dataDistributor.dispose();
+                    this.distributorDisposed = true;
+                } catch (final RuntimeException | Error closeFailure) {
+                    failures.add(closeFailure);
+                }
             }
-            try {
-                this.dataClient.dispose();
-            } catch (final RuntimeException | Error closeFailure) {
-                failures.add(closeFailure);
+            if (!this.clientDisposed) {
+                try {
+                    this.dataClient.dispose();
+                    this.clientDisposed = true;
+                } catch (final RuntimeException | Error closeFailure) {
+                    failures.add(closeFailure);
+                }
             }
-            try {
-                this.healthCheck.close();
-            } catch (final RuntimeException | Error closeFailure) {
-                failures.add(closeFailure);
+            if (!this.healthCheckClosed) {
+                try {
+                    this.healthCheck.close();
+                    this.healthCheckClosed = true;
+                } catch (final RuntimeException | Error closeFailure) {
+                    failures.add(closeFailure);
+                }
             }
-            try {
-                this.positionProvider.close();
-            } catch (final RuntimeException | Error closeFailure) {
-                failures.add(closeFailure);
+            if (!this.positionProviderClosed) {
+                try {
+                    this.positionProvider.close();
+                    this.positionProviderClosed = true;
+                } catch (final RuntimeException | Error closeFailure) {
+                    failures.add(closeFailure);
+                }
             }
             failures.throwIfFailed();
         }

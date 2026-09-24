@@ -87,7 +87,7 @@ public final class ReplicationApplierAeron implements Disposable {
                     () -> false,
                     () -> {
                     },
-                    AeronRetryPolicy.Default().idleStrategy()
+                    AeronRetryPolicy.defaults().idleStrategy()
             );
         } catch (final RuntimeException e) {
             this.assembler.failure(e);

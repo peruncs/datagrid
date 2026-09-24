@@ -11,11 +11,12 @@ import org.eclipse.store.storage.types.*;
 import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.datagrid.cluster.errors.ReseedRequiredException;
+import peruncs.datagrid.cluster.errors.WrongRoleException;
 import peruncs.datagrid.cluster.node.NodeSettingsSource.Env.EnvKeys;
 import peruncs.datagrid.cluster.node.backup.BackupNodeControl;
+import peruncs.datagrid.cluster.node.backup.StorageBackupTaskExecutor;
 import peruncs.datagrid.cluster.node.store.ClusterStorageManager;
 import peruncs.datagrid.cluster.node.store.DistributedStorage;
-import peruncs.datagrid.cluster.node.store.StorageTaskExecutor;
 import peruncs.datagrid.cluster.storage.ReplicationCursor;
 import peruncs.datagrid.cluster.storage.index.ClusterStoreIndexes;
 
@@ -76,9 +77,16 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     @Override
     public synchronized StorageNodeControl storageNodeManager() throws NodeException {
         this.ensureOpen();
-        final var properties = this.assembly.getNodeSettingsSource();
-        if (!properties.isProdMode() || properties.nodeRole() == NodeRole.BACKUP_READER) {
-            throw new IllegalStateException("this node is not a storage node");
+        /* The role managers exist only for production nodes: a dev node
+         * starts without the replication collaborators the manager wraps, so
+         * manufacturing one here would wrap half-built resources. */
+        if (!this.assembly.getNodeSettingsSource().isProdMode()) {
+            throw new WrongRoleException(
+                    "a development node owns no storage node manager; status and checks are production-only");
+        }
+        if (this.assembly.nodeRole == NodeRole.BACKUP_READER) {
+            throw new WrongRoleException(
+                    "node role '%s' is not a storage node".formatted(this.assembly.nodeRole.configName()));
         }
         if (this.assembly.clusterStorageManager == null) {
             this.start();
@@ -90,9 +98,13 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     @Override
     public synchronized BackupNodeControl backupNodeManager() throws NodeException {
         this.ensureOpen();
-        final var properties = this.assembly.getNodeSettingsSource();
-        if (!properties.isProdMode() || properties.nodeRole() != NodeRole.BACKUP_READER) {
-            throw new IllegalStateException("this node is not a backup node");
+        if (!this.assembly.getNodeSettingsSource().isProdMode()) {
+            throw new WrongRoleException(
+                    "a development node owns no backup node manager; status and checks are production-only");
+        }
+        if (this.assembly.nodeRole != NodeRole.BACKUP_READER) {
+            throw new WrongRoleException(
+                    "node role '%s' is not a backup node".formatted(this.assembly.nodeRole.configName()));
         }
         if (this.assembly.clusterStorageManager == null) {
             this.start();
@@ -109,15 +121,16 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     private synchronized void start() throws NodeException {
         this.ensureOpen();
         if (this.started) {
-            throw new IllegalStateException("Cluster foundation has already started");
+            throw new IllegalStateException("cluster node has already started");
         }
         this.started = true;
         try {
-            final var properties = this.assembly.getNodeSettingsSource();
-
-            if (!properties.isProdMode()) {
+            /* The role is captured once at assembly time and never
+             * re-parsed: a custom settings source cannot split one startup
+             * across roles by returning different values later. */
+            if (!this.assembly.getNodeSettingsSource().isProdMode()) {
                 this.startDevNode();
-            } else if (properties.nodeRole() == NodeRole.BACKUP_READER) {
+            } else if (this.assembly.nodeRole == NodeRole.BACKUP_READER) {
                 this.startBackupNode();
             } else {
                 this.startStorageNode();
@@ -227,8 +240,11 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
 
         final var housekeeper = this.assembly.getNodeMaintenanceScheduler();
 
+        /* The shutdown callback is a no-op by design: NodeLifecycle.close owns
+         * the complete teardown graph, so a Store-internal shutdown cannot
+         * race the sequencer's stage order. */
         this.assembly.clusterStorageManager = ClusterStorageManager.ReadOnly(embeddedStorageManager,
-                () -> this.closeHousekeeperAndReplication(housekeeper), this.assembly.graphCoordinator);
+                ClusterStorageManager.ShutdownCallback.noOp(), this.assembly.graphCoordinator);
 
         this.assembly.getReplicationApplier().start();
         /* Eagerly create the manager so misconfiguration fails at startup.
@@ -353,15 +369,17 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * write. The application-facing read-only view rejects every write;
          * only the node-owned merger receives the raw manager. */
         final boolean writer = props.nodeRole() == NodeRole.WRITER;
+        /* The shutdown callback is a no-op by design: NodeLifecycle.close owns
+         * the complete teardown graph — see the backup node path above. */
         this.assembly.clusterStorageManager = writer
                 ? ClusterStorageManager.create(
                         embeddedStorageManager,
                         limitGate::limitReached,
-                        () -> this.closeHousekeeperAndReplication(housekeeper),
+                        ClusterStorageManager.ShutdownCallback.noOp(),
                         this.assembly.graphCoordinator)
                 : ClusterStorageManager.ReadOnly(
                         embeddedStorageManager,
-                        () -> this.closeHousekeeperAndReplication(housekeeper),
+                        ClusterStorageManager.ShutdownCallback.noOp(),
                         this.assembly.graphCoordinator);
 
         this.assembly.getReplicationApplier().start();
@@ -453,7 +471,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         if (!allowCreate) {
             throw new ReseedRequiredException(
                     "node role '%s' opened a Store without a root; seed the Store directory with its replication cursor before starting"
-                            .formatted(this.assembly.getNodeSettingsSource().nodeRole().configName()));
+                            .formatted(this.assembly.nodeRole.configName()));
         }
         LOGGER.log(System.Logger.Level.DEBUG, "Setting and storing new root from root supplier");
         final Object root = this.assembly.getRootSupplier().get();
@@ -476,7 +494,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         if (stored == null || stored.logicalSequence() < 0) {
             throw new ReseedRequiredException(
                     "node role '%s' has Store files at %s but no durable replication cursor; restore a compatible backup or seed the Store directory with its replication cursor before starting"
-                            .formatted(this.assembly.getNodeSettingsSource().nodeRole().configName(), storageRootPath),
+                            .formatted(this.assembly.nodeRole.configName(), storageRootPath),
                     cursorFailure);
         }
     }
@@ -493,31 +511,11 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly.clusterStorageManager = ClusterStorageManager.create(
                 storage,
                 ClusterStorageManager.StorageSizeValidation.notReached(),
-                this::closeReplicationTransportAndPositionProvider,
+                ClusterStorageManager.ShutdownCallback.noOp(),
                 this.assembly.graphCoordinator
         );
     }
 
-    private void closeReplicationTransportAndPositionProvider() {
-        final CloseSequencer sequencer = new CloseSequencer();
-        if (this.assembly.replicationTransport.isInitialized()) {
-            sequencer.add("replication transport", true, () -> this.assembly.replicationTransport.get().close());
-        }
-        if (this.assembly.positionProvider.isInitialized()) {
-            sequencer.add("position provider", true, () -> this.assembly.positionProvider.get().close());
-        }
-        if (this.assembly.replicationRetention.isInitialized()) {
-            sequencer.add("replication retention", true, () -> this.assembly.replicationRetention.get().close());
-        }
-        sequencer.run("failed to close replication resources");
-    }
-
-    private void closeHousekeeperAndReplication(final NodeMaintenanceScheduler housekeeper) {
-        final CloseSequencer sequencer = new CloseSequencer();
-        sequencer.add("housekeeper", true, housekeeper::close);
-        sequencer.add("replication resources", true, this::closeReplicationTransportAndPositionProvider);
-        sequencer.run("failed to close housekeeper and replication resources");
-    }
 
     /// Stops the node and all resources it created.
     ///
@@ -535,66 +533,98 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 return;
             }
             if (this.closing) {
-                throw new IllegalStateException("Cluster foundation is already closing");
+                throw new IllegalStateException("cluster node is already closing");
             }
             this.closing = true;
         }
         Throwable failure = null;
         try {
             final var collaborators = this.assembly;
-            final boolean storageManagerOwnsNodeResources = collaborators.clusterStorageManager != null;
             final boolean storageManagerClosed = collaborators.storageNodeManager.isInitialized();
             final boolean backupManagerClosed = collaborators.backupNodeManager.isInitialized();
-            final StorageTaskExecutor backupTaskExecutor = collaborators.storageBackupTaskExecutor.isInitialized()
+            final StorageBackupTaskExecutor backupTaskExecutor = collaborators.storageBackupTaskExecutor.isInitialized()
                     ? collaborators.storageBackupTaskExecutor.get() : null;
 
             final CloseSequencer sequencer = new CloseSequencer();
-            /* A started node manager owns its collaborators: closing it
-             * cascades to the applier, publisher, tasks, and health check.
-             * Those collaborators are disposed individually only when their
-             * manager never started — a close after partial construction —
-             * or when the manager does not own them. Every implementation is
-             * idempotent. Roles are fixed, so at most one manager started. */
+            /* The whole close graph is owned here, in FINAL's dependency
+             * order: stop maintenance, bound background work, stop the
+             * replication reader/publisher, close the managers and their
+             * collaborators, and shut the Store down last. Readiness is
+             * evaluated at run time, so a retried close skips completed
+             * stages, and the Store stage waits for a still-running backup
+             * instead of shutting down underneath its export. */
             sequencer
-                    /* Stop new maintenance work before waiting for task
-                     * executors or closing anything those tasks use. */
-                    .add("housekeeper", collaborators.housekeeper.isInitialized(),
-                            () -> collaborators.housekeeper.get().close())
-                    .add("backup task executor", collaborators.storageBackupTaskExecutor.isInitialized(),
-                            () -> collaborators.storageBackupTaskExecutor.get().close())
-                    .add("storage task executor",
-                            collaborators.storageTaskExecutor.isInitialized() && collaborators.storageTaskExecutor.get() != backupTaskExecutor,
-                            () -> collaborators.storageTaskExecutor.get().close())
-                    .add("cluster storage manager", collaborators.clusterStorageManager != null,
-                            () -> collaborators.clusterStorageManager.close())
-                    /* A startup failure can leave the raw Store started but
-                     * unwrapped: root creation, index validation, or the
-                     * writer dictionary failed after the Store opened but
-                     * before the cluster manager existed. The cluster
-                     * manager shuts the Store down when it exists, so this
-                     * stage owns the raw manager only in the failure path. */
-                    .add("embedded storage", collaborators.clusterStorageManager == null && collaborators.embeddedStorageManager != null,
-                            () -> collaborators.embeddedStorageManager.shutdown())
-                    .add("storage node manager", storageManagerClosed,
-                            () -> collaborators.storageNodeManager.get().close())
-                    .add("backup node manager", backupManagerClosed,
-                            () -> collaborators.backupNodeManager.get().close())
-                    .add("data distributor", !storageManagerClosed && collaborators.dataDistributor.isInitialized(),
-                            () -> collaborators.dataDistributor.get().dispose())
-                    .add("health check", !storageManagerClosed && collaborators.healthCheck.isInitialized(),
-                            () -> collaborators.healthCheck.get().close())
-                    .add("data client", !storageManagerClosed && !backupManagerClosed && collaborators.dataClient.isInitialized(),
-                            () -> collaborators.dataClient.get().dispose())
-                    .add("data merger", collaborators.dataMerger.isInitialized(),
-                            () -> collaborators.dataMerger.get().dispose())
-                    .add("applied listener", collaborators.commitAppliedListener.isInitialized(),
-                            () -> collaborators.commitAppliedListener.get().close())
-                    .add("stored cursor manager",
-                            !collaborators.commitAppliedListener.isInitialized() && collaborators.durableCursorFile != null,
-                            collaborators::closeDurableCursorFile)
-                    .add("replication resources", !storageManagerOwnsNodeResources,
-                            this::closeReplicationTransportAndPositionProvider);
-            sequencer.run("Failed to close cluster foundation");
+                    /* 1. Stop new maintenance work before anything it uses. */
+                    .add(CloseSequencer.stage("housekeeper",
+                            collaborators.housekeeper::isInitialized,
+                            () -> collaborators.housekeeper.get().close()))
+                    /* 2. Cancel or boundedly await background backup work. */
+                    .add(CloseSequencer.stage("backup task executor",
+                            collaborators.storageBackupTaskExecutor::isInitialized,
+                            () -> collaborators.storageBackupTaskExecutor.get().close()))
+                    .add(CloseSequencer.stage("storage task executor",
+                            () -> collaborators.storageTaskExecutor.isInitialized() &&
+                                  collaborators.storageTaskExecutor.get() != backupTaskExecutor,
+                            () -> collaborators.storageTaskExecutor.get().close()))
+                    /* 3. Stop the replication reader/publisher before the
+                     * Store: the reader must not deliver into a Store that
+                     * is shutting down, and the final cursor force needs the
+                     * Store still open. */
+                    .add(CloseSequencer.stage("replication transport",
+                            collaborators.replicationTransport::isInitialized,
+                            () -> collaborators.replicationTransport.get().close()))
+                    .add(CloseSequencer.stage("position provider",
+                            collaborators.positionProvider::isInitialized,
+                            () -> collaborators.positionProvider.get().close()))
+                    .add(CloseSequencer.stage("replication retention",
+                            collaborators.replicationRetention::isInitialized,
+                            () -> collaborators.replicationRetention.get().close()))
+                    /* 4. Close the managers. A started node manager owns its
+                     * collaborators: closing it cascades to the applier,
+                     * publisher, tasks, and health check. Those collaborators
+                     * are disposed individually only when their manager never
+                     * started — a close after partial construction. Every
+                     * implementation is idempotent and tracks per-collaborator
+                     * completion, so a retried close finishes the remainder. */
+                    .add(CloseSequencer.stage("storage node manager",
+                            () -> storageManagerClosed,
+                            () -> collaborators.storageNodeManager.get().close()))
+                    .add(CloseSequencer.stage("backup node manager",
+                            () -> backupManagerClosed,
+                            () -> collaborators.backupNodeManager.get().close()))
+                    .add(CloseSequencer.stage("data distributor",
+                            () -> !storageManagerClosed && collaborators.dataDistributor.isInitialized(),
+                            () -> collaborators.dataDistributor.get().dispose()))
+                    .add(CloseSequencer.stage("health check",
+                            () -> !storageManagerClosed && collaborators.healthCheck.isInitialized(),
+                            () -> collaborators.healthCheck.get().close()))
+                    .add(CloseSequencer.stage("data client",
+                            () -> !storageManagerClosed && !backupManagerClosed && collaborators.dataClient.isInitialized(),
+                            () -> collaborators.dataClient.get().dispose()))
+                    .add(CloseSequencer.stage("data merger",
+                            collaborators.dataMerger::isInitialized,
+                            () -> collaborators.dataMerger.get().dispose()))
+                    .add(CloseSequencer.stage("applied listener",
+                            collaborators.commitAppliedListener::isInitialized,
+                            () -> collaborators.commitAppliedListener.get().close()))
+                    .add(CloseSequencer.stage("stored cursor manager",
+                            () -> !collaborators.commitAppliedListener.isInitialized() && collaborators.durableCursorFile != null,
+                            collaborators::closeDurableCursorFile))
+                    /* 5. Close the Store and its low-level resources last.
+                     * A backup that outlived its executor budget must block
+                     * this stage instead of losing the race to a shutdown
+                     * Store. A startup failure can leave the raw Store
+                     * started but unwrapped: the cluster manager shuts the
+                     * Store down when it exists, so the raw stage owns the
+                     * manager only in the failure path. */
+                    .add(CloseSequencer.stage("cluster storage manager",
+                            () -> collaborators.clusterStorageManager != null && (
+                                    backupTaskExecutor == null || !backupTaskExecutor.isRunningBackup()),
+                            () -> collaborators.clusterStorageManager.close()))
+                    .add(CloseSequencer.stage("embedded storage",
+                            () -> collaborators.clusterStorageManager == null && collaborators.embeddedStorageManager != null,
+                            () -> collaborators.embeddedStorageManager.shutdown()));
+            sequencer.run("Failed to close node");
         } catch (final RuntimeException | Error closeFailure) {
             failure = closeFailure;
             throw closeFailure;
@@ -618,7 +648,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
 
     private void ensureOpen() {
         if (this.closed || this.closing || this.closeFailure != null) {
-            throw new IllegalStateException("Cluster foundation is closed");
+            throw new IllegalStateException("cluster node is closed");
         }
     }
 }

@@ -31,7 +31,7 @@ public final class WriterLeaseTakeoverChildMain {
             }
             if (!Files.exists(release)) throw new IllegalStateException("parent did not release offer boundary");
             try {
-                lease.executeUnderOwnership(() -> {
+                lease.executeUnderOwnership(ignored -> {
                     try {
                         Files.writeString(volume.resolve("child-offered"), "offered");
                     } catch (final java.io.IOException failure) {
@@ -40,7 +40,7 @@ public final class WriterLeaseTakeoverChildMain {
                     return 1L;
                 });
                 Files.writeString(result, "OFFERED");
-            } catch (final IllegalStateException fenced) {
+            } catch (final RuntimeException fenced) {
                 if (!fenced.getMessage().contains("fenced") && !fenced.getMessage().contains("closed")) {
                     throw fenced;
                 }

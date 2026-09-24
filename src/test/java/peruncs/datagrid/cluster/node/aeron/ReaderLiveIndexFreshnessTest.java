@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+
 import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.jvector.VectorSearchResult;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
@@ -18,6 +19,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Deterministic regression for live-reader index freshness.
 ///

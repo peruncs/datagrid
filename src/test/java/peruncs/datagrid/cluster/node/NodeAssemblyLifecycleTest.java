@@ -5,6 +5,7 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.errors.WrongRoleException;
 
 import java.nio.file.Path;
 import java.util.Map;
@@ -81,10 +82,10 @@ class NodeAssemblyLifecycleTest {
                      .setNodeSettingsSource(unstartable("writer"))
                      .build();
              final NodeAssembly devProbe = NodeAssembly.create().build()) {
-            assertThrows(IllegalStateException.class, storageProbe::storageNodeManager);
-            assertThrows(IllegalStateException.class, backupProbe::backupNodeManager);
-            assertThrows(IllegalStateException.class, devProbe::storageNodeManager);
-            assertThrows(IllegalStateException.class, devProbe::backupNodeManager);
+            assertThrows(WrongRoleException.class, storageProbe::storageNodeManager);
+            assertThrows(WrongRoleException.class, backupProbe::backupNodeManager);
+            assertThrows(WrongRoleException.class, devProbe::storageNodeManager);
+            assertThrows(WrongRoleException.class, devProbe::backupNodeManager);
         }
     }
 
@@ -113,8 +114,8 @@ class NodeAssemblyLifecycleTest {
                 .build()) {
             assertDoesNotThrow(foundation::startStorageManager);
 
-            assertThrows(IllegalStateException.class, foundation::storageNodeManager);
-            assertThrows(IllegalStateException.class, foundation::backupNodeManager);
+            assertThrows(WrongRoleException.class, foundation::storageNodeManager);
+            assertThrows(WrongRoleException.class, foundation::backupNodeManager);
         }
     }
 

@@ -2,6 +2,8 @@ package peruncs.datagrid.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.datagrid.cluster.errors.WriterFencedException;
+import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 import peruncs.datagrid.cluster.test.ChildJava;
 
 import java.nio.ByteBuffer;
@@ -18,6 +20,37 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Verifies the writer fencing lease: only one writer per cluster/generation.
 class WriterFencingLeaseTest {
     private static final Duration STALENESS = Duration.ofMillis(300);
+
+    /// Two path aliases of one physical volume must not mint two lease
+    /// identities: without toRealPath canonicalization, `/tmp/x` and
+    /// `/private/tmp/x` would create two JVM mutex and registry keys so a
+    /// holder recorded under one alias would not fence the other.
+    @Test
+    void pathAliasesShareOneLeaseIdentity(@TempDir final Path volume) throws Exception {
+        final Path alias;
+        if (AtomicFileWriter.isMacOs() && volume.toAbsolutePath().toString().startsWith("/var")) {
+            alias = Path.of("/private" + volume.toAbsolutePath());
+        } else if (AtomicFileWriter.isMacOs() && volume.toAbsolutePath().toString().contains("/var/folders")) {
+            alias = volume.toRealPath();
+        } else {
+            /* Not a symlinked temp root: the canonical and the normalized
+             * path are the same string, and the test degrades to proving the
+             * canonical form is used. */
+            alias = volume;
+        }
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final UUID nodeId = UUID.randomUUID();
+        try (final WriterFencingLease first =
+                     WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+            /* Acquiring through the alias must see the same active lease, not
+             * mint a second one. */
+            assertThrows(IllegalStateException.class,
+                    () -> WriterFencingLease.acquire(alias, cluster, generation, nodeId, STALENESS),
+                    "an aliased path must not bypass the in-JVM holder check");
+            assertEquals(first.fencingToken(), 1L);
+        }
+    }
 
     /// Verifies a forked deposed writer reports fenced and never runs its offer after a successor takes over.
     @Test
@@ -272,8 +305,8 @@ class WriterFencingLeaseTest {
             try (final WriterFencingLease successor =
                     WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
                 assertTrue(successor.fencingToken() > 1L);
-                final var failure = assertThrows(IllegalStateException.class, () ->
-                        first.executeUnderOwnership(() -> {
+                final var failure = assertThrows(WriterFencedException.class, () ->
+                        first.executeUnderOwnership(ignored -> {
                             offers.incrementAndGet();
                             return 99L;
                         }));
@@ -339,7 +372,7 @@ class WriterFencingLeaseTest {
             final long before = heartbeatAt(volume, cluster, generation);
             Thread.sleep(5L);
             assertThrows(IllegalStateException.class, () -> holder.executeUnderOwnership(
-                    () -> {
+                    ignored -> {
                         throw new IllegalStateException("injected offer failure");
                     }));
             assertTrue(heartbeatAt(volume, cluster, generation) > before,
@@ -361,11 +394,11 @@ class WriterFencingLeaseTest {
                      WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS)) {
             holder.suspendHeartbeatForTest();
             final long acquired = heartbeatAt(volume, cluster, generation);
-            holder.executeUnderOwnership(() -> 1L);
+            holder.executeUnderOwnership(ignored -> 1L);
             assertEquals(acquired, heartbeatAt(volume, cluster, generation),
                     "a commit inside the renewal interval must not rewrite the heartbeat");
             Thread.sleep(STALENESS.toMillis() / 3L + 60L);
-            holder.executeUnderOwnership(() -> 2L);
+            holder.executeUnderOwnership(ignored -> 2L);
             assertTrue(heartbeatAt(volume, cluster, generation) > acquired,
                     "a commit past the renewal interval must refresh the heartbeat");
         }
@@ -384,7 +417,7 @@ class WriterFencingLeaseTest {
          * heartbeat look far in the future. The holder pairs it with its own
          * monotonic age and still admits commits. */
         overwriteHeartbeat(volume, cluster, generation, System.currentTimeMillis() + STALENESS.toMillis());
-        assertEquals(9L, holder.executeUnderOwnership(() -> 9L));
+        assertEquals(9L, holder.executeUnderOwnership(ignored -> 9L));
         holder.close();
         final IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
                 WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS));
@@ -441,8 +474,8 @@ class WriterFencingLeaseTest {
                 WriterFencingLease.acquire(volume, cluster, generation, UUID.randomUUID(), STALENESS);
         holder.close();
         final long afterClose = heartbeatAt(volume, cluster, generation);
-        final var failure = assertThrows(IllegalStateException.class, () ->
-                holder.executeUnderOwnership(() -> 3L));
+        final var failure = assertThrows(WriterFencedException.class, () ->
+                holder.executeUnderOwnership(ignored -> 3L));
         assertTrue(failure.getMessage().contains("closed"), "closed lease must reject offers: " + failure.getMessage());
         Thread.sleep(STALENESS.toMillis() + 50L);
         assertEquals(afterClose, heartbeatAt(volume, cluster, generation),

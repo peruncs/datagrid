@@ -7,7 +7,6 @@ import io.aeron.archive.client.PersistentSubscription;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.datagrid.cluster.node.replication.CommitAppliedListener;
 import peruncs.datagrid.cluster.storage.ReplicationCursor;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
@@ -305,7 +304,6 @@ final class AeronReaderTransport {
                     try {
                         final AeronReplicationCheckpoint checkpoint = new AeronReplicationCheckpoint(
                                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                                ReplicationDurabilityMode.ARCHIVE_FIRST,
                                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                                 settings().topology().clusterId(), settings().topology().identity().nodeId(), settings().topology().identity().storeGeneration(), readerRecordingId.get(),
                                 settings().topology().epoch(), currentFencingToken(), sequence, position,

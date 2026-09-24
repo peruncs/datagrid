@@ -23,6 +23,7 @@ import java.nio.file.Paths;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /// Verifies provider health reflects writer readiness and checkpoint state.
 class AeronReplicationMonitoringTest {

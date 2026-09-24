@@ -7,7 +7,7 @@ import java.util.function.Function;
 
 /// Guarded Store access owned by a [ClusterNode].
 ///
-/// Reader graph traversal must run inside [#read(Function)]. Writer persistence
+/// Reader graph traversal must run inside [#withRootRead(Function)]. Writer persistence
 /// is intentionally limited to the ordinary Store operations needed by an
 /// application; raw imports, persistence targets, graph locks, and lifecycle
 /// controls remain internal.
@@ -27,14 +27,13 @@ public final class ClusterStore<T> {
     /// reaches — must finish before this method returns: returned or retained
     /// live graph objects escape the boundary and may race replication or
     /// read a graph that is being mutated. Copy whatever data the caller
-    /// needs into plain values or records before returning. (This contract
-    /// is why a shorter name such as `withRootRead` was considered for this
-    /// method; the discipline is the same either way.)
+    /// needs into plain values or records before returning. The name states
+    /// the discipline: the root is borrowed for the callback only.
     ///
     /// @param <R> query result type
     /// @param query query evaluated inside the read boundary
     /// @return the query result
-    public <R> R read(final Function<? super T, ? extends R> query) {
+    public <R> R withRootRead(final Function<? super T, ? extends R> query) {
         return this.storage.readRoot(Objects.requireNonNull(query, "query"));
     }
 
@@ -63,14 +62,17 @@ public final class ClusterStore<T> {
     /// node no longer holds the writer lease
     /// @throws peruncs.datagrid.cluster.errors.StorageLimitReachedException
     /// when the configured storage limit is reached
+    /// @throws peruncs.datagrid.cluster.errors.ReplicationUnavailableException
+    /// when replication is unavailable — a failed MediaDriver, exhausted
+    /// Archive capacity, or an offer deadline — or the node is closing
     public long store(final Object value) {
         return this.storage.store(Objects.requireNonNull(value, "value"));
     }
 
     /// Persists changed objects on the writer; reader roles reject the call.
     ///
-    /// The same reader-rejection, fencing, capacity, and uncertain-commit
-    /// rules as [#store(Object)] apply to the complete batch.
+    /// The same reader-rejection, fencing, capacity, availability, and
+    /// uncertain-commit rules as [#store(Object)] apply to the complete batch.
     ///
     /// @param values changed objects to publish
     /// @return publication sequences in input order
@@ -81,8 +83,8 @@ public final class ClusterStore<T> {
 
     /// Persists the current root on the writer; reader roles reject the call.
     ///
-    /// The same reader-rejection, fencing, capacity, and uncertain-commit
-    /// rules as [#store(Object)] apply.
+    /// The same reader-rejection, fencing, capacity, availability, and
+    /// uncertain-commit rules as [#store(Object)] apply.
     ///
     /// @return the publication sequence
     public long storeRoot() {

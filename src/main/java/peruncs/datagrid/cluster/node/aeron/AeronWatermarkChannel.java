@@ -96,7 +96,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
     static AeronWatermarkChannel writer(
             final Aeron aeron, final String channel, final int streamId, final Receiver receiver,
             final long closeTimeoutNanos) {
-        return writer(aeron, channel, streamId, receiver, closeTimeoutNanos, AeronRetryPolicy.Default());
+        return writer(aeron, channel, streamId, receiver, closeTimeoutNanos, AeronRetryPolicy.defaults());
     }
 
     static AeronWatermarkChannel writer(
@@ -124,7 +124,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
 
     static AeronWatermarkChannel reader(
             final Aeron aeron, final String channel, final int streamId, final long closeTimeoutNanos) {
-        return reader(aeron, channel, streamId, closeTimeoutNanos, AeronRetryPolicy.Default());
+        return reader(aeron, channel, streamId, closeTimeoutNanos, AeronRetryPolicy.defaults());
     }
 
     static AeronWatermarkChannel reader(final Aeron aeron, final String channel, final int streamId) {

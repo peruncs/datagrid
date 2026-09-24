@@ -6,8 +6,9 @@
 /// `...cluster.node.store`, `...cluster.node.backup`, and
 /// `...cluster.node.replication`, implemented by the Aeron transport in
 /// `...cluster.node.aeron`. Control operations are exposed programmatically
-/// through the node managers; the module ships no HTTP surface — any HTTP,
-/// MCP, or UI boundary belongs to the embedding application.
+/// through the exported [peruncs.datagrid.cluster.api.ClusterNode] only;
+/// the module ships no HTTP surface — any HTTP, MCP, or UI boundary belongs
+/// to the embedding application.
 /// Store binary movement lives in
 /// `...cluster.storage.binary`, carried by
 /// `...cluster.storage.aeron.*`, which also carries the embedded
@@ -150,10 +151,11 @@
 /// The node ships no HTTP server and no HTTP types. The embedding application
 /// owns the entire boundary — HTTP and OpenAPI routes, MCP tools, a web UI,
 /// Prometheus rendering, authentication, and authorization — and drives the
-/// node through the control views (`StorageNodeControl`, `BackupNodeControl`)
-/// borrowed from `NodeAssembly`; the Store object graph beneath them is
-/// the entity layer. The assembly owns both managers and closes them
-/// exactly once, and both closes are idempotent. Roles stay fixed at startup
+/// node through the exported [peruncs.datagrid.cluster.api.ClusterNode] and
+/// its [peruncs.datagrid.cluster.api.ClusterStore] view; the Store object
+/// graph beneath them is the entity layer. The assembly owns both role
+/// managers and closes them exactly once, and both closes are idempotent.
+/// Roles stay fixed at startup
 /// as described above, so there is deliberately no reader-to-writer
 /// promotion: a role change is a restart with a new role, never a runtime
 /// transition.

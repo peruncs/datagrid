@@ -16,7 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.zip.CRC32C;
@@ -38,11 +37,13 @@ final class TransactionAssembler {
     private final StorageBinaryDataReceiver receiver;
     private final Consumer<CursorSnapshot> transactionResolved;
     private final ReaderDeliveryListener deliveryListener;
-    private final AtomicLong lastResolvedSequence = new AtomicLong();
+    /* The durable boundary is one immutable snapshot so a concurrent
+     * status or cursor reader can never observe a new sequence paired with
+     * the previous position (or vice versa). */
+    private volatile CursorSnapshot resolvedBoundary;
     /* Materialization can succeed before the durable cursor callback completes.
      * Keep that observation separate for health/lag reporting. */
-    private final AtomicLong lastAppliedSequence = new AtomicLong();
-    private final AtomicLong lastResolvedPosition = new AtomicLong();
+    private volatile long lastAppliedSequence;
     /* Greatest writer fencing token accepted so far. A lower token proves the
      * frame comes from a deposed writer that lost the lease race; it fails
      * closed instead of interleaving stale history. Seeded from the durable
@@ -145,9 +146,8 @@ final class TransactionAssembler {
         if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
             throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
         }
-        this.lastResolvedSequence.set(initialSequence);
-        this.lastAppliedSequence.set(initialSequence);
-        this.lastResolvedPosition.set(initialPosition);
+        this.resolvedBoundary = new CursorSnapshot(initialSequence, initialPosition);
+        this.lastAppliedSequence = initialSequence;
         this.nextExpectedSequence = initialSequence + 1;
         /* ScopedValue bindings are not inherited by the virtual-thread poller
          * (final Scoped Values dropped inheritance), so the hook must be
@@ -190,13 +190,13 @@ final class TransactionAssembler {
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
                 }
                 if (deliver) {
+                    /* Stage only: the blocking materialization wait must run
+                     * outside the fragment callback, or a full barrier would
+                     * stall the whole controlledPoll. The reader breaks the
+                     * poll when the barrier fills and flushes from its own
+                     * loop; an incomplete barrier flushes on the next idle
+                     * poll or lifecycle stop. */
                     this.delivery.stage();
-                    /* Full barrier: flush right after staging. An incomplete
-                     * barrier flushes on the next idle poll or lifecycle stop. */
-                    if (this.unflushedDeliveryCount() >= this.configuration.readerBarrierMaxTransactions()
-                            || this.unflushedDeliveryBytes() >= this.configuration.maxTransactionBytes()) {
-                        flushDeliveries();
-                    }
                 }
             }
         } catch (final RuntimeException e) {
@@ -226,7 +226,7 @@ final class TransactionAssembler {
             throw new IllegalStateException(
                     "stale writer fencing token %s below accepted %s; the writer lost the lease race".formatted(token, floor));
         }
-        final long lastResolvedSequence = this.lastResolvedSequence.get();
+        final long lastResolvedSequence = this.resolvedBoundary.sequence();
         if (envelope.sequence() < lastResolvedSequence) {
             throw new IllegalStateException("replication sequence regressed: last resolved %s, received %s".formatted(lastResolvedSequence, envelope.sequence()));
         }
@@ -456,14 +456,14 @@ final class TransactionAssembler {
     ///
     /// @return last resolved transaction sequence, or the initial value
     long lastResolvedSequence() {
-        return this.lastResolvedSequence.get();
+        return this.resolvedBoundary.sequence();
     }
 
         /// Returns the last sequence materialized by the Store receiver.
     ///
     /// @return last applied transaction sequence, or the initial value
     long lastAppliedSequence() {
-        return this.lastAppliedSequence.get();
+        return this.lastAppliedSequence;
     }
 
         /// Returns the expected cluster identity.
@@ -501,7 +501,7 @@ final class TransactionAssembler {
     ///
     /// @return last resolved Archive position, or the initial value
     long lastResolvedPosition() {
-        return this.lastResolvedPosition.get();
+        return this.resolvedBoundary.position();
     }
 
     /// Returns whether the current delivery barrier has reached either limit.
@@ -512,9 +512,9 @@ final class TransactionAssembler {
 
         /// Returns an atomic sequence and position snapshot for cursor persistence.
     ///
-    /// @return consistent cursor snapshot under the assembler monitor
-    synchronized CursorSnapshot cursorSnapshot() {
-        return new CursorSnapshot(this.lastResolvedSequence.get(), this.lastResolvedPosition.get());
+    /// @return consistent cursor snapshot; atomic by construction
+    CursorSnapshot cursorSnapshot() {
+        return this.resolvedBoundary;
     }
 
         /// Returns whether chunks are waiting for a terminal marker.
@@ -860,13 +860,14 @@ final class TransactionAssembler {
 
         /// Flushes every staged transaction of the current delivery barrier.
     ///
-    /// Called by the polling loop when the window fills (inside
-    /// [TransactionAssembler#onFragment]), when a poll returns no fragments,
-    /// or when the reader stops, so a live transaction is never held back by
-    /// more than one idle poll cycle while a backlog replays at full window
-    /// size. A latched failure makes the flush a no-op: the queued buffers
-    /// belong to the receiver, whose failure path releases them, and the open
-    /// uncertainty marker correctly fails the next start closed.
+    /// Called by the polling loop after the poll breaks on a full window,
+    /// when a poll returns no fragments, or when the reader stops, so a live
+    /// transaction is never held back by more than one idle poll cycle while
+    /// a backlog replays at full window size — and so the blocking
+    /// materialization wait never runs inside a fragment callback. A latched
+    /// failure makes the flush a no-op: the queued buffers belong to the
+    /// receiver, whose failure path releases them, and the open uncertainty
+    /// marker correctly fails the next start closed.
     ///
     /// @throws RuntimeException when the receiver's materialization failed
     void flushDeliveries() {
@@ -884,41 +885,44 @@ final class TransactionAssembler {
          * holds no monitor: failure latching and disposal stay lock-free, and a
          * snapshot of the staged entries is only taken below. */
         if (hasData) receiver.awaitApplied();
-        PendingDelivery resolvedTail = null;
-        long candidateAppliedSequence = this.lastAppliedSequence.get();
-        while (true) {
-            final PendingDelivery entry;
-            synchronized (this.barrierLock) {
-                entry = this.pendingDeliveries.poll();
-                if (entry != null) {
-                    this.barrierBytes -= (long) entry.dataLength() + entry.dictionaryLength();
+        /* The staged barrier is inspected, not drained: a transient
+         * durability-callback failure must stay retryable, so the drained
+         * entries are dropped only after the callback reports the new
+         * boundary durable. Until then status and cursorSnapshot() keep
+         * exposing the preceding durable boundary. */
+        final PendingDelivery resolvedTail;
+        long candidateAppliedSequence = this.lastAppliedSequence;
+        synchronized (this.barrierLock) {
+            resolvedTail = this.pendingDeliveries.peekLast();
+            if (resolvedTail == null) return;
+            /* An abort advances the cursor without materializing a Store
+             * image; commits carry the applied-sequence watermark. */
+            for (final PendingDelivery entry : this.pendingDeliveries) {
+                if (entry.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
+                    candidateAppliedSequence = entry.sequence();
                 }
             }
-            if (entry == null) break;
-            /* An abort advances the cursor without materializing a Store image. */
-            if (entry.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
-                candidateAppliedSequence = entry.sequence();
-            }
-            resolvedTail = entry;
         }
-        /* The callback forces the Store and persists this exact candidate.
-         * Until it succeeds, status and cursorSnapshot() keep exposing the
-         * preceding durable boundary. */
-        if (resolvedTail != null) {
-            this.transactionResolved.accept(new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position()));
-            synchronized (this) {
-                this.lastAppliedSequence.set(candidateAppliedSequence);
-                this.lastResolvedSequence.set(resolvedTail.sequence());
-                this.lastResolvedPosition.set(resolvedTail.position());
-                this.lastResolutionCrc32c = resolvedTail.crc32c();
-                this.lastResolutionKind = resolvedTail.kind();
-                this.lastResolutionDataLength = resolvedTail.dataLength();
-                this.lastResolutionDataChunkCount = resolvedTail.dataChunkCount();
-                this.lastResolutionDictionaryLength = resolvedTail.dictionaryLength();
-                this.lastResolutionDictionaryChunkCount = resolvedTail.dictionaryChunkCount();
-            }
+        /* The staged barrier is retained on a callback failure so the flush
+         * stays retryable: latching the failure is the caller's decision —
+         * the reader loop does exactly that when this exception reaches it,
+         * while a standalone retry can still complete the boundary. */
+        this.transactionResolved.accept(new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position()));
+        /* The callback made the new boundary durable: publish the snapshot
+         * and only now retire the staged barrier. */
+        this.lastAppliedSequence = candidateAppliedSequence;
+        synchronized (this) {
+            this.resolvedBoundary = new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position());
+            this.lastResolutionCrc32c = resolvedTail.crc32c();
+            this.lastResolutionKind = resolvedTail.kind();
+            this.lastResolutionDataLength = resolvedTail.dataLength();
+            this.lastResolutionDataChunkCount = resolvedTail.dataChunkCount();
+            this.lastResolutionDictionaryLength = resolvedTail.dictionaryLength();
+            this.lastResolutionDictionaryChunkCount = resolvedTail.dictionaryChunkCount();
         }
         synchronized (this.barrierLock) {
+            this.pendingDeliveries.clear();
+            this.barrierBytes = 0L;
             this.deliveryMarkerOpen = false;
             this.barrierHasData = false;
         }
@@ -951,6 +955,8 @@ final class TransactionAssembler {
         synchronized (this.barrierLock) {
             this.pendingDeliveries.clear();
             this.barrierBytes = 0L;
+            this.deliveryMarkerOpen = false;
+            this.barrierHasData = false;
         }
     }
 }

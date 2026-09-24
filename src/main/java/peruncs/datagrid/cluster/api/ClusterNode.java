@@ -109,6 +109,10 @@ public final class ClusterNode<T> implements AutoCloseable {
 
     /// Returns one immutable status snapshot.
     ///
+    /// This is a production-node API: a development node owns no role
+    /// manager, so status (and [startStorageChecks]) is rejected for it
+    /// with [peruncs.datagrid.cluster.errors.WrongRoleException].
+    ///
     /// @return the current role, readiness, and replication metrics
     public NodeStatus status() {
         final StorageNodeControl control = this.control();
@@ -131,13 +135,16 @@ public final class ClusterNode<T> implements AutoCloseable {
     /// instead of a record full of placeholder values.
     private static ReplicationStatus replication(final StorageNodeControl control) {
         final ReplicationMetrics metrics = control.replicationMetrics();
-        if (metrics.transport() == null || metrics.transport().isBlank()
-            || "none".equalsIgnoreCase(metrics.transport())) {
+        if (metrics == null) {
+            /* A node configured without replication reports no metrics at
+             * all instead of a record full of placeholder values. */
             return null;
         }
         return new ReplicationStatus(metrics.state(), metrics.currentSequence(), metrics.latestSequence(),
-                present(metrics.archiveUsableSpaceBytes()), present(metrics.writerDurablePosition()),
-                present(metrics.writerDurableSequence()), present(metrics.appliedSequence()));
+                present(metrics.archiveUsableSpaceBytes()),
+                new ReplicationStatus.WriterDurableBoundary(
+                        present(metrics.writerDurablePosition()), present(metrics.writerDurableSequence())),
+                present(metrics.appliedSequence()));
     }
 
     /// Maps the internal negative-is-unknown sentinel to absence.

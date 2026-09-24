@@ -191,7 +191,7 @@ class AeronReaderLifecycleTest {
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> false, () -> polls.incrementAndGet() == 1 ? 1 : 0,
                 () -> polls.get() >= 2, () -> false, () -> {
-                }, AeronRetryPolicy.Default().idleStrategy());
+                }, AeronRetryPolicy.defaults().idleStrategy());
 
         assertFalse(active.get());
         assertEquals(2, polls.get());
@@ -205,7 +205,7 @@ class AeronReaderLifecycleTest {
 
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> false, () -> 0, () -> false, () -> true, () -> timedOut.set(true),
-                AeronRetryPolicy.Default().idleStrategy());
+                AeronRetryPolicy.defaults().idleStrategy());
 
         assertFalse(active.get());
         assertTrue(timedOut.get());
@@ -223,7 +223,7 @@ class AeronReaderLifecycleTest {
                         active, () -> false, () -> 0, () -> false, () -> true, () -> {
                             throw expected;
                         },
-                        AeronRetryPolicy.Default().idleStrategy()));
+                        AeronRetryPolicy.defaults().idleStrategy()));
 
         assertSame(expected, actual);
         assertFalse(active.get());
@@ -237,7 +237,7 @@ class AeronReaderLifecycleTest {
         AeronReaderLifecycle.runPollingLoop(
                 active, () -> polls.get() == 0, polls::incrementAndGet,
                 () -> false, () -> false, () -> {
-                }, AeronRetryPolicy.Default().idleStrategy());
+                }, AeronRetryPolicy.defaults().idleStrategy());
         assertEquals(0, polls.get());
     }
 

@@ -16,7 +16,7 @@ public record NodeOptions<T>(Supplier<? extends T> rootSupplier) {
         Objects.requireNonNull(rootSupplier, "rootSupplier");
     }
 
-    /// Creates options using the default Store foundation and synchronous publication.
+    /// Creates options using the default Store foundation.
     ///
     /// @param <T> root type
     /// @param rootSupplier creates a root for an empty Store

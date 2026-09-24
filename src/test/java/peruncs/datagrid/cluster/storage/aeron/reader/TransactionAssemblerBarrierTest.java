@@ -14,8 +14,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
+
 
 /// Contract tests for the batched delivery barrier: staging, window-size
 /// auto-flush, idle flush by the polling loop, and the delivery-listener
@@ -59,6 +59,70 @@ class TransactionAssemblerBarrierTest {
                 AeronReplicationEnvelope.crc32c(data), new byte[0]));
     }
 
+    /// A durability callback that blocks or fails must leave status and the
+    /// cursor snapshot on the previous durable boundary, keep the marker
+    /// open, and stay retryable: the staged barrier is not drained until the
+    /// callback reports the new boundary durable.
+    @Test
+    void blockedOrFailedCallbackKeepsPreviousDurableBoundary() throws Exception {
+        final CountDownLatch callbackEntered = new CountDownLatch(1);
+        final CountDownLatch releaseCallback = new CountDownLatch(1);
+        final var blockCallback = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final var failCallback = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final TransactionAssembler assembler = assembler(8, swallowingReceiver(), () ->
+        {
+            if (blockCallback.get()) {
+                callbackEntered.countDown();
+                try {
+                    releaseCallback.await(10, TimeUnit.SECONDS);
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (failCallback.getAndSet(false)) {
+                throw new IllegalStateException("transient cursor force failure");
+            }
+        }, null);
+
+        commitOne(assembler, 0);
+        assembler.flushDeliveries();
+        assertEquals(0L, assembler.lastResolvedSequence(), "the first barrier is durable");
+        commitOne(assembler, 1);
+
+        /* The blocked callback parks the flush on a helper thread while a
+         * concurrent reader must keep seeing the previous durable boundary. */
+        final var flusher = Executors.newSingleThreadExecutor();
+        try {
+            blockCallback.set(true);
+            final var flushed = flusher.submit(assembler::flushDeliveries);
+            assertTrue(callbackEntered.await(5, TimeUnit.SECONDS), "the callback never started");
+            assertEquals(0L, assembler.lastResolvedSequence(),
+                    "status must keep the previous boundary while the callback runs");
+            assertEquals(0L, assembler.cursorSnapshot().sequence(),
+                    "the cursor snapshot must keep the previous boundary while the callback runs");
+            assertEquals(1, assembler.unflushedDeliveryCount(),
+                    "a callback in flight must not drain the staged barrier");
+
+            /* A first failed callback must also stay retryable. */
+            failCallback.set(true);
+            blockCallback.set(false);
+            releaseCallback.countDown();
+            assertThrows(java.util.concurrent.ExecutionException.class, flushed::get);
+            assertEquals(0L, assembler.lastResolvedSequence(), "a failed callback must not publish the boundary");
+            assertEquals(1, assembler.unflushedDeliveryCount(), "a failed callback must keep the staged barrier");
+
+            /* The retry persists the boundary and drains. */
+            assembler.flushDeliveries();
+            assertEquals(1L, assembler.lastResolvedSequence());
+            assertEquals(1L, assembler.cursorSnapshot().sequence());
+            assertEquals(0, assembler.unflushedDeliveryCount());
+        } finally {
+            blockCallback.set(false);
+            releaseCallback.countDown();
+            flusher.shutdownNow();
+        }
+    }
+
     /// Transactions under the window stay staged until an explicit flush.
     @Test
     void stagedTransactionsPublishOnlyOnFlush() {
@@ -97,9 +161,9 @@ class TransactionAssemblerBarrierTest {
         assertEquals(1, after.get());
     }
 
-    /// Reaching the configured window flushes the barrier without an idle poll.
+    /// A full window reports full, and the reader loop's flush publishes it.
     @Test
-    void fullWindowFlushesImmediately() {
+    void fullWindowFlushesFromTheReaderLoop() {
         final AtomicInteger resolved = new AtomicInteger();
         final TransactionAssembler assembler = assembler(4, swallowingReceiver(), resolved::incrementAndGet, null);
 
@@ -107,8 +171,14 @@ class TransactionAssemblerBarrierTest {
         commitOne(assembler, 1);
         commitOne(assembler, 2);
         assertEquals(0, resolved.get());
+        assertFalse(assembler.deliveryBarrierFull(), "a partially filled window must not report full");
         commitOne(assembler, 3);
-        assertEquals(3, assembler.lastResolvedSequence(), "the fourth commit fills the window and flushes");
+        /* The staging no longer flushes inside the fragment callback: the
+         * window reports full, the reader breaks the poll, and the flush
+         * below is exactly what the reader loop performs. */
+        assertTrue(assembler.deliveryBarrierFull(), "the fourth commit fills the window");
+        assembler.flushDeliveries();
+        assertEquals(3, assembler.lastResolvedSequence(), "a full window flush publishes the durable tail");
         assertEquals(1, resolved.get(), "a full window publishes one durable tail");
         assertEquals(0, assembler.unflushedDeliveryCount());
     }

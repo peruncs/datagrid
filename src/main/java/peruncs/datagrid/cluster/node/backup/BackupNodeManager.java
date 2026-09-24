@@ -1,9 +1,11 @@
 package peruncs.datagrid.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
+import peruncs.datagrid.cluster.errors.BackupBusyException;
 import peruncs.datagrid.cluster.errors.NodeException;
 import peruncs.datagrid.cluster.node.CloseSequencer;
 import peruncs.datagrid.cluster.node.StorageNodeControl;
+import peruncs.datagrid.cluster.node.replication.ReplicationMetrics;
 import peruncs.datagrid.cluster.node.store.StorageUsageGauge;
 import peruncs.datagrid.cluster.storage.binary.ReplicationApplier;
 
@@ -80,9 +82,14 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
         return this;
     }
 
+    /// Reports no metrics at all for a node without replication; the
+    /// exported status then carries no placeholder values.
     @Override
-    public String replicationTransport() {
-        return this.replicationTransport;
+    public ReplicationMetrics replicationMetrics() {
+        if ("none".equalsIgnoreCase(this.replicationTransport)) {
+            return null;
+        }
+        return StorageNodeControl.super.replicationMetrics();
     }
 
     @Override

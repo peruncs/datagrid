@@ -69,11 +69,17 @@ class ReplicationApplierAeronTest {
         );
     }
 
+    /// Feeds one fragment exactly like the reader loop: the callback stages,
+    /// the loop breaks on a full window, and the flush runs outside the
+    /// fragment callback.
     private static void accept(
             final TransactionAssembler assembler,
             final byte[] bytes
     ) {
         assembler.onFragment(new UnsafeBuffer(bytes), 0, bytes.length, null);
+        if (assembler.deliveryBarrierFull()) {
+            assembler.flushDeliveries();
+        }
     }
 
     /// Verifies a failure racing a blocked commit delivery cannot deadlock and stays latched as the terminal failure.
@@ -487,9 +493,13 @@ class ReplicationApplierAeronTest {
         final byte[] data = {1, 2, 3};
         accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
                 data, data.length));
-        assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, EPOCH, 1L, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
-                AeronReplicationEnvelope.crc32c(data), new byte[0])));
+        /* The flush now runs in the reader loop, which latches the failure
+         * when the durability callback throws — reproduce that here. */
+        final var callbackFailure = assertThrows(IllegalStateException.class, () -> accept(assembler,
+                AeronReplicationEnvelopeTestSupport.encode(
+                        CLUSTER, EPOCH, 1L, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
+                        AeronReplicationEnvelope.crc32c(data), new byte[0])));
+        assembler.failure(callbackFailure);
         assertEquals(1, receiver.dataCalls);
         assertEquals("checkpoint failed", assembler.failure().getMessage());
     }

@@ -1,5 +1,6 @@
 package peruncs.datagrid.cluster.storage.aeron.crashtest;
 
+
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.test.ChildJava;
 
@@ -8,6 +9,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Regression test for Aeron's default DriverTimeoutException exit policy.
 class AeronDriverFailureIT {

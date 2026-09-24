@@ -3,7 +3,6 @@ package peruncs.datagrid.cluster.storage.aeron.config;
 import io.aeron.driver.Configuration;
 import io.aeron.logbuffer.FrameDescriptor;
 import org.agrona.BitUtil;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.util.Objects;
@@ -30,7 +29,6 @@ import java.util.Objects;
 ///                                     durability barrier before it is flushed
 /// @param readerBarrierIdleFlushNanos  how long a partially staged barrier may survive idle polls
 ///                                     before it is flushed at the stream tail
-/// @param durabilityMode             local-versus-Archive ordering used by the writer
 /// @param retryPolicy                idle pacing and probe spacing for bounded retry loops
 public record AeronReplicationConfiguration(
         int termLength,
@@ -45,7 +43,6 @@ public record AeronReplicationConfiguration(
         int readerFragmentsPerPoll,
         int readerBarrierMaxTransactions,
         long readerBarrierIdleFlushNanos,
-        ReplicationDurabilityMode durabilityMode,
         AeronRetryPolicy retryPolicy
 ) {
         /// Default Aeron term length in bytes.
@@ -91,8 +88,8 @@ public record AeronReplicationConfiguration(
     /// @throws IllegalArgumentException when the limits cannot describe a valid
     ///                                  Aeron envelope
     public AeronReplicationConfiguration {
-        if (durabilityMode == null || retryPolicy == null) {
-            throw new IllegalArgumentException("durabilityMode and retryPolicy must be set");
+        if (retryPolicy == null) {
+            throw new IllegalArgumentException("retryPolicy must be set");
         }
         if (!BitUtil.isPowerOfTwo(termLength) || termLength < 64 * 1024) {
             throw new IllegalArgumentException("termLength must be a power of two >= 64 KiB");
@@ -177,8 +174,7 @@ public record AeronReplicationConfiguration(
         private int readerFragmentsPerPoll = DEFAULT_READER_FRAGMENTS_PER_POLL;
         private int readerBarrierMaxTransactions = DEFAULT_READER_BARRIER_MAX_TRANSACTIONS;
         private long readerBarrierIdleFlushNanos = DEFAULT_READER_BARRIER_IDLE_FLUSH_NANOS;
-        private ReplicationDurabilityMode durabilityMode = ReplicationDurabilityMode.ARCHIVE_FIRST;
-        private AeronRetryPolicy retryPolicy = AeronRetryPolicy.Default();
+            private AeronRetryPolicy retryPolicy = AeronRetryPolicy.defaults();
 
                 /// Creates a builder initialized with the documented defaults.
         public Builder() {
@@ -310,15 +306,6 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the local-versus-Archive ordering used by the writer.
-        ///
-        /// @param value durability mode
-        /// @return this builder
-        public Builder durabilityMode(final ReplicationDurabilityMode value) {
-            this.durabilityMode = Objects.requireNonNull(value, "durabilityMode");
-            return this;
-        }
-
                 /// Sets the idle pacing and probe spacing for bounded retry loops.
         ///
         /// @param value retry policy
@@ -347,7 +334,6 @@ public record AeronReplicationConfiguration(
                     this.readerFragmentsPerPoll,
                     this.readerBarrierMaxTransactions,
                     this.readerBarrierIdleFlushNanos,
-                    this.durabilityMode,
                     this.retryPolicy
             );
         }

@@ -536,6 +536,13 @@ public final class AeronArchiveReader implements Disposable {
             this.live = current.isLive();
             this.trackArchiveIncident();
             if (this.stopAtLatest) extendStopDeadline();
+            /* A full window broke the poll above; flush here, outside the
+             * fragment callback, so the blocking materialization wait never
+             * stalls the subscription's fragment handler. */
+            if (this.assembler.deliveryBarrierFull()) {
+                this.assembler.flushDeliveries();
+                this.barrierIdleSinceNanos = 0L;
+            }
             /* Time-based barrier flush: a replay backlog that drips in one
              * fragment per poll still fills whole barriers between flushes,
              * while a quiet live tail gets its cursor after the configured

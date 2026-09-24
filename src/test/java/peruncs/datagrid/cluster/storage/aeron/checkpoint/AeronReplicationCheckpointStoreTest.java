@@ -2,7 +2,6 @@ package peruncs.datagrid.cluster.storage.aeron.checkpoint;
 
 import org.junit.jupiter.api.Test;
 import peruncs.datagrid.cluster.storage.Crc32C;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -20,7 +19,6 @@ class AeronReplicationCheckpointStoreTest {
     private static AeronReplicationCheckpoint checkpoint() {
         return new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 7, 5, 13, 4096, 12, 1, 99
         );
@@ -102,7 +100,7 @@ class AeronReplicationCheckpointStoreTest {
         final AeronReplicationCheckpoint first = checkpoint();
         AeronReplicationCheckpointStore.write(path, first);
         final AeronReplicationCheckpoint second = new AeronReplicationCheckpoint(
-                first.recordType(), first.durabilityMode(), AeronReplicationCheckpoint.State.COMMITTED,
+                first.recordType(), AeronReplicationCheckpoint.State.COMMITTED,
                 first.clusterId(), first.nodeId(), first.storeGeneration(), first.recordingId(),
                 first.writerEpoch(), first.fencingToken(), first.transactionSequence() + 1, first.recordingPosition() + 10,
                 first.dataLength(), first.dataChunkCount(), 7);
@@ -124,22 +122,18 @@ class AeronReplicationCheckpointStoreTest {
     void rejectsInvalidCheckpointFieldsAtConstruction() {
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.PREPARING,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -2, 0, 1, -1, -1, 0, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 3, 7, 1024, 1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), -1, 0, 2, 7, -1, 1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 4, Long.MAX_VALUE, 1024, 1, 1, 0));
     }
@@ -149,12 +143,10 @@ class AeronReplicationCheckpointStoreTest {
     void rejectsTokenZeroOnResolvedCheckpoints() {
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.WRITER_CHECKPOINT,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTED,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 42, 0, 0, 7, 1024, 1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 0, 7, 4096, 0, 0, 0));
     }
@@ -186,7 +178,6 @@ class AeronReplicationCheckpointStoreTest {
         final Path path = Files.createTempFile("datagrid-reader-cursor", ".bin");
         final AeronReplicationCheckpoint readerCursor = new AeronReplicationCheckpoint(
                 AeronReplicationCheckpoint.RecordType.READER_CURSOR,
-                ReplicationDurabilityMode.ARCHIVE_FIRST,
                 AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN,
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 11, 3, 6, 7, 4096, 0, 0, 0);
         try {

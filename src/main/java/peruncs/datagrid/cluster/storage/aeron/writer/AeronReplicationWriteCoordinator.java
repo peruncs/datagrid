@@ -3,7 +3,6 @@ package peruncs.datagrid.cluster.storage.aeron.writer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.datagrid.cluster.errors.ReplicationUnavailableException;
 import peruncs.datagrid.cluster.errors.WriterFencedException;
-import peruncs.datagrid.cluster.storage.ReplicationDurabilityMode;
 import peruncs.datagrid.cluster.storage.ReplicationRetry;
 import peruncs.datagrid.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 
@@ -14,7 +13,6 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.BooleanSupplier;
 import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 
@@ -42,7 +40,6 @@ import java.util.function.LongSupplier;
 /// acceptance and would bypass the durable fence.
 public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private final AeronReplicationPublisher publisher;
-    private final ReplicationDurabilityMode durabilityMode;
     private final AeronArchiveReplicationPublisher.CheckpointWriter listener;
     private final LongPredicate writeAdmission;
     /* Lease validity is checked before Archive capacity on every admission, so
@@ -112,59 +109,30 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher) {
-        this(publisher, ReplicationDurabilityMode.ARCHIVE_FIRST,
-                (state, sequence, length, chunks, crc, position) -> {
-                }, ignored -> true);
+        this(publisher, (state, sequence, length, chunks, crc, position) -> {
+        }, ignored -> true, WriterLeaseGate.alwaysValid());
     }
 
     AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
                                      final AeronArchiveReplicationPublisher.CheckpointWriter listener) {
-        this(publisher, ReplicationDurabilityMode.ARCHIVE_FIRST, listener);
+        this(publisher, listener, ignored -> true, WriterLeaseGate.alwaysValid());
     }
 
     AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
-                                     final ReplicationDurabilityMode durabilityMode,
-                                     final AeronArchiveReplicationPublisher.CheckpointWriter listener) {
-        this(publisher, durabilityMode, listener, ignored -> true);
-    }
-
-    AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
-                                     final ReplicationDurabilityMode durabilityMode,
-                                     final AeronArchiveReplicationPublisher.CheckpointWriter listener,
-                                     final LongPredicate writeAdmission) {
-        this(publisher, durabilityMode, listener, writeAdmission, () -> true);
-    }
-
-    AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
-                                      final ReplicationDurabilityMode durabilityMode,
-                                      final AeronArchiveReplicationPublisher.CheckpointWriter listener,
-                                      final LongPredicate writeAdmission,
-                                      final BooleanSupplier leaseValid) {
-        this(publisher, durabilityMode, listener, writeAdmission, WriterLeaseGate.of(leaseValid));
-    }
-
-    AeronReplicationWriteCoordinator(final AeronReplicationPublisher publisher,
-                                      final ReplicationDurabilityMode durabilityMode,
                                       final AeronArchiveReplicationPublisher.CheckpointWriter listener,
                                       final LongPredicate writeAdmission,
                                       final WriterLeaseGate leaseGate) {
         Objects.requireNonNull(publisher, "publisher");
-        Objects.requireNonNull(durabilityMode, "durabilityMode");
         Objects.requireNonNull(listener, "listener");
         Objects.requireNonNull(writeAdmission, "writeAdmission");
         Objects.requireNonNull(leaseGate, "leaseGate");
         this.publisher = publisher;
-        this.durabilityMode = durabilityMode;
         this.listener = listener;
         this.writeAdmission = writeAdmission;
         this.leaseGate = leaseGate;
         this.publisher.claimCoordinator(this, leaseGate);
         this.writerEpoch = publisher.epoch();
         this.initialSequence = publisher.nextSequence();
-    }
-
-    ReplicationDurabilityMode durabilityMode() {
-        return this.durabilityMode;
     }
 
     long nextSequence() {
@@ -199,36 +167,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     throw new IllegalArgumentException("type dictionary exceeds maxTransactionBytes");
                 }
                 this.retryDictionary = encoded;
-            }
-        } finally {
-            this.writeLock.unlock();
-        }
-    }
-
-    /// Serializes the fast phase of one Store acceptance/publication
-    /// transaction.
-    ///
-    /// The supplied operation must not perform the slow commit wait; callers
-    /// run [AeronReplicationPublisher.PreparedTransaction] commits outside this
-    /// method so a long Archive acknowledgement cannot hold write admission.
-    /// The operation runs while holding the write lock; commit paths must call
-    /// [#commitOrMarkUncertain] only after this method has released it.
-    ///
-    /// @param <T> operation result type
-    /// @param operation transaction body
-    /// @return the value returned by the operation
-    <T> T executeWriteAtomically(final WriteOperation<T> operation) {
-        Objects.requireNonNull(operation, "operation");
-        this.lockWriteAdmission();
-        try {
-            this.ensureNotCommitting();
-            this.ensureWriterIdentity();
-            try {
-                return operation.run();
-            } catch (final RuntimeException | Error failure) {
-                this.clearActiveWrite();
-                this.clearBufferScratch();
-                throw failure;
             }
         } finally {
             this.writeLock.unlock();
@@ -377,6 +315,9 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
         /// Publishes a transaction's prepare phase after recording its PREPARING fence.
     AeronReplicationPublisher.PreparedTransaction prepare(final Binary data) {
+        if (this.writeLock.isHeldByCurrentThread()) {
+            return this.prepareLocked(data);
+        }
         this.writeLock.lock();
         try {
             return this.prepareLocked(data);
@@ -426,7 +367,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     metadata, this.publisher.fencingToken(), null, PreparedWrite.State.RESERVED,
                     Thread.currentThread());
             this.retryDictionary = null;
-            this.notifyStateWithoutLock(AeronReplicationCheckpoint.State.PREPARING, sequence,
+            this.notifyStateOutsideAdmission(AeronReplicationCheckpoint.State.PREPARING, sequence,
                     metadata.dataLength(), metadata.dataChunkCount(), metadata.crc32c(), -1);
         } catch (final RuntimeException | Error failure) {
             this.clearActiveWrite();
@@ -491,9 +432,18 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             throw new IllegalArgumentException("Store transaction exceeds maxTransactionBytes");
         }
         if (!this.writeAdmission.test(requiredBytes)) {
-            throw new IllegalStateException(
+            throw new ReplicationUnavailableException(
                     "Aeron Archive has insufficient free capacity for transaction bytes=%s".formatted(requiredBytes));
         }
+    }
+
+    /// Fails closed when Archive maintenance cannot start.
+    ///
+    /// Maintenance shares the write-admission contract: a lost lease or a
+    /// terminally failed driver must reject the operation with the recorded
+    /// cause instead of failing later inside an Archive RPC.
+    private void ensureMaintenanceAdmitted() {
+        this.ensureWriteAdmitted(0, null);
     }
 
         /// Returns whether the publisher can still accept a transaction.
@@ -512,15 +462,30 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         if (!this.maintenance.compareAndSet(false, true)) {
             throw new IllegalStateException("Aeron Archive maintenance is already in progress");
         }
-        this.writeLock.lock();
         try {
-            this.awaitNoCommit();
-            if (this.publisher.hasPendingTransaction()) {
-                throw new IllegalStateException("cannot run Archive maintenance while a transaction is pending");
+            this.ensureMaintenanceAdmitted();
+            /* Bounded, interruptible acquisition: a slow local Store write must
+             * not park retention or dispose behind admission without a deadline. */
+            final long deadline = ReplicationRetry.deadlineNanos(this.publisher.recordedPositionTimeoutNanos());
+            try {
+                if (!this.writeLock.tryLock(ReplicationRetry.remainingNanos(deadline), TimeUnit.NANOSECONDS)) {
+                    throw new ReplicationUnavailableException("timed out waiting for Aeron write admission");
+                }
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new ReplicationUnavailableException(
+                        "interrupted while waiting for Aeron write admission", interrupted);
             }
-            return maintenance.getAsLong();
+            try {
+                this.awaitNoCommit();
+                if (this.publisher.hasPendingTransaction()) {
+                    throw new IllegalStateException("cannot run Archive maintenance while a transaction is pending");
+                }
+                return maintenance.getAsLong();
+            } finally {
+                this.writeLock.unlock();
+            }
         } finally {
-            this.writeLock.unlock();
             this.maintenance.set(false);
         }
     }
@@ -604,7 +569,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                         "writer fencing lease lost during commit; transaction is uncertain");
             }
             CrashHook.invoke("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", prepared.sequence());
-            this.notifyStateWithoutLock(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
+            this.notifyStateOutsideAdmission(AeronReplicationCheckpoint.State.COMMITTED, prepared.sequence(),
                     prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), position);
             /* Only a successful checkpoint callback proves that the durable
              * COMMITTED record is visible. If the callback throws after a
@@ -693,8 +658,16 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.bufferScratchCount = 0;
     }
 
+    /// Marks the prepared transaction uncertain and releases admission.
+    ///
+    /// Called from the Store write path while it still holds the single
+    /// admission hold, so the checkpoint journal runs at exactly one hold
+    /// and the caller's finally keeps balancing its own lock.
     void markCommittingUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        this.writeLock.lock();
+        if (!this.writeLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "markCommittingUncertain requires the caller's Aeron write-admission hold");
+        }
         boolean owned = false;
         try {
             if (this.activeWrite == null || this.activeWrite.transaction() != prepared) {
@@ -708,13 +681,12 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         } finally {
             if (owned) this.clearActiveWrite();
             if (owned) this.clearBufferScratch();
-            this.writeLock.unlock();
         }
     }
 
     private void markCommittingUncertainLocked(final AeronReplicationPublisher.PreparedTransaction prepared) {
         try {
-            this.notifyStateWithoutLock(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, prepared.sequence(),
+            this.notifyStateOutsideAdmission(AeronReplicationCheckpoint.State.COMMITTING_UNCERTAIN, prepared.sequence(),
                     prepared.dataLength(), prepared.dataChunkCount(), prepared.dataCrc32c(), -1);
             this.activeWrite = this.activeWrite.withState(PreparedWrite.State.UNCERTAIN, Thread.currentThread());
         } catch (final RuntimeException | Error failure) {
@@ -729,15 +701,37 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     /// Runs durable checkpoint I/O without holding write admission.
-    private void notifyStateWithoutLock(final AeronReplicationCheckpoint.State state, final long sequence,
-                                        final int dataLength, final int dataChunkCount,
-                                        final int dataCrc32c, final long position) {
-        final int holds = this.writeLock.getHoldCount();
-        for (int index = 0; index < holds; index++) this.writeLock.unlock();
+    ///
+    /// Must be called with exactly one {@code writeLock} hold: the caller
+    /// reserves the active write first, so a concurrent writer is excluded by
+    /// the admission loop and Archive maintenance parks in [awaitNoCommit]
+    /// while this runs. The hold count is asserted so a future nested call
+    /// cannot journal with a divergent lock stack, and the re-acquire is
+    /// bounded and interruptible so a wedged holder fails this writer instead
+    /// of parking it without a deadline.
+    private void notifyStateOutsideAdmission(final AeronReplicationCheckpoint.State state, final long sequence,
+                                             final int dataLength, final int dataChunkCount,
+                                             final int dataCrc32c, final long position) {
+        if (!this.writeLock.isHeldByCurrentThread() || this.writeLock.getHoldCount() != 1) {
+            throw new IllegalStateException(
+                    "checkpoint journal write requires exactly one Aeron write-admission hold");
+        }
+        this.writeLock.unlock();
         try {
             this.notifyState(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
         } finally {
-            for (int index = 0; index < holds; index++) this.writeLock.lock();
+            final long deadline = ReplicationRetry.deadlineNanos(this.publisher.admissionTimeoutNanos());
+            boolean relocked = false;
+            try {
+                relocked = this.writeLock.tryLock(
+                        ReplicationRetry.remainingNanos(deadline), TimeUnit.NANOSECONDS);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            if (!relocked) {
+                throw new ReplicationUnavailableException(
+                        "timed out or interrupted re-acquiring Aeron write admission after a checkpoint write");
+            }
         }
     }
 
@@ -768,7 +762,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         while (this.activeWrite != null) {
             final long remaining = ReplicationRetry.remainingNanos(deadline);
             if (remaining == 0L) {
-                throw new IllegalStateException(
+                throw new ReplicationUnavailableException(
                         "Aeron commit did not finish within the recorded-position timeout");
             }
             try {
@@ -777,7 +771,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                 this.writeDone.await(remaining, TimeUnit.NANOSECONDS);
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException(
+                throw new ReplicationUnavailableException(
                         "interrupted while waiting for the Aeron commit to finish", interrupted);
             }
         }

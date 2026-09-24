@@ -77,7 +77,7 @@ class AeronArchiveReplicationIT {
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(media, archiveContext);
              AeronArchive archive = AeronArchive.connect(client)) {
             final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, liveChannel, 1001, configuration, clusterId, 2, 0);
+                    archive, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
             await(publisher.publication()::isConnected, 10_000);
             publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
             recordingId = awaitRecordingId(publisher);
@@ -149,7 +149,7 @@ class AeronArchiveReplicationIT {
             try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
                  AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
                 try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                        archive, liveChannel, 1001, configuration, clusterId, 2, 0)) {
+                        archive, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId))) {
                     await(publisher.publication()::isConnected, 10_000);
                     publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
                     recordingId = awaitRecordingId(publisher);
@@ -324,8 +324,7 @@ class AeronArchiveReplicationIT {
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
              AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
             final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, liveChannel, 1001, configuration, clusterId, 2, 0
-            );
+                    archive, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
             await(publisher.publication()::isConnected, 10_000);
             final byte[] data = new byte[70_000];
             for (int i = 0; i < data.length; i++) {
@@ -342,11 +341,10 @@ class AeronArchiveReplicationIT {
             publisher.close();
             await(() -> archive.getStopPosition(recordingId) >= firstStop, 10_000);
             assertThrows(IllegalArgumentException.class, () -> AeronArchiveReplicationPublisher.extend(
-                    archive, recordingId, 1002, configuration, clusterId, 2, 1));
+                    archive, recordingId, 1002, configuration, clusterId, 2, 1, AeronReplicationEnvelope.defaultWireNonce(clusterId)));
             final byte[] resumedData = new byte[]{8, 6, 7, 5};
             final AeronArchiveReplicationPublisher resumed = AeronArchiveReplicationPublisher.extend(
-                    archive, recordingId, 1001, configuration, clusterId, 2, 1
-            );
+                    archive, recordingId, 1001, configuration, clusterId, 2, 1, AeronReplicationEnvelope.defaultWireNonce(clusterId));
             await(resumed.publication()::isConnected, 10_000);
             resumed.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(resumedData)});
             assertEquals(recordingId, awaitRecordingId(resumed));
@@ -445,7 +443,7 @@ class AeronArchiveReplicationIT {
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext)) {
             final AeronArchive archive = AeronArchive.connect(archiveClientContext);
             final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, liveChannel, 1001, configuration, UUID.randomUUID(), 1, 0);
+                    archive, liveChannel, 1001, configuration, UUID.randomUUID(), 1, 0, AeronReplicationEnvelope.defaultWireNonce(UUID.randomUUID()));
             try {
                 await(publisher.publication()::isConnected, 10_000);
                 publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1, 2, 3})});
@@ -506,7 +504,7 @@ class AeronArchiveReplicationIT {
                 final long recordingId;
                 {
                     publisher = AeronArchiveReplicationPublisher.create(
-                            archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0);
+                            archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
                     try {
                         await(publisher.publication()::isConnected, 10_000);
                         for (int i = 0; i < transactions; i++) {
@@ -592,7 +590,7 @@ class AeronArchiveReplicationIT {
                  AeronArchive archiveClient =
                          connectArchive(archiveClientContext.clone().aeron(aeron).ownsAeronClient(false))) {
                 final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                        archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0);
+                        archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
                 final long recordingId;
                 try {
                     await(publisher.publication()::isConnected, 10_000);

@@ -1,6 +1,8 @@
 package peruncs.datagrid.cluster.node.aeron;
 
+
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /// Verifies rejection-log level selection: shutdown interrupts stay quiet,
 /// genuine watermark rejections warn.

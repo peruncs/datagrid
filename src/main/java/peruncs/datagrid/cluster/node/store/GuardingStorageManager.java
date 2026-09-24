@@ -711,9 +711,11 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
             this.delegate.prepareTarget();
         }
 
+        /// A borrowed view never owns the live target: closing it must be a
+        /// no-op so an application cannot shut the shared Store down through
+        /// the persistence-manager adapter.
         @Override
         public void closeTarget() {
-            this.delegate.closeTarget();
         }
     }
 }

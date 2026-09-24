@@ -264,6 +264,9 @@ final class ApplyWorker {
         }
 
         void ensureViews(final int transactionLength) {
+            /* Exact sizing is a Store-API constraint, not an oversight: the
+             * importer hands the whole views array to the Store import, so a
+             * grow-only array would smuggle a stale null tail into it. */
             if (this.views.length != transactionLength) {
                 this.views = new ByteBuffer[transactionLength];
             }
