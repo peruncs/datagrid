@@ -699,8 +699,7 @@ class AeronStoreIntegrationIT {
                                 : "a reader restarted from a purged cursor neither failed closed nor rejoined within 60s");
                     }
                     final RuntimeException failure = lagging.clientFailure();
-                    assertTrue(failure instanceof ReseedRequiredException
-                                    || failure instanceof ReseedRequiredException,
+                    assertTrue(failure instanceof ReseedRequiredException,
                             "expected the typed reseed signal (health RESEED_REQUIRED), got: " + failure);
                     /* Fail-closed also means untouched durable state: the
                      * cursor never advanced past the frozen boundary and the

@@ -111,13 +111,14 @@ public final class AeronTransport implements ClusterReplicationTransport {
     /// @param leaseDirectory resolved lease directory, or `null` when unset
     private static void validateLeaseDirectory(final AeronSettings settings, final Path leaseDirectory,
                                                final NodeSettingsSource properties) {
+        final boolean productionWriter = settings.productionMode() && settings.topology().role() == NodeRole.WRITER;
         if (leaseDirectory == null) {
-            if (settings.productionMode() && settings.topology().role() == NodeRole.WRITER) {
+            if (productionWriter) {
                 throw new IllegalArgumentException("production writer requires a pre-provisioned shared lease directory");
             }
             return;
         }
-        if (settings.productionMode() && settings.topology().role() == NodeRole.WRITER) {
+        if (productionWriter) {
             if (!Boolean.parseBoolean(properties.replicationProperty("ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM"))) {
                 throw new IllegalArgumentException(
                         "ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true is required for a production writer");

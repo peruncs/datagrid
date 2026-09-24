@@ -61,7 +61,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
     /// Reads, maintenance, and restore keep working; every application write
     /// entry point — `store`, `storeAll`, `storeRoot`, `setRoot`, storers,
     /// raw persistence target, and public import methods —
-    /// fails with [ReaderWriteRejectedException] so a reader can never
+    /// fails with [peruncs.datagrid.cluster.errors.ReaderWriteRejectedException] so a reader can never
     /// persist an unreplicated local divergence.
     ///
     /// @param <T>              root type

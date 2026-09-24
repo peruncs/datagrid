@@ -54,7 +54,12 @@ public final class AeronProviderDriverFailureChildMain {
                     case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> root.resolve("archive").toString();
                     case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" -> root.resolve("checkpoint/writer").toString();
                     case "ECLIPSE_DATAGRID_BACKUP_PATH" -> root.resolve("backups").toString();
-                    case "ECLIPSE_DATAGRID_AERON_DRIVER_TIMEOUT_MILLIS" -> "250";
+                    case                     /* 1000ms, not the production 10s: dead-driver detection
+                     * must fit the parent's 5s health deadline, while the
+                     * initial connect still gets enough headroom to see the
+                     * embedded driver's first heartbeat under a loaded test
+                     * JVM (a 250ms budget fails the connect intermittently). */
+                    "ECLIPSE_DATAGRID_AERON_DRIVER_TIMEOUT_MILLIS" -> "1000";
                     default -> null;
                 };
             }

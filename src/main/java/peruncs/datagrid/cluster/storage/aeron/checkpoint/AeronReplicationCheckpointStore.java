@@ -71,7 +71,9 @@ public final class AeronReplicationCheckpointStore {
                 }
                 if (channel.size() == 0L) {
                     channel.position(JOURNAL_BYTES - 1L);
-                    channel.write(ByteBuffer.wrap(new byte[1]));
+                    if (channel.write(ByteBuffer.wrap(new byte[1])) != 1) {
+                        throw new IOException("failed to size a new Aeron checkpoint journal");
+                    }
                     channel.force(true);
                 }
                 final Slot first = readSlot(channel, 0);

@@ -188,8 +188,6 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     private final StorageConnection storage;
     private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
     private final StorageGraphCoordinator graphCoordinator;
-    private final long cachingTimeoutMs;
-    private final long cacheBytesLimit;
     private final long maxCachedBytes;
     private final long applyTimeoutMs;
     private final long disposeOrderlyTimeoutMs;
@@ -220,8 +218,8 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         this.storage = configuration.storage();
         this.objectGraphUpdateHandler = configuration.objectGraphUpdateHandler();
         this.graphCoordinator = configuration.graphCoordinator();
-        this.cachingTimeoutMs = configuration.cachingTimeoutMs();
-        this.cacheBytesLimit = configuration.cachedBytesLimit();
+        final long cachingTimeoutMs = configuration.cachingTimeoutMs();
+        final long cacheBytesLimit = configuration.cachedBytesLimit();
         this.maxCachedBytes = configuration.maxCachedBytes();
         this.applyTimeoutMs = configuration.applyTimeoutMs();
         this.disposeOrderlyTimeoutMs = configuration.disposeOrderlyTimeoutMs();
@@ -231,7 +229,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         } catch (final ArithmeticException overflow) {
             throw new IllegalArgumentException("applyTimeoutMs is too large: %s".formatted(applyTimeoutMs), overflow);
         }
-        this.queue = new ApplyQueue(this, this.cacheBytesLimit, this.maxCachedBytes, this.applyTimeoutMs);
+        this.queue = new ApplyQueue(this, cacheBytesLimit, this.maxCachedBytes, this.applyTimeoutMs);
         this.worker = new ApplyWorker(
                 this,
                 this.queue,
@@ -240,7 +238,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
                 this.foundation,
                 this.storage,
                 this.objectGraphUpdateHandler,
-                this.cachingTimeoutMs,
+                cachingTimeoutMs,
                 configuration.maxValidatedIndexObjects(),
                 this.materializationBudgetMs);
         final BinaryPersistenceFoundation<?> parsingFoundation = BinaryPersistence.Foundation()

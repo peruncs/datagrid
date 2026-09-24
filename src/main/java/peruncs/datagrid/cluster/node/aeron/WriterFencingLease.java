@@ -391,16 +391,7 @@ final class WriterFencingLease implements AutoCloseable {
         this.heartbeat.shutdownNow();
     }
 
-        /// Reports whether this holder still owns a fresh lease.
-    ///
-    /// The lease file is re-read at most once per third of the staleness
-    /// bound; calls inside that window return the cached result instead of
-    /// performing file I/O on the write path. A stolen, deleted, or corrupt
-    /// lease reports stale on the next re-read and suspends write admission.
-    /// A closed lease is never current.
-    ///
-    /// @return `true` while the lease file still names this holder with a fresh heartbeat
-        /// Re-reads the lease file with a rate-limited ownership proof.
+    /// Re-reads the lease file with a rate-limited ownership proof.
     ///
     /// The physical re-read runs at most once per third of the staleness
     /// bound; calls inside that window reuse the cached result, so a busy
@@ -508,31 +499,34 @@ final class WriterFencingLease implements AutoCloseable {
         }
     }
 
-        /// Makes one publication attempt while holding the interprocess lease lock.
+    /// Returns the time budget for one terminal-offer attempt.
     ///
-    /// The caller supplies one non-blocking Aeron offer attempt. Ownership is verified under
-    /// the same lock file used for acquisition, the offer runs, and the
-    /// heartbeat is refreshed before the lock is released — so a successor
-    /// racing in another process either blocks until the marker is offered with
-    /// a still-current heartbeat, or observes the refreshed heartbeat and fails
-    /// its steal. A deposed writer fails here instead of offering a stale marker.
+    /// The budget is a third of the staleness bound, floored at one nanosecond,
+    /// so a deposed writer still has room to renew before its lease can go
+    /// stale. The lock acquisition in [#executeUnderOwnership] is capped by the
+    /// same value.
     ///
-    /// The heartbeat is rewritten only when it has aged past a third of the
-    /// staleness bound, and is also refreshed in the offer's failure path while
-    /// the interprocess lock is still held, so a throwing offer cannot
-    /// leave a stale-but-present lease for a successor to steal. This keeps the
-    /// shared volume's per-commit fsync cost proportional to renewal need
-    /// rather than to commit rate.
-    ///
-    /// @param offer one publication attempt returning an Aeron result
-    /// @return Aeron position returned by the offer
-    /// @throws WriterFencedException when this holder no longer owns a fresh lease
-    /// Leaves room for renewal and takeover before the lease can become stale.
+    /// @return per-attempt offer budget in nanos, always positive
     long terminalOfferBudgetNanos() {
         return Math.max(1L, this.maxStalenessNanos / 3L);
     }
 
-        /// Offers one terminal marker with a per-attempt ownership callback.
+    /// Makes one publication attempt while holding the interprocess lease lock.
+    ///
+    /// The caller supplies one non-blocking Aeron offer attempt. Ownership is
+    /// verified under the same lock file used for acquisition, the offer runs,
+    /// and the heartbeat is refreshed before the lock is released — so a
+    /// successor racing in another process either blocks until the marker is
+    /// offered with a still-current heartbeat, or observes the refreshed
+    /// heartbeat and fails its steal. A deposed writer fails here instead of
+    /// offering a stale marker.
+    ///
+    /// The heartbeat is rewritten only when it has aged past a third of the
+    /// staleness bound, and is also refreshed in the offer's failure path while
+    /// the interprocess lock is still held, so a throwing offer cannot leave a
+    /// stale-but-present lease for a successor to steal. This keeps the shared
+    /// volume's per-commit fsync cost proportional to renewal need rather than
+    /// to commit rate.
     ///
     /// @param offer offer operation receiving the per-attempt ownership check
     /// @return Aeron position returned by the offer

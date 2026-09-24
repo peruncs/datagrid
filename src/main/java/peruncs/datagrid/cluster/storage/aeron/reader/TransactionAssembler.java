@@ -907,12 +907,13 @@ final class TransactionAssembler {
          * stays retryable: latching the failure is the caller's decision —
          * the reader loop does exactly that when this exception reaches it,
          * while a standalone retry can still complete the boundary. */
-        this.transactionResolved.accept(new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position()));
+        final CursorSnapshot boundary = new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position());
+        this.transactionResolved.accept(boundary);
         /* The callback made the new boundary durable: publish the snapshot
          * and only now retire the staged barrier. */
         this.lastAppliedSequence = candidateAppliedSequence;
         synchronized (this) {
-            this.resolvedBoundary = new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position());
+            this.resolvedBoundary = boundary;
             this.lastResolutionCrc32c = resolvedTail.crc32c();
             this.lastResolutionKind = resolvedTail.kind();
             this.lastResolutionDataLength = resolvedTail.dataLength();

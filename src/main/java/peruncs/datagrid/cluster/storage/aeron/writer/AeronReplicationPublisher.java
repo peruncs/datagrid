@@ -337,15 +337,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 /* Fencing loss must never be followed by an old-token terminal
                  * marker: the deposed writer stops offering immediately and
                  * recovery reads the durable PREPARING fence instead. */
-                synchronized (this) {
-                    if (pending != null) {
-                        pending.terminal = true;
-                        this.pendingTransaction = null;
-                    }
-                    if (this.reservedSequence == sequence) this.reservedSequence = -1L;
-                    this.preparing = false;
-                    this.failed = true;
-                }
+                this.failPendingTransaction(pending, sequence);
                 throw failure;
             }
             try {
@@ -361,18 +353,26 @@ final class AeronReplicationPublisher implements AutoCloseable {
             } catch (final RuntimeException abortFailure) {
                 failure.addSuppressed(abortFailure);
             }
-            synchronized (this) {
-                if (pending != null) {
-                    pending.terminal = true;
-                    this.pendingTransaction = null;
-                }
-                if (this.reservedSequence == sequence) this.reservedSequence = -1L;
-                this.preparing = false;
-                this.failed = true;
-            }
+            this.failPendingTransaction(pending, sequence);
             throw failure;
         } finally {
             if (!handedOff && framer != null) framer.close();
+        }
+    }
+
+    /// Terminates a failed preparation: the pending transaction (when one
+    /// exists) is marked terminal so close() cannot emit a second terminal
+    /// marker, the reserved sequence is released, and the publisher fails
+    /// closed for the rest of the process.
+    private void failPendingTransaction(final PreparedTransaction pending, final long sequence) {
+        synchronized (this) {
+            if (pending != null) {
+                pending.terminal = true;
+                this.pendingTransaction = null;
+            }
+            if (this.reservedSequence == sequence) this.reservedSequence = -1L;
+            this.preparing = false;
+            this.failed = true;
         }
     }
 

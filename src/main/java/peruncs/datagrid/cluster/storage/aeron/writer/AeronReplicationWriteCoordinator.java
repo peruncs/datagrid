@@ -344,8 +344,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         final int bufferCount = this.collectBuffers(data);
         final ByteBuffer[] buffers = this.bufferScratch;
         final byte[] dictionary = this.retryDictionary;
-        AeronReplicationPublisher.TransactionMetadata metadata = null;
-        long sequence = -1L;
+        AeronReplicationPublisher.TransactionMetadata metadata;
+        long sequence;
         /* Reserve the sequence and persist PREPARING before publication so a
          * crash after local Store acceptance remains visible to recovery. */
         try {
@@ -717,8 +717,14 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     "checkpoint journal write requires exactly one Aeron write-admission hold");
         }
         this.writeLock.unlock();
+        /* The state failure is captured, not thrown from the finally block: a
+         * failed re-acquire must not silently replace the primary checkpoint
+         * I/O exception with the relock timeout. */
+        Throwable failure = null;
         try {
             this.notifyState(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
+        } catch (final RuntimeException | Error thrown) {
+            failure = thrown;
         } finally {
             final long deadline = ReplicationRetry.deadlineNanos(this.publisher.admissionTimeoutNanos());
             boolean relocked = false;
@@ -729,10 +735,14 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                 Thread.currentThread().interrupt();
             }
             if (!relocked) {
-                throw new ReplicationUnavailableException(
+                final ReplicationUnavailableException unavailable = new ReplicationUnavailableException(
                         "timed out or interrupted re-acquiring Aeron write admission after a checkpoint write");
+                if (failure != null) unavailable.addSuppressed(failure);
+                throw unavailable;
             }
         }
+        if (failure instanceof Error error) throw error;
+        if (failure instanceof RuntimeException runtime) throw runtime;
     }
 
     private void clearActiveWrite() {

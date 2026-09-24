@@ -72,7 +72,7 @@ final class AeronRuntimeOwner {
     /// and close all take that monitor, and blocking the conductor stalls
     /// every Aeron client sharing the driver. The method only writes
     /// volatile state and fails the installed reader through the lock-free
-    /// [AeronArchiveReader#fail] path, which is safe to invoke from the
+    /// [peruncs.datagrid.cluster.storage.aeron.reader.AeronArchiveReader#fail] path, which is safe to invoke from the
     /// error handler without touching transport lifecycle locks.
     private void recordDriverFailure(final Throwable failure) {
         final AeronTransportShared shared = shared();

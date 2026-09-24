@@ -369,7 +369,7 @@ public final class ClusterIndexMaintenance {
     /// silently leaving the rebuild to the next query. The probe is reused
     /// per index across batches, so a steady import allocates no probe arrays.
     ///
-    /// @param vectors vector group to rebuild
+    /// @param dirtyIndexes dirty vector index groups to rebuild
     /// @param scratch worker-local scratch owning the reused probes
     private static void ensureVectorSearchGraphs(final ArrayList<VectorIndex<?>> dirtyIndexes,
                                                   final ClusterIndexValidation.ValidationScratch scratch) {

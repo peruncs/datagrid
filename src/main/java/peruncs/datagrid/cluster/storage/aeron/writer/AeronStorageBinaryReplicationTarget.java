@@ -17,7 +17,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// instead of letting the Store and Archive drift silently.
 ///
 /// The local write and the Aeron preparation run inside one
-/// [AeronReplicationWriteCoordinator#executeWriteAtomically] section; the
+/// [AeronReplicationWriteCoordinator#prepareWriteAtomically] section; the
 /// commit then waits for its Archive acknowledgement with no coordinator lock
 /// held, so a slow Archive never blocks health, maintenance, or dispose.
 public final class AeronStorageBinaryReplicationTarget implements PersistenceTarget<Binary> {

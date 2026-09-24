@@ -23,7 +23,7 @@ import static org.eclipse.serializer.util.X.notNull;
 
 /// Store facade with the write gate, the raw-target gate, and coordinated reads.
 ///
-/// [start] and [shutdown] delegate to the owned [ClusterStoreLifecycle];
+/// [#start] and [#shutdown] delegate to the owned [ClusterStoreLifecycle];
 /// every other method is a Store operation, forwarded as-is, gated on the
 /// configured size limit when it persists application data, or wrapped so a
 /// fluent write cannot bypass the gate.
