@@ -6,7 +6,7 @@ For code intelligence (symbols, call chains, architecture, impact), use the code
 
 ## General code rules - items to investigate or fix:
 
-1. Use all modern Java features for the java version specified in the build framework, including preview features such as: Virtual threads, Patern matching, ScopedValue, StructuredTaskScope, LazyConstant
+1. Use all modern Java features for the java version specified in the build framework, including preview features such as: Virtual threads, Patern matching, ScopedValue, StructuredTaskScope, LazyConstant. Do not use ThreadLocal.
 2. Follow good OOP design - map the Java entities map to expected APIs and domain concepts. Are Java entities and methods properly named, reflected
    on their purpose?
 3. Prefer java records, immutable entities, modern functional style java code. Use Optional only for method input params.
@@ -17,7 +17,7 @@ For code intelligence (symbols, call chains, architecture, impact), use the code
 8. Single-use methods that could be inlined. Java entities with 1-2 static methods that should be folded into stronger entities.
 9. Proper use of AutoClosable with try/catch resources managemnt in Java. Exceptiong handlig in genral, sallowed exceptions.
 10. Minimal Java entinties and methods visibility surface (do not use "public" without reason)
-11. Proper package structure with package-info.java javadocs - do not throw everything in one big "god" package.
+11. Proper package structure -  naming, avoid unneccessry cross-package placement,  unnecessary public visibility. Add package-info.java javadocs. Do not throw everything in one big "god" package.
 12. Beware of Java "god" obects/interafaces/records. When possible, break them into smaller focused entities, that are easier to junit test and reason about.
 13. Avoid Java reflection unless absolutely necessary.
 14. Javadocs at all levels - module, package and individual Java entities. Use simple narrative suitable for humans, less jargon, first sentence is the most important.
@@ -32,11 +32,15 @@ For code intelligence (symbols, call chains, architecture, impact), use the code
 23. Proper exception design, handling, propagation and reporting.
 24. Correct and informative javadocs, including javadocs for packages (package-info.java) and modules (module-info.java)
 25. Add ample well-documented junit test and simulation coverage.
-26. Have we looked at the Aeron examples and cookbook for best practices? Does the implementation follow them?
-27. Use of Agrona and Eclipse Serializer and Eclipse Store utils (LockedExecutor, StripeLockedExecutor) as much as possible ?
-28. Eclipse Datagrid constraints are strictly obeyed: 1-writer/N-reader nodes.
-29. Memory inefficiencies when packing data in Aeron CBE and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want to avoid allocating objects (even temporary) on the JVM heap.
-30. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
+26. Have we looked at the Aeron examples and cookbook for best practices? Have you looked at the Eclipse Store /Serializer tests? Does the implementation follow them?
+27. Prefer use  of Agrona and Eclipse Serializer and Eclipse Store thread utils (LockedExecutor, StripeLockedExecutor) over synchronized.
+28. Cluster constraints are strictly obeyed: 1-writer/N-reader nodes. No node authentication features, no transport level encryption.
+29. Memory inefficiencies when packing data in Aeron and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want to avoid allocating objects (even temporary) on the JVM heap.
+30. Avoid using unsafe/internal jdk apis for accessing off-the-heap memory. 
+31. Prefer modern java Memory (FFM) API (MemorySegment, Arena, SegmentAllocator, see:  https://docs.oracle.com/en/java/javase/21/core/memory-segments-and-arenas.html , https://dev.java/learn/ffm/access-memory/) over legacy native memory/byte bufffer utilities from Aeron/Agrona or Ecipse Serializer.
+32. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
+33. Correctness of the  cluster code
+34. Cluster performance - liveliness, throughput, threading.
 
 
 ### If asked for review only
