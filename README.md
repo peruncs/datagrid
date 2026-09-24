@@ -1,4 +1,4 @@
-# Peruncs Data Grid
+# Peruncs Cluster
 
 Peruncs Data Grid is an in-memory data processing layer to speed up database
 applications and relieve the database. It combines distributed caching,
