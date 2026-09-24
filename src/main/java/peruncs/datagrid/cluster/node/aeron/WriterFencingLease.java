@@ -325,6 +325,12 @@ final class WriterFencingLease implements AutoCloseable {
      * cannot pair clocks across processes and must rely on wall time alone
      * (see the class javadoc). */
     private volatile long lastWriteNanos;
+    /* A heartbeat task that dies on an Error silently cancels a
+     * ScheduledExecutorService periodic task: the lease must fail closed
+     * with that cause recorded until an operator restarts it, instead of
+     * merely going stale. */
+    private final java.util.concurrent.atomic.AtomicReference<RuntimeException> heartbeatFailure =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     private WriterFencingLease(
             final Path path, final long token, final UUID nodeId, final Duration maxStaleness,
@@ -353,6 +359,14 @@ final class WriterFencingLease implements AutoCloseable {
                 System.getLogger(WriterFencingLease.class.getName()).log(WARNING,
                         "writer lease heartbeat failed; write admission is suspended until renewal succeeds",
                         failure);
+            } catch (final Error failure) {
+                /* An Error escaping a periodic task cancels it silently on the
+                 * executor: record the cause so write admission fails closed
+                 * with a named terminal failure, then let the throw end the
+                 * heartbeat. A permanent fix is a restart, not supression. */
+                this.heartbeatFailure.compareAndSet(null,
+                        new IllegalStateException("writer lease heartbeat worker died; this writer is fenced", failure));
+                throw failure;
             }
         }), period, period, TimeUnit.MILLISECONDS);
     }
@@ -399,7 +413,7 @@ final class WriterFencingLease implements AutoCloseable {
     boolean isCurrent() {
         final long nowNanos = System.nanoTime();
         synchronized (this.stateLock) {
-            if (this.closed || this.releaseUnproven) return false;
+            if (this.closed || this.releaseUnproven || this.heartbeatFailure.get() != null) return false;
             if (this.hasCheck && nowNanos - this.lastCheckNanos < this.checkIntervalNanos) {
                 return this.lastCheckResult;
             }
@@ -407,7 +421,7 @@ final class WriterFencingLease implements AutoCloseable {
         final LeaseFile current = readQuietly(this.path);
         final boolean result = current != null && this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
         synchronized (this.stateLock) {
-            if (this.closed || this.releaseUnproven) return false;
+            if (this.closed || this.releaseUnproven || this.heartbeatFailure.get() != null) return false;
             this.hasCheck = true;
             this.lastCheckNanos = nowNanos;
             this.lastCheckResult = result;
@@ -442,7 +456,7 @@ final class WriterFencingLease implements AutoCloseable {
         final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
         synchronized (mutexFor(this.path)) {
             synchronized (this.stateLock) {
-                if (this.closed || this.releaseUnproven) return;
+                if (this.closed || this.releaseUnproven || this.heartbeatFailure.get() != null) return;
             }
             try (final FileChannel lockChannel = openLockChannel(lockPath);
                  final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
@@ -529,6 +543,12 @@ final class WriterFencingLease implements AutoCloseable {
             synchronized (this.stateLock) {
                 if (this.closed) {
                     throw new WriterFencedException("writer fencing lease is closed");
+                }
+                final RuntimeException heartbeatDeath = this.heartbeatFailure.get();
+                if (heartbeatDeath != null) {
+                    throw new WriterFencedException(
+                            "writer fencing lease heartbeat died; this writer is fenced, restart required",
+                            heartbeatDeath);
                 }
                 if (this.releaseUnproven) {
                     throw new WriterFencedException(

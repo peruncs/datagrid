@@ -93,7 +93,7 @@ Requires same user (or root) as the target JVM, and attach mechanism not disable
 
 ## 2. JFR (Java Flight Recorder)
 
-Built into the JDK (11+, backported to 8u262+), low-overhead, best for deep profiling:
+Built into the JDK, low-overhead, best for deep profiling:
 ```bash
 jcmd <pid> JFR.start name=rec duration=60s filename=recording.jfr
 jcmd <pid> JFR.dump name=rec filename=snapshot.jfr

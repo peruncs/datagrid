@@ -3,6 +3,7 @@ package peruncs.datagrid.cluster.node.aeron;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.datagrid.cluster.errors.WriterFencedException;
+import peruncs.datagrid.cluster.storage.aeron.writer.CrashHook;
 import peruncs.datagrid.cluster.storage.io.AtomicFileWriter;
 import peruncs.datagrid.cluster.test.ChildJava;
 
@@ -516,5 +517,36 @@ class WriterFencingLeaseTest {
         buffer.putInt(bytes.length - Integer.BYTES,
                 peruncs.datagrid.cluster.storage.Crc32C.compute(bytes, 0, bytes.length - Integer.BYTES));
         Files.write(path, bytes);
+    }
+    /// A heartbeat task that dies on an Error must fail the lease closed with
+    /// the terminal cause recorded, instead of silently canceling the
+    /// scheduled renewal and leaving write admission to expire as unexplained
+    /// staleness.
+    @Test
+    void heartbeatErrorEndsRenewalAndFencesTheWriter(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final UUID nodeId = UUID.randomUUID();
+        final WriterFencingLease[] holder = {null};
+        /* The renewal milestone inherits ScopedValue bindings from start: the
+         * hook fires on the next heartbeat after acquisition completes. */
+        CrashHook.runWithHook((name, sequence) -> {
+            if ("BEFORE_LEASE_RENEWAL_HEARTBEAT".equals(name)) throw new Error("injected heartbeat death");
+        }, () -> holder[0] = WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS));
+        try {
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (holder[0].isCurrent() && System.nanoTime() < deadline) {
+                Thread.sleep(25L);
+            }
+            assertFalse(holder[0].isCurrent(), "a dead heartbeat must fail the lease closed");
+
+            final var failure = assertThrows(WriterFencedException.class,
+                    () -> holder[0].executeUnderOwnership(ignored -> 99L));
+            assertTrue(failure.getMessage().contains("heartbeat"),
+                    "the fencing failure must name the heartbeat death: " + failure.getMessage());
+            assertNotNull(failure.getCause(), "the recorded terminal cause must travel with the fencing failure");
+        } finally {
+            holder[0].close();
+        }
     }
 }
