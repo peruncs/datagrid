@@ -4,20 +4,31 @@ import io.aeron.Aeron;
 import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
 import io.aeron.archive.Archive;
+import io.aeron.archive.ArchiveMarkFile;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.codecs.mark.MarkFileHeaderDecoder;
+import io.aeron.archive.codecs.mark.MessageHeaderDecoder;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.exceptions.ActiveDriverException;
 import org.agrona.ErrorHandler;
+import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.datagrid.cluster.storage.ReplicationRetry;
 
+import java.io.EOFException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.WARNING;
@@ -34,6 +45,12 @@ import static java.lang.System.Logger.Level.WARNING;
 final class AeronRuntime implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(AeronRuntime.class.getName());
     private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;
+    /// Matches the upstream rejection of a mark file whose semantic version never
+    /// matched this build, as produced by [ArchiveMarkFile] validation.
+    private static final Pattern REJECTED_MARK_VERSION = Pattern.compile(
+            "mark file \\((.+?)\\) major version (\\d+) does not match software: \\d+");
+    /// Matches the upstream rejection of a mark file whose last owner still appears alive.
+    private static final Pattern ACTIVE_MARK_FILE = Pattern.compile("active mark file detected: (.+)");
 
     private final AeronSettings settings;
     private final ErrorHandler errorHandler;
@@ -73,8 +90,36 @@ final class AeronRuntime implements AutoCloseable {
         return current;
     }
 
-    private static <T extends AutoCloseable> T launchDriver(final MediaDriver.Context context,
-                                                            final Supplier<T> launcher) {
+    /// Launches the embedded Aeron driver and, for a writer, its embedded Archive,
+    /// retrying while a previously crashed instance still owns the driver or archive
+    /// mark files.
+    ///
+    /// A writer acquires its lease before [start], so this directory has a single
+    /// launcher at a time and two crash leftovers can be recovered here:
+    /// <ul>
+    /// <li>A never-signaled archive mark file (major version 0) left by a writer
+    /// killed during Archive startup is removed before the first attempt, and again
+    /// if upstream rejects the launch anyway; see [repairsNeverSignaledArchiveMarkFile].
+    /// Removing it up front matters: the driver and Archive launch as one unit, so a
+    /// repair after a partial launch would restart the driver age-out wait and could
+    /// exhaust the deadline.</li>
+    /// <li>An active driver or archive mark file left by a process killed less than
+    /// Aeron's liveness timeout ago is waited out, bounded by {@code timeoutMillis}
+    /// ({@code driverTimeout + 1s}, which covers Aeron's fixed 10-second archive-mark
+    /// liveness at the default 10-second driver timeout; a driver timeout below that
+    /// liveness can exhaust the deadline and the next restart inherits the wait).</li>
+    /// </ul>
+    /// Any other failure propagates immediately: a wrong major version, a foreign
+    /// path, or an unreadable file all fail closed.
+    ///
+    /// @param context         media driver context whose driver timeout bounds the retry
+    /// @param archiveMarkFile archive mark file this launch owns, empty when the node
+    ///                        runs without an embedded Archive
+    /// @param launcher        starts the driver, or the driver and Archive together
+    /// @return the launched resource, owned by the caller for shutdown
+    static <T extends AutoCloseable> T launchDriver(final MediaDriver.Context context,
+                                                    final Optional<Path> archiveMarkFile,
+                                                    final Supplier<T> launcher) {
         RuntimeException lastFailure = null;
         final long timeoutMillis;
         try {
@@ -82,6 +127,7 @@ final class AeronRuntime implements AutoCloseable {
         } catch (final ArithmeticException overflow) {
             throw new IllegalArgumentException("Aeron driver timeout is too large", overflow);
         }
+        archiveMarkFile.ifPresent(AeronRuntime::removeNeverSignaledArchiveMarkFile);
         final long deadline = ReplicationRetry.deadlineNanos(TimeUnit.MILLISECONDS.toNanos(timeoutMillis));
         int attempts = 0;
         while (!ReplicationRetry.expired(deadline)) {
@@ -93,6 +139,18 @@ final class AeronRuntime implements AutoCloseable {
                 LOGGER.log(DEBUG,
                         "Aeron driver launch is waiting for a stale driver to release its mark file (attempt=%d, timeoutMillis=%d)"
                                 .formatted(attempts, timeoutMillis), failure);
+            } catch (final IllegalArgumentException failure) {
+                if (!archiveMarkFile.map(markFile -> repairsNeverSignaledArchiveMarkFile(markFile, failure))
+                        .orElse(false)) throw failure;
+                lastFailure = failure;
+                attempts++;
+            } catch (final IllegalStateException failure) {
+                if (!namesOwnActiveArchiveMarkFile(archiveMarkFile, failure)) throw failure;
+                lastFailure = failure;
+                attempts++;
+                LOGGER.log(DEBUG,
+                        "Aeron archive launch is waiting for a stale writer to release its mark file (attempt=%d, timeoutMillis=%d)"
+                                .formatted(attempts, timeoutMillis), failure);
             }
             try {
                 Thread.sleep(STALE_DRIVER_RETRY_DELAY_MILLIS);
@@ -101,7 +159,124 @@ final class AeronRuntime implements AutoCloseable {
                 throw new IllegalStateException("interrupted while waiting for stale Aeron driver cleanup", interrupted);
             }
         }
-        throw new IllegalStateException("Aeron driver directory remained active after %d milliseconds".formatted(timeoutMillis), lastFailure);
+        throw new IllegalStateException("Aeron driver or archive did not become available within %d milliseconds"
+                .formatted(timeoutMillis), lastFailure);
+    }
+
+    /// Removes an archive mark file that a writer killed during Archive startup left
+    /// behind without ever signaling it, if and only if it still reads that way.
+    ///
+    /// The mark file version is written only by signalReady at the very end of Archive
+    /// startup, so a kill between file creation and a completed startup leaves a file
+    /// that still reads major version 0. Aeron rejects that file on every future launch,
+    /// permanently bricking the archive directory: no archive data is lost, but no writer
+    /// can start either. Major version 0 can only mean never signaled: signalReady only
+    /// ever writes a positive version, and the writer lease plus this node's private
+    /// directory make a live concurrent Archive in this directory unreachable. The mark
+    /// file carries liveness and error state, never recordings, so removal is safe; a
+    /// positive but different major is a real format mismatch and fails closed. The
+    /// version is read immediately before the delete so a file signaled in the meantime
+    /// is kept.
+    ///
+    /// @param markFile archive mark file to remove
+    /// @return true when the file was removed
+    private static boolean removeNeverSignaledArchiveMarkFile(final Path markFile) {
+        try {
+            if (!Files.exists(markFile) || !stillNeverSignaled(markFile)) return false;
+            Files.delete(markFile);
+            LOGGER.log(WARNING, "removed never-signaled archive mark file left by a killed writer: %s"
+                    .formatted(markFile));
+            return true;
+        } catch (final IOException | RuntimeException failure) {
+            LOGGER.log(WARNING, "failed to remove never-signaled archive mark file %s".formatted(markFile), failure);
+            return false;
+        }
+    }
+
+    /// Applies [removeNeverSignaledArchiveMarkFile] only when upstream's rejection
+    /// names this launch's own mark file with the never-signaled major version 0.
+    ///
+    /// @param archiveMarkFile mark file this launch owns
+    /// @param rejection       upstream rejection of that launch
+    /// @return true when the file was removed and the launch may be retried
+    private static boolean repairsNeverSignaledArchiveMarkFile(final Path archiveMarkFile,
+                                                               final IllegalArgumentException rejection) {
+        final Matcher rejected = REJECTED_MARK_VERSION.matcher(String.valueOf(rejection.getMessage()));
+        if (!rejected.matches() || !"0".equals(rejected.group(2))) return false;
+        try {
+            final Path named = Path.of(rejected.group(1)).toRealPath();
+            if (!named.equals(archiveMarkFile.toRealPath())) return false;
+            return removeNeverSignaledArchiveMarkFile(named);
+        } catch (final IOException | RuntimeException unreadable) {
+            return false;
+        }
+    }
+
+    /// Reads the semantic version from an archive mark file without modifying it,
+    /// locating the field exactly as [ArchiveMarkFile] does.
+    ///
+    /// @param markFile archive mark file to read
+    /// @return true only when the file positively reads a never-signaled version of 0
+    /// @throws IOException when the file cannot be read or cannot hold a version field
+    private static boolean stillNeverSignaled(final Path markFile) throws IOException {
+        final int versionOffset = MessageHeaderDecoder.ENCODED_LENGTH + MarkFileHeaderDecoder.versionEncodingOffset();
+        final ByteBuffer header = ByteBuffer.allocate(versionOffset + Integer.BYTES);
+        try (final FileChannel channel = FileChannel.open(markFile, StandardOpenOption.READ)) {
+            while (header.hasRemaining()) {
+                if (channel.read(header, header.position()) < 0) break;
+            }
+        }
+        if (header.hasRemaining()) throw new EOFException("archive mark file is too short: %s".formatted(markFile));
+        final UnsafeBuffer buffer = new UnsafeBuffer(header.array());
+        final MessageHeaderDecoder decoder = new MessageHeaderDecoder();
+        decoder.wrap(buffer, 0);
+        final int headerOffset = MarkFileHeaderDecoder.TEMPLATE_ID == decoder.templateId()
+                && MarkFileHeaderDecoder.SCHEMA_ID == decoder.schemaId()
+                ? MessageHeaderDecoder.ENCODED_LENGTH : 0;
+        return 0 == buffer.getInt(headerOffset + MarkFileHeaderDecoder.versionEncodingOffset());
+    }
+
+    /// Reports whether an upstream rejection names this launch's own archive mark file
+    /// as still active, that is, owned by a writer killed within Aeron's liveness window.
+    ///
+    /// @param archiveMarkFile archive mark file this launch owns, empty without an Archive
+    /// @param rejection       upstream rejection of that launch
+    /// @return true when the launch may wait and retry
+    private static boolean namesOwnActiveArchiveMarkFile(final Optional<Path> archiveMarkFile,
+                                                         final IllegalStateException rejection) {
+        return archiveMarkFile
+                .map(own -> matchesMarkFile(own, ACTIVE_MARK_FILE, rejection))
+                .orElse(false);
+    }
+
+    /// Reports whether an upstream failure message names the given mark file, resolved
+    /// to its real path so aliases such as macOS's {@code /var} still compare equal.
+    ///
+    /// @param own     mark file this launch owns
+    /// @param pattern message shape carrying the rejected file path in its first group
+    /// @param failure upstream failure to inspect
+    /// @return true when the failure names exactly the given file
+    private static boolean matchesMarkFile(final Path own, final Pattern pattern, final RuntimeException failure) {
+        final Matcher rejected = pattern.matcher(String.valueOf(failure.getMessage()));
+        if (!rejected.matches()) return false;
+        try {
+            return Path.of(rejected.group(1)).toRealPath().equals(own.toRealPath());
+        } catch (final IOException | RuntimeException unreadable) {
+            return false;
+        }
+    }
+
+    /// Resolves the archive mark file an embedded Archive will open, honouring Aeron's
+    /// optional mark-file directory override the same way [Archive] itself does.
+    ///
+    /// @param settings node settings holding the archive directory
+    /// @return absolute path of the archive mark file
+    private static Path archiveMarkFile(final AeronSettings settings) {
+        final String relocated = Archive.Configuration.markFileDir();
+        final Path directory = relocated == null || relocated.isEmpty()
+                ? settings.topology().directories().archiveDirectory()
+                : Path.of(relocated);
+        return directory.resolve(ArchiveMarkFile.FILENAME);
     }
 
     static void ensurePrivateDirectory(final Path path) {
@@ -215,10 +390,10 @@ final class AeronRuntime implements AutoCloseable {
                 archiveContext.authenticatorSupplier(this.settings.authenticatorSupplier());
                 archiveContext.authorisationServiceSupplier(this.settings.authorisationServiceSupplier());
             }
-            this.driver = launchDriver(media,
+            this.driver = launchDriver(media, Optional.of(archiveMarkFile(this.settings)),
                     () -> ArchivingMediaDriver.launch(media.clone(), archiveContext.clone()));
         } else {
-            this.driver = launchDriver(media, () -> MediaDriver.launch(media.clone()));
+            this.driver = launchDriver(media, Optional.empty(), () -> MediaDriver.launch(media.clone()));
         }
         this.aeron = Aeron.connect(new Aeron.Context()
                 .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
