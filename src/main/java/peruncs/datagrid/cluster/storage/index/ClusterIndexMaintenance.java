@@ -66,14 +66,11 @@ public final class ClusterIndexMaintenance {
                 }
             }
         }
-        /* Dirty-gated retirement: a batch that touched no reachable entity
-         * and left the roots stable cannot have changed any index view, so it
-         * must not pay Lucene close/reopen churn on the next query. The
-         * imported-id check above supplies the dirtiness signal; the first
-         * batch after a root scan always retires. */
-        if (!this.initialized || this.rootsDiffer || this.reachabilityChanged) {
-            refreshMaps(this.cachedMaps, this.scratch);
-        }
+        /* Lucene views are cached NRT readers built lazily per index, not per
+         * entity: even a batch that touched no known-reachable entity must
+         * retire them, or the next query reopens over the *pre-import* files
+         * (torn reads). Agents/src: refreshMaps is intentionally unconditional. */
+        refreshMaps(this.cachedMaps, this.scratch);
     }
 
     /// Validates changed roots and rebuilds only changed vector graphs.

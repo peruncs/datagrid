@@ -70,6 +70,10 @@ final class AeronWatermarkChannel implements AutoCloseable {
         this.receiver = receiver;
         this.closeTimeoutNanos = closeTimeoutNanos;
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy");
+        /* A raw daemon thread rather than Aeron's AgentRunner: watermark
+         * ingest is a subscriber-driven drain whose lifecycle is owned by the
+         * transport close stages, and its idle/wakeup pacing is tied to this
+         * node's retry policy, not to an Agent duty cycle. */
         this.worker = Thread.ofPlatform().daemon().name("eclipse-datagrid-aeron-watermarks").unstarted(this::run);
         this.worker.start();
     }

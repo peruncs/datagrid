@@ -69,7 +69,9 @@ final class AeronArchiveCapacity {
         final long required;
         try {
             required = Math.addExact(this.minimumFreeBytes, reserve);
-        } catch (final ArithmeticException ignored) {
+        } catch (final ArithmeticException overflow) {
+            /* Deliberate sentinel arithmetic: -1 means "no usable figure",
+             * never silently saturated. The overflow reports unavailable. */
             return false;
         }
         return this.usableSpace() >= required;

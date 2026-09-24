@@ -468,6 +468,11 @@ public final class AeronArchiveReader implements Disposable {
          * becomes RUNNING, but a failed or timed-out reader never looks healthy. */
         this.updateOutcome(ReplicationApplier.StopOutcome.RUNNING);
         this.stopped = new CountDownLatch(1);
+        /* A raw daemon thread, deliberately not Agrona's AgentRunner: the
+         * subscription is poll-driven (poll returns at N fragments or on
+         * idle), and AgentRunner's duty-cycle re-invocation would add a
+         * second idling layer on top of the fragment-pull loop while this
+         * thread must also bridge blockingly to the Store importer. */
         this.thread = Thread.ofPlatform().daemon().name("datagrid-aeron-archive-reader").unstarted(this::run);
         this.thread.start();
     }
@@ -564,9 +569,9 @@ public final class AeronArchiveReader implements Disposable {
             return work;
         } catch (final ArchiveException disconnect) {
             if (!this.active.get() || this.disposeRequested) {
-                /* Stopping or disposing: keep the historical behavior of letting
-                 * the transport failure surface as-is instead of reconnecting a
-                 * reader that is about to go away. */
+                /* Stopping or disposing: the transport failure surfaces as-is
+                 * — reconnecting a reader that is about to go away would only
+                 * hide the shutdown behind Archive noise. */
                 throw disconnect;
             }
             this.tearDownReconnectableSubscription(current, disconnect);

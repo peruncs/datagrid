@@ -172,7 +172,7 @@ final class NodeCollaborators {
 
     final LazyHolder<StorageBackupBackend> backupBackend;
     final LazyHolder<EmbeddedStorageFoundation<?>> embeddedStorageFoundation;
-    final LazyHolder<NodeMaintenanceScheduler> housekeeper;
+    final LazyHolder<NodeMaintenanceScheduler> maintenanceScheduler;
     final LazyHolder<StorageLimitGate> storageLimitGate;
     final LazyHolder<BackupNodeManager> backupNodeManager;
     final LazyHolder<ReplicationApplier> dataClient;
@@ -216,7 +216,7 @@ final class NodeCollaborators {
         this.backupBackend = LazyHolder.of(this::ensureBackupBackend);
         this.storageTaskExecutor = LazyHolder.of(this::ensureStorageTaskExecutor);
         this.storageBackupTaskExecutor = LazyHolder.of(this::ensureStorageBackupTaskExecutor);
-        this.housekeeper = LazyHolder.of(this::ensureNodeMaintenanceScheduler);
+        this.maintenanceScheduler = LazyHolder.of(this::ensureNodeMaintenanceScheduler);
         this.storageLimitGate = LazyHolder.of(this::ensureStorageLimitGate);
         this.replicationTransport = LazyHolder.of(this::ensureClusterReplicationTransport);
         this.dataMerger = LazyHolder.of(this::ensureStorageBinaryDataMerger);
@@ -705,7 +705,7 @@ final class NodeCollaborators {
     }
 
     NodeMaintenanceScheduler getNodeMaintenanceScheduler() {
-        return this.housekeeper.get();
+        return this.maintenanceScheduler.get();
     }
 
     StorageLimitGate getStorageLimitGate() {

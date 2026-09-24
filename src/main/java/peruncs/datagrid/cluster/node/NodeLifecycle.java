@@ -238,7 +238,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly.getReplicationPublisher().ignoreDistribution(false);
         this.queueWriterDictionary(embeddedStorageManager);
 
-        final var housekeeper = this.assembly.getNodeMaintenanceScheduler();
+        final var maintenance = this.assembly.getNodeMaintenanceScheduler();
 
         /* The shutdown callback is a no-op by design: NodeLifecycle.close owns
          * the complete teardown graph, so a Store-internal shutdown cannot
@@ -253,13 +253,13 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly.getBackupNodeManager();
 
         final StorageConnection gcConnection = this.assembly.clusterStorageManager;
-        housekeeper.schedule("GcWorkaround", () ->
+        maintenance.schedule("GcWorkaround", () ->
         {
             LOGGER.log(System.Logger.Level.INFO, "Issuing GC and CC");
             gcConnection.issueFullCacheCheck();
             gcConnection.issueFullGarbageCollection();
         }, NodeCollaborators.maintenanceInterval(props.gcIntervalMinutes(), EnvKeys.GC_INTERVAL_MINUTES, 30));
-        housekeeper.schedule(
+        maintenance.schedule(
                 "StorageBackup",
                 this.assembly.getStorageBackupTaskExecutor().createScheduledWork(),
                 NodeCollaborators.maintenanceInterval(props.backupIntervalMinutes(), EnvKeys.BACKUP_INTERVAL_MINUTES, 120)
@@ -273,7 +273,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             this.assembly.getStorageBackupManager().createStorageBackup(false);
         }
 
-        housekeeper.start();
+        maintenance.start();
     }
 
     /// Starts a node that publishes storage data.
@@ -361,7 +361,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly.getReplicationPublisher().ignoreDistribution(false);
         this.queueWriterDictionary(embeddedStorageManager);
 
-        final var housekeeper = this.assembly.getNodeMaintenanceScheduler();
+        final var maintenance = this.assembly.getNodeMaintenanceScheduler();
         final var limitGate = this.assembly.getStorageLimitGate();
 
         /* Reader roles reproduce the writer's history through the internal
@@ -390,13 +390,13 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly.getStorageNodeManager();
 
         final StorageConnection gcConnection = this.assembly.clusterStorageManager;
-        housekeeper.schedule("GcWorkaround", () ->
+        maintenance.schedule("GcWorkaround", () ->
         {
             LOGGER.log(System.Logger.Level.INFO, "Issuing GC and CC");
             gcConnection.issueFullCacheCheck();
             gcConnection.issueFullGarbageCollection();
         }, NodeCollaborators.maintenanceInterval(props.gcIntervalMinutes(), EnvKeys.GC_INTERVAL_MINUTES, 60));
-        housekeeper.schedule(
+        maintenance.schedule(
                 "StorageLimitChecker",
                 limitGate.createScheduledWork(this.assembly.getStorageUsageGauge()),
                 Duration.ofMinutes(NodeCollaborators.requiredPositive(
@@ -405,7 +405,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 ))
         );
 
-        housekeeper.start();
+        maintenance.start();
     }
 
     /// Queues the complete persisted dictionary for the first post-restart
@@ -555,9 +555,9 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
              * instead of shutting down underneath its export. */
             sequencer
                     /* 1. Stop new maintenance work before anything it uses. */
-                    .add(CloseSequencer.stage("housekeeper",
-                            collaborators.housekeeper::isInitialized,
-                            () -> collaborators.housekeeper.get().close()))
+                    .add(CloseSequencer.stage("maintenance scheduler",
+                            collaborators.maintenanceScheduler::isInitialized,
+                            () -> collaborators.maintenanceScheduler.get().close()))
                     /* 2. Cancel or boundedly await background backup work. */
                     .add(CloseSequencer.stage("backup task executor",
                             collaborators.storageBackupTaskExecutor::isInitialized,

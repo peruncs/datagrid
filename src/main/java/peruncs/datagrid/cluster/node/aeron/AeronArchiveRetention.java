@@ -36,9 +36,8 @@ import java.util.function.*;
 /// purges and recording restarts therefore never run concurrently on polling
 /// threads, and no caller lock is held across Archive calls.
 final class AeronArchiveRetention implements ReplicationLogRetention {
-    /* Versions 1 through 3 were development-only layouts, including the signed
-     * watermark encoding. There is no migration contract, so the unsigned
-     * watermark layout starts at version 4. */
+    /* The persisted watermark layout is version 4; versions 1 through 3 were
+     * superseded before any stable release and carry no migration contract. */
     private static final int STATE_VERSION = 4;
     private final Set<UUID> configuredReaders;
     private final Runnable ensureWriter;

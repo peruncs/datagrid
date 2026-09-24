@@ -33,16 +33,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /// cannot flake it, while a hot-path allocation regression (a per-transaction
 /// list, lambda, or copy) still trips it.
 ///
-/// Measured steady state on the reference machine (JDK 26, Apple Silicon) was
-/// roughly 31 KiB per transaction, stable within tens of bytes across runs;
-/// the budget below was 8x that. After the per-batch allocations were removed
-/// (reused drain scratch, no per-batch scope/list/flag/Duration, reused
-/// validation scratch), the measured steady state is roughly 20 KiB per
-/// transaction. The budget is deliberately left unchanged: it still bounds the
-/// same hot path with ample headroom for JDK/GC noise, and tightening it
-/// would buy nothing but flake risk on other machines.
+/// Measured steady state on the reference machine (JDK 26, Apple Silicon) is
+/// roughly 20 KiB per transaction, stable within tens of bytes across runs,
+/// after the per-batch allocations were removed (reused drain scratch, no
+/// per-batch scope/list/flag/Duration, reused validation scratch). The budget
+/// bounds that hot path with headroom for JDK/GC noise on other machines.
 class StorageBinaryDataMergerAllocationTest {
-    private static final long BUDGET_BYTES_PER_TRANSACTION = 256L * 1024L;
+    /* Roughly 2.4x the measured ~20 KiB steady state: close enough to trip on a
+ * regression, far enough to absorb JDK/GC noise on other machines. */
+    private static final long BUDGET_BYTES_PER_TRANSACTION = 48L * 1024L;
     private static final int WARMUP_TRANSACTIONS = 10;
     private static final int MEASURED_TRANSACTIONS = 40;
 
@@ -96,6 +95,19 @@ class StorageBinaryDataMergerAllocationTest {
                     assertTrue(perTransaction <= BUDGET_BYTES_PER_TRANSACTION,
                             "heap allocation per transaction %s exceeds budget %s"
                                     .formatted(perTransaction, BUDGET_BYTES_PER_TRANSACTION));
+                    /* Native accounting: the merger must hand every direct
+                     * buffer back after import, so the direct buffer pool
+                     * must not grow across one more measured batch. */
+                    final long nativeBefore = directMemoryUsed();
+                    for (int i = 0; i < MEASURED_TRANSACTIONS; i++) {
+                        merger.receiveDataOwned(transactionBinary(transaction));
+                        merger.awaitApplied();
+                    }
+                    merger.awaitApplied();
+                    final long nativeAfter = directMemoryUsed();
+                    assertTrue(nativeAfter <= nativeBefore + 1L << 20,
+                            "direct memory grew by %s bytes across measured transactions; the merger must release its native buffers"
+                                    .formatted(nativeAfter - nativeBefore));
                 } finally {
                     merger.dispose();
                 }
@@ -203,5 +215,17 @@ class StorageBinaryDataMergerAllocationTest {
 
     public static final class Root {
         public final List<String> values = new ArrayList<>();
+    }
+
+    private static long directMemoryUsed() {
+        long used = 0L;
+        for (final java.lang.management.BufferPoolMXBean pool :
+                java.lang.management.ManagementFactory.getPlatformMXBeans(
+                        java.lang.management.BufferPoolMXBean.class)) {
+            if ("direct".equals(pool.getName())) {
+                used += pool.getMemoryUsed();
+            }
+        }
+        return used;
     }
 }
