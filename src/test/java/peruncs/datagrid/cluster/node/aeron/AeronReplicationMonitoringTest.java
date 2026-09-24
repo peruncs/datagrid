@@ -19,7 +19,6 @@ import peruncs.datagrid.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -43,20 +42,22 @@ class AeronReplicationMonitoringTest {
         assertTrue(local.getMessage().contains("supported shared filesystem"));
     }
 
-    private static NodeSettingsSource properties(final String role) {
+    /// Builds properties whose directories live under the test's own temporary
+    /// directory, so every validation and runtime start is cleaned up by JUnit
+    /// instead of accumulating in the system temporary directory.
+    private NodeSettingsSource properties(final String role) {
         return propertiesWith(role, null, null);
     }
 
-    private static NodeSettingsSource propertiesWith(
+    private NodeSettingsSource propertiesWith(
             final String role, final String overrideName, final String overrideValue) {
         return propertiesWith(role, overrideName, overrideValue, false);
     }
 
-    private static NodeSettingsSource propertiesWith(
+    private NodeSettingsSource propertiesWith(
             final String role, final String overrideName, final String overrideValue, final boolean production) {
         final String clusterId = UUID.randomUUID().toString();
-        final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
-                "datagrid-aeron-monitoring-%s".formatted(UUID.randomUUID()));
+        final Path root = temporaryDirectory.resolve("monitoring-%s".formatted(UUID.randomUUID()));
         return new TestNodeProperties() {
             @Override
             public String replicationRole() {
@@ -249,8 +250,7 @@ class AeronReplicationMonitoringTest {
     /// driver start, so the wiring is rejected instead of silently losing it.
     @Test
     void rejectsLeaseDirectoryInsideAeronDirectory() {
-        final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
-                "datagrid-lease-overlap-%s".formatted(UUID.randomUUID()));
+        final Path root = temporaryDirectory.resolve("lease-overlap");
         final NodeSettingsSource properties = new TestNodeProperties() {
             @Override
             public String replicationRole() {
@@ -278,8 +278,7 @@ class AeronReplicationMonitoringTest {
     /// startup fails with an actionable error instead of publishing unfenced.
     @Test
     void writerWithoutSharedLeaseDirectoryFailsAtStartup() {
-        final Path root = Paths.get(System.getProperty("java.io.tmpdir"),
-                "datagrid-lease-absent-%s".formatted(UUID.randomUUID()));
+        final Path root = temporaryDirectory.resolve("lease-absent");
         final NodeSettingsSource properties = new TestNodeProperties() {
             @Override
             public String replicationRole() {
@@ -322,7 +321,9 @@ class AeronReplicationMonitoringTest {
             @Override
             public String replicationProperty(final String name) {
                 if ("ECLIPSE_DATAGRID_AERON_CLUSTER_ID".equals(name)) return UUID.randomUUID().toString();
-                if ("ECLIPSE_DATAGRID_AERON_DIRECTORY".equals(name)) return "/tmp/datagrid-aeron-test";
+                if ("ECLIPSE_DATAGRID_AERON_DIRECTORY".equals(name)) {
+                    return temporaryDirectory.resolve("production").toString();
+                }
                 return null;
             }
         };
