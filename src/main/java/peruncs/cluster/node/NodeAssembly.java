@@ -103,10 +103,10 @@ public interface NodeAssembly extends AutoCloseable {
 
     /// Starts the storage manager.
     ///
-    /// The returned manager is a borrow: the assembly owns it and shuts it
-    /// down on [NodeAssembly#close]. Callers must not shut it down or
-    /// close it; shutdown is idempotent, so a stray call stays harmless but
-    /// still risks using a closed Store.
+    /// The assembly owns the manager's lifecycle: the manager's `shutdown()`
+    /// triggers this assembly's complete close through the same ordered
+    /// sequencer as [NodeAssembly#close], and closing either entry point is
+    /// equivalent. Callers may close either, never both separately.
     ///
     /// @return storage manager
     /// @throws NodeException if startup fails

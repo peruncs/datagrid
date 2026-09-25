@@ -1,6 +1,7 @@
 package peruncs.cluster.node;
 import peruncs.cluster.api.NodeSettingsSource;
 
+import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
@@ -184,6 +185,39 @@ class NodeAssemblyLifecycleTest {
         /* The auto-close triggered the same full close: a fresh assembly start
          * must fail and the raw Store is down. */
         assertThrows(IllegalStateException.class, foundation::startStorageManager);
+    }
+
+    /// Verifies a Store whose root was never wrapped as Lazy fails startup
+    /// instead of migrating or clearing existing data — the node must be
+    /// reseeded from a compatible image.
+    @Test
+    void nonLazyExistingRootFailsClosedAtStartup(@TempDir final Path storagePath) {
+        /* Preexisting image with a plain (non-Lazy) root. */
+        try (final var seeded = EmbeddedStorage.start(
+                new RootWithPlainData(),
+                StorageConfiguration.Builder()
+                        .setStorageFileProvider(Storage.FileProvider(storagePath))
+                        .createConfiguration())) {
+            seeded.storeRoot();
+        }
+        final NodeAssembly foundation = NodeAssembly.create()
+                .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
+                        .setConfiguration(StorageConfiguration.Builder()
+                                .setStorageFileProvider(Storage.FileProvider(storagePath))
+                                .createConfiguration()))
+                .setRootSupplier(Object::new)
+                .build();
+        try {
+            assertThrows(peruncs.cluster.errors.ReseedRequiredException.class,
+                    foundation::startStorageManager,
+                    "a non-Lazy stored root means reseed, never silent repair");
+        } finally {
+            foundation.close();
+        }
+    }
+
+    static final class RootWithPlainData {
+        String value = "plain";
     }
 
     /// Verifies the options hooks reach the assembly: a programmatic settings

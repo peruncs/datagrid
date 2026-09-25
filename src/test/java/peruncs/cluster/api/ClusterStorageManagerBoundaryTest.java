@@ -299,6 +299,26 @@ class ClusterStorageManagerBoundaryTest {
         }
     }
 
+    /// A started node rejects a Store whose persisted root is not a Lazy
+    /// reference: incompatible images fail closed instead of migrating or
+    /// wiping existing data.
+    @Test
+    void plainExistingRootIsRejectedAtStartup() {
+        try (EmbeddedStorageManager delegate = start(this.dir)) {
+            final CountingManager counting = new CountingManager(delegate);
+            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+                    counting.proxy(), StorageSizeValidation.notReached(), () -> false,
+                    new StorageGraphCoordinator());
+            /* Plain replacement is rejected before any mutation: the graph
+             * must stay valid afterwards, since nothing was corrupted. */
+            assertThrows(IllegalArgumentException.class, () -> manager.setRoot(new Object()),
+                    "a non-Lazy replacement root must be rejected");
+            manager.shutdown();
+            assertThrows(IllegalStateException.class, manager::start,
+                    "reopening a closed facade must fail");
+        }
+    }
+
     /// Read-to-write upgrades are rejected immediately instead of deadlocking
     /// the fair lock; reads inside a write are reentrant and supported.
     @Test

@@ -304,14 +304,21 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @Override
     public ClusterStorageManager<T> start() {
         /* The node lifecycle owns real startup: this is an idempotent
-         * admission check, never a resurrection of a closed Store. */
+         * admission check, never a resurrection of a closed Store — closed
+         * and invalidated states are rejected, like every other entry. */
         this.ensureOpen();
+        this.ensureGraphValid();
         return this;
     }
 
-    /// Fails closed when this manager's store was shut down with the node.
+    /// Fails closed when this manager is no longer live.
+    ///
+    /// A node close — whether routed through this facade's shutdown or
+    /// directly through the owning lifecycle — leaves the raw Store shut
+    /// down underneath; reads and writes on a dead Store must not resurrect
+    /// or re-enter it.
     private void ensureOpen() {
-        if (this.closed) {
+        if (this.closed || !this.delegate.isRunning()) {
             throw new IllegalStateException("cluster storage manager is closed");
         }
     }
@@ -351,8 +358,10 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @Override
     public PersistenceRootsView viewRoots() {
         /* Live root accessors outside a coordinated read are only tolerable
-         * while the graph is provably valid. Note that callers still must
-         * not traverse the returned view past a coordinated boundary. */
+         * while the graph is provably valid and the store is open. Note that
+         * callers still must not traverse the returned view past a
+         * coordinated boundary. */
+        this.ensureOpen();
         this.ensureGraphValid();
         return this.delegate.viewRoots();
     }
@@ -400,12 +409,11 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @Override
     @SuppressWarnings("unchecked")
     public Lazy<T> root() {
-        /* Writers own their image and mutate it through store(); returning
-         * the live reference preserves the Store write flow, but a latched
-         * graph invalidity must not be served: the image may be partially
-         * applied. Readers override this to throw outright: a live reference
-         * would escape the coordinator read lock and observe a
-         * half-materialized batch. */
+        /* The live root stays accessible to both roles — readers traverse it
+         * inside `graphBoundary().read(...)`, writers under the documented
+         * write contract — but never after the node closed or the graph was
+         * invalidated. */
+        this.ensureOpen();
         this.ensureGraphValid();
         return this.delegate.root();
     }

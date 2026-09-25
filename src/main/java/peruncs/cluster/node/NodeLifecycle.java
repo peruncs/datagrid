@@ -18,6 +18,7 @@ import peruncs.cluster.api.NodeSettingsSource.Env.EnvKeys;
 import peruncs.cluster.node.backup.BackupNodeControl;
 import peruncs.cluster.node.backup.StorageBackupTaskExecutor;
 import peruncs.cluster.node.store.ClusterStorageManagers;
+import peruncs.cluster.node.store.StorageSizeValidation;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.storage.ReplicationCursor;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
@@ -524,7 +525,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
 
         this.assembly.clusterStorageManager = ClusterStorageManagers.guarding(
                 storage,
-                peruncs.cluster.node.store.StorageSizeValidation.notReached(),
+                StorageSizeValidation.notReached(),
                 this::closeNode,
                 this.assembly.graphCoordinator
         );
@@ -669,16 +670,23 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                             collaborators::closeDurableCursorFile))
                     /* 5. Close the Store last. A backup that outlived its
                      * executor budget must block this stage instead of losing
-                     * the race to a shutdown Store. The raw embedded manager
-                     * is shut down here — never through the facade, whose
-                     * shutdown() now triggers this whole close back into this
-                     * sequencer. A startup failure may leave the raw Store
-                     * started but unwrapped: without the facade this stage
-                     * owns the raw manager directly. */
+                     * the race to a shutdown Store: a running backup fails the
+                     * stage, and a retry re-runs it instead of skipping
+                     * silently — a skipped stage is no proof the Store closed.
+                     * The raw embedded manager is shut down here — never
+                     * through the facade, whose shutdown() now triggers this
+                     * whole close back into this sequencer. A startup failure
+                     * may leave the raw Store started but unwrapped: without
+                     * the facade this stage owns the raw manager directly. */
                     .add(CloseSequencer.stage("embedded storage",
-                            () -> collaborators.embeddedStorageManager != null && (
-                                    backupTaskExecutor == null || !backupTaskExecutor.isRunningBackup()),
-                            () -> collaborators.embeddedStorageManager.shutdown()));
+                            () -> collaborators.embeddedStorageManager != null,
+                            () ->
+                            {
+                                if (backupTaskExecutor != null && backupTaskExecutor.isRunningBackup()) {
+                                    throw new IllegalStateException("Store close deferred: backup still running");
+                                }
+                                collaborators.embeddedStorageManager.shutdown();
+                            }));
             sequencer.run("Failed to close node");
         } catch (final RuntimeException | Error closeFailure) {
             failure = closeFailure;
