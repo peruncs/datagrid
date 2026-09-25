@@ -15,9 +15,11 @@ import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
@@ -560,8 +562,7 @@ public final class AeronArchiveReader implements Disposable {
                 /* Stale is safe: never leads the recording, only delays. */
             }
             /* Paced refresh: park between queries; return when disposing. */
-            java.util.concurrent.locks.LockSupport.parkNanos(
-                    java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(RECORDED_POSITION_REFRESH_MILLIS));
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(RECORDED_POSITION_REFRESH_MILLIS));
             if (Thread.currentThread().isInterrupted()) {
                 return;
             }
