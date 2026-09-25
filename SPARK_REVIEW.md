@@ -360,7 +360,7 @@ keep `Storage*` in both. Merge `PathSecurity` + `StorageFileOperations` +
 `BackupUploadValidator`; move `node/BackupRestorePolicy.java` (216) → `node/backup/`.
 
 ### S5. Demote `public` that is only intra-module (module exports only `api`)
-`module-info.java:158-177` exports only `peruncs.datagrid.cluster.api`, yet ~70
+`module-info.java:158-177` exports only `peruncs.cluster.api`, yet ~70
 types/methods are `public` for intra-module sharing. Concrete, safe demotions:
 - `storage/types/PathSecurity.java:16` + `node/store/StorageFileOperations.java:18`
   ("public only because backup and node packages share it") + `node/CloseSequencer.java:27-31`

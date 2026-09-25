@@ -39,7 +39,7 @@ not a constraint.
 ### P0-1. Repair the merger's queue-byte invariant and signal before waiting
 
 **Evidence.** In
-`src/main/java/peruncs/datagrid/cluster/storage/types/StorageBinaryDataMerger.java`,
+`src/main/java/peruncs/cluster`,
 `scheduleMaterialization` computes `projectedBytes` as `cachedBytes +
 inFlightBytes + incomingBytes`, then stores that total back into `cachedBytes`.
 When batch A is in flight and batch B is queued, A is counted in both fields and
@@ -562,7 +562,7 @@ order separately testable.
 
 ### P3-5. Shrink visibility after the package move
 
-The module exports only `peruncs.datagrid.cluster.api`, yet roughly 75 top-level main
+The module exports only `peruncs.cluster.api`, yet roughly 75 top-level main
 types are declared public. Public is still meaningful inside a non-exported module:
 it permits accidental cross-package coupling and makes later moves harder. After
 P3-1/P3-2, make implementations, codecs, file helpers, `CrashHook`, reader delivery

@@ -220,7 +220,7 @@
 							<compilerArgs>
 								<arg>--enable-preview</arg>
 								<arg>--add-modules</arg><arg>jdk.jfr</arg>
-								<arg>--add-reads</arg><arg>peruncs.datagrid.cluster=jdk.jfr</arg>
+								<arg>--add-reads</arg><arg>peruncs.cluster=jdk.jfr</arg>
 							</compilerArgs>
 						</configuration>
 					</execution>

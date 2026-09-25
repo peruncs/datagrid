@@ -345,7 +345,7 @@ control / role / housekeeper in the root only if they stay cohesive.
 `storage.aeron.wire.ReplicationWireException`, nested
 `BackupArchive.IncompleteArchiveException`. `BackupBusyException:9` and
 `WriterFencedException:12` claim “exported contract / exported type” but
-`module-info` exports only `peruncs.datagrid.cluster.api`. README documents
+`module-info` exports only `peruncs.cluster.api`. README documents
 `storageNodeManager()`, `BackupBusyException`, `AeronArchiveReader.New` — none are
 reachable outside the module.
 

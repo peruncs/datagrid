@@ -1,3 +1,6 @@
+import peruncs.cluster.api.ClusterNode;
+import peruncs.cluster.api.ClusterStore;
+
 /// Data Grid node with Aeron replication.
 ///
 /// Applications create the node services, start them in dependency order,
@@ -6,7 +9,7 @@
 /// `...cluster.node.store`, `...cluster.node.backup`, and
 /// `...cluster.node.replication`, implemented by the Aeron transport in
 /// `...cluster.node.aeron`. Control operations are exposed programmatically
-/// through the exported [peruncs.datagrid.cluster.api.ClusterNode] only;
+/// through the exported [ClusterNode] only;
 /// the module ships no HTTP surface — any HTTP, MCP, or UI boundary belongs
 /// to the embedding application.
 /// Store binary movement lives in
@@ -151,8 +154,8 @@
 /// The node ships no HTTP server and no HTTP types. The embedding application
 /// owns the entire boundary — HTTP and OpenAPI routes, MCP tools, a web UI,
 /// Prometheus rendering, authentication, and authorization — and drives the
-/// node through the exported [peruncs.datagrid.cluster.api.ClusterNode] and
-/// its [peruncs.datagrid.cluster.api.ClusterStore] view; the Store object
+/// node through the exported [ClusterNode] and
+/// its [ClusterStore] view; the Store object
 /// graph beneath them is the entity layer. The assembly owns both role
 /// managers and closes them exactly once, and both closes are idempotent.
 /// Roles stay fixed at startup
@@ -161,7 +164,7 @@
 /// transition.
 ///
 /// @since 1.0
-module peruncs.datagrid.cluster
+module peruncs.cluster
 {
     requires org.eclipse.store.storage.embedded;
     requires org.eclipse.serializer.base;
@@ -180,6 +183,6 @@ module peruncs.datagrid.cluster
     // the published module descriptor.
     requires org.eclipes.store.gigamap.jvector;
     requires jvector;
-    exports peruncs.datagrid.cluster.api;
-    exports peruncs.datagrid.cluster.errors;
+    exports peruncs.cluster.api;
+    exports peruncs.cluster.errors;
 }

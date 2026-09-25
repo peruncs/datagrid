@@ -42,8 +42,8 @@ metadata across nodes.
 </dependency>
 ```
 
-The JPMS module exports only `peruncs.datagrid.cluster.api` (node contracts)
-and `peruncs.datagrid.cluster.errors` (typed failures to name at your
+The JPMS module exports only `peruncs.cluster.api` (node contracts)
+and `peruncs.cluster.errors` (typed failures to name at your
 boundary). Open a node through the small owned facade; Aeron, Store
 adapters, checkpoints, indexes, backup internals, and lifecycle controls
 deliberately remain inaccessible:
@@ -68,7 +68,7 @@ traversal inside the callback, and return only copied values — never a live
 graph object. Mutations are accepted only on the writer; a reader fails
 writes with `ReaderWriteRejectedException`, a fenced writer with
 `WriterFencedException`, and a full Store with `StorageLimitReachedException`
-(all from `peruncs.datagrid.cluster.errors`). An uncertain-commit failure is
+(all from `peruncs.cluster.errors`). An uncertain-commit failure is
 not safe to retry blindly; see the `ClusterStore.store` Javadoc.
 `ClusterNode.close` owns and closes the complete node lifecycle.
 
