@@ -102,7 +102,7 @@ class AeronReplicationMonitoringTest {
             final ReplicationPositionProvider positionProvider = transport.positionProvider("stream");
             positionProvider.init();
             positionProvider.latest();
-            final ReplicationApplier client = transport.client(null, "stream", null, null, false);
+            final ReplicationApplier client = transport.client(null, "stream", null, null);
             final ReplicationHealth health = transport.health(() -> true, client);
             assertEquals("aeron", transport.id());
             assertTrue(health.isReady());
@@ -219,7 +219,7 @@ class AeronReplicationMonitoringTest {
     void reportsArchiveCapacityDegradationBeforeAcceptingWrites() {
         try (final ClusterReplicationTransport transport = new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES",
                         Long.toString(Long.MAX_VALUE)))) {
-            final ReplicationApplier client = transport.client(null, "stream", null, null, false);
+            final ReplicationApplier client = transport.client(null, "stream", null, null);
             final ReplicationHealth health = transport.health(() -> true, client);
             assertFalse(health.isReady());
             assertFalse(health.isHealthy());

@@ -195,7 +195,7 @@ class AeronRuntimeTest {
 
     /// Writes an archive mark file shaped like upstream's own output: a valid SBE
     /// header whose version field is either left never-signaled or written like
-    /// [ArchiveMarkFile.signalReady] would.
+    /// `ArchiveMarkFile.signalReady` would.
     private static Path archiveMarkFile(final Path root, final int version) throws IOException {
         final Path markFile = root.resolve("archive").resolve(ArchiveMarkFile.FILENAME);
         writeArchiveMarkFile(markFile, version);

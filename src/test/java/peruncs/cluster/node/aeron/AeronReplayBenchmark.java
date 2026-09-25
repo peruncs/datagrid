@@ -176,7 +176,7 @@ public final class AeronReplayBenchmark {
                             @Override
                             public void close() {
                             }
-                        }, baseline, false);
+                        }, baseline);
                 try {
                     final long replayStarted = System.nanoTime();
                     client.start();

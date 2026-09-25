@@ -77,10 +77,6 @@ class ClusterIndexProbeScratchTest {
                 final ClusterIndexValidation.ValidationScratch scratch = scratchOf(maintenance);
                 assertTrue(scratch.vectorProbes.isEmpty(),
                         "probe scratch must be dropped with the batch, found " + scratch.vectorProbes.keySet());
-                for (final Object key : scratch.vectorProbes.keySet()) {
-                    assertInstanceOf(Integer.class, key,
-                            "probes are keyed by dimension, never by index");
-                }
                 assertTrue(scratch.vectorModCounts.isEmpty(),
                         "structural mod counts must be dropped with the batch");
                 assertTrue(scratch.vectorGroups.isEmpty());
@@ -109,7 +105,7 @@ class ClusterIndexProbeScratchTest {
             maintenance.beforeApply(connection, new ByteBuffer[0], 0,
                     ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS);
             maintenance.afterApply(connection, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS);
-            final VectorIndex<Article> retired = (VectorIndex<Article>) root.articles.index()
+            final Object retired = root.articles.index()
                     .get(VectorIndices.Category()).get("article-vectors");
             root.articles = GigaMap.New();
             storage.storeRoot();
@@ -119,12 +115,11 @@ class ClusterIndexProbeScratchTest {
             /* The scratch must not pin the retired map's index across the
              * replacement; probe keys are dimensions, never index instances. */
             assertTrue(scratchOf(maintenance).vectorProbes.keySet().stream()
-                            .noneMatch(key -> (Object) key == (Object) retired),
+                            .noneMatch(key -> key == (Object) retired),
                     "the retired index must not stay reachable through probe scratch");
         }
     }
 
-    @SuppressWarnings("unchecked")
     private static ClusterIndexValidation.ValidationScratch scratchOf(final ClusterIndexMaintenance maintenance)
             throws Exception {
         final Field field = ClusterIndexMaintenance.class.getDeclaredField("scratch");

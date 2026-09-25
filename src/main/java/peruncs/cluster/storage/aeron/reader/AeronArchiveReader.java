@@ -559,10 +559,10 @@ public final class AeronArchiveReader implements Disposable {
             } catch (final RuntimeException ignored) {
                 /* Stale is safe: never leads the recording, only delays. */
             }
-            try {
-                Thread.sleep(RECORDED_POSITION_REFRESH_MILLIS);
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
+            /* Paced refresh: park between queries; return when disposing. */
+            java.util.concurrent.locks.LockSupport.parkNanos(
+                    java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(RECORDED_POSITION_REFRESH_MILLIS));
+            if (Thread.currentThread().isInterrupted()) {
                 return;
             }
         }

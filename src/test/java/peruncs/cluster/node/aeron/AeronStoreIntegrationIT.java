@@ -170,7 +170,7 @@ class AeronStoreIntegrationIT {
                         public void close() {
                         }
                     },
-                    startingCursor, "backup-reader".equals(role));
+                    startingCursor);
             try {
                 client.start();
                 final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
@@ -1224,7 +1224,7 @@ class AeronStoreIntegrationIT {
                 @Override
                 public void close() {
                 }
-            }, startingCursor, "backup-reader".equals(this.role));
+            }, startingCursor);
         }
 
         /// Test-only cursor overwrite used by soak rollback chaos: persists an

@@ -350,7 +350,9 @@ public final class ReaderCrashChildMain {
                     try (FileChannel channel = FileChannel.open(this.uncertainty,
                             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
                         channel.position(INFLIGHT_JOURNAL_BYTES - 1L);
-                        channel.write(ByteBuffer.wrap(new byte[1]));
+                        if (channel.write(ByteBuffer.wrap(new byte[1])) != 1) {
+                            throw new IOException("journal byte was not written");
+                        }
                         channel.force(true);
                     }
                     this.fixture.barrier(this.point, sequence, position);

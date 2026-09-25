@@ -287,8 +287,7 @@ final class ApplyWorker {
 
     /// Latches an index-refresh-phase overrun unless the phase already ended.
     ///
-    /// @param startedNanos        nanoTime stamp of the batch being applied
-    /// @param rebuildStartedNanos nanoTime stamp at the start of the index phase
+    /// @param startedNanos nanoTime stamp of the batch being applied
     void refreshBudgetExpired(final long startedNanos) {
         synchronized (this.budgetLock) {
             if (this.indexRefreshedAtNanos != 0L) return;

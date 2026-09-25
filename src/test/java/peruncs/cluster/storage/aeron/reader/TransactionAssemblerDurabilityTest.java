@@ -113,7 +113,7 @@ class TransactionAssemblerDurabilityTest {
                     "an unrecorded live COMMIT must be withheld");
             assertEquals(-1L, assembler.lastResolvedSequence(), "withheld for redelivery, not resolved");
             assertTrue(assembler.cursorSnapshot().position() < commitEnd);
-            assertTrue(assembler.unflushedDeliveryCount() == 0, "nothing may be staged yet");
+            assertEquals(0, assembler.unflushedDeliveryCount(), "nothing may be staged yet");
 
             /* The Archive catches up; the redelivered COMMIT now applies. */
             recorded.set(commitEnd);

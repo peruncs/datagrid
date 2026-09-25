@@ -509,13 +509,11 @@ final class NodeCollaborators {
     /// @return replication data client
     private ReplicationApplier ensureReplicationApplier() {
         final var props = this.getNodeSettingsSource();
-        final boolean commitPosition = this.nodeRole == NodeRole.BACKUP_READER;
         return this.getClusterReplicationTransport().client(
                 this.getStorageBinaryDataMerger(),
                 props.replicationStreamName(),
                 this.getCommitAppliedListener(),
-                this.getDurableCursorFile().get(),
-                commitPosition
+                this.getDurableCursorFile().get()
         );
     }
 

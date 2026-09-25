@@ -81,14 +81,12 @@ final class AeronReaderTransport {
     /// @param streamName logical stream name
     /// @param cursorListener callback after data is applied
     /// @param startingCursor durable starting cursor
-    /// @param commitPosition whether reader positions are committed
     /// @return binary data client
     ReplicationApplier client(
             final StorageBinaryDataReceiver receiver,
             final String streamName,
             final CommitAppliedListener cursorListener,
-            final ReplicationCursor startingCursor,
-            final boolean commitPosition
+            final ReplicationCursor startingCursor
     ) {
         final AeronTransportShared shared = shared();
         synchronized (shared) {

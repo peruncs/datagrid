@@ -245,10 +245,9 @@ public final class AeronTransport implements ClusterReplicationTransport {
             final StorageBinaryDataReceiver receiver,
             final String streamName,
             final CommitAppliedListener cursorListener,
-            final ReplicationCursor startingCursor,
-            final boolean commitPosition
+            final ReplicationCursor startingCursor
     ) {
-        return this.readerTransport.client(receiver, streamName, cursorListener, startingCursor, commitPosition);
+        return this.readerTransport.client(receiver, streamName, cursorListener, startingCursor);
     }
 
     @Override

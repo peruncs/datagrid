@@ -104,7 +104,7 @@ public final class AeronFullPathBenchmark {
                             @Override
                             public void close() {
                             }
-                        }, baseline, false);
+                        }, baseline);
                 try {
                     client.start();
                     awaitLive(client);

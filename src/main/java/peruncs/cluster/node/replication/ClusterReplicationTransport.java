@@ -57,8 +57,7 @@ public interface ClusterReplicationTransport extends AutoCloseable {
                 final StorageBinaryDataReceiver receiver,
                 final String streamName,
                 final CommitAppliedListener cursorListener,
-                final ReplicationCursor startingCursor,
-                final boolean commitPosition
+                final ReplicationCursor startingCursor
         ) {
             return ReplicationApplier.noOp(startingCursor);
         }
@@ -148,14 +147,12 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     /// @param streamName     logical stream name
     /// @param cursorListener callback after data is applied
     /// @param startingCursor durable starting cursor
-    /// @param commitPosition whether reader positions are committed
     /// @return replication applier
     ReplicationApplier client(
             StorageBinaryDataReceiver receiver,
             String streamName,
             CommitAppliedListener cursorListener,
-            ReplicationCursor startingCursor,
-            boolean commitPosition
+            ReplicationCursor startingCursor
     );
 
         /// Returns the provider's latest published position used for backup/bootstrap.

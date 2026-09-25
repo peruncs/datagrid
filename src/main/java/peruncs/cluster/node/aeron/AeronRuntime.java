@@ -94,7 +94,7 @@ final class AeronRuntime implements AutoCloseable {
     /// retrying while a previously crashed instance still owns the driver or archive
     /// mark files.
     ///
-    /// A writer acquires its lease before [start], so this directory has a single
+    /// A writer acquires its lease before start, so this directory has a single
     /// launcher at a time and two crash leftovers can be recovered here:
     /// <ul>
     /// <li>A never-signaled archive mark file (major version 0) left by a writer

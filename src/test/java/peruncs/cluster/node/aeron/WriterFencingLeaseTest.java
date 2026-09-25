@@ -50,7 +50,7 @@ class WriterFencingLeaseTest {
             assertThrows(IllegalStateException.class,
                     () -> WriterFencingLease.acquire(alias, cluster, generation, nodeId, STALENESS),
                     "an aliased path must not bypass the in-JVM holder check");
-            assertEquals(first.fencingToken(), 1L);
+            assertEquals(1L, first.fencingToken());
         }
     }
 

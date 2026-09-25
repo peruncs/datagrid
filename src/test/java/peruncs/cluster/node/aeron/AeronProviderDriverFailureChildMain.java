@@ -19,7 +19,7 @@ public final class AeronProviderDriverFailureChildMain {
         final Path root = Path.of(System.getProperty("dg.driver.failure.root"));
         Files.createDirectories(root.resolve("control"));
         final ClusterReplicationTransport transport = new AeronTransport(properties(root));
-        final ReplicationApplier client = transport.client(null, "store", null, null, false);
+        final ReplicationApplier client = transport.client(null, "store", null, null);
         final ReplicationHealth health = transport.health(() -> true, client);
         final var positionProvider = transport.positionProvider("store");
         positionProvider.init();

@@ -214,7 +214,6 @@ class AeronArchiveReplicationIT {
 
             /* During the stall budget the reader must neither apply the
              * unrecorded transaction nor fail early. */
-            final long stallStartNanos = System.nanoTime();
             LockSupport.parkNanos(stallBudgetNanos / 2L);
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(150L));
             assertEquals(0L, client.lastResolvedSequence(),
