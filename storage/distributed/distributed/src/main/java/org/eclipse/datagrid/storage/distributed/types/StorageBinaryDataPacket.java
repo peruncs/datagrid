@@ -50,6 +50,15 @@ import static org.eclipse.serializer.util.X.notNull;
 		 */
 		int packetCount();
 
+		/** Returns the transport message index, or {@code -1} when unindexed.
+		 *
+		 * @return complete message index, or {@code -1}
+		 */
+		default long messageIndex()
+		{
+			return -1L;
+		}
+
 		/** Returns the borrowed packet payload.
 		 *
 		 * @return packet payload
@@ -66,13 +75,37 @@ import static org.eclipse.serializer.util.X.notNull;
 		 * @return new packet
 		 */
 		static StorageBinaryDataPacket New(
-            final MessageType messageType,
-            final int messageLength,
-            final int packetIndex,
-            final int packetCount,
-            final ByteBuffer buffer
-    )
+	            final MessageType messageType,
+	            final int messageLength,
+	            final int packetIndex,
+	            final int packetCount,
+	            final ByteBuffer buffer
+	    )
+		{
+			return New(messageType, messageLength, packetIndex, packetCount, -1L, buffer);
+		}
+
+		/** Creates a packet with validated metadata and a transport message index.
+		 *
+		 * @param messageType message kind
+		 * @param messageLength complete message length
+		 * @param packetIndex zero-based packet index
+		 * @param packetCount total packet count
+		 * @param messageIndex complete message index, or {@code -1}
+		 * @param buffer packet payload
+		 * @return new packet
+		 */
+		static StorageBinaryDataPacket New(
+			final MessageType messageType,
+			final int messageLength,
+			final int packetIndex,
+			final int packetCount,
+			final long messageIndex,
+			final ByteBuffer buffer
+		)
 	{
+		if (messageIndex < -1L || messageIndex == Long.MAX_VALUE)
+			throw new IllegalArgumentException("message index must be in [-1, Long.MAX_VALUE)");
 		final int validatedPacketIndex = notNegative(packetIndex);
 		final int validatedPacketCount = positive(packetCount);
 		if (validatedPacketIndex >= validatedPacketCount)
@@ -81,26 +114,29 @@ import static org.eclipse.serializer.util.X.notNull;
 		}
 		return new StorageBinaryDataPacketDefault(
 			notNull(messageType),
-			notNegative(messageLength),
-			validatedPacketIndex,
-			validatedPacketCount,
-			notNull(buffer)
-		);
+				notNegative(messageLength),
+				validatedPacketIndex,
+				validatedPacketCount,
+				messageIndex,
+				notNull(buffer)
+			);
 	}
 
 	/** Immutable packet metadata and borrowed payload view.
 	 *
 	 * @param messageType message kind
 	 * @param messageLength complete message length
-	 * @param packetIndex zero-based packet index
-	 * @param packetCount total packet count
-	 * @param buffer borrowed packet payload
+		 * @param packetIndex zero-based packet index
+		 * @param packetCount total packet count
+		 * @param messageIndex complete message index, or {@code -1}
+		 * @param buffer borrowed packet payload
 	 */
 	record StorageBinaryDataPacketDefault(
 		MessageType messageType,
-		int messageLength,
-		int packetIndex,
-		int packetCount,
+			int messageLength,
+			int packetIndex,
+			int packetCount,
+			long messageIndex,
 			ByteBuffer buffer
 		) implements StorageBinaryDataPacket
 	{

@@ -87,6 +87,7 @@ public interface StorageBinaryDataDistributorKafka extends StorageBinaryDataDist
 		private int activeActions;
 		private boolean disposed;
 		private boolean disposing;
+		private boolean messageIndexExplicitlySet;
 
 		Abstract(final Properties kafkaProperties, final String topicName)
 		{
@@ -203,6 +204,8 @@ public interface StorageBinaryDataDistributorKafka extends StorageBinaryDataDist
 		private KafkaProducer<String, byte[]> ensureProducer()
 		{
 			if (this.kafkaProducer != null) return this.kafkaProducer;
+			if (!this.messageIndexExplicitlySet)
+				this.messageIndex.set(KafkaLatestMessageIndex.read(this.kafkaProperties, this.topicName));
 			final Properties properties = new Properties();
 			properties.putAll(this.kafkaProperties);
 			properties.setProperty(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
@@ -232,6 +235,7 @@ public interface StorageBinaryDataDistributorKafka extends StorageBinaryDataDist
 
 		private void executeDistribution(final MessageType type, final List<StorageBinaryDataChunker.Chunk> chunks)
 		{
+			final KafkaProducer<String, byte[]> producer = this.ensureProducer();
 			final long index = this.messageIndex.incrementAndGet();
 			final var checksum = Crc32c.accumulator();
 			for (final StorageBinaryDataChunker.Chunk chunk : chunks)
@@ -240,7 +244,6 @@ public interface StorageBinaryDataDistributorKafka extends StorageBinaryDataDist
 				checksum.update(bytes, 0, bytes.length);
 			}
 			final int crc = (int)checksum.getValue();
-			final KafkaProducer<String, byte[]> producer = this.ensureProducer();
 			for (final StorageBinaryDataChunker.Chunk chunk : chunks)
 			{
 				final ProducerRecord<String, byte[]> record =
@@ -320,6 +323,7 @@ public interface StorageBinaryDataDistributorKafka extends StorageBinaryDataDist
 			if (this.activeActions != 0 || this.disposed || this.disposing)
 				throw new IllegalStateException("Kafka message index can only change while quiescent");
 			this.messageIndex.set(index);
+			this.messageIndexExplicitlySet = true;
 		}
 
 		/** Returns the latest logical message index.

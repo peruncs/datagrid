@@ -38,11 +38,10 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic
 {
 	private final StorageBinaryDataDistributor distributor;
 	private final UnaryOperator<PersistenceTarget<Binary>> targetFactory;
-	private final InstanceDispatcherLogic previous;
 
 	public DistributedStorageConfigurator(final StorageBinaryDataDistributor distributor)
 	{
-		this(distributor, delegate -> StorageBinaryTargetDistributing.New(delegate, distributor), null);
+		this(distributor, delegate -> StorageBinaryTargetDistributing.New(delegate, distributor));
 	}
 
 	public DistributedStorageConfigurator(
@@ -50,30 +49,18 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic
 		final UnaryOperator<PersistenceTarget<Binary>> targetFactory
 	)
 	{
-		this(distributor, targetFactory, null);
-	}
-
-	/** Creates a configurator that preserves an already installed dispatcher. */
-	public DistributedStorageConfigurator(
-		final StorageBinaryDataDistributor distributor,
-		final UnaryOperator<PersistenceTarget<Binary>> targetFactory,
-		final InstanceDispatcherLogic previous
-	)
-	{
 		super();
 		this.distributor = notNull(distributor);
 		this.targetFactory = notNull(targetFactory);
-		this.previous = previous;
 	}
 
 	@SuppressWarnings("unchecked") // Store supplies the Binary persistence target to this typed factory
 	@Override
 	public <T> T apply(final T subject)
 	{
-		final T dispatched = this.previous == null ? subject : this.previous.apply(subject);
-		if (dispatched == null) return null;
-		if (dispatched instanceof PersistenceTarget<?> target &&
-			dispatched instanceof PersistenceTypeDictionaryExporter dictionaryExporter)
+		if (subject == null) return null;
+		if (subject instanceof PersistenceTarget<?> target &&
+			subject instanceof PersistenceTypeDictionaryExporter dictionaryExporter)
 		{
 			/* Store foundations may expose one object through both SPIs. Returning
 			 * only the target decorator silently drops dictionary publication, so
@@ -83,19 +70,19 @@ public class DistributedStorageConfigurator implements InstanceDispatcherLogic
 				StorageTypeDictionaryExporterDistributing.New(dictionaryExporter, this.distributor)
 			);
 		}
-		if (dispatched instanceof PersistenceTarget<?> target)
+		if (subject instanceof PersistenceTarget<?> target)
 		{
 			return (T)this.targetFactory.apply((PersistenceTarget<Binary>)target);
 		}
-		if (dispatched instanceof PersistenceTypeDictionaryExporter)
+		if (subject instanceof PersistenceTypeDictionaryExporter dictionaryExporter)
 		{
 			return (T)StorageTypeDictionaryExporterDistributing.New(
-				(PersistenceTypeDictionaryExporter)dispatched,
+				dictionaryExporter,
 				this.distributor
 			);
 		}
 
-		return dispatched;
+		return subject;
 	}
 
 	/** Combines the two Store extension contracts when one subject implements both. */

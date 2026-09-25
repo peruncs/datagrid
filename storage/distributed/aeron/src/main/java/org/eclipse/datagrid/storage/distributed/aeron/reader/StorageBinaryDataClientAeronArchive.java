@@ -393,8 +393,13 @@ public final class StorageBinaryDataClientAeronArchive implements StorageBinaryD
 		{
 			throw new IllegalStateException("Aeron Archive reader is stopping for disposal");
 		}
-		this.stopAtLatest = true;
-		this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
+		/* Repeated control calls are idempotent. Resetting the deadline on every
+		 * call lets a busy caller keep a stalled replay alive forever. */
+		if (!this.stopAtLatest)
+		{
+			this.stopAtLatest = true;
+			this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
+		}
 		if (this.active.get()) this.stopOutcome = StorageBinaryDataClient.StopOutcome.STOPPING;
 	}
 

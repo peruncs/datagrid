@@ -60,7 +60,9 @@ public class KafkaCursorProvider implements AutoCloseable
 	private static final System.Logger LOG = System.getLogger(KafkaCursorProvider.class.getName());
 	private static final long PARTITION_ASSIGNMENT_TIMEOUT_NANOS = Duration.ofSeconds(10L).toNanos();
 	private static final Duration POLL_TIMEOUT = Duration.ofMillis(250L);
+	private static final Duration OFFSET_LOOKUP_TIMEOUT = Duration.ofSeconds(10L);
 	private static final long LATEST_LOOKUP_TIMEOUT_NANOS = Duration.ofSeconds(10L).toNanos();
+	private static final long MAX_RECORDS_PER_SCAN = 1_024L;
 
 	private volatile KafkaConsumer<String, byte[]> kafka;
 	private final KafkaPropertiesProvider kafkaPropertiesProvider;
@@ -154,36 +156,69 @@ public class KafkaCursorProvider implements AutoCloseable
 	public synchronized long provideLatestSequence() throws KafkaException
 	{
 		final KafkaConsumer<String, byte[]> consumer = this.consumer();
-		long lastSequence = -1L;
 		consumer.poll(POLL_TIMEOUT);
 		final var partitions = consumer.assignment();
 		if (partitions.size() != 1) throw new IllegalStateException("Kafka replication topic must have exactly one partition");
 		final TopicPartition partition = partitions.iterator().next();
 		consumer.seekToEnd(partitions);
-		long candidate = consumer.position(partition) - 1L;
+		final long endOffset = consumer.position(partition);
+		final long beginningOffset = consumer.beginningOffsets(partitions, OFFSET_LOOKUP_TIMEOUT).get(partition);
 		final long deadline = ReplicationRetry.deadlineNanos(LATEST_LOOKUP_TIMEOUT_NANOS);
-		while (candidate >= 0L && !ReplicationRetry.expired(deadline))
+		long scanEnd = endOffset;
+		while (scanEnd > beginningOffset && !ReplicationRetry.expired(deadline))
 		{
-			consumer.seek(partition, candidate);
-			for (final var rec : consumer.poll(POLL_TIMEOUT))
+			final long scanStart = Math.max(beginningOffset, scanEnd - MAX_RECORDS_PER_SCAN);
+			consumer.seek(partition, scanStart);
+			long lastSequence = -1L;
+			while (consumer.position(partition) < scanEnd && !ReplicationRetry.expired(deadline))
 			{
-				final long sequence;
-				try
+				for (final var rec : consumer.poll(POLL_TIMEOUT))
 				{
-					sequence = KafkaHeaderCodec.messageIndex(rec.headers());
+					if (rec.offset() >= scanEnd || rec.value() == null) continue;
+					final long sequence = validateRecord(rec);
+					if (sequence >= 0L && sequence > lastSequence) lastSequence = sequence;
 				}
-				catch (final IllegalArgumentException malformed)
-				{
-					throw new KafkaException(
-						"Malformed Kafka replication record at offset " + rec.offset(), malformed);
-				}
-				if (sequence >= 0L && sequence > lastSequence) lastSequence = sequence;
 			}
 			if (lastSequence >= 0L) return lastSequence;
-			candidate--;
+			scanEnd = scanStart;
 		}
 
-		return lastSequence;
+		return -1L;
+	}
+
+	private static long validateRecord(final org.apache.kafka.clients.consumer.ConsumerRecord<String, byte[]> record)
+	{
+		if (record.value().length == 0 || record.value().length > KafkaHeaderCodec.maxPacketSize())
+			throw malformed(record, "invalid packet payload length");
+		try
+		{
+			final int messageLength = KafkaHeaderCodec.messageLength(record.headers());
+			final int packetIndex = KafkaHeaderCodec.packetIndex(record.headers());
+			final int packetCount = KafkaHeaderCodec.packetCount(record.headers());
+			final long sequence = KafkaHeaderCodec.messageIndex(record.headers());
+			KafkaHeaderCodec.messageType(record.headers());
+			KafkaHeaderCodec.messageCrc32c(record.headers());
+			KafkaHeaderCodec.validateMetadata(messageLength, packetIndex, packetCount, sequence);
+			return sequence;
+		}
+		catch (final IllegalArgumentException malformed)
+		{
+			throw malformed(record, malformed.getMessage(), malformed);
+		}
+	}
+
+	private static KafkaException malformed(
+		final org.apache.kafka.clients.consumer.ConsumerRecord<String, byte[]> record, final String message)
+	{
+		return malformed(record, message, null);
+	}
+
+	private static KafkaException malformed(
+		final org.apache.kafka.clients.consumer.ConsumerRecord<String, byte[]> record,
+		final String message, final Throwable cause)
+	{
+		return new KafkaException("Malformed Kafka replication record at offset " + record.offset() + ": " + message,
+			cause);
 	}
 
 	/** Returns the latest Kafka replication cursor.

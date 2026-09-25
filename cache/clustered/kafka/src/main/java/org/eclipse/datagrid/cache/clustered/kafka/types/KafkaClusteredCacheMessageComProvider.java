@@ -332,8 +332,10 @@ public class KafkaClusteredCacheMessageComProvider implements ClusteredCacheMess
                 if (key != null)
                 {
                     final var value = rawProperties.get(rawKey);
-                    LOGGER.log(System.Logger.Level.TRACE,
-                        "Found Kafka config with key=" + key + ", value=" + value);
+                    /* Keys are useful when diagnosing configuration, but values can
+                     * contain SASL credentials or trust-store passwords. Never put
+                     * Kafka configuration values in logs. */
+                    LOGGER.log(System.Logger.Level.TRACE, "Found Kafka config with key=" + key);
                     kafkaProperties.put(key, value);
                 }
             }

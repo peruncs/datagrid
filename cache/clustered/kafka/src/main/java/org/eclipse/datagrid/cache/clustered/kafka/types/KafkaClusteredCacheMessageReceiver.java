@@ -149,32 +149,32 @@ final class KafkaClusteredCacheMessageReceiver implements ClusteredCacheMessageR
 
     private void run()
     {
-        final Properties properties = new Properties();
-        properties.putAll(this.kafkaProperties);
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, this.groupId);
-        /* A new node must reconcile retained invalidations before serving cache
-         * reads. Stable groups resume from their committed offset; earliest is
-         * the safe bootstrap policy for a group with no committed offset. */
-        final Object configuredReset = properties.get(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG);
-        if (configuredReset == null)
-        {
-            properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        }
-        else if (!"earliest".equals(configuredReset) && !"latest".equals(configuredReset))
-        {
-            throw new IllegalArgumentException(
-                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG + " must be earliest or latest: " + configuredReset);
-        }
-        /* Acknowledgements are committed only after every record in the poll
-         * has been applied. Kafka's default auto-commit can advance the group
-         * while the acceptor is still running and lose an invalidation after a
-         * crash. */
-        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, VoidDeserializer.class.getName());
-        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-
         try
         {
+            final Properties properties = new Properties();
+            properties.putAll(this.kafkaProperties);
+            properties.put(ConsumerConfig.GROUP_ID_CONFIG, this.groupId);
+            /* A new node must reconcile retained invalidations before serving cache
+             * reads. Stable groups resume from their committed offset; earliest is
+             * the safe bootstrap policy for a group with no committed offset. */
+            final Object configuredReset = properties.get(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG);
+            if (configuredReset == null)
+            {
+                properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+            }
+            else if (!"earliest".equals(configuredReset) && !"latest".equals(configuredReset))
+            {
+                throw new IllegalArgumentException(
+                    ConsumerConfig.AUTO_OFFSET_RESET_CONFIG + " must be earliest or latest: " + configuredReset);
+            }
+            /* Acknowledgements are committed only after every record in the poll
+             * has been applied. Kafka's default auto-commit can advance the group
+             * while the acceptor is still running and lose an invalidation after a
+             * crash. */
+            properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+            properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, VoidDeserializer.class.getName());
+            properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+
             final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(properties);
             this.consumer = consumer;
             try (consumer)

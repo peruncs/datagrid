@@ -643,7 +643,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 			final int messageCrc32c = KafkaHeaderCodec.messageCrc32c(headers);
 			KafkaHeaderCodec.validateMetadata(messageLength, packetIndex, packetCount, messageIndex);
 			return new CachedPacket(
-				ClusterStorageBinaryDataPacket.New(
+				StorageBinaryDataPacket.New(
 					messageType, messageLength, packetIndex, packetCount, messageIndex,
 					ByteBuffer.wrap(record.value())
 				), messageCrc32c, record.offset());
@@ -651,13 +651,13 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 
 		private void validateChecksum(final List<CachedPacket> packets)
 		{
-			final ClusterStorageBinaryDataPacket first = packets.get(0).packet();
+			final StorageBinaryDataPacket first = packets.get(0).packet();
 			final int expected = packets.get(0).messageCrc32c();
 			int totalLength = 0;
 			final var checksum = Crc32c.accumulator();
 			for (final CachedPacket cached : packets)
 			{
-				final ClusterStorageBinaryDataPacket packet = cached.packet();
+				final StorageBinaryDataPacket packet = cached.packet();
 				if (packet.messageType() != first.messageType() ||
 					packet.messageLength() != first.messageLength() ||
 					packet.packetCount() != first.packetCount() ||
@@ -682,7 +682,7 @@ public final class KafkaClusterStorageBinaryDataClient implements ClusterStorage
 		}
 
 	/** Packet plus its Kafka offset, retained until the complete message is applied. */
-	private record CachedPacket(ClusterStorageBinaryDataPacket packet, int messageCrc32c, long offset)
+	private record CachedPacket(StorageBinaryDataPacket packet, int messageCrc32c, long offset)
 	{
 	}
 

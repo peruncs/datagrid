@@ -159,13 +159,24 @@ public interface BackupProxyHttpClient
 		public void upload(final String s3Key, final Path filePath) throws NodelibraryException
 		{
 			LOG.trace("Uploading compressed storage archive");
+			final Path absoluteFilePath = filePath.toAbsolutePath().normalize();
+			try
+			{
+				StorageFileOperations.ensureNoSymbolicLinks(absoluteFilePath);
+				if (!Files.isRegularFile(absoluteFilePath, LinkOption.NOFOLLOW_LINKS))
+					throw new IOException("Backup upload source is not a regular file");
+			}
+			catch (final IOException failure)
+			{
+				throw new NodelibraryException("Backup upload source is unsafe", failure);
+			}
 
 			final HttpResponse<Void> res;
 			try
 			{
 				res = this.send(
 					HttpRequest.newBuilder()
-						.PUT(BodyPublishers.ofFile(filePath))
+						.PUT(BodyPublishers.ofFile(absoluteFilePath))
 						.uri(this.uri(s3Key))
 						.timeout(this.requestTimeout)
 						.build(),
@@ -193,17 +204,21 @@ public interface BackupProxyHttpClient
 		public Path download(final String s3Key, final Path destinationFilePath) throws NodelibraryException
 		{
 			LOG.trace("Downloading storage archive");
+			final Path absoluteDestination = destinationFilePath.toAbsolutePath().normalize();
 
 			try
 			{
-				final Path parent = destinationFilePath.toAbsolutePath().getParent();
+				StorageFileOperations.ensureNoSymbolicLinks(absoluteDestination.getParent());
+				if (Files.isSymbolicLink(absoluteDestination))
+					throw new IOException("Backup download destination is a symbolic link");
+				final Path parent = absoluteDestination.getParent();
 				if (parent != null) Files.createDirectories(parent);
+				StorageFileOperations.ensureNoSymbolicLinks(parent);
 			}
 			catch (final IOException e)
 			{
 				throw new NodelibraryException("Failed to create download destination", e);
 			}
-			final Path absoluteDestination = destinationFilePath.toAbsolutePath();
 			final Path temporary = absoluteDestination.resolveSibling(
 				absoluteDestination.getFileName() + ".part-" + UUID.randomUUID());
 			boolean installed = false;
