@@ -46,12 +46,16 @@ final class ApplyWorker {
      * the batch; slots past it are always `null`. Grows to the largest
      * batch seen and stays there. */
     private final Drain drain = new Drain();
-    /* Set inside the batch after validation, before the vector rebuild:
-     * the overrun budget bounds materialization, whose cost is
-     * batch-proportional, not the rebuild, which scans the whole store and
-     * grows with data size. Only touched under the materialization lock,
-     * so a plain long needs no atomics. */
+    /* Phase stamps for the batch budget. The materialization budget is
+     * batch-proportional and stops at the materialization boundary; the
+     * index refresh after it scans the whole store and gets a budget of its
+     * own, measured from that same boundary. Both stamps are guarded by
+     * `budgetLock` because the watchdog thread reads them: a watchdog that
+     * fires exactly when a phase completes must lose, so the cancel and the
+     * stamp run inside the same critical section the expiry check reads. */
+    private final Object budgetLock = new Object();
     private long materializedAtNanos;
+    private long indexRefreshedAtNanos;
 
     ApplyWorker(
             final MergerLifecycle owner,
@@ -136,9 +140,12 @@ final class ApplyWorker {
              * never returns still pins this worker; dispose() bounds that
              * wait and reports the pinned buffers instead of freeing them
              * underneath the Store. */
-            this.materializedAtNanos = 0L;
-            final ScheduledFuture<?> watchdogTask = this.watchdog.schedule(
-                    () -> this.owner.onMaterializationBudgetExpired(startedNanos),
+            synchronized (this.budgetLock) {
+                this.materializedAtNanos = 0L;
+                this.indexRefreshedAtNanos = 0L;
+            }
+            final ScheduledFuture<?> materializationWatchdog = this.watchdog.schedule(
+                    () -> this.materializationBudgetExpired(startedNanos),
                     this.materializationBudgetMs,
                     TimeUnit.MILLISECONDS);
             try {
@@ -189,21 +196,44 @@ final class ApplyWorker {
                                 transactionOffset, transactionLength);
                         transactionOffset += transactionLength;
                     }
-                    /* Reader-side index enforcement plus the vector
-                     * rebuild share one root-graph traversal: a writer that
-                     * smuggled an external Lucene directory or a
-                     * non-persisted vector index past registration fails
-                     * this reader closed instead of diverging it, and any
-                     * vector graph cleared above is rebuilt eagerly in the
-                     * same section. The scan visits index metadata only,
-                     * never entity payload, and the rebuild is skipped
-                     * entirely when the store has no vector indices. The
-                     * eager rebuild keeps the deadlock-avoidance invariant
-                     * documented on the maintenance entry point: a lazy
-                     * rebuild on the next query would race the following
-                     * batch's bulk materialization. */
-                    this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
-                    this.materializedAtNanos = System.nanoTime();
+                    /* Materialization ends here: its batch-proportional budget
+                     * is spent, and the index refresh below — a whole-store
+                     * scan plus the vector rebuild — gets a separately bounded
+                     * phase so a large progressing rebuild is never charged
+                     * against the materialization budget. Stamp and cancel
+                     * under the budget lock so a concurrent expiry loses the
+                     * race deterministically instead of latching a completed
+                     * phase. */
+                    final long materializedAt;
+                    synchronized (this.budgetLock) {
+                        materializedAt = this.materializedAtNanos = System.nanoTime();
+                        materializationWatchdog.cancel(false);
+                    }
+                    final ScheduledFuture<?> refreshWatchdog = this.watchdog.schedule(
+                            () -> this.refreshBudgetExpired(startedNanos, materializedAt),
+                            this.materializationBudgetMs,
+                            TimeUnit.MILLISECONDS);
+                    try {
+                        /* Reader-side index enforcement plus the vector
+                         * rebuild share one root-graph traversal: a writer that
+                         * smuggled an external Lucene directory or a
+                         * non-persisted vector index past registration fails
+                         * this reader closed instead of diverging it, and any
+                         * vector graph cleared above is rebuilt eagerly in the
+                         * same section. The scan visits index metadata only,
+                         * never entity payload, and the rebuild is skipped
+                         * entirely when the store has no vector indices. The
+                         * eager rebuild keeps the deadlock-avoidance invariant
+                         * documented on the maintenance entry point: a lazy
+                         * rebuild on the next query would race the following
+                         * batch's bulk materialization. */
+                        this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
+                    } finally {
+                        synchronized (this.budgetLock) {
+                            this.indexRefreshedAtNanos = System.nanoTime();
+                            refreshWatchdog.cancel(false);
+                        }
+                    }
                 });
             } catch (final RuntimeException | Error failure) {
                 /* A genuine failure says failed; only an overrun says timed
@@ -213,7 +243,7 @@ final class ApplyWorker {
                 }
                 throw failure;
             } finally {
-                watchdogTask.cancel(false);
+                materializationWatchdog.cancel(false);
                 try {
                     StorageBinaryDataImporter.release(this.drain.buffers, pending);
                 } finally {
@@ -221,23 +251,73 @@ final class ApplyWorker {
                     this.queue.completeInFlight(batchBytes);
                 }
             }
-            /* Bounds materialization only: the vector rebuild above scans
-             * the whole store, so including it would fail a healthy
-             * large import. A batch that threw before stamping its
-             * boundary already failed through the catch above. */
-            final long materializedAt = this.materializedAtNanos == 0L
-                    ? System.nanoTime()
-                    : this.materializedAtNanos;
-            final long elapsedMs =
-                    TimeUnit.NANOSECONDS.toMillis(materializedAt - startedNanos);
-            if (elapsedMs > this.materializationBudgetMs) {
+            this.verifyBatchBudgets(startedNanos);
+        });
+    }
+
+    /// Latches a materialization-phase overrun unless the phase already ended.
+    ///
+    /// The stamp check runs under the budget lock, so a watchdog that fires
+    /// concurrently with the phase boundary always resolves to one verdict.
+    ///
+    /// @param startedNanos nanoTime stamp of the batch being applied
+    void materializationBudgetExpired(final long startedNanos) {
+        synchronized (this.budgetLock) {
+            if (this.materializedAtNanos != 0L) return;
+        }
+        this.owner.onMaterializationBudgetExpired(startedNanos);
+    }
+
+    /// Latches an index-refresh-phase overrun unless the phase already ended.
+    ///
+    /// @param startedNanos        nanoTime stamp of the batch being applied
+    /// @param rebuildStartedNanos nanoTime stamp at the start of the index phase
+    void refreshBudgetExpired(final long startedNanos, final long rebuildStartedNanos) {
+        synchronized (this.budgetLock) {
+            if (this.indexRefreshedAtNanos != 0L) return;
+        }
+        this.owner.onRefreshBudgetExpired(startedNanos, rebuildStartedNanos);
+    }
+
+    /// Checks each completed phase against its own budget after the batch returns.
+    ///
+    /// Materialization is batch-proportional and bounded from batch start to
+    /// the materialized stamp; the index refresh, which scans the whole
+    /// store, is bounded from that stamp to its own completion. A batch whose
+    /// handler never ran the updater (no stamp) falls back to charging the
+    /// whole elapsed time against the materialization budget. A batch that
+    /// threw before stamping already failed through the caller's catch.
+    ///
+    /// @param startedNanos nanoTime stamp of the batch being applied
+    void verifyBatchBudgets(final long startedNanos) {
+        final long materializedAt;
+        final long refreshedAt;
+        synchronized (this.budgetLock) {
+            materializedAt = this.materializedAtNanos;
+            refreshedAt = this.indexRefreshedAtNanos;
+        }
+        final long materializedElapsedMs = TimeUnit.NANOSECONDS.toMillis(
+                (materializedAt == 0L ? System.nanoTime() : materializedAt) - startedNanos);
+        if (materializedElapsedMs > this.materializationBudgetMs) {
+            final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
+                    "Timed out while applying Store data: batch took %s ms with a budget of %s ms"
+                            .formatted(materializedElapsedMs, this.materializationBudgetMs));
+            this.owner.noteFailure(terminal.getMessage(), terminal);
+            throw terminal;
+        }
+        if (materializedAt != 0L && refreshedAt != 0L) {
+            /* Bounds the refresh phase only: the vector rebuild scans the
+             * whole store, so including the import and materialization time
+             * would fail a healthy large import. */
+            final long refreshElapsedMs = TimeUnit.NANOSECONDS.toMillis(refreshedAt - materializedAt);
+            if (refreshElapsedMs > this.materializationBudgetMs) {
                 final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
-                        "Timed out while applying Store data: batch took %s ms with a budget of %s ms"
-                                .formatted(elapsedMs, this.materializationBudgetMs));
+                        "Timed out while refreshing reader index views: refresh took %s ms with a budget of %s ms"
+                                .formatted(refreshElapsedMs, this.materializationBudgetMs));
                 this.owner.noteFailure(terminal.getMessage(), terminal);
                 throw terminal;
             }
-        });
+        }
     }
 
     /// Reused worker-confined storage for one drained batch.

@@ -113,6 +113,77 @@ class StorageBinaryDataMergerReadSideTest {
         }
     }
 
+    /// Verifies a batch that fails inside its write section invalidates the
+    /// graph before the write lock releases: coordinated reads and later
+    /// writes fail closed until reload/reseed instead of serving a
+    /// potentially half-materialized graph.
+    @Test
+    void failedBatchLeavesTheGraphFailClosed(@TempDir final Path readerRoot) throws Exception {
+        try (EmbeddedStorageManager reader = EmbeddedStorage.start(new Root(), readerRoot)) {
+            final StorageConnection realConnection = reader.createConnection();
+            final PersistenceManager<?> realManager = realConnection.persistenceManager();
+            final IllegalStateException scanBoom = new IllegalStateException("index scan blew up mid-batch");
+            final PersistenceManager<?> managers = (PersistenceManager<?>) Proxy.newProxyInstance(
+                    PersistenceManager.class.getClassLoader(),
+                    new Class<?>[]{PersistenceManager.class},
+                    (proxy, method, args) ->
+                    {
+                        if (method.getName().equals("viewRoots")) {
+                            throw scanBoom;
+                        }
+                        return method.invoke(realManager, args);
+                    });
+            final StorageConnection connection = (StorageConnection) Proxy.newProxyInstance(
+                    StorageConnection.class.getClassLoader(),
+                    new Class<?>[]{StorageConnection.class},
+                    (proxy, method, args) ->
+                    {
+                        if (method.getName().equals("persistenceManager")) return managers;
+                        /* The batch carries no entities; only the failing
+                         * validation section matters here, so the import
+                         * itself is a no-op. */
+                        if (method.getName().equals("importData")) return null;
+                        return method.invoke(realConnection, args);
+                    });
+
+            final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), connection, ObjectGraphUpdateHandler.PerStore(coordinator), 0L, 1_000_000L, 60_000L, coordinator));
+            try {
+                final Binary empty = ChunksWrapper.New(ByteBuffer.allocateDirect(8));
+                assertTrue(merger.receiveDataOwned(empty), "the batch must be admitted");
+
+                final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_MS);
+                while (coordinator.graphFailure() == null && System.nanoTime() < deadline) {
+                    Thread.sleep(10L);
+                }
+                assertInstanceOf(peruncs.cluster.errors.GraphInvalidatedException.class, coordinator.graphFailure(),
+                        "a failed batch must latch graph invalidity before the write lock releases");
+                assertSame(scanBoom, coordinator.graphFailure().getCause(),
+                        "the latched invalidity must name the failed section");
+                assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+                        () -> coordinator.read(() -> {
+                        }), "coordinated reads must fail closed on a torn graph");
+                assertNotNull(merger.failure(), "the failed batch must also latch the merger failure");
+                final RuntimeException latched = merger.failure();
+                assertNotNull(latched);
+                assertSame(scanBoom, lastCause(latched),
+                        "the merger failure must name the failing update section");
+                assertThrows(RuntimeException.class, () -> merger.receiveDataOwned(ChunksWrapper.New(ByteBuffer.allocateDirect(8))),
+                        "a failed merger must refuse further batches with its latched failure");
+            } finally {
+                merger.dispose();
+            }
+        }
+    }
+
+    private static Throwable lastCause(final Throwable failure) {
+        Throwable cursor = failure;
+        while (cursor.getCause() != null) {
+            cursor = cursor.getCause();
+        }
+        return cursor;
+    }
+
     /// Verifies a merger built without a coordinator reports none so callers run scans directly.
     @Test
     void unwiredMergerExposesNoCoordinator() {

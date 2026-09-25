@@ -1,7 +1,7 @@
 import peruncs.cluster.api.ClusterNode;
 import peruncs.cluster.api.ClusterStore;
 
-/// Data Grid node with Aeron replication.
+/// Cluster  node with Aeron replication.
 ///
 /// Applications create the node services, start them in dependency order,
 /// and close them in reverse order. The node lifecycle, storage
@@ -38,8 +38,12 @@ import peruncs.cluster.api.ClusterStore;
 /// carrying only cluster identity, a shared accidental-cross-wiring nonce,
 /// sequence, chunking, CRC32C, and
 /// commit/abort markers — framing only, no second object-graph encoding.
-/// Readers replay from the Archive, join the live stream, and reconnect
-/// from a durable cursor.
+/// Readers replay from the Archive and join the live stream, and reconnect
+/// from a durable cursor. Live delivery runs ahead of the recording, so a
+/// live-observed commit or abort is applied only after the Archive's
+/// recorded position durably covers it; a recording that stalls beyond the
+/// reader's stop budget fails the reader closed instead of exposing a
+/// transaction the writer may never make durable.
 ///
 /// # Fixed roles with a fencing lease
 ///

@@ -34,11 +34,52 @@ public final class ClusterStore<T> {
     /// needs into plain values or records before returning. The name states
     /// the discipline: the root is borrowed for the callback only.
     ///
-    /// @param <R> query result type
+    /// Read callbacks are read-only by contract: mutating the root inside
+    /// them races other application threads. Writer-side mutation belongs to
+    /// [#withRootWrite(Function)], which holds exclusive graph ownership from
+    /// mutation through persistence.
+    ///
+    /// @param <R>   query result type
     /// @param query query evaluated inside the read boundary
     /// @return the query result
     public <R> R withRootRead(final Function<? super T, ? extends R> query) {
         return this.storage.readRoot(Objects.requireNonNull(query, "query"));
+    }
+
+    /// Mutates the root and persists it as one atomic writer-side boundary.
+    ///
+    /// One write owns the graph from mutation through [#storeRoot()]:
+    /// concurrent mutations and concurrent queries either observe the whole
+    /// mutation and its commit, or neither. Use this instead of mutating
+    /// inside [#withRootRead(Function)] followed by [#storeRoot()] — that
+    /// pattern holds only a shared read boundary and can lose updates when
+    /// two application threads race.
+    ///
+    /// Failure rules follow [#store(Object)]: reader rejection, fencing,
+    /// storage-limit, and availability failures carry their documented types.
+    /// An uncertain commit — persistence may already be durable while the
+    /// in-memory root carries the mutation — invalidates the writer's
+    /// mutable view: coordinated reads and writes fail closed until the node
+    /// reloads or reseeds. Do not retry blindly; inspect
+    /// [#status()][ClusterNode#status()] and the durable writer sequence
+    /// first.
+    ///
+    /// @param <R>      mutation result type
+    /// @param mutation mutation evaluated inside the exclusive write
+    ///                  boundary; it receives the live root but must not
+    ///                  retain or return it
+    /// @return the mutation result
+    /// @throws ReaderWriteRejectedException on
+    /// a reader or backup-reader node
+    /// @throws WriterFencedException when this
+    /// node no longer holds the writer lease
+    /// @throws StorageLimitReachedException
+    /// when the configured storage limit is reached
+    /// @throws ReplicationUnavailableException
+    /// when replication is unavailable — a failed MediaDriver, exhausted
+    /// Archive capacity, or an offer deadline — or the node is closing
+    public <R> R withRootWrite(final Function<? super T, ? extends R> mutation) {
+        return this.storage.writeRoot(Objects.requireNonNull(mutation, "mutation"));
     }
 
     /// Persists one changed object on the writer; reader roles reject the call.

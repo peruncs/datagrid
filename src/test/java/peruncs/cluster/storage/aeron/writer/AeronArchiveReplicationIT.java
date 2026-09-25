@@ -362,7 +362,8 @@ class AeronArchiveReplicationIT {
                     .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
                     .replicationConfiguration(configuration).clusterId(clusterId)
                     .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
-                    .initialSequence(-1).receiver(receiver).build());
+                    .initialSequence(-1).receiver(receiver)
+                    .recordedPosition(() -> archive.getRecordingPosition(recordingId)).build());
             client.start();
 
             await(() -> client.lastResolvedSequence() == 1 || client.failure() != null, 15_000);
@@ -388,7 +389,8 @@ class AeronArchiveReplicationIT {
                     .replicationConfiguration(configuration).clusterId(clusterId)
                     .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
                     .initialSequence(restartSequence).initialPosition(restartPosition)
-                    .receiver(restartedReceiver).build());
+                    .receiver(restartedReceiver)
+                    .recordedPosition(() -> archive.getRecordingPosition(recordingId)).build());
             restarted.start();
             final byte[] thirdData = new byte[]{1, 3, 3, 7};
             resumed.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(thirdData)});
@@ -526,7 +528,8 @@ class AeronArchiveReplicationIT {
                                     .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
                                     .replicationConfiguration(configuration).clusterId(clusterId)
                     .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
-                                    .initialSequence(-1).receiver(receiver).build());
+                                    .initialSequence(-1).receiver(receiver)
+                    .recordedPosition(() -> archiveClient.getRecordingPosition(recordingId)).build());
                     try {
                         reader.start();
                         /* Wait until replay demonstrably started, then restart
@@ -614,7 +617,8 @@ class AeronArchiveReplicationIT {
                                 .replayChannel("aeron:udp?endpoint=localhost:0").replayStreamId(1002)
                                 .replicationConfiguration(configuration).clusterId(clusterId)
                     .wireNonce(AeronReplicationEnvelope.defaultWireNonce(clusterId)).epoch(2)
-                                .initialSequence(-1).receiver(new CountingReceiver()).build());
+                                .initialSequence(-1).receiver(new CountingReceiver())
+                                .recordedPosition(() -> archiveClient.getRecordingPosition(recordingId)).build());
                 try {
                     reader.start();
                     await(() -> reader.lastResolvedSequence() >= 2 || reader.failure() != null, 15_000);

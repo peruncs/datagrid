@@ -1,8 +1,10 @@
 package peruncs.cluster.storage;
 
+import peruncs.cluster.errors.GraphInvalidatedException;
 import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
 
@@ -53,8 +55,22 @@ import static org.eclipse.serializer.util.X.notNull;
 /// coordinator run their scans directly for the same reason there is nothing
 /// to join — legacy wiring without a shared lock — while their mutations
 /// still flow through the update handler.
+///
+/// # Fail-closed on a partial update
+///
+/// A failing [#write(Runnable)] section may have partially applied its
+/// mutations: the durable replication cursor stays at the previous boundary,
+/// which protects restart recovery, but it cannot undo the in-memory side. The
+/// write side therefore latches the graph as invalid *before* releasing the
+/// write lock, and every later joined read or write fails with
+/// [GraphInvalidatedException] until the node reloads or reseeds its Store
+/// image. A graph shared only with provably non-mutating writes stays valid.
 public final class StorageGraphCoordinator {
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
+    /* Latched while a failed write section still holds the write lock: after
+     * release, every coordinated access must fail closed instead of serving a
+     * potentially half-applied graph. */
+    private final AtomicReference<GraphInvalidatedException> invalidity = new AtomicReference<>();
 
     /// Creates a fair coordinator for one Store object graph.
     public StorageGraphCoordinator() {
@@ -63,13 +79,16 @@ public final class StorageGraphCoordinator {
         /// Runs application graph access under the shared read side.
     ///
     /// Concurrent reads overlap; a materialization holding the write side
-    /// delays the read until it has finished.
+    /// delays the read until it has finished. Once a write section failed,
+    /// reads fail closed: the graph may be partially updated.
     ///
     /// @param action graph access to run
+    /// @throws GraphInvalidatedException when a previous write section failed
     public void read(final Runnable action) {
         notNull(action);
         this.lock.readLock().lock();
         try {
+            this.ensureValid();
             action.run();
         } finally {
             this.lock.readLock().unlock();
@@ -81,10 +100,12 @@ public final class StorageGraphCoordinator {
     /// @param <T>    result type
     /// @param action graph access to run
     /// @return action result
+    /// @throws GraphInvalidatedException when a previous write section failed
     public <T> T read(final Supplier<T> action) {
         notNull(action);
         this.lock.readLock().lock();
         try {
+            this.ensureValid();
             return action.get();
         } finally {
             this.lock.readLock().unlock();
@@ -94,16 +115,68 @@ public final class StorageGraphCoordinator {
         /// Runs a graph mutation under the exclusive write side.
     ///
     /// The write excludes every read and every other write until the update
-    /// has finished.
+    /// has finished. A throwing update leaves the graph potentially
+    /// half-applied, so the coordinator invalidates it before releasing the
+    /// lock; later coordinated reads and writes fail closed.
     ///
     /// @param update graph mutation to run
+    /// @throws GraphInvalidatedException when a previous write section failed
     public void write(final Runnable update) {
         notNull(update);
         this.lock.writeLock().lock();
         try {
+            this.ensureValid();
             update.run();
+        } catch (final RuntimeException | Error failure) {
+            /* Latch before the finally releases the write lock: no coordinated
+             * read may ever observe the graph this failed section left. */
+            this.invalidate(failure);
+            throw failure;
         } finally {
             this.lock.writeLock().unlock();
         }
+    }
+
+        /// Runs a graph mutation under the exclusive write side and returns its result.
+    ///
+    /// Same exclusivity and invalidation semantics as [#write(Runnable)].
+    ///
+    /// @param <T>    result type
+    /// @param update graph mutation to run
+    /// @return update result
+    /// @throws GraphInvalidatedException when a previous write section failed
+    public <T> T write(final Supplier<T> update) {
+        notNull(update);
+        this.lock.writeLock().lock();
+        try {
+            this.ensureValid();
+            return update.get();
+        } catch (final RuntimeException | Error failure) {
+            /* Latch before the finally releases the write lock: no coordinated
+             * read may ever observe the graph this failed section left. */
+            this.invalidate(failure);
+            throw failure;
+        } finally {
+            this.lock.writeLock().unlock();
+        }
+    }
+
+        /// Returns the latched graph invalidity, or `null` while every write
+    /// section so far completed.
+    ///
+    /// @return invalidity failure, or `null`
+    public GraphInvalidatedException graphFailure() {
+        return this.invalidity.get();
+    }
+
+    private void ensureValid() {
+        final GraphInvalidatedException failure = this.invalidity.get();
+        if (failure != null) throw failure;
+    }
+
+    private void invalidate(final Throwable failure) {
+        this.invalidity.compareAndSet(null, new GraphInvalidatedException(
+                "Store graph may be partially updated after a failed write section; reload or reseed is required",
+                failure));
     }
 }

@@ -18,6 +18,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -238,14 +239,21 @@ final class WriterTakeoverCrashMatrixIT {
                 .maxTransactionBytes(1024)
                 .build();
         final Class<?> assembler = Class.forName(ASSEMBLER);
+        final Class<?> listenerType = Class.forName(DELIVERY_LISTENER);
+        final Class<?> gateType = Arrays.stream(assembler.getDeclaredClasses())
+                .filter(type -> type.getSimpleName().equals("CommitDurabilityGate"))
+                .findFirst().orElseThrow();
         final Constructor<?> constructor = assembler.getDeclaredConstructor(
                 AeronReplicationConfiguration.class, UUID.class, long.class, long.class, long.class,
                 StorageBinaryDataReceiver.class, java.util.function.Consumer.class,
-                Class.forName(DELIVERY_LISTENER), long.class);
+                listenerType, long.class, gateType);
         constructor.setAccessible(true);
         return constructor.newInstance(configuration, CLUSTER_ID, EPOCH, -1L, -1L,
                 receiver, (java.util.function.Consumer<Object>) ignored -> {
-                }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID));
+                }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID),
+                /* These cells drive replay-shaped frames; no durability gate needed. */
+                java.lang.reflect.Proxy.newProxyInstance(gateType.getClassLoader(),
+                        new Class<?>[]{gateType}, (proxy, method, args) -> true));
     }
 
     private static Object invoke(final Object target, final String name, final Class<?>[] types,

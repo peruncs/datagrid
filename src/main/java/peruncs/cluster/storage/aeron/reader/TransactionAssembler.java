@@ -6,6 +6,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
@@ -37,6 +38,19 @@ final class TransactionAssembler {
     private final StorageBinaryDataReceiver receiver;
     private final Consumer<CursorSnapshot> transactionResolved;
     private final ReaderDeliveryListener deliveryListener;
+    /* Live-source terminal markers are admitted only once the Archive has
+     * durably recorded them: a writer offers COMMIT and then awaits its
+     * recorded position, so live delivery runs ahead of durable recording by
+     * at most that gap. Without the gate a stalled or failing recording would
+     * let a reader apply and persist a transaction the writer later reports
+     * as not durable. The gate is consulted only for live-sourced terminal
+     * markers; replayed frames are recorded by definition. */
+    private final CommitDurabilityGate durabilityGate;
+    /* Bounded stall bookkeeping for a withheld terminal marker: the live
+     * image redelivers it on every poll, so recording progress or the
+     * configured stop timeout decides the outcome. Polling-thread confined;
+     * guarded reads happen through onFragment's delivery monitor. */
+    private long withholdSinceNanos;
     /* The durable boundary is one immutable snapshot so a concurrent
      * status or cursor reader can never observe a new sequence paired with
      * the previous position (or vice versa). */
@@ -124,6 +138,8 @@ final class TransactionAssembler {
     /// @param transactionResolved callback after a delivery barrier resolves durably; never `null`
     /// @param deliveryListener   callback around Store materialization, or `null`
     /// @param wireNonce          expected accidental-cross-wiring nonce; must not be zero
+    /// @param durabilityGate     durability proof required before a live-sourced terminal
+    ///                           marker is delivered to the Store; never `null`
     TransactionAssembler(
             final AeronReplicationConfiguration configuration,
             final UUID clusterId,
@@ -133,7 +149,8 @@ final class TransactionAssembler {
             final StorageBinaryDataReceiver receiver,
             final Consumer<CursorSnapshot> transactionResolved,
             final ReaderDeliveryListener deliveryListener,
-            final long wireNonce
+            final long wireNonce,
+            final CommitDurabilityGate durabilityGate
     ) {
         this.configuration = Objects.requireNonNull(configuration, "configuration");
         this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
@@ -143,6 +160,7 @@ final class TransactionAssembler {
         this.receiver = Objects.requireNonNull(receiver, "receiver");
         this.transactionResolved = Objects.requireNonNull(transactionResolved, "transactionResolved");
         this.deliveryListener = deliveryListener;
+        this.durabilityGate = Objects.requireNonNull(durabilityGate, "durabilityGate");
         if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
             throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
         }
@@ -168,6 +186,33 @@ final class TransactionAssembler {
     /// @param length fragment length
     /// @param header Aeron header, or `null` in direct tests
     void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header) {
+        this.onFragment(buffer, offset, length, header, false);
+    }
+
+        /// Consumes one fragment, gating live-sourced terminal markers on
+    /// durable Archive coverage.
+    ///
+    /// A terminal marker observed on the live publication may currently be
+    /// ahead of the Archive recording: the writer offers COMMIT and only
+    /// then awaits its recorded position. Delivering it unseen would apply
+    /// and persist a transaction that a recording stall or failure could
+    /// still exclude from durable history. Withholding instead — the caller
+    /// returns `ABORT` so the fragment is redelivered on the next poll —
+    /// holds the transaction buffered until the recording provably covers
+    /// the marker's end position ([Header#position] is the position after
+    /// the frame), and a stall beyond the reader stop budget fails closed.
+    /// Data chunks are never gated: without the terminal marker they only
+    /// occupy the incomplete-transaction buffer.
+    ///
+    /// @param buffer     fragment source
+    /// @param offset     fragment offset
+    /// @param length     fragment length
+    /// @param header     Aeron header, or `null` in direct tests
+    /// @param liveSource whether the fragment came from the live image rather
+    ///                   than the Archive replay
+    /// @return `true` when the fragment was withheld for redelivery
+    boolean onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header,
+                       final boolean liveSource) {
         try {
             /* A single reusable Delivery carries the detached transaction. The Aeron
              * subscription normally invokes this callback on one polling thread. Keep
@@ -175,17 +220,21 @@ final class TransactionAssembler {
              * boundary for direct/concurrent callers, while the assembler monitor is
              * still released before Store import and fsync. */
             synchronized (this.delivery) {
+                final AeronReplicationEnvelope.EnvelopeView envelope =
+                        AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
+                if (liveSource && isTerminalMarker(envelope.kind()) && header != null) {
+                    if (!this.durabilityGate.isDurablyRecorded(header.position())) {
+                        return this.withholdTerminalMarker(envelope.sequence());
+                    }
+                    /* Recording coverage confirmed: the next stall starts a
+                     * fresh budget below. */
+                    this.withholdSinceNanos = 0L;
+                }
                 final boolean deliver;
                 synchronized (this) {
                     if (this.failure.get() != null) {
                         this.releaseIncompleteTransaction();
-                        return;
-                    }
-                    final AeronReplicationEnvelope.EnvelopeView envelope =
-                            AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
-                    if (this.failure.get() != null) {
-                        this.releaseIncompleteTransaction();
-                        return;
+                        return false;
                     }
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
                 }
@@ -198,6 +247,7 @@ final class TransactionAssembler {
                      * poll or lifecycle stop. */
                     this.delivery.stage();
                 }
+                return false;
             }
         } catch (final RuntimeException e) {
             this.failure(e);
@@ -208,6 +258,56 @@ final class TransactionAssembler {
             this.releaseIncompleteTransaction();
             throw e;
         }
+    }
+
+    private static boolean isTerminalMarker(final AeronReplicationEnvelope.Kind kind) {
+        return kind == AeronReplicationEnvelope.Kind.COMMIT || kind == AeronReplicationEnvelope.Kind.ABORT;
+    }
+
+        /// Withholds an unrecorded live terminal marker for redelivery, failing
+    /// closed once the recording stays behind past the reader stop budget.
+    ///
+    /// The stall budget is the reader stop timeout: the same bound accepted
+    /// for draining a live tail on shutdown bounds a recording that stops
+    /// confirming, so a wedged writer-side Archive fails the reader instead
+    /// of parking it forever without touching the Store.
+    ///
+    /// @param sequence withheld transaction sequence, for diagnostics
+    /// @return always `true`; the marker must be redelivered once durable
+    private boolean withholdTerminalMarker(final long sequence) {
+        final long now = System.nanoTime();
+        if (this.withholdSinceNanos == 0L) {
+            this.withholdSinceNanos = now;
+            return true;
+        }
+        if (now - this.withholdSinceNanos >= this.configuration.readerStopTimeoutNanos()) {
+            final ReplicationUnavailableException failure = new ReplicationUnavailableException(
+                    ("Archive recording did not durably cover the live terminal marker at sequence %d " +
+                     "within %dns; failing closed instead of applying an unrecorded transaction")
+                            .formatted(sequence, this.configuration.readerStopTimeoutNanos()));
+            this.failure(failure);
+            throw failure;
+        }
+        return true;
+    }
+
+        /// Reports whether a live-sourced terminal marker is durably recorded in
+    /// the writer's Archive. `ALWAYS` is the replay-safe default for callers
+    /// whose source can only be a recording.
+    ///
+    /// Implementations answer for the position after the marker's frame. The
+    /// check may block on the Archive control channel; it runs on the reader
+    /// polling thread outside the assembler monitor.
+    @FunctionalInterface
+    interface CommitDurabilityGate {
+        /// No gating: every marker is treated as recorded (replay sources).
+        CommitDurabilityGate ALWAYS = requiredPosition -> true;
+
+        /// Reports whether the recording has durably reached `requiredPosition`.
+        ///
+        /// @param requiredPosition recording position that covers the marker
+        /// @return `true` once the marker is durably recorded
+        boolean isDurablyRecorded(long requiredPosition);
     }
 
     private boolean accept(final AeronReplicationEnvelope.EnvelopeView envelope, final long position) {

@@ -754,7 +754,13 @@ final class AeronWriterTransport {
          * cleanup failure cannot make a durable commit look unavailable. */
         this.writerBoundary = new AeronWriterBoundary(sequence, this.writerRecordingId.get(), position);
         try {
-            AtomicFileWriter.delete(this.inFlightCheckpointPath());
+            /* The terminal checkpoint above is durable and restart already
+             * recognizes and removes a covered in-flight fence, so a stale
+             * marker after a crash is harmless here. Skipping the parent
+             * directory force cuts one of the three per-transaction directory
+             * fsyncs; the write itself must still happen so the steady-state
+             * fence actually disappears. */
+            AtomicFileWriter.delete(this.inFlightCheckpointPath(), false);
         } catch (final IOException failure) {
             /* Self-healing cleanup: restart deletes a covered in-flight fence
              * before resuming, so a transient deletion failure must not make a

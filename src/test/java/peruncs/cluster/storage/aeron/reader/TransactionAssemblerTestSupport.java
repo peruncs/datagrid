@@ -80,6 +80,30 @@ final class TransactionAssemblerTestSupport {
                 deliveryListener);
     }
 
+    /// Creates an assembler with resolution and delivery callbacks plus an
+    /// explicit durability gate for live-sourced terminal markers.
+    ///
+    /// @param configuration       framing and timeout limits
+    /// @param clusterId           expected cluster identity
+    /// @param epoch               expected writer epoch
+    /// @param initialSequence     last resolved sequence, or `-1`
+    /// @param receiver            Store binary receiver
+    /// @param transactionResolved callback after a transaction resolves
+    /// @param deliveryListener    callback around Store materialisation, or `null`
+    /// @param durabilityGate      durability proof for live-sourced terminal markers
+    /// @return assembler with the supplied callbacks and gate
+    static TransactionAssembler New(final AeronReplicationConfiguration configuration, final UUID clusterId,
+                                    final long epoch, final long initialSequence,
+                                    final StorageBinaryDataReceiver receiver,
+                                    final Runnable transactionResolved,
+                                    final ReaderDeliveryListener deliveryListener,
+                                    final TransactionAssembler.CommitDurabilityGate durabilityGate) {
+        Objects.requireNonNull(clusterId, "clusterId");
+        return new TransactionAssembler(configuration, clusterId, epoch, initialSequence, -1L,
+                receiver, ignored -> transactionResolved.run(), deliveryListener,
+                AeronReplicationEnvelope.defaultWireNonce(clusterId), durabilityGate);
+    }
+
     /// Creates an assembler at a recovered sequence and position.
     ///
     /// @param configuration       framing and timeout limits
@@ -97,8 +121,10 @@ final class TransactionAssemblerTestSupport {
                                     final Runnable transactionResolved,
                                     final ReaderDeliveryListener deliveryListener) {
         Objects.requireNonNull(clusterId, "clusterId");
+        /* Direct assembler tests drive replay-shaped frames (or no header at
+         * all), which need no durability gate. */
         return new TransactionAssembler(configuration, clusterId, epoch, initialSequence, initialPosition,
                 receiver, ignored -> transactionResolved.run(), deliveryListener,
-                AeronReplicationEnvelope.defaultWireNonce(clusterId));
+                AeronReplicationEnvelope.defaultWireNonce(clusterId), TransactionAssembler.CommitDurabilityGate.ALWAYS);
     }
 }

@@ -118,6 +118,92 @@ class StorageGraphCoordinatorTest {
         assertFalse(writer.isAlive());
     }
 
+    /// A failed write section invalidates the graph before the write lock
+    /// releases: later coordinated reads and writes fail closed with the
+    /// latched cause, because the graph may be partially updated.
+    @Test
+    void failedWriteInvalidatesGraphForReadsAndWrites() {
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        final IllegalStateException boom = new IllegalStateException("half-applied");
+        final IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                coordinator.write(() -> {
+                    throw boom;
+                }));
+        assertSame(boom, thrown, "the original failure must propagate to the writer");
+
+        assertInstanceOf(peruncs.cluster.errors.GraphInvalidatedException.class, coordinator.graphFailure());
+        assertSame(boom, coordinator.graphFailure().getCause(), "the latched cause must name the failed update");
+        final var readFailure = assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+                () -> coordinator.read(() -> {
+                }), "a coordinated read must fail closed on a torn graph");
+        assertSame(boom, readFailure.getCause());
+        assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+                () -> coordinator.read(() -> 1), "supplier reads fail closed too");
+        final var writeFailure = assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+                () -> coordinator.write(() -> {
+                }), "further writes must not build on a torn graph");
+        assertSame(boom, writeFailure.getCause());
+    }
+
+    /// A supplier-form write also invalidates the graph on failure and
+    /// returns results on success.
+    @Test
+    void supplierWriteReturnsAndInvalidatesOnFailure() {
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        assertEquals(42, coordinator.write(() -> 42));
+        assertNull(coordinator.graphFailure(), "a successful write keeps the graph valid");
+        assertThrows(IllegalStateException.class, () -> coordinator.write(() -> {
+            throw new IllegalStateException("mid-mutation");
+        }));
+        assertNotNull(coordinator.graphFailure(), "a failing supplier write must invalidate the graph");
+    }
+
+    /// Reads racing a failing write must either complete before the write or
+    /// fail closed after it — never observe the half-applied state.
+    @Test
+    void readRacingAFailedWriteNeverObservesIt() throws Exception {
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        final CountDownLatch writeInside = new CountDownLatch(1);
+        final CountDownLatch failNow = new CountDownLatch(1);
+        final Thread writer = Thread.ofVirtual().start(() ->
+        {
+            try {
+                coordinator.write(() ->
+                {
+                    writeInside.countDown();
+                    try {
+                        assertTrue(failNow.await(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                    throw new IllegalStateException("torn batch");
+                });
+            } catch (final IllegalStateException expected) {
+                /* The write failure itself is the precondition being set up. */
+            }
+        });
+        await(writeInside, "write to hold the coordinator");
+        final java.util.concurrent.atomic.AtomicReference<Throwable> readOutcome =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final Thread reader = Thread.ofVirtual().start(() ->
+        {
+            try {
+                coordinator.read(() -> {
+                });
+            } catch (final Throwable failure) {
+                readOutcome.set(failure);
+            }
+        });
+        /* The queued read cannot enter while the write section holds the lock. */
+        reader.join(200L);
+        assertTrue(reader.isAlive(), "coordinated read entered during a write section");
+        failNow.countDown();
+        writer.join(TIMEOUT.toMillis());
+        reader.join(TIMEOUT.toMillis());
+        assertInstanceOf(peruncs.cluster.errors.GraphInvalidatedException.class, readOutcome.get(),
+                "the read queued behind the failed write must fail closed, outcome: " + readOutcome.get());
+    }
+
     /// Verifies per-store graph updates run on the write side and wait while an application read is held.
     @Test
     void perStoreHandlerRunsUpdatesOnTheWriteSide() throws Exception {

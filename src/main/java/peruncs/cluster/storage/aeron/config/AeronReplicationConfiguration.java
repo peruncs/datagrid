@@ -23,7 +23,9 @@ import java.util.Objects;
 /// @param recordingStartTimeoutNanos bounded wait for an Archive recording to become active
 /// @param recordedPositionTimeoutNanos bounded wait for the Archive to report a recorded position
 /// @param recordingStopTimeoutNanos  bounded wait for an Archive recording to stop
-/// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary
+/// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary;
+///                                   also the endurance of a live terminal marker withheld
+///                                   while the Archive recording has not durably covered it
 /// @param readerFragmentsPerPoll     fragments a reader consumes per poll call while replaying
 /// @param readerBarrierMaxTransactions maximum resolved transactions the reader may stage into one
 ///                                     durability barrier before it is flushed

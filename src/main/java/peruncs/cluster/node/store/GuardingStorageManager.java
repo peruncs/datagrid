@@ -315,6 +315,29 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
     @Override
     @SuppressWarnings("unchecked")
+    public <R> R writeRoot(final Function<? super T, ? extends R> action) {
+        notNull(action);
+        /* The storage-limit and reader-role gates run before the exclusive
+         * section: their rejections are not graph corruption and must not
+         * invalidate the coordinator. */
+        this.validateState();
+        return this.graphCoordinator.write(() ->
+        {
+            final Object raw = this.delegate.root();
+            final Object value = raw instanceof Lazy<?> lazy ? lazy.get() : raw;
+            /* A failed mutation — or an uncertain persistence outcome —
+             * leaves the in-memory root potentially ahead of durable history:
+             * the coordinator invalidates the writer's mutable view before
+             * the write lock releases, so later coordinated reads and writes
+             * fail closed until the node reloads or reseeds. */
+            final R result = action.apply((T) value);
+            this.delegate.storeRoot();
+            return result;
+        });
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
     public <R> R readRoot(final Function<? super T, ? extends R> action) {
         notNull(action);
         return this.graphCoordinator.read(() -> {

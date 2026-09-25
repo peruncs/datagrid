@@ -220,7 +220,8 @@ class TransactionAssemblerBarrierTest {
                         throw new AssertionError(interrupted);
                     }
                     throw failure;
-                }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER));
+                }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER),
+                TransactionAssembler.CommitDurabilityGate.ALWAYS);
         commitOne(assembler, 0L);
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             final var flush = executor.submit(assembler::flushDeliveries);

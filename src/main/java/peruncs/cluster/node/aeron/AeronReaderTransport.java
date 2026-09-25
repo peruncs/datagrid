@@ -167,6 +167,11 @@ final class AeronReaderTransport {
                     .initialSequence(aeronCursor ? cursor.logicalSequence() : -1)
                     .initialPosition(aeronCursor ? cursorPosition : -1)
                     .receiver(new ReceiverAdapter(shared, receiver))
+                    /* Live-sourced terminal markers are withheld until the
+                     * Archive's recorded position covers them, so a reader
+                     * never applies a transaction that a writer-side recording
+                     * stall or failure could still drop from durable history. */
+                    .recordedPosition(() -> this.runtime().getRecordingPosition(recordingId))
                     .transactionResolved(snapshot -> {
                         final AeronArchiveReader current = readerRef.get();
                         if (current != null && current == this.readers.current()) {

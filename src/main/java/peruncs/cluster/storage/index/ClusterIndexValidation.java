@@ -77,10 +77,12 @@ final class ClusterIndexValidation {
         /* Rebuild plan for the merged validate-and-rebuild pass. Entries carry
          * the owning map so the rebuild can hold the same monitor queries use. */
         final ArrayList<VectorGroup> vectorGroups = new ArrayList<>();
-        /* One all-ones probe per discovered vector index, reused across
-         * batches: the probe only triggers lazy initialization, so its vector
-         * never needs recreating. Entries stay with the owning merger. */
-        final IdentityHashMap<VectorIndex<?>, float[]> vectorProbes = new IdentityHashMap<>();
+        /* One all-ones probe per encountered vector dimension, not per index:
+         * the probe only triggers lazy initialization, so its vector never
+         * needs recreating. Keying by dimension keeps no index reachable from
+         * the scratch — a per-index cache would retain a rebuilt-away index
+         * and, through it, its parent map and reachable graph state. */
+        final HashMap<Integer, float[]> vectorProbes = new HashMap<>();
         final IdentityHashMap<VectorIndex<?>, Long> vectorModCounts = new IdentityHashMap<>();
         /* Reused index enumeration scratch for one vector group. */
         final ArrayList<VectorIndex<?>> vectorIndexes = new ArrayList<>();

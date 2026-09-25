@@ -223,12 +223,62 @@ class WriterFencingLeaseTest {
     /// Verifies leases for different clusters and generations are held independently.
     @Test
     void leasesAreScopedPerClusterAndGeneration(@TempDir final Path volume) {
+        final UUID clusterA = UUID.randomUUID();
+        final UUID clusterB = UUID.randomUUID();
+        final UUID generationA = UUID.randomUUID();
+        final UUID generationB = UUID.randomUUID();
         try (final WriterFencingLease first =
-                     WriterFencingLease.acquire(volume, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), STALENESS);
+                     WriterFencingLease.acquire(volume, clusterA, generationA, UUID.randomUUID(), STALENESS);
              final WriterFencingLease second =
-                     WriterFencingLease.acquire(volume, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), STALENESS)) {
+                     WriterFencingLease.acquire(volume, clusterB, generationB, UUID.randomUUID(), STALENESS)) {
             assertTrue(first.isCurrent());
             assertTrue(second.isCurrent());
+            /* Each lease gets its own interprocess lock file: a shared
+             * directory-wide lock would serialize — and inside one JVM
+             * terminally fence — unrelated clusters sharing one volume. */
+            assertNotEquals(WriterFencingLease.lockPath(volume, clusterA, generationA),
+                    WriterFencingLease.lockPath(volume, clusterB, generationB));
+            assertNotEquals(WriterFencingLease.lockPath(volume, clusterA, generationA),
+                    WriterFencingLease.lockPath(volume, clusterA, generationB));
+        }
+    }
+
+    /// Verifies two clusters sharing one volume renew and commit concurrently
+    /// in one JVM without tripping over a shared interprocess lock.
+    @Test
+    void independentClustersShareAVolumeWithoutFencingEachOther(@TempDir final Path volume) throws Exception {
+        final UUID clusterA = UUID.randomUUID();
+        final UUID clusterB = UUID.randomUUID();
+        try (final WriterFencingLease first =
+                     WriterFencingLease.acquire(volume, clusterA, UUID.randomUUID(), UUID.randomUUID(), STALENESS);
+             final WriterFencingLease second =
+                     WriterFencingLease.acquire(volume, clusterB, UUID.randomUUID(), UUID.randomUUID(), STALENESS);
+             final var pool = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            final int rounds = 64;
+            final var done = new java.util.concurrent.CountDownLatch(2);
+            final var failures = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+            final java.util.function.BiConsumer<WriterFencingLease, Long> driver = (lease, base) -> {
+                try {
+                    for (int round = 0; round < rounds; round++) {
+                        final long expected = base + round;
+                        assertEquals(expected, lease.executeUnderOwnership(ignored -> expected));
+                    }
+                } catch (final Throwable failure) {
+                    failures.compareAndSet(null, failure);
+                } finally {
+                    done.countDown();
+                }
+            };
+            pool.submit(() -> driver.accept(first, 1_000L));
+            pool.submit(() -> driver.accept(second, 2_000L));
+            assertTrue(done.await(30, TimeUnit.SECONDS), "concurrent commits did not finish");
+            /* Concurrent renewals ride both heartbeat executors: let them run
+             * across several intervals while the commits race the lock files. */
+            Thread.sleep(STALENESS.toMillis() * 2L);
+            assertNull(failures.get(),
+                    () -> "independent clusters sharing a volume must not fence each other: " + failures.get());
+            assertTrue(first.isCurrent(), "cluster A holder must stay current");
+            assertTrue(second.isCurrent(), "cluster B holder must stay current");
         }
     }
 
@@ -490,7 +540,7 @@ class WriterFencingLeaseTest {
     void overlappingLeaseLockFailsClosed(@TempDir final Path volume) throws Exception {
         final UUID cluster = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final Path lockPath = volume.resolve("writer-lease.lock");
+        final Path lockPath = WriterFencingLease.lockPath(volume, cluster, generation);
         try (var channel = java.nio.channels.FileChannel.open(
                 lockPath, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
              var ignored = channel.lock()) {

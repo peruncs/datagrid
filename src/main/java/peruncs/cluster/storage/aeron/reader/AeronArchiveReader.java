@@ -28,6 +28,14 @@ import java.util.function.Consumer;
 /// The subscription belongs to this reader; the caller remains responsible for
 /// the shared Aeron and Archive clients.
 ///
+/// Live delivery runs ahead of the Archive recording: the writer offers a
+/// COMMIT before it could have been recorded. This reader therefore withholds
+/// every live-sourced terminal marker until the configured recorded-position
+/// supplier proves the marker durable; a stall longer than the reader stop
+/// timeout fails the reader closed instead of applying a transaction the
+/// durable history may never contain. Replay-sourced frames are recorded by
+/// definition and need no gating.
+///
 /// A lost Archive control channel (writer restart of its embedded Archive) is
 /// treated as recoverable. An escaping [ArchiveException] swaps the
 /// subscription for a fresh one resuming at the last resolved position; a
@@ -62,6 +70,9 @@ public final class AeronArchiveReader implements Disposable {
     /// @param receiver                 destination for complete Store binaries
     /// @param transactionResolved      callback after a transaction is delivered
     /// @param deliveryListener         callback around Store materialization
+    /// @param recordedPosition         current recorded position of the Archive recording;
+    ///                                 terminal markers observed on the live publication are
+    ///                                 withheld until it covers them
     public record Configuration(
             Aeron aeron,
             AeronArchive.Context archiveContext,
@@ -79,7 +90,8 @@ public final class AeronArchiveReader implements Disposable {
             long initialPosition,
             StorageBinaryDataReceiver receiver,
             Consumer<CursorSnapshot> transactionResolved,
-            ReaderDeliveryListener deliveryListener
+            ReaderDeliveryListener deliveryListener,
+            java.util.function.LongSupplier recordedPosition
     ) {
         /// Validates required reader collaborators and recovered cursor bounds.
     public Configuration {
@@ -90,6 +102,7 @@ public final class AeronArchiveReader implements Disposable {
             if (wireNonce == 0L) throw new IllegalArgumentException("wireNonce must not be zero");
             Objects.requireNonNull(receiver, "receiver");
             Objects.requireNonNull(transactionResolved, "transactionResolved");
+            Objects.requireNonNull(recordedPosition, "recordedPosition");
             if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
                 throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
             }
@@ -123,6 +136,7 @@ public final class AeronArchiveReader implements Disposable {
             private Consumer<CursorSnapshot> transactionResolved = ignored -> {
             };
             private ReaderDeliveryListener deliveryListener;
+            private java.util.function.LongSupplier recordedPosition;
 
             /// Creates an empty reader configuration builder.
             public Builder() {
@@ -219,6 +233,15 @@ public final class AeronArchiveReader implements Disposable {
             /// @param value Store materialization callback, or `null`
             /// @return this builder
             public Builder deliveryListener(final ReaderDeliveryListener value) { this.deliveryListener = value; return this; }
+            /// Sets the supplier of the recording's current recorded position.
+            ///
+            /// Live-sourced terminal markers are withheld until this supplier
+            /// reports a recorded position covering them, so a reader never
+            /// applies a transaction the Archive has not durably stored.
+            ///
+            /// @param value recorded-position supplier over the configured recording
+            /// @return this builder
+            public Builder recordedPosition(final java.util.function.LongSupplier value) { this.recordedPosition = value; return this; }
 
             /// Builds the immutable reader configuration.
             ///
@@ -229,7 +252,8 @@ public final class AeronArchiveReader implements Disposable {
                 }
                 return new Configuration(aeron, archiveContext, recordingId, startPosition, liveChannel,
                         liveStreamId, replayChannel, replayStreamId, replicationConfiguration, clusterId,
-                        this.wireNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved, deliveryListener);
+                        this.wireNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved,
+                        deliveryListener, this.recordedPosition);
             }
         }
     }
@@ -319,10 +343,26 @@ public final class AeronArchiveReader implements Disposable {
             this.assembler = new TransactionAssembler(
                     requiredConfiguration, required.clusterId(), required.epoch(), required.initialSequence(),
                     required.initialPosition(), required.receiver(), required.transactionResolved(),
-                    required.deliveryListener(), required.wireNonce()
+                    required.deliveryListener(), required.wireNonce(),
+                    requiredPosition -> required.recordedPosition().getAsLong() >= requiredPosition
             );
             this.fragmentHandler = (buffer, offset, length, header) -> {
-                this.assembler.onFragment(buffer, offset, length, header);
+                final PersistentSubscription source = this.subscription;
+                /* Live fragments may run ahead of the recording; replay and
+                 * catch-up fragments are recorded by definition. */
+                final boolean liveSource = source != null && source.isLive();
+                /* An ArchiveException escaping the recorded-position query
+                 * below propagates through controlledPoll into the reader's
+                 * reconnect path, exactly like a lost control channel: replay
+                 * resumes at the last resolved position, and a withheld
+                 * (unrecorded, undelivered) marker is simply replayed once it
+                 * has been recorded. */
+                if (this.assembler.onFragment(buffer, offset, length, header, liveSource)) {
+                    /* Withheld terminal marker: the recording has not durably
+                     * covered it yet. ABORT keeps the fragment for redelivery
+                     * on the next poll; the buffered data chunks stay staged. */
+                    return ControlledFragmentHandler.Action.ABORT;
+                }
                 return this.assembler.deliveryBarrierFull()
                         ? ControlledFragmentHandler.Action.BREAK
                         : ControlledFragmentHandler.Action.CONTINUE;

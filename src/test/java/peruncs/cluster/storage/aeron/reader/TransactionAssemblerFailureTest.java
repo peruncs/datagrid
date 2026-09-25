@@ -197,6 +197,6 @@ class TransactionAssemblerFailureTest {
         };
         assertThrows(IllegalArgumentException.class, () -> new TransactionAssembler(
                 configuration, CLUSTER, EPOCH, -1, -1, receiver, ignored -> {
-        }, null, 0L));
+        }, null, 0L, TransactionAssembler.CommitDurabilityGate.ALWAYS));
     }
 }

@@ -95,6 +95,7 @@ public final class ClusterIndexMaintenance {
             scratch.vectorGroups.clear();
             scratch.rebuiltGroups.clear();
             scratch.vectorModCounts.clear();
+            scratch.vectorProbes.clear();
         }
     }
 
@@ -239,6 +240,7 @@ public final class ClusterIndexMaintenance {
             scratch.vectorGroups.clear();
             scratch.rebuiltGroups.clear();
             scratch.vectorModCounts.clear();
+            scratch.vectorProbes.clear();
         }
     }
 
@@ -367,7 +369,9 @@ public final class ClusterIndexMaintenance {
     /// is read back after every probe, so an upstream version that decouples
     /// search from initialization fails this merger loudly instead of
     /// silently leaving the rebuild to the next query. The probe is reused
-    /// per index across batches, so a steady import allocates no probe arrays.
+    /// per dimension within the pass and dropped with the batch, so the
+    /// scratch never keeps a retired index — or the graph reachable through
+    /// it — alive.
     ///
     /// @param dirtyIndexes dirty vector index groups to rebuild
     /// @param scratch worker-local scratch owning the reused probes
@@ -376,7 +380,7 @@ public final class ClusterIndexMaintenance {
         for (final VectorIndex<?> index : dirtyIndexes) {
                 try {
                     final float[] probe = scratch.vectorProbes.computeIfAbsent(
-                            index, key -> ones(key.configuration().dimension()));
+                            index.configuration().dimension(), ClusterIndexMaintenance::ones);
                     index.search(probe, 1);
                 } catch (final RuntimeException | Error rebuildFailure) {
                     throw new IllegalStateException("Store graph vector-index rebuild failed", rebuildFailure);

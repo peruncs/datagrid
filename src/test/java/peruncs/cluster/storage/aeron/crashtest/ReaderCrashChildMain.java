@@ -106,6 +106,8 @@ public final class ReaderCrashChildMain {
                     .controlRequestChannel(required("dg.reader.controlChannel"))
                     .controlResponseChannel(required("dg.reader.controlResponseChannel"))
                     .messageTimeoutNs(configuration.offerTimeoutNanos());
+            final AeronArchive positionProbe =
+                    AeronArchive.connect(archiveContext.clone().aeron(aeron).ownsAeronClient(false));
             final long recordingId = Long.parseLong(required("dg.reader.recordingId"));
             final Cursor cursor = readCursor(base.resolve("reader.cursor"));
             /* Whether this phase must replay recorded history from behind the
@@ -126,7 +128,9 @@ public final class ReaderCrashChildMain {
                         .wireNonce(AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID))
                         .initialSequence(cursor == null ? -1 : cursor.sequence)
                         .initialPosition(cursor == null ? -1 : cursor.position)
-                        .receiver(fixture).transactionResolved(ignored ->
+                        .receiver(fixture)
+                        .recordedPosition(() -> positionProbe.getRecordingPosition(recordingId))
+                        .transactionResolved(ignored ->
                         {
                             if (ignored.sequence() < 0) return;
                             final AeronArchiveReader current = readerRef.get();

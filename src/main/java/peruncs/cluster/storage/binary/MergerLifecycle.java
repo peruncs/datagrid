@@ -61,4 +61,17 @@ interface MergerLifecycle {
     ///
     /// @param startedNanos nanoTime stamp of the batch being applied
     void onMaterializationBudgetExpired(long startedNanos);
+
+    /// Fails the merger when one batch's index refresh overruns its own budget.
+    ///
+    /// The index refresh (root validation plus changed vector-graph rebuild)
+    /// is bounded separately from materialization: it scans the whole store,
+    /// so its cost grows with data size, not batch size, and must never be
+    /// charged against the materialization budget. Invoked by the watchdog;
+    /// a no-op unless `startedNanos` still matches the batch the worker is
+    /// applying.
+    ///
+    /// @param startedNanos       nanoTime stamp of the batch being applied
+    /// @param rebuildStartedNanos nanoTime stamp at the start of the index phase
+    void onRefreshBudgetExpired(long startedNanos, long rebuildStartedNanos);
 }

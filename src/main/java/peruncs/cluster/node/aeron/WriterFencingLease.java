@@ -57,6 +57,13 @@ import static java.lang.System.Logger.Level.WARNING;
 /// only the Archive is not enough: separate Archives cannot see each other's
 /// lease without the shared volume.
 ///
+/// Both files of the pair are keyed by the same cluster/generation identity:
+/// the lease file `writer-lease-<cluster>-<generation>.lease` and its
+/// interprocess lock file `writer-lease-<cluster>-<generation>.lock`.
+/// Independent clusters sharing one volume use different lock files, so they
+/// neither serialize against nor fence each other — a shared lock file would
+/// turn a same-JVM overlap into a spurious fencing failure on renewal.
+///
 /// ## Clock requirements
 ///
 /// Freshness is ultimately a wall-clock comparison across machines, so every
@@ -187,7 +194,7 @@ final class WriterFencingLease implements AutoCloseable {
             final Duration lockTimeout
     ) {
         final Path path = leasePath(volumeDirectory, clusterId, storeGeneration);
-        final Path lockPath = volumeDirectory.resolve("writer-lease.lock");
+        final Path lockPath = lockPath(volumeDirectory, clusterId, storeGeneration);
         final long token;
         final long writeNanos;
         final long now;
@@ -234,7 +241,7 @@ final class WriterFencingLease implements AutoCloseable {
                             clusterId, storeGeneration),
                     failure);
         }
-        final WriterFencingLease lease = new WriterFencingLease(path, token, nodeId, maxStaleness, lockTimeout, writeNanos);
+        final WriterFencingLease lease = new WriterFencingLease(path, lockPath, token, nodeId, maxStaleness, lockTimeout, writeNanos);
         ACTIVE.put(path, lease);
         lease.startHeartbeat();
         return lease;
@@ -297,7 +304,27 @@ final class WriterFencingLease implements AutoCloseable {
                 .resolve("writer-lease-%s-%s.lease".formatted(clusterId, storeGeneration));
     }
 
+        /// Returns the interprocess lock file for one cluster/generation.
+    ///
+    /// The lock path carries the same cluster/generation identity as the
+    /// lease it serializes: a directory-wide lock would let co-located but
+    /// independent clusters trip each other's
+    /// [OverlappingFileLockException] inside one JVM and would serialize
+    /// unrelated clusters across processes.
+    ///
+    /// @param volumeDirectory shared backup volume directory
+    /// @param clusterId       replication cluster identity
+    /// @param storeGeneration Store generation identity
+    /// @return interprocess lock path
+    static Path lockPath(final Path volumeDirectory, final UUID clusterId, final UUID storeGeneration) {
+        return volumeDirectory.toAbsolutePath().normalize()
+                .resolve("writer-lease-%s-%s.lock".formatted(clusterId, storeGeneration));
+    }
+
     private final Path path;
+    /* The interprocess lock file keyed by the same cluster/generation identity
+     * as the lease; never a directory-wide name. */
+    private final Path lockPath;
     private final long token;
     private final UUID nodeId;
     private final UUID holderId;
@@ -333,9 +360,10 @@ final class WriterFencingLease implements AutoCloseable {
             new java.util.concurrent.atomic.AtomicReference<>();
 
     private WriterFencingLease(
-            final Path path, final long token, final UUID nodeId, final Duration maxStaleness,
+            final Path path, final Path lockPath, final long token, final UUID nodeId, final Duration maxStaleness,
             final Duration lockTimeout, final long lastWriteNanos) {
         this.path = path;
+        this.lockPath = lockPath;
         this.token = token;
         this.nodeId = nodeId;
         this.holderId = PROCESS_HOLDER_ID;
@@ -444,7 +472,7 @@ final class WriterFencingLease implements AutoCloseable {
     }
 
     private void renew() {
-        final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
+        final Path lockPath = this.lockPath;
         synchronized (mutexFor(this.path)) {
             synchronized (this.stateLock) {
                 if (this.closed || this.releaseUnproven || this.heartbeatFailure.get() != null) return;
@@ -549,7 +577,7 @@ final class WriterFencingLease implements AutoCloseable {
                             "writer fencing lease release was unresolved; this writer is fenced");
                 }
             }
-            final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
+            final Path lockPath = this.lockPath;
             try (final FileChannel lockChannel = openLockChannel(lockPath);
                  final FileLock ignored = lockFile(lockChannel,
                          Duration.ofNanos(Math.min(this.lockTimeout.toNanos(), this.terminalOfferBudgetNanos())))) {
@@ -628,7 +656,7 @@ final class WriterFencingLease implements AutoCloseable {
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         }
-        final Path lockPath = this.path.getParent().resolve("writer-lease.lock");
+        final Path lockPath = this.lockPath;
         boolean releaseProven = false;
         try (final FileChannel lockChannel = openLockChannel(lockPath);
              final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {

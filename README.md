@@ -1,6 +1,6 @@
 # Peruncs Cluster
 
-Peruncs Data Grid is an in-memory data processing layer to speed up database
+Peruncs Cluster is an in-memory data processing layer to speed up database
 applications and relieve the database. It combines distributed caching,
 high-speed in-memory searching, and complex data manipulation on the native
 Java object model, persisted transaction-safe by Eclipse Store and moved
@@ -50,12 +50,12 @@ deliberately remain inaccessible:
 
 ```java
 try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
-    // Writer: mutate inside the read boundary, then persist the change.
-    int size = node.store().withRootRead(root -> {
+    // Writer: mutate and persist inside one atomic boundary — concurrent
+    // mutations and queries observe either the whole change or none.
+    int size = node.store().withRootWrite(root -> {
         root.add("value");
         return root.size();
     });
-    node.store().storeRoot();
     // Reader: copy what you need inside the callback — never return a
     // live graph object.
     int seen = node.store().withRootRead(root -> root.size());
@@ -65,7 +65,10 @@ try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
 
 `ClusterStore.withRootRead` is the required reader-side graph boundary: run the whole
 traversal inside the callback, and return only copied values — never a live
-graph object. Mutations are accepted only on the writer; a reader fails
+graph object. `ClusterStore.withRootWrite` is the required writer-side
+mutation boundary: mutate and persist inside one exclusive callback so
+concurrent application threads cannot lose or interleave each other's
+updates. Mutations are accepted only on the writer; a reader fails
 writes with `ReaderWriteRejectedException`, a fenced writer with
 `WriterFencedException`, and a full Store with `StorageLimitReachedException`
 (all from `peruncs.cluster.errors`). An uncertain-commit failure is

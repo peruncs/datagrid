@@ -1,6 +1,7 @@
 package peruncs.cluster.node.store;
 
 import org.eclipse.store.storage.types.StorageManager;
+import peruncs.cluster.errors.GraphInvalidatedException;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReaderWriteRejectedException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
@@ -97,10 +98,41 @@ public interface ClusterStorageManager<T> extends StorageManager {
     /// must not return any live graph object. Only a direct root return can be
     /// detected here; callers must also avoid returning nested mutable objects.
     ///
+    /// The read closure is read-only by contract: mutating the root inside it
+    /// races application reads and other mutations. Writer-side mutation
+    /// belongs to [#writeRoot(Function)].
+    ///
+    /// A read after a failed update section fails closed with
+    /// [GraphInvalidatedException]
+    /// until the node reloads or reseeds: the graph may be partially updated.
+    ///
     /// @param <R>    result type
     /// @param action graph read; it receives the materialized root, or `null`
     /// @return action result, never the live graph
     <R> R readRoot(Function<? super T, ? extends R> action);
+
+    /// Mutates the current root and persists it as one atomic writer boundary.
+    ///
+    /// Single-writer *node* ownership does not serialize application threads
+    /// on that node: two callers mutating inside a shared read closure and
+    /// storing afterwards can lose each other's updates. This closure holds
+    /// exclusive graph ownership across BOTH the mutation and [#storeRoot()],
+    /// so concurrent writer threads and concurrent queries either observe the
+    /// full mutation and its commit or neither.
+    ///
+    /// Reader roles reject the call with [ReaderWriteRejectedException]
+    /// and the storage-limit gate applies before the mutation runs. If
+    /// persistence fails — in particular with an uncertain commit outcome —
+    /// the graph may carry an unpersisted mutation, so the coordinator
+    /// invalidates the writer's mutable view: every later coordinated read
+    /// and write fails closed until the node reloads or reseeds. See
+    /// [#store(Object)] for the uncertain-commit contract.
+    ///
+    /// @param <R>    result type
+    /// @param action mutation and optional result extraction; it receives the
+    ///               live root but must not retain or return it
+    /// @return action result, never the live graph
+    <R> R writeRoot(Function<? super T, ? extends R> action);
 
     /// Returns the graph coordinator guarding this Store.
     ///
