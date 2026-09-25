@@ -1,4 +1,5 @@
 package peruncs.cluster.node;
+import peruncs.cluster.api.NodeSettingsSource;
 
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.NodeException;
@@ -17,27 +18,27 @@ class NodeLibraryEnvKeysTest {
                 NodeSettingsSource.Env.EnvKeys.STORAGE_LIMIT_GB, "64",
                 "STORAGE_LIMIT_GB", "32");
 
-        assertEquals("64", env(environment).resolve(
+        assertEquals("64", env(environment).replicationProperty(
                 NodeSettingsSource.Env.EnvKeys.STORAGE_LIMIT_GB));
     }
 
     /// Verifies legacy unprefixed names still resolve when the prefixed name is unset.
     @Test
     void legacyNameResolvesWhenPrefixedIsUnset() {
-        assertEquals("32", env(Map.of("STORAGE_LIMIT_GB", "32")).resolve(
+        assertEquals("32", env(Map.of("STORAGE_LIMIT_GB", "32")).replicationProperty(
                 NodeSettingsSource.Env.EnvKeys.STORAGE_LIMIT_GB));
-        assertEquals("secret", env(Map.of("MSCNL_PROD_MODE", "secret")).resolve(
+        assertEquals("secret", env(Map.of("MSCNL_PROD_MODE", "secret")).replicationProperty(
                 NodeSettingsSource.Env.EnvKeys.IS_PROD_MODE));
     }
 
     /// Verifies unknown or unset names resolve to null instead of a default value.
     @Test
     void unsetNameResolvesToNull() {
-        assertNull(env(Map.of()).resolve(
+        assertNull(env(Map.of()).replicationProperty(
                 NodeSettingsSource.Env.EnvKeys.STORAGE_LIMIT_GB));
-        assertNull(env(Map.of("STORAGE_LIMIT_GB", "32")).resolve(
+        assertNull(env(Map.of("STORAGE_LIMIT_GB", "32")).replicationProperty(
                 NodeSettingsSource.Env.EnvKeys.STORAGE_PATH));
-        assertNull(env(Map.of("UNRELATED", "1")).resolve(
+        assertNull(env(Map.of("UNRELATED", "1")).replicationProperty(
                 NodeSettingsSource.Env.EnvKeys.IS_BACKUP_NODE));
     }
 
@@ -104,11 +105,11 @@ class NodeLibraryEnvKeysTest {
     @Test
     void roleFallsBackWhenUnconfigured() {
         assertNull(env(Map.of()).replicationRole());
-        assertEquals(NodeRole.WRITER, env(Map.of()).nodeRole());
-        assertEquals(NodeRole.BACKUP_READER, env(Map.of(
-                NodeSettingsSource.Env.EnvKeys.IS_BACKUP_NODE, "true")).nodeRole());
-        assertEquals(NodeRole.READER, env(Map.of(
-                NodeSettingsSource.Env.EnvKeys.REPLICATION_ROLE, "reader")).nodeRole());
+        assertEquals(NodeRole.WRITER, NodeRole.of(env(Map.of())));
+        assertEquals(NodeRole.BACKUP_READER, NodeRole.of(env(Map.of(
+                NodeSettingsSource.Env.EnvKeys.IS_BACKUP_NODE, "true"))));
+        assertEquals(NodeRole.READER, NodeRole.of(env(Map.of(
+                NodeSettingsSource.Env.EnvKeys.REPLICATION_ROLE, "reader"))));
     }
 
     private static NodeSettingsSource.Env env(final Map<String, String> environment) {

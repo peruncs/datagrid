@@ -5,7 +5,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.node.CloseSequencer;
 import peruncs.cluster.node.NodeRole;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.backup.BackupMetadata;
 import peruncs.cluster.node.replication.*;
 import peruncs.cluster.storage.ReplicationCursor;

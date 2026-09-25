@@ -9,7 +9,7 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.security.*;
 import org.agrona.SystemUtil;
 import peruncs.cluster.node.NodeRole;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
@@ -291,7 +291,7 @@ record AeronSettings(
         }
         /* One normalized role for transport setup; a legacy/new conflict
          * fails here, before any gate reads it. */
-        final NodeRole role = properties.nodeRole();
+        final NodeRole role = NodeRole.of(properties);
         final boolean productionMode = properties.isProdMode();
         final boolean trustedNetwork = Boolean.parseBoolean(value(
                 properties, "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK", "false"));

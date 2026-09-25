@@ -12,10 +12,12 @@ import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.errors.WrongRoleException;
-import peruncs.cluster.node.NodeSettingsSource.Env.EnvKeys;
+import peruncs.cluster.api.ClusterStorageManager;
+import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource.Env.EnvKeys;
 import peruncs.cluster.node.backup.BackupNodeControl;
 import peruncs.cluster.node.backup.StorageBackupTaskExecutor;
-import peruncs.cluster.node.store.ClusterStorageManager;
+import peruncs.cluster.node.store.ClusterStorageManagers;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.storage.ReplicationCursor;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
@@ -45,6 +47,9 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     private volatile boolean started;
     private volatile boolean closed;
     private volatile boolean closing;
+    /* The thread that owns the in-flight close attempt; re-entry from it is a
+     * no-op, so the facade's shutdown() inside a close cannot recurse. */
+    private Thread closer;
     private volatile Throwable closeFailure;
 
     NodeLifecycle(final NodeCollaborators assembly) {
@@ -240,11 +245,11 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
 
         final var maintenance = this.assembly.getNodeMaintenanceScheduler();
 
-        /* The shutdown callback is a no-op by design: NodeLifecycle.close owns
-         * the complete teardown graph, so a Store-internal shutdown cannot
-         * race the sequencer's stage order. */
-        this.assembly.clusterStorageManager = ClusterStorageManager.ReadOnly(embeddedStorageManager,
-                ClusterStorageManager.ShutdownCallback.noOp(), this.assembly.graphCoordinator);
+        /* The manager's shutdown() triggers this lifecycle's complete close,
+         * so a DI container or try-with-resources owning the StorageManager
+         * tears the whole node down in the sequencer's order. */
+        this.assembly.clusterStorageManager = ClusterStorageManagers.readOnly(embeddedStorageManager,
+                this::closeNode, this.assembly.graphCoordinator);
 
         this.assembly.getReplicationApplier().start();
         /* Eagerly create the manager so misconfiguration fails at startup.
@@ -313,7 +318,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         if (!restored && !this.assembly.mayCreateRoot() && NodeCollaborators.isMissingOrEmpty(storageRootPath)) {
             throw new ReseedRequiredException(
                     "node role '%s' has no local Store image and no backup seed at %s; restore a compatible backup or seed the Store directory with its replication cursor before starting"
-                            .formatted(props.nodeRole().configName(), storageRootPath));
+                            .formatted(NodeRole.of(props).configName(), storageRootPath));
         }
         /* Lost-cursor gate, replicated readers only: Store files without
          * their durable offset cursor cannot be resumed safely, because
@@ -333,7 +338,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         if (!this.assembly.mayCreateRoot() && NodeCollaborators.isMissingOrEmpty(storageRootPath)) {
             throw new ReseedRequiredException(
                     "node role '%s' has no local Store image at %s; restore a compatible backup or seed the Store directory with its replication cursor before starting"
-                            .formatted(props.nodeRole().configName(), storageRootPath));
+                            .formatted(NodeRole.of(props).configName(), storageRootPath));
         }
         final var embeddedStorageFoundation = this.prepareEmbeddedStorage(storageRootPath);
         DistributedStorage.configureWriting(
@@ -368,18 +373,18 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * raw Store import path and must never persist a locally originated
          * write. The application-facing read-only view rejects every write;
          * only the node-owned merger receives the raw manager. */
-        final boolean writer = props.nodeRole() == NodeRole.WRITER;
-        /* The shutdown callback is a no-op by design: NodeLifecycle.close owns
-         * the complete teardown graph — see the backup node path above. */
+        final boolean writer = NodeRole.of(props) == NodeRole.WRITER;
+        /* The manager's shutdown() triggers this lifecycle's complete close —
+         * see the backup node path above. */
         this.assembly.clusterStorageManager = writer
-                ? ClusterStorageManager.create(
+                ? ClusterStorageManagers.guarding(
                         embeddedStorageManager,
                         limitGate::limitReached,
-                        ClusterStorageManager.ShutdownCallback.noOp(),
+                        this::closeNode,
                         this.assembly.graphCoordinator)
-                : ClusterStorageManager.ReadOnly(
+                : ClusterStorageManagers.readOnly(
                         embeddedStorageManager,
-                        ClusterStorageManager.ShutdownCallback.noOp(),
+                        this::closeNode,
                         this.assembly.graphCoordinator);
 
         this.assembly.getReplicationApplier().start();
@@ -413,7 +418,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// incremental export was consumed before the writer crashed.
     private void queueWriterDictionary(final EmbeddedStorageManager storage) {
         final NodeSettingsSource props = this.assembly.getNodeSettingsSource();
-        if (props.nodeRole() != NodeRole.WRITER) {
+        if (NodeRole.of(props) != NodeRole.WRITER) {
             return;
         }
         final String dictionary = PersistenceTypeDictionaryAssembler.New().assemble(storage.typeDictionary());
@@ -465,7 +470,16 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// @param allowCreate whether this node owns an authoritative image
     /// @throws ReseedRequiredException when the node may not create a root
     private void initializeRoot(final StorageManager storage, final boolean allowCreate) {
-        if (storage.root() != null) {
+        final Object existing = storage.root();
+        if (existing != null) {
+            /* The cluster contract stores every root as a Lazy reference.
+             * Anything else on disk is an incompatible image: reject it
+             * clearly instead of silently migrating or deleting it. */
+            if (!(existing instanceof Lazy)) {
+                throw new ReseedRequiredException(
+                        "node role '%s' opened a Store whose root is not a Lazy reference; reseed from an image written by this node version"
+                                .formatted(this.assembly.nodeRole.configName()));
+            }
             return;
         }
         if (!allowCreate) {
@@ -508,10 +522,10 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly.embeddedStorageManager = storage;
         this.initializeRoot(storage, true);
 
-        this.assembly.clusterStorageManager = ClusterStorageManager.create(
+        this.assembly.clusterStorageManager = ClusterStorageManagers.guarding(
                 storage,
-                ClusterStorageManager.StorageSizeValidation.notReached(),
-                ClusterStorageManager.ShutdownCallback.noOp(),
+                peruncs.cluster.node.store.StorageSizeValidation.notReached(),
+                this::closeNode,
                 this.assembly.graphCoordinator
         );
     }
@@ -526,16 +540,59 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// itself would freeze every node API and can deadlock against the
     /// maintenance scheduler termination join. Individual stages may briefly take
     /// the node monitor themselves; each is a flag flip, never a wait.
+    ///
+    /// Close is idempotent and safe under concurrent callers: re-entry from
+    /// the closing thread itself returns, a concurrent caller waits for the
+    /// running attempt and then returns (or rethrows that attempt's recorded
+    /// failure), and a retry after a failed close re-runs only the stages
+    /// that still owe work while preserving the failed attempt's observed
+    /// outcome.
     @Override
     public void close() {
+        this.closeNode();
+    }
+
+    /// Runs the complete node teardown exactly once, sharing it with the
+    /// storage facade's shutdown.
+    ///
+    /// Called by the manager's `shutdown()` trigger and by [ClusterNode#close].
+    ///
+    /// @return `true` when this call performed the teardown, `false` after
+    /// observing another caller's successful close
+    boolean closeNode() {
         synchronized (this) {
             if (this.closed) {
-                return;
+                return false;
             }
-            if (this.closing) {
-                throw new IllegalStateException("cluster node is already closing");
+            /* A concurrent close attempt waits and observes its outcome;
+             * re-entry from the same thread (for example via the facade's
+             * shutdown within a close stage) is a no-op. */
+            boolean joinedInFlight = false;
+            while (this.closing) {
+                if (this.closer == Thread.currentThread()) {
+                    return false;
+                }
+                joinedInFlight = true;
+                try {
+                    this.wait();
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new NodeException("Interrupted while waiting for node close", interrupted);
+                }
+            }
+            if (this.closed) {
+                return false;
+            }
+            if (joinedInFlight && this.closeFailure != null) {
+                /* The attempt this caller joined failed: observe its recorded
+                 * failure rather than starting an independent retry. The
+                 * failure stays recorded so a later, genuinely new close
+                 * retries only the stages still owing work. */
+                if (this.closeFailure instanceof Error error) throw error;
+                throw (RuntimeException) this.closeFailure;
             }
             this.closing = true;
+            this.closer = Thread.currentThread();
         }
         Throwable failure = null;
         try {
@@ -610,19 +667,17 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                     .add(CloseSequencer.stage("stored cursor manager",
                             () -> !collaborators.commitAppliedListener.isInitialized() && collaborators.durableCursorFile != null,
                             collaborators::closeDurableCursorFile))
-                    /* 5. Close the Store and its low-level resources last.
-                     * A backup that outlived its executor budget must block
-                     * this stage instead of losing the race to a shutdown
-                     * Store. A startup failure can leave the raw Store
-                     * started but unwrapped: the cluster manager shuts the
-                     * Store down when it exists, so the raw stage owns the
-                     * manager only in the failure path. */
-                    .add(CloseSequencer.stage("cluster storage manager",
-                            () -> collaborators.clusterStorageManager != null && (
-                                    backupTaskExecutor == null || !backupTaskExecutor.isRunningBackup()),
-                            () -> collaborators.clusterStorageManager.close()))
+                    /* 5. Close the Store last. A backup that outlived its
+                     * executor budget must block this stage instead of losing
+                     * the race to a shutdown Store. The raw embedded manager
+                     * is shut down here — never through the facade, whose
+                     * shutdown() now triggers this whole close back into this
+                     * sequencer. A startup failure may leave the raw Store
+                     * started but unwrapped: without the facade this stage
+                     * owns the raw manager directly. */
                     .add(CloseSequencer.stage("embedded storage",
-                            () -> collaborators.clusterStorageManager == null && collaborators.embeddedStorageManager != null,
+                            () -> collaborators.embeddedStorageManager != null && (
+                                    backupTaskExecutor == null || !backupTaskExecutor.isRunningBackup()),
                             () -> collaborators.embeddedStorageManager.shutdown()));
             sequencer.run("Failed to close node");
         } catch (final RuntimeException | Error closeFailure) {
@@ -638,12 +693,17 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 } else {
                     /* Keep resource references so a later close can retry a
                      * stage such as deferred backup-client disposal. Other
-                     * APIs remain unavailable while teardown is incomplete. */
+                     * APIs remain unavailable while teardown is incomplete.
+                     * Waiters from this attempt observe the recorded failure
+                     * after the flag clears below. */
                     this.closeFailure = failure;
                 }
                 this.closing = false;
+                this.closer = null;
+                this.notifyAll();
             }
         }
+        return failure == null;
     }
 
     private void ensureOpen() {

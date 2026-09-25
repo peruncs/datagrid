@@ -1,9 +1,17 @@
-/// Minimal embedding API for one Eclipse Store replication node.
+/// Application-facing API of one Eclipse Store replication node.
 ///
-/// Applications open a [ClusterNode], access its
-/// guarded [ClusterStore], and render immutable
-/// [NodeStatus] snapshots. Aeron, backup archive,
-/// cursor, checkpoint, and Store-adapter types are implementation details.
+/// Applications open a [ClusterNode] with [NodeOptions],
+/// receive a [ClusterStorageManager] — a StorageManager-compatible facade
+/// with documented role, root, coordination, and lifecycle restrictions — and
+/// join graph access through [GraphBoundary]. Aeron, backup archive, cursor,
+/// checkpoint, and Store-adapter types are implementation details; node
+/// configuration enters programmatically through [NodeSettingsSource], with
+/// the environment as the default source.
+///
+/// Deviations from plain Store: application imports are rejected outright,
+/// persistence failures with uncertain durable outcome latch the graph
+/// (fail closed until reload or reseed), and application shutdown of the
+/// manager tears the whole node down in the owned teardown order.
 ///
 /// No public or protected signature in this package references a
 /// non-exported type: internal assembly, manager, control-view, and

@@ -4,9 +4,11 @@ import org.eclipse.serializer.exceptions.MissingFoundationPartException;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.eclipse.store.storage.types.StorageManager;
+import peruncs.cluster.api.ClusterStorageManager;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReseedRequiredException;
-import peruncs.cluster.node.NodeSettingsSource.Env.EnvKeys;
+import peruncs.cluster.api.NodeSettingsSource.Env.EnvKeys;
 import peruncs.cluster.node.aeron.AeronTransport;
 import peruncs.cluster.node.backup.*;
 import peruncs.cluster.node.replication.*;
@@ -234,7 +236,7 @@ final class NodeCollaborators {
         this.storageNodeManager = LazyHolder.of(this::ensureStorageNodeManager);
         this.positionProvider = LazyHolder.of(this::ensureReplicationPositionProvider);
         this.replicationRetention = LazyHolder.of(this::ensureReplicationLogRetention);
-        this.nodeRole = this.propertiesProvider.get().nodeRole();
+        this.nodeRole = NodeRole.of(this.propertiesProvider.get());
     }
 
     private static <T> LazyHolder<T> lazy(final T configured, final Supplier<? extends T> factory) {

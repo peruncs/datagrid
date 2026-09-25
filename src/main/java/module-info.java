@@ -1,5 +1,6 @@
 import peruncs.cluster.api.ClusterNode;
-import peruncs.cluster.api.ClusterStore;
+import peruncs.cluster.api.ClusterStorageManager;
+import peruncs.cluster.api.GraphBoundary;
 
 /// Cluster node with Aeron replication.
 ///
@@ -16,9 +17,14 @@ import peruncs.cluster.api.ClusterStore;
 /// `...cluster.storage.binary`, carried by
 /// `...cluster.storage.aeron.*`, which also carries the embedded
 /// Lucene/JVector index policy. The exported `cluster.api` package contains
-/// the contracts embedding applications use; the exported `cluster.errors`
-/// package carries the typed failures crossing the same boundary. Everything
-/// else is internal and translated at that boundary.
+/// the contracts embedding applications use: the node facade ([ClusterNode],
+/// [NodeOptions]), the `StorageManager`-compatible application contract
+/// ([ClusterStorageManager], [GraphBoundary]) sharing the same graph lock
+/// domain as replication, the embedding settings hook ([NodeSettingsSource]),
+/// and immutable status. A manager `shutdown()` close performs the complete
+/// node teardown; the exported `cluster.errors` package carries the typed
+/// failures crossing that boundary. Everything else is internal and
+/// translated at that boundary.
 /// Aeron is the only transport. Each transport owns its embedded MediaDriver
 /// and Archive lifecycle, closed by the node lifecycle after maintenance stops.
 ///
@@ -159,9 +165,10 @@ import peruncs.cluster.api.ClusterStore;
 /// owns the entire boundary — HTTP and OpenAPI routes, MCP tools, a web UI,
 /// Prometheus rendering, authentication, and authorization — and drives the
 /// node through the exported [ClusterNode] and
-/// its [ClusterStore] view; the Store object
-/// graph beneath them is the entity layer. The assembly owns both role
-/// managers and closes them exactly once, and both closes are idempotent.
+/// its [ClusterStorageManager] view; the Store object
+/// graph beneath them is coordinated through [GraphBoundary]. The assembly
+/// owns both role managers and closes them exactly once, and both closes are
+/// idempotent.
 /// Roles stay fixed at startup
 /// as described above, so there is deliberately no reader-to-writer
 /// promotion: a role change is a restart with a new role, never a runtime
@@ -170,11 +177,14 @@ import peruncs.cluster.api.ClusterStore;
 /// @since 1.0
 module peruncs.cluster
 {
+    /* Application-facing types (ClusterStorageManager, GraphBoundary) expose
+     * the Store/Serializer contracts in their signatures; consumers read them
+     * transitively instead of adding their own requires. */
+    requires transitive org.eclipse.store.storage;
+    requires transitive org.eclipse.serializer.base;
     requires org.eclipse.store.storage.embedded;
-    requires org.eclipse.serializer.base;
     requires org.eclipse.serializer.persistence;
     requires org.eclipse.serializer.persistence.binary;
-    requires org.eclipse.store.storage;
     requires org.eclipse.serializer.afs;
     requires org.eclipse.store.afs.nio;
     requires io.aeron.client;

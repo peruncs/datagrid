@@ -1,4 +1,4 @@
-package peruncs.cluster.node;
+package peruncs.cluster.api;
 
 import peruncs.cluster.errors.NodeException;
 
@@ -52,9 +52,11 @@ public interface NodeSettingsSource {
 
         /// Fixed-topology node role: `writer`, `reader`, or `backup-reader`.
     ///
-    /// A blank value inherits the legacy backup flag via [NodeRole#resolve].
+    /// A blank value inherits the legacy backup flag. The normalized role is
+    /// resolved by internal node code; this contract only reports the raw
+    /// setting so the role type never enters the application contract.
     ///
-    /// @return node role, or `null` when unconfigured
+    /// @return configured role value, or `null` when unconfigured
     default String replicationRole() {
         return null;
     }
@@ -68,18 +70,9 @@ public interface NodeSettingsSource {
         /// Backup reader role: replays like a reader and additionally serves backups.
     String BACKUP_READER_ROLE = "backup-reader";
 
-        /// Returns the single normalized role every decision point uses.
+        /// Reports whether this node restores backups.
     ///
-    /// This reconciles the legacy [NodeSettingsSource#isBackupNode]
-    /// flag with the `ECLIPSE_DATAGRID_REPLICATION_ROLE` value and rejects a
-    /// conflicting combination, so startup, guards, and transport setup can
-    /// never disagree about the role.
-    ///
-    /// @return effective role
-    /// @throws IllegalArgumentException for an unknown value or a legacy/new conflict
-    default NodeRole nodeRole() {
-        return NodeRole.of(this);
-    }
+    /// @return `true` for a backup node
 
         /// Reports whether this node restores backups.
     ///

@@ -16,7 +16,7 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import peruncs.cluster.errors.ReseedRequiredException;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.replication.*;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.storage.ReplicationCursor;

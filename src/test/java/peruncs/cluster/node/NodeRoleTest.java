@@ -1,4 +1,5 @@
 package peruncs.cluster.node;
+import peruncs.cluster.api.NodeSettingsSource;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -54,7 +55,7 @@ class NodeRoleTest {
         final var properties = new NodeSettingsSource.Env(Map.of(
                 "ECLIPSE_DATAGRID_REPLICATION_ROLE", "backup-reader"));
 
-        assertEquals(NodeRole.BACKUP_READER, properties.nodeRole());
+        assertEquals(NodeRole.BACKUP_READER, NodeRole.of(properties));
     }
 
     /// Verifies the legacy backup-node flag alone still resolves to the backup-reader role without the new setting.
@@ -63,6 +64,6 @@ class NodeRoleTest {
         final var properties = new NodeSettingsSource.Env(Map.of(
                 "ECLIPSE_DATAGRID_IS_BACKUP_NODE", "true"));
 
-        assertEquals(NodeRole.BACKUP_READER, properties.nodeRole());
+        assertEquals(NodeRole.BACKUP_READER, NodeRole.of(properties));
     }
 }

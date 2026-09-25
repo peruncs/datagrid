@@ -4,6 +4,7 @@ import peruncs.cluster.errors.GraphInvalidatedException;
 import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
@@ -172,14 +173,80 @@ public final class StorageGraphCoordinator {
         return this.invalidity.get();
     }
 
+        /// Runs an application mutation under the exclusive write side.
+    ///
+    /// Unlike the replication write sections, this path does NOT infer
+    /// invalidation from a thrown callback: application code validates before
+    /// mutation and must report a potentially dirty failure through
+    /// [#invalidate(Throwable)] itself before leaving the section
+    /// ([GraphInvalidatedException] documentation explains the rule). The
+    /// lock is checked before running and the validity latch still applies.
+    ///
+    /// Read-to-write upgrades are rejected outright: a thread holding only
+    /// this coordinator's read lock would deadlock against the fair write
+    /// lock, so the upgrade throws immediately instead of blocking. Nested
+    /// writes and reads-inside-writes are reentrant and supported.
+    ///
+    /// @param <T>    result type
+    /// @param update application mutation to run
+    /// @return update result
+    /// @throws GraphInvalidatedException when the graph was previously invalidated
+    /// @throws IllegalStateException     when the calling thread already holds the read lock
+    public <T> T writeExclusive(final Supplier<T> update) {
+        notNull(update);
+        if (!this.lock.isWriteLockedByCurrentThread() && this.lock.getReadHoldCount() > 0) {
+            throw new IllegalStateException(
+                    "read-to-write lock upgrade is not supported; start a write section before holding a read");
+        }
+        this.lock.writeLock().lock();
+        try {
+            this.ensureValid();
+            return update.get();
+        } finally {
+            this.lock.writeLock().unlock();
+        }
+    }
+
+        /// Runs an application mutation under the exclusive write side.
+    ///
+    /// Same semantics as [#writeExclusive(Supplier)].
+    ///
+    /// @param update application mutation to run
+    /// @throws GraphInvalidatedException when the graph was previously invalidated
+    /// @throws IllegalStateException     when the calling thread already holds the read lock
+    public void writeExclusive(final Runnable update) {
+        this.writeExclusive(() ->
+        {
+            update.run();
+            return null;
+        });
+    }
+
+    /// Explicitly invalidates the graph: the first cause wins and cannot be reset.
+    ///
+    /// Called by the application boundary when an application unit of work
+    /// reports a potentially dirty state before leaving its exclusive section.
+    /// Replication's write sections call this automatically on failure.
+    ///
+    /// @param cause first observed potentially-dirty failure
+    public void invalidate(final Throwable cause) {
+        this.invalidity.compareAndSet(null, new GraphInvalidatedException(
+                "Store graph may be partially updated after a failed write section; reload or reseed is required",
+                Objects.requireNonNull(cause, "cause")));
+    }
+
+    /// Reports whether the calling thread currently holds either side.
+    ///
+    /// Used by the lifecycle: a graph section must never synchronously run
+    /// node teardown, which joins workers that themselves take this lock.
+    ///
+    /// @return `true` when this thread holds the read or write side
+    public boolean isHeldByCurrentThread() {
+        return this.lock.isWriteLockedByCurrentThread() || this.lock.getReadHoldCount() > 0;
+    }
+
     private void ensureValid() {
         final GraphInvalidatedException failure = this.invalidity.get();
         if (failure != null) throw failure;
-    }
-
-    private void invalidate(final Throwable failure) {
-        this.invalidity.compareAndSet(null, new GraphInvalidatedException(
-                "Store graph may be partially updated after a failed write section; reload or reseed is required",
-                failure));
     }
 }

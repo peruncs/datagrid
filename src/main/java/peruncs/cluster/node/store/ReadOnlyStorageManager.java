@@ -1,15 +1,13 @@
 package peruncs.cluster.node.store;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.types.PersistenceRootsView;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
-import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.store.storage.types.StorageManager;
 import peruncs.cluster.errors.ReaderWriteRejectedException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
 
-/// Read-only facade for reader roles: it rejects application writes while
-/// keeping reads, maintenance, and restore working.
+/// Read-only facade for reader roles: it rejects durable application writes
+/// while keeping reads, maintenance, and restore working.
 ///
 /// Replication uses the unwrapped Store connection owned by the node;
 /// exposing import through this application-facing view would let a reader
@@ -17,7 +15,12 @@ import peruncs.cluster.storage.StorageGraphCoordinator;
 ///
 /// The write gate always throws [ReaderWriteRejectedException], which flows
 /// through the inherited `store`, `storeAll`, `storeRoot`, `setRoot`, storer
-/// `commit`, raw-target `write`, and import paths.
+/// `commit`, raw-target `write`, and import paths, and through the
+/// application boundary's write sections.
+///
+/// Roots are readable on readers too: `root()` returns the live `Lazy`
+/// reference and `viewRoots()` delegates — readers must run the traversal
+/// inside `graphBoundary().read(...)`, never outside it.
 ///
 /// Object-ID assignment (`createRegisterer`, `ensureObjectId*`,
 /// `lookupObjectId`) is deliberately ungated: it only hands out in-memory
@@ -29,13 +32,16 @@ import peruncs.cluster.storage.StorageGraphCoordinator;
 /// @param <T> root type
 final class ReadOnlyStorageManager<T> extends GuardingStorageManager<T> {
     ReadOnlyStorageManager(final StorageManager delegate,
-                           final ClusterStorageManager.ShutdownCallback shutdownCallback,
+                           final NodeClose nodeClose,
                            final StorageGraphCoordinator graphCoordinator) {
-        super(delegate, StorageSizeValidation.notReached(), shutdownCallback, graphCoordinator);
+        super(delegate, StorageSizeValidation.notReached(), nodeClose, graphCoordinator);
     }
 
     @Override
     void validateState() {
+        /* The shared lifecycle and graph-validity checks still run; reader
+         * rejection is layered on top and must not bypass them. */
+        this.ensureGraphValid();
         throw new ReaderWriteRejectedException(
                 "node role is read-only; application writes are rejected because they would diverge from the writer");
     }
@@ -49,21 +55,5 @@ final class ReadOnlyStorageManager<T> extends GuardingStorageManager<T> {
     @Override
     PersistenceTarget<Binary> gateTarget(final PersistenceTarget<Binary> raw) {
         return RejectingPersistenceTarget.create(raw);
-    }
-
-    @Override
-    public Lazy<T> root() {
-        /* The merger applies batches on the coordinator write side; a live
-         * reference returned here would be traversed after the read lock is
-         * gone. Application readers must use readRoot(...) or
-         * graphCoordinator().read(...). */
-        throw new UnsupportedOperationException(
-                "use readRoot(...) for a coherent graph read; root() cannot retain the coordinator read lock");
-    }
-
-    @Override
-    public PersistenceRootsView viewRoots() {
-        throw new UnsupportedOperationException(
-                "use readRoot(...) for a coherent graph read; viewRoots() exposes live roots");
     }
 }

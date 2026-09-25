@@ -87,8 +87,9 @@ class ModuleDescriptorConsistencyTest {
                 "upstream has not published the corrected spelling yet: " + required);
     }
 
-        /// The exported facade contains only JDK types, so implementation
-    /// dependencies must not leak into a consumer's module graph.
+        /// The exported facade exposes the Store and Serializer contracts in
+    /// its signatures, so exactly those two upstream modules flow transitively
+    /// to consumers. Every other implementation dependency stays local.
     @Test
     void exportedFacadeHasNoTransitiveImplementationDependencies() {
         final Set<String> transitive = descriptor().requires().stream()
@@ -96,8 +97,8 @@ class ModuleDescriptorConsistencyTest {
                 .map(ModuleDescriptor.Requires::name)
                 .collect(Collectors.toSet());
 
-        assertTrue(transitive.isEmpty(),
-                "implementation dependencies must not be transitive: " + transitive);
+        assertEquals(Set.of("org.eclipse.store.storage", "org.eclipse.serializer.base"), transitive,
+                "only the exported Store surface may be transitive: " + transitive);
     }
 
     /// Exactly one application facade is exported; transport, Store adapter,

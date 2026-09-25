@@ -6,7 +6,7 @@ import io.aeron.archive.codecs.StartRecordingRequestDecoder;
 import io.aeron.archive.codecs.TruncateRecordingRequestDecoder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;

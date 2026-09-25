@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.api.ReplicationState;
 import peruncs.cluster.errors.ReplicationPositionUnavailableException;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;

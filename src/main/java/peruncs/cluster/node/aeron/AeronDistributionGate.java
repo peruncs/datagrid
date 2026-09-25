@@ -1,7 +1,7 @@
 package peruncs.cluster.node.aeron;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.Objects;

@@ -7,7 +7,7 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.storage.binary.ReplicationPublisher;

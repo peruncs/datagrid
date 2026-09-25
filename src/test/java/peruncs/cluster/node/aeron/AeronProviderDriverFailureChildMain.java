@@ -1,6 +1,6 @@
 package peruncs.cluster.node.aeron;
 
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.storage.binary.ReplicationApplier;

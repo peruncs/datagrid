@@ -9,7 +9,7 @@ import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.ReplicationUnavailableException;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;

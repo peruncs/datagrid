@@ -1,6 +1,6 @@
 package peruncs.cluster.node.aeron;
 
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 
 /// Neutral node-properties fixture for Aeron tests.
 ///

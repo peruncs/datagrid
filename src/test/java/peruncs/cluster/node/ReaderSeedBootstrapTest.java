@@ -1,4 +1,5 @@
 package peruncs.cluster.node;
+import peruncs.cluster.api.NodeSettingsSource;
 
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.types.Storage;
@@ -99,7 +100,7 @@ class ReaderSeedBootstrapTest {
             final var manager = writer.startStorageManager();
             final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("populated-before-reader-start");
-            manager.setRoot(writerRoot);
+            manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(writerRoot));
             manager.storeRoot();
         }
 
@@ -189,7 +190,7 @@ class ReaderSeedBootstrapTest {
             final var manager = writer.startStorageManager();
             final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("seeded-value");
-            manager.setRoot(writerRoot);
+            manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(writerRoot));
             manager.storeRoot();
         }
 
@@ -205,7 +206,7 @@ class ReaderSeedBootstrapTest {
                 .build()) {
             @SuppressWarnings("unchecked")
             final ArrayList<String> readerRoot = reader.startStorageManager()
-                    .readRoot(stored -> new ArrayList<>((ArrayList<String>) stored));
+                    .graphBoundary().read(() -> new ArrayList<>((ArrayList<String>) ((org.eclipse.serializer.reference.Lazy<?>) reader.startStorageManager().root()).get()));
             assertTrue(readerRoot.contains("seeded-value"), "seeded reader must reproduce the writer's root");
         }
     }
@@ -223,7 +224,7 @@ class ReaderSeedBootstrapTest {
             final var manager = writer.startStorageManager();
             final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("seeded-value");
-            manager.setRoot(writerRoot);
+            manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(writerRoot));
             manager.storeRoot();
         }
 

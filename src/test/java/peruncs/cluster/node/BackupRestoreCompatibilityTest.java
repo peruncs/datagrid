@@ -1,4 +1,5 @@
 package peruncs.cluster.node;
+import peruncs.cluster.api.NodeSettingsSource;
 
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
@@ -108,7 +109,7 @@ class BackupRestoreCompatibilityTest {
             final var manager = node.startStorageManager();
             final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("local-value");
-            manager.setRoot(writerRoot);
+            manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(writerRoot));
             manager.storeRoot();
         }
         assertTrue(Files.isDirectory(home.resolve("storage")), "node must have created its Store directory");
@@ -126,7 +127,7 @@ class BackupRestoreCompatibilityTest {
                 .build()) {
             @SuppressWarnings("unchecked")
             final ArrayList<String> restartedRoot = restarted.startStorageManager()
-                    .readRoot(stored -> new ArrayList<>((ArrayList<String>) stored));
+                    .graphBoundary().read(() -> new ArrayList<>((ArrayList<String>) ((org.eclipse.serializer.reference.Lazy<?>) restarted.startStorageManager().root()).get()));
             assertTrue(restartedRoot.contains("local-value"),
                     "valid local storage must survive an incompatible newest backup, was: %s".formatted(restartedRoot));
         }
@@ -155,7 +156,7 @@ class BackupRestoreCompatibilityTest {
                         home, volume, NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            assertTrue(node.startStorageManager().readRoot((Object stored) -> stored != null),
+            assertTrue(node.startStorageManager().graphBoundary().read(() -> node.startStorageManager().root() != null),
                     "the node must start from the compatible backup");
         }
 
@@ -204,7 +205,7 @@ class BackupRestoreCompatibilityTest {
             final var manager = writer.startStorageManager();
             final ArrayList<String> writerRoot = new ArrayList<>();
             writerRoot.add("seeded-value");
-            manager.setRoot(writerRoot);
+            manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(writerRoot));
             manager.storeRoot();
         }
 
@@ -220,7 +221,7 @@ class BackupRestoreCompatibilityTest {
                 .build()) {
             @SuppressWarnings("unchecked")
             final ArrayList<String> readerRoot = reader.startStorageManager()
-                    .readRoot(stored -> new ArrayList<>((ArrayList<String>) stored));
+                    .graphBoundary().read(() -> new ArrayList<>((ArrayList<String>) ((org.eclipse.serializer.reference.Lazy<?>) reader.startStorageManager().root()).get()));
             assertTrue(readerRoot.contains("seeded-value"),
                     "seeded reader storage must survive an incompatible newest backup, was: %s".formatted(readerRoot));
         }

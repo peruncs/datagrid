@@ -50,30 +50,31 @@ deliberately remain inaccessible:
 
 ```java
 try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
-    // Writer: mutate and persist inside one atomic boundary — concurrent
-    // mutations and queries observe either the whole change or none.
-    int size = node.store().withRootWrite(root -> {
+    ClusterStorageManager<MyRoot> storage = node.storageManager();
+    // Writer: mutate inside the exclusive write section and persist
+    // explicitly — concurrent mutations and queries observe either the whole
+    // change or none. The boundary itself persists nothing.
+    int size = storage.graphBoundary().write(() -> {
+        MyRoot root = storage.root().get();
         root.add("value");
+        storage.store(root);
         return root.size();
     });
-    // Reader: copy what you need inside the callback — never return a
-    // live graph object.
-    int seen = node.store().withRootRead(root -> root.size());
+    // Reader: copy what you need inside the read section — never traverse a
+    // live graph object outside it.
+    int seen = storage.graphBoundary().read(() -> storage.root().get().size());
     NodeStatus status = node.status();
 }
 ```
 
-`ClusterStore.withRootRead` is the required reader-side graph boundary: run the whole
-traversal inside the callback, and return only copied values — never a live
-graph object. `ClusterStore.withRootWrite` is the required writer-side
-mutation boundary: mutate and persist inside one exclusive callback so
-concurrent application threads cannot lose or interleave each other's
-updates. Mutations are accepted only on the writer; a reader fails
-writes with `ReaderWriteRejectedException`, a fenced writer with
-`WriterFencedException`, and a full Store with `StorageLimitReachedException`
-(all from `peruncs.cluster.errors`). An uncertain-commit failure is
-not safe to retry blindly; see the `ClusterStore.store` Javadoc.
-`ClusterNode.close` owns and closes the complete node lifecycle.
+`ClusterStorageManager` is the drop-in `StorageManager` facade of a node:
+application writes on a reader are rejected with `ReaderWriteRejectedException`,
+a fenced writer with `WriterFencedException`, and a full Store with
+`StorageLimitReachedException` (all from `peruncs.cluster.errors`). An
+uncertain-commit failure is not safe to retry blindly; see the
+`ClusterStorageManager` Javadoc. `ClusterNode.close` and
+`storageManager().shutdown()` both own the complete node lifecycle and are
+idempotent.
 
 ## Cluster node with Aeron replication
 `peruncs-cluster` runs a Data Grid node with Aeron replication, including the

@@ -6,7 +6,6 @@ import peruncs.cluster.node.NodeAssembly;
 import peruncs.cluster.node.NodeRole;
 import peruncs.cluster.node.StorageNodeControl;
 import peruncs.cluster.node.replication.ReplicationMetrics;
-import peruncs.cluster.node.store.ClusterStorageManager;
 
 import java.util.Objects;
 import java.util.OptionalLong;
@@ -19,12 +18,12 @@ import java.util.OptionalLong;
 /// @param <T> root type
 public final class ClusterNode<T> implements AutoCloseable {
     private final NodeAssembly assembly;
-    private final ClusterStore<T> store;
+    private final ClusterStorageManager<T> storage;
     private final NodeRole role;
 
-    private ClusterNode(final NodeAssembly assembly, final ClusterStore<T> store, final NodeRole role) {
+    private ClusterNode(final NodeAssembly assembly, final ClusterStorageManager<T> storage, final NodeRole role) {
         this.assembly = assembly;
-        this.store = store;
+        this.storage = storage;
         this.role = role;
     }
 
@@ -47,16 +46,36 @@ public final class ClusterNode<T> implements AutoCloseable {
     /// @param <T> root type
     /// @param options immutable node options
     /// @return the started node and its owned Store view
-    @SuppressWarnings("unchecked")
     public static <T> ClusterNode<T> open(final NodeOptions<T> options) {
         Objects.requireNonNull(options, "options");
         final NodeAssembly.Builder builder = NodeAssembly.create()
                 .setRootSupplier(options.rootSupplier()::get);
+        /* General embedding hooks: a custom Store foundation (tuning, custom
+         * type handlers, backup setup — the live file provider is always
+         * node-derived) and a programmatic settings source. */
+        if (options.embeddedStorageFoundation() != null) {
+            builder.setEmbeddedStorageFoundation(options.embeddedStorageFoundation());
+        }
+        if (options.nodeSettingsSource() != null) {
+            builder.setNodeSettingsSource(options.nodeSettingsSource());
+        }
+        return open(builder);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> ClusterNode<T> open(final NodeAssembly.Builder builder) {
         final NodeAssembly assembly = builder.build();
         try {
+            /* NodeOptions<T> is the typed boundary: the root supplier's type
+             * fixes the intended manager root type; existing disk data must
+             * also satisfy the documented schema/root contract. The supplier
+             * alone cannot prove a deserialized payload's type, and the
+             * assembly stores Supplier<Object> because it is role-generic, so
+             * this single cast is where the application's type meets the
+             * assembly's erasure. */
             final ClusterStorageManager<T> storage =
                     (ClusterStorageManager<T>) assembly.startStorageManager();
-            return new ClusterNode<>(assembly, new ClusterStore<>(storage), assembly.nodeRole());
+            return new ClusterNode<>(assembly, storage, assembly.nodeRole());
         } catch (final RuntimeException | Error failure) {
             try {
                 assembly.close();
@@ -67,11 +86,17 @@ public final class ClusterNode<T> implements AutoCloseable {
         }
     }
 
-    /// Returns the guarded Store owned by this node.
+    /// Returns the guarded, Store-compatible storage manager owned by this node.
     ///
-    /// @return the Store view guarded by this node's lifecycle
-    public ClusterStore<T> store() {
-        return this.store;
+    /// The manager is a drop-in [org.eclipse.store.storage.types.StorageManager]:
+    /// common Store interfaces remain available under the documented role,
+    /// root, coordination, and lifecycle restrictions. Reads and mutations on
+    /// the graph join [GraphBoundary]; its `shutdown()` performs the complete
+    /// node teardown, as does closing this node.
+    ///
+    /// @return the guarded Store facade owned by this node's lifecycle
+    public ClusterStorageManager<T> storageManager() {
+        return this.storage;
     }
 
     /// Starts periodic storage checks.

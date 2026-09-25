@@ -1,5 +1,7 @@
 package peruncs.cluster.node;
 
+import peruncs.cluster.api.NodeSettingsSource;
+
 import java.util.Locale;
 import java.util.Objects;
 

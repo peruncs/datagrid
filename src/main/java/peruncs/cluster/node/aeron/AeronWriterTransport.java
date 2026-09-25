@@ -10,7 +10,7 @@ import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.errors.WriterFencedException;
-import peruncs.cluster.node.NodeSettingsSource;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.RejectingPersistenceTarget;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
