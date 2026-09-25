@@ -7,6 +7,7 @@ import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.cluster.node.store.StorageTaskExecutor;
 import peruncs.cluster.node.store.StorageUsageGauge;
+import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
@@ -40,6 +41,8 @@ interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
     /// @param positionProvider       position provider
     /// @param replicationTransport   transport id
     /// @param role                   fixed replication role
+    /// @param graphCoordinator       the Store graph coordinator whose latched invalidity
+    ///                               makes the node unhealthy and not ready
     record Configuration(
             ReplicationPublisher dataDistributor,
             StorageTaskExecutor storageTaskExecutor,
@@ -48,7 +51,8 @@ interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
             StorageUsageGauge storageUsageGauge,
             ReplicationPositionProvider positionProvider,
             String replicationTransport,
-            Role role
+            Role role,
+            StorageGraphCoordinator graphCoordinator
     ) {
         /// Validates the manager wiring once at the configuration boundary.
         public Configuration {
@@ -59,6 +63,7 @@ interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
             Objects.requireNonNull(storageUsageGauge, "storageUsageGauge");
             Objects.requireNonNull(positionProvider, "positionProvider");
             Objects.requireNonNull(role, "role");
+            Objects.requireNonNull(graphCoordinator, "graphCoordinator");
             if (replicationTransport == null || replicationTransport.isBlank()) {
                 throw new IllegalArgumentException("replicationTransport must not be blank");
             }
@@ -96,6 +101,7 @@ interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
         private final ReplicationPositionProvider positionProvider;
         private final String replicationTransport;
         private final Role role;
+        private final StorageGraphCoordinator graphCoordinator;
 
         private volatile boolean closed;
         /* Per-collaborator completion: a failed close must stay retryable so
@@ -118,6 +124,7 @@ interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
             this.positionProvider = configuration.positionProvider();
             this.replicationTransport = configuration.replicationTransport();
             this.role = configuration.role();
+            this.graphCoordinator = configuration.graphCoordinator();
         }
 
         @Override
@@ -137,12 +144,19 @@ interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
 
         @Override
         public boolean isReady() throws NodeException {
-            return this.storageTaskExecutor.failure() == null && this.replicationReady();
+            return this.validGraph() && this.storageTaskExecutor.failure() == null && this.replicationReady();
         }
 
         @Override
         public boolean isHealthy() {
-            return this.storageTaskExecutor.failure() == null && this.replicationHealthy();
+            return this.validGraph() && this.storageTaskExecutor.failure() == null && this.replicationHealthy();
+        }
+
+        /// A latched graph invalidity — a store update section that failed
+        /// mid-application — makes the node neither healthy nor ready: queries
+        /// fail closed until the node reloads or reseeds.
+        private boolean validGraph() {
+            return this.graphCoordinator.graphFailure() == null;
         }
 
         /// Reports replication readiness for the current role.

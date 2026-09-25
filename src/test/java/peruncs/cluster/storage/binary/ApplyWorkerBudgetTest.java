@@ -135,7 +135,7 @@ class ApplyWorkerBudgetTest {
             worker.materializationBudgetExpired(started);
             /* The materialization watchdog already saw its stamp; simulate a
              * still-armed refresh watchdog firing after the refresh stamped. */
-            worker.refreshBudgetExpired(started, System.nanoTime() - 1);
+            worker.refreshBudgetExpired(started);
             assertNull(owner.failure(), "an expiry after the phase stamp must be ignored");
         } finally {
             workerShutdown(worker);

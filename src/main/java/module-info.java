@@ -1,7 +1,7 @@
 import peruncs.cluster.api.ClusterNode;
 import peruncs.cluster.api.ClusterStore;
 
-/// Cluster  node with Aeron replication.
+/// Cluster node with Aeron replication.
 ///
 /// Applications create the node services, start them in dependency order,
 /// and close them in reverse order. The node lifecycle, storage

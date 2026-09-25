@@ -25,7 +25,7 @@ class StorageWriteGatingTest {
     void writesAreRejectedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp());
+                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(StorageLimitReachedException.class, () -> manager.store(new Payload("a")));
             assertThrows(StorageLimitReachedException.class, () -> manager.storeAll(new Payload("b")));
@@ -39,7 +39,7 @@ class StorageWriteGatingTest {
     void everyFluentStorerPathIsGatedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp());
+                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(StorageLimitReachedException.class, () -> {
                 final var storer = manager.createStorer().reinitialize();
@@ -85,7 +85,7 @@ class StorageWriteGatingTest {
             delegate.setRoot(new Payload("root"));
             delegate.storeRoot();
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.ReadOnly(delegate, ClusterStorageManager.ShutdownCallback.noOp());
+                    ClusterStorageManager.ReadOnly(delegate, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(ReaderWriteRejectedException.class, () -> manager.store(new Payload("a")));
             assertThrows(ReaderWriteRejectedException.class, () -> manager.storeAll(new Payload("c")));
@@ -134,7 +134,7 @@ class StorageWriteGatingTest {
     void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp());
+                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(UnsupportedOperationException.class, () -> manager.importData(X.Enum()));
             assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("c")));
@@ -147,7 +147,7 @@ class StorageWriteGatingTest {
     void persistenceManagerViewDoesNotOwnTheStore(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManager.create(delegate, () -> false, ClusterStorageManager.ShutdownCallback.noOp());
+                    ClusterStorageManager.create(delegate, () -> false, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             manager.persistenceManager().close();
             /* The borrowed target view is non-owning one level down as well:

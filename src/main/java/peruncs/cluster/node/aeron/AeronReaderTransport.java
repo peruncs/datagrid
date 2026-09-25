@@ -170,8 +170,12 @@ final class AeronReaderTransport {
                     /* Live-sourced terminal markers are withheld until the
                      * Archive's recorded position covers them, so a reader
                      * never applies a transaction that a writer-side recording
-                     * stall or failure could still drop from durable history. */
-                    .recordedPosition(() -> this.runtime().getRecordingPosition(recordingId))
+                     * stall or failure could still drop from durable history.
+                     * The max recorded position also answers while the
+                     * recording is stopped, so a stopped writer does not read
+                     * as "never recorded". Queried by the reader's background
+                     * refresher, never from the polling thread. */
+                    .recordedPosition(() -> this.runtime().getMaxRecordedPosition(recordingId))
                     .transactionResolved(snapshot -> {
                         final AeronArchiveReader current = readerRef.get();
                         if (current != null && current == this.readers.current()) {

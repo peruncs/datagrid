@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.reader;
 
+import io.aeron.archive.client.ArchiveException;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -189,7 +190,7 @@ final class TransactionAssembler {
         this.onFragment(buffer, offset, length, header, false);
     }
 
-        /// Consumes one fragment, gating live-sourced terminal markers on
+    /// Consumes one fragment, gating live-sourced terminal markers on
     /// durable Archive coverage.
     ///
     /// A terminal marker observed on the live publication may currently be
@@ -204,10 +205,23 @@ final class TransactionAssembler {
     /// Data chunks are never gated: without the terminal marker they only
     /// occupy the incomplete-transaction buffer.
     ///
+    /// Withholding cannot deadlock against a following transaction: the
+    /// live image is an ordered stream, so an ABORTed marker stops the image
+    /// at its own position — no later sequence can be delivered past it —
+    /// and the writer's single-active-transaction invariant (one prepared
+    /// write at a time, committed before the next prepares) additionally
+    /// keeps the next terminal marker from being published while this one
+    /// is unrecorded.
+    ///
+    /// A failed Archive control query is not a durability verdict: the
+    /// marker stays withheld and the stall budget decides, so a transient
+    /// control-channel loss while live never latches a terminal failure.
+    ///
     /// @param buffer     fragment source
     /// @param offset     fragment offset
     /// @param length     fragment length
-    /// @param header     Aeron header, or `null` in direct tests
+    /// @param header     Aeron header, or `null` in direct tests; live terminal
+    ///                   markers without a header fail closed
     /// @param liveSource whether the fragment came from the live image rather
     ///                   than the Archive replay
     /// @return `true` when the fragment was withheld for redelivery
@@ -222,8 +236,23 @@ final class TransactionAssembler {
             synchronized (this.delivery) {
                 final AeronReplicationEnvelope.EnvelopeView envelope =
                         AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
-                if (liveSource && isTerminalMarker(envelope.kind()) && header != null) {
-                    if (!this.durabilityGate.isDurablyRecorded(header.position())) {
+                if (liveSource && isTerminalMarker(envelope.kind())) {
+                    /* A live terminal marker without a header cannot prove its
+                     * durability position — fail closed rather than silently
+                     * bypass the gate. */
+                    if (header == null) {
+                        throw new IllegalStateException("live terminal marker without an Aeron header");
+                    }
+                    final boolean recorded;
+                    try {
+                        recorded = this.durabilityGate.isDurablyRecorded(header.position());
+                    } catch (final ArchiveException controlFailure) {
+                        /* A lost Archive control channel (writer restart,
+                         * network flap) is not proof for or against coverage:
+                         * keep withholding on the existing stall budget. */
+                        return this.withholdTerminalMarker(envelope.sequence());
+                    }
+                    if (!recorded) {
                         return this.withholdTerminalMarker(envelope.sequence());
                     }
                     /* Recording coverage confirmed: the next stall starts a

@@ -213,6 +213,22 @@ final class AeronRuntimeOwner {
         }
     }
 
+    /// Reports the Archive's maximum recorded position for the recording.
+    ///
+    /// Unlike [io.aeron.archive.client.AeronArchive#getRecordingPosition],
+    /// this still answers for an inactive or stopped recording, so a
+    /// temporarily stopped recording never reads as -1 (never recorded a
+    /// byte). The gate therefore withholds only on genuinely unrecorded data.
+    ///
+    /// @param recordingId recording identity
+    /// @return maximum recorded position
+    long getMaxRecordedPosition(final long recordingId) {
+        final AeronArchive archive = this.archive();
+        synchronized (archive) {
+            return archive.getMaxRecordedPosition(recordingId);
+        }
+    }
+
     int listRecordingsForUri(final String channelFragment, final int streamId,
                              final RecordingDescriptorConsumer consumer) {
         final AeronArchive archive = this.archive();

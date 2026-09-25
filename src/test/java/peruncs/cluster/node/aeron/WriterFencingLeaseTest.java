@@ -282,6 +282,51 @@ class WriterFencingLeaseTest {
         }
     }
 
+    /// Verifies two clusters sharing one volume commit concurrently across
+    /// processes: the child JVM holds cluster B while this JVM holds cluster
+    /// A, and per-cluster lock files keep both renewals and offers alive.
+    @Test
+    void independentClustersShareAVolumeAcrossProcesses(@TempDir final Path volume) throws Exception {
+        final UUID clusterA = UUID.randomUUID();
+        final UUID clusterB = UUID.randomUUID();
+        final UUID generationB = UUID.randomUUID();
+        final int childOffers = 32;
+        final Process child = new ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "-cp", ChildJava.classpath(), WriterLeaseSharedVolumeChildMain.class.getName(),
+                volume.toString(), clusterB.toString(), generationB.toString(),
+                Integer.toString(childOffers))
+                .redirectErrorStream(true).start();
+        try {
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (!Files.exists(volume.resolve("child-ready")) && System.nanoTime() < deadline) {
+                if (!child.isAlive()) fail("lease child exited: " + new String(child.getInputStream().readAllBytes()));
+                Thread.sleep(5);
+            }
+            assertTrue(Files.exists(volume.resolve("child-ready")), "cluster-B child was not ready");
+            try (final WriterFencingLease first = WriterFencingLease.acquire(
+                    volume, clusterA, UUID.randomUUID(), UUID.randomUUID(), STALENESS)) {
+                Files.writeString(volume.resolve("child-go"), "go");
+                for (int round = 0; round < 32; round++) {
+                    final long expected = 10_000L + round;
+                    assertEquals(expected, first.executeUnderOwnership(ignored -> expected));
+                }
+                assertTrue(child.waitFor(15, TimeUnit.SECONDS),
+                        "cluster-B child did not finish its commits: " + new String(child.getInputStream().readAllBytes()));
+                assertEquals(0, child.exitValue(), new String(child.getInputStream().readAllBytes()));
+                assertEquals("OK", Files.readString(volume.resolve("child-result")),
+                        "the foreign cluster fenced or stalled the child");
+                assertTrue(first.isCurrent(), "the parent cluster must not be fenced by the child");
+            }
+        } finally {
+            if (child.isAlive()) {
+                child.destroyForcibly();
+                child.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     /// Verifies racing acquires serialize so exactly one winner mints the starting token and the rest fail.
     @Test
     void concurrentAcquiresSerializeToOneWinner(@TempDir final Path volume) throws Exception {
@@ -551,6 +596,62 @@ class WriterFencingLeaseTest {
             assertTrue(System.nanoTime() - started < Duration.ofSeconds(5).toNanos(),
                     "a lock held elsewhere in the JVM must fail closed quickly");
             assertNotNull(failure.getCause());
+        }
+    }
+
+    /// Verifies an unproven release blocks same-JVM reacquisition only for
+    /// its cool-down — never forever — and then fences the zombie holder
+    /// terminally before the path reopens.
+    @Test
+    void unprovenReleaseClearsAfterCooldown(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final UUID nodeId = UUID.randomUUID();
+        final Duration shortLockWait = Duration.ofMillis(150L);
+        final Duration shortStaleness = Duration.ofMillis(120L);
+        final WriterFencingLease holder = WriterFencingLease.acquire(
+                volume, cluster, generation, nodeId, shortStaleness, shortLockWait);
+        final Path lockPath = WriterFencingLease.lockPath(volume, cluster, generation);
+        try (var channel = java.nio.channels.FileChannel.open(
+                     lockPath, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+             var ignored = channel.lock()) {
+            /* The bounded release lock is already held in this JVM, so the
+             * close cannot prove release — it must give up instead of
+             * blocking, and flag the registration unresolved. */
+            holder.close();
+            assertFalse(holder.isCurrent(), "an unproven release suspends admission immediately");
+            assertThrows(IllegalStateException.class,
+                    () -> WriterFencingLease.acquire(volume, cluster, generation, nodeId, shortStaleness, shortLockWait),
+                    "reacquisition must wait out the cool-down");
+        }
+        Thread.sleep(Math.max(shortLockWait.toMillis(), shortStaleness.toMillis()) + 400L);
+        try (final WriterFencingLease reacquired =
+                     WriterFencingLease.acquire(volume, cluster, generation, nodeId, STALENESS)) {
+            assertTrue(reacquired.isCurrent(), "after the cool-down the path reopens cleanly");
+            assertThrows(WriterFencedException.class, () -> holder.executeUnderOwnership(ignored -> 1L),
+                    "the zombie holder must never offer again");
+        }
+    }
+
+    /// Verifies a concurrent same-JVM hold of the lock file surfaces as a
+    /// fencing-typed failure, not a generic I/O failure.
+    @Test
+    void concurrentLockHoldFencesWithTypedSignal(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final Path lockPath = WriterFencingLease.lockPath(volume, cluster, generation);
+        final WriterFencingLease holder = WriterFencingLease.acquire(
+                volume, cluster, generation, UUID.randomUUID(), Duration.ofMillis(300L), Duration.ofMillis(100L));
+        try (var channel = java.nio.channels.FileChannel.open(
+                     lockPath, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+             var ignored = channel.lock()) {
+            final var failure = assertThrows(WriterFencedException.class,
+                    () -> holder.executeUnderOwnership(ignoredOffer -> 1L),
+                    "a same-JVM lock overlap must fail with a fencing type");
+            assertTrue(failure.getMessage().contains("concurrently"),
+                    "the failure must name the concurrent hold: " + failure.getMessage());
+        } finally {
+            holder.close();
         }
     }
 

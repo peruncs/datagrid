@@ -170,8 +170,33 @@ class StorageBinaryDataMergerReadSideTest {
                         "the merger failure must name the failing update section");
                 assertThrows(RuntimeException.class, () -> merger.receiveDataOwned(ChunksWrapper.New(ByteBuffer.allocateDirect(8))),
                         "a failed merger must refuse further batches with its latched failure");
+                /* A failed batch must not keep half-planned index scratch
+                 * pinned behind the terminal failure. */
+                assertScratchCleared(field(field(field(merger, "worker"), "indexMaintenance"), "scratch"));
             } finally {
                 merger.dispose();
+            }
+        }
+    }
+
+    private static Object field(final Object owner, final String name) {
+        try {
+            final java.lang.reflect.Field field = owner.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(owner);
+        } catch (final ReflectiveOperationException failure) {
+            throw new AssertionError("cannot read " + name, failure);
+        }
+    }
+
+    private static void assertScratchCleared(final Object scratch) {
+        for (final String name : new String[]{"vectorGroups", "rebuiltGroups", "vectorModCounts",
+                "vectorProbes", "vectorIndexes", "dirtyVectorIndexes", "groups", "maps"}) {
+            final Object value = field(scratch, name);
+            switch (value) {
+                case java.util.Map<?, ?> map -> assertTrue(map.isEmpty(), name + " must be cleared after a failed batch");
+                case java.util.Collection<?> list -> assertTrue(list.isEmpty(), name + " must be cleared after a failed batch");
+                default -> throw new AssertionError("unexpected scratch field type: " + name);
             }
         }
     }

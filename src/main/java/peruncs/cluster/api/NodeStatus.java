@@ -18,7 +18,9 @@ package peruncs.cluster.api;
 ///
 /// @param writer whether this node owns the writer role
 /// @param ready whether it may serve requests
-/// @param healthy whether it has no terminal failure
+/// @param healthy whether it has no terminal failure; a latched graph
+/// invalidity — a store update section that failed mid-application — makes
+/// the node unhealthy and not ready until it reloads or reseeds
 /// @param storageChecksRunning whether periodic storage checks are active
 /// @param storageBytes current Store size
 /// @param replication replication observability, or `null` when this node

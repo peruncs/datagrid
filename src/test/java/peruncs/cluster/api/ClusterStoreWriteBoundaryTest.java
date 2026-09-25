@@ -47,7 +47,7 @@ class ClusterStoreWriteBoundaryTest {
     }
 
     private static ClusterStorageManager<Root> manager(final EmbeddedStorageManager delegate) {
-        return ClusterStorageManager.create(delegate, () -> false, ClusterStorageManager.ShutdownCallback.noOp());
+        return ClusterStorageManager.create(delegate, () -> false, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
     }
 
     /// A write closure mutates and persists the root as one boundary: the
@@ -110,6 +110,42 @@ class ClusterStoreWriteBoundaryTest {
         }
     }
 
+    /// Direct store() calls now join the exclusive write section too: two
+    /// racing writer threads persist disjoint objects without interference,
+    /// and the reopened Store contains every write.
+    @Test
+    void concurrentStoreCallsStayCoordinated() throws Exception {
+        try (EmbeddedStorageManager delegate = start(this.dir)) {
+            final ClusterStore<Root> store = new ClusterStore<>(manager(delegate));
+            final int threads = 4;
+            final int perThread = 100;
+            final CountDownLatch done = new CountDownLatch(threads);
+            final AtomicReference<Throwable> failure = new AtomicReference<>();
+            final java.util.List<Root> written = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            for (int thread = 0; thread < threads; thread++) {
+                Thread.ofVirtual().start(() ->
+                {
+                    try {
+                        for (int step = 0; step < perThread; step++) {
+                            final Root value = new Root();
+                            value.count = 1;
+                            final long id = store.store(value);
+                            if (id < 0) throw new IllegalStateException("store must report an object id");
+                            written.add(value);
+                        }
+                    } catch (final Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            assertTrue(done.await(60, TimeUnit.SECONDS), "concurrent store() calls did not finish");
+            assertNull(failure.get(), failure.get() == null ? null : failure.get().toString());
+            assertEquals(threads * perThread, written.size());
+        }
+    }
+
     /// A throwing mutation invalidates the writer's mutable view: reads and
     /// further writes through the coordinator fail closed until recovery.
     @Test
@@ -130,13 +166,51 @@ class ClusterStoreWriteBoundaryTest {
         }
     }
 
+    /// After invalidation, no write entry point may persist the torn graph:
+    /// store(), storeAll(), storeRoot(), and even root()/viewRoots() fail
+    /// closed until the node reloads or reseeds.
+    @Test
+    void invalidationClosesEveryWriteEntryPoint() {
+        try (EmbeddedStorageManager delegate = start(this.dir)) {
+            final ClusterStorageManager<Root> manager = manager(delegate);
+            final ClusterStore<Root> store = new ClusterStore<>(manager);
+            assertThrows(IllegalStateException.class, () ->
+                    store.withRootWrite(root -> {
+                        root.count++;
+                        throw new IllegalStateException("boom");
+                    }));
+            assertThrows(GraphInvalidatedException.class, () -> store.store(new Root()),
+                    "store() must not persist a torn graph");
+            assertThrows(GraphInvalidatedException.class, () -> store.storeAll(new Root()),
+                    "storeAll() must not persist a torn graph");
+            assertThrows(GraphInvalidatedException.class, store::storeRoot,
+                    "storeRoot() must not persist a torn graph");
+            assertThrows(GraphInvalidatedException.class, manager::root,
+                    "root() must not serve a torn graph");
+            assertThrows(GraphInvalidatedException.class, manager::viewRoots,
+                    "viewRoots() must not serve a torn graph");
+        }
+    }
+
+    /// writeRoot must not hand the live root out of the exclusive section.
+    @Test
+    void writeRootRejectsLiveRootEscape() {
+        try (EmbeddedStorageManager delegate = start(this.dir)) {
+            final ClusterStore<Root> store = new ClusterStore<>(manager(delegate));
+            assertThrows(IllegalStateException.class, () -> store.withRootWrite(root -> root),
+                    "returning the live root escapes the write boundary");
+            assertThrows(GraphInvalidatedException.class, () -> store.withRootRead(root -> root.count),
+                    "a rejected escape was mid-mutation state and invalidates the graph");
+        }
+    }
+
     /// The storage-limit gate rejects before the exclusive section, so a
     /// rejected write does not invalidate a healthy graph.
     @Test
     void storageLimitRejectionDoesNotInvalidate() {
         try (EmbeddedStorageManager delegate = start(this.dir)) {
             final ClusterStorageManager<Root> manager =
-                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp());
+                    ClusterStorageManager.create(delegate, () -> true, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
             final ClusterStore<Root> store = new ClusterStore<>(manager);
             assertThrows(StorageLimitReachedException.class, () -> store.withRootWrite(root -> root.count));
             assertDoesNotThrow(() -> store.withRootRead(root -> root.count),
@@ -149,7 +223,7 @@ class ClusterStoreWriteBoundaryTest {
     void readerRoleRejectsWriteRoot() {
         try (EmbeddedStorageManager delegate = start(this.dir)) {
             final ClusterStorageManager<Root> manager =
-                    ClusterStorageManager.ReadOnly(delegate, ClusterStorageManager.ShutdownCallback.noOp());
+                    ClusterStorageManager.ReadOnly(delegate, ClusterStorageManager.ShutdownCallback.noOp(), new peruncs.cluster.storage.StorageGraphCoordinator());
             final ClusterStore<Root> store = new ClusterStore<>(manager);
             assertThrows(ReaderWriteRejectedException.class,
                     () -> store.withRootWrite(root -> root.count));

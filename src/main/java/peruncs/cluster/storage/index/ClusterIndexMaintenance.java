@@ -99,6 +99,25 @@ public final class ClusterIndexMaintenance {
         }
     }
 
+    /// Drops all per-batch scratch after a failed phase.
+    ///
+    /// The owning merger latches its terminal failure on any mismanaged batch,
+    /// so nothing material runs again — but until disposal the scratch arrays
+    /// must not pin the half-planned indexes and their reachable graphs.
+    /// (Caller-owned failure recovery; package-visibility would leave the
+    /// binary merger in a different package unable to reach it.)
+    public void resetScratch() {
+        final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
+        scratch.vectorGroups.clear();
+        scratch.rebuiltGroups.clear();
+        scratch.vectorModCounts.clear();
+        scratch.vectorProbes.clear();
+        scratch.vectorIndexes.clear();
+        scratch.dirtyVectorIndexes.clear();
+        scratch.groups.clear();
+        scratch.maps.clear();
+    }
+
     private boolean rootsChanged(final StorageConnection storage) {
         this.rootsSeen = 0;
         this.rootsDiffer = false;

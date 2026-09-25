@@ -25,22 +25,12 @@ import static org.eclipse.serializer.util.X.notNull;
 ///
 /// @param <T> root type
 public interface ClusterStorageManager<T> extends StorageManager {
-    /// Creates a manager with size validation and shutdown handling.
-    ///
-    /// @param <T>                   root type
-    /// @param delegate              Store manager
-    /// @param storageSizeValidation size validation policy
-    /// @param shutdownCallback      shutdown callback
-    /// @return cluster storage manager
-    static <T> ClusterStorageManager<T> create(
-            final StorageManager delegate,
-            final StorageSizeValidation storageSizeValidation,
-            final ShutdownCallback shutdownCallback
-    ) {
-        return create(delegate, storageSizeValidation, shutdownCallback, new StorageGraphCoordinator());
-    }
-
     /// Creates a manager sharing the Store graph coordinator with replication.
+    ///
+    /// The coordinator must be the assembly's shared instance: replication
+    /// materialization, this facade, and read/write validity gating live in
+    /// one lock domain per Store, so a private coordinator would silently
+    /// split exclusion from invalidation.
     ///
     /// @param <T>                   root type
     /// @param delegate              Store manager
@@ -64,17 +54,9 @@ public interface ClusterStorageManager<T> extends StorageManager {
     /// entry point — `store`, `storeAll`, `storeRoot`, `setRoot`, storers,
     /// raw persistence target, and public import methods —
     /// fails with [ReaderWriteRejectedException] so a reader can never
-    /// persist an unreplicated local divergence.
-    ///
-    /// @param <T>              root type
-    /// @param delegate         Store manager
-    /// @param shutdownCallback shutdown callback
-    /// @return read-only cluster storage manager
-    static <T> ClusterStorageManager<T> ReadOnly(final StorageManager delegate, final ShutdownCallback shutdownCallback) {
-        return ReadOnly(delegate, shutdownCallback, new StorageGraphCoordinator());
-    }
-
-    /// Creates a read-only manager sharing the Store graph coordinator.
+    /// persist an unreplicated local divergence. The coordinator must be the
+    /// assembly's shared instance for the same one-lock-domain reason as
+    /// [#create].
     ///
     /// @param <T>              root type
     /// @param delegate         Store manager

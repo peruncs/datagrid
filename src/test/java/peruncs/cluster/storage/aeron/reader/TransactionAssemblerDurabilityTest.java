@@ -179,6 +179,91 @@ class TransactionAssemblerDurabilityTest {
         }
     }
 
+    /// A lost Archive control channel is not a durability verdict: the
+    /// marker stays withheld on the stall budget instead of latching a
+    /// terminal reader failure, and delivery resumes once queries succeed.
+    @Test
+    void archiveControlFailureWithholdsWithoutLatching() {
+        final AtomicLong recorded = new AtomicLong(60L);
+        final AtomicLong outages = new AtomicLong(3L);
+        final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
+                AeronReplicationConfiguration.builder()
+                        .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024)
+                        .readerBarrierMaxTransactions(1)
+                        .readerStopTimeoutNanos(5_000_000_000L)
+                        .build(),
+                CLUSTER, EPOCH, -1L, new RecordingReceiver(), () -> {
+                }, null, required ->
+                {
+                    if (outages.getAndDecrement() > 0L) {
+                        throw new io.aeron.archive.client.ArchiveException("control channel lost");
+                    }
+                    return recorded.get() >= required;
+                });
+        try {
+            assertFalse(assembler.onFragment(new UnsafeBuffer(dataFrame(0L, 4)), 0,
+                    dataFrame(0L, 4).length, liveHeader(64L), true));
+            /* Three control-channel outages withhold the marker without
+             * latching any failure; the fourth poll confirms coverage and
+             * applies it. */
+            for (int attempt = 0; attempt < 3; attempt++) {
+                assertTrue(assembler.onFragment(new UnsafeBuffer(commitFrame(0L, 4)), 0,
+                        commitFrame(0L, 4).length, liveHeader(128L), true),
+                        "control failure must withhold, not fail");
+                assertNull(assembler.failure(),
+                        "a transient control-channel loss must not latch a terminal failure");
+            }
+            recorded.set(128L);
+            assertFalse(assembler.onFragment(new UnsafeBuffer(commitFrame(0L, 4)), 0,
+                    commitFrame(0L, 4).length, liveHeader(128L), true),
+                    "once queries succeed again, the covered marker applies");
+            assembler.flushDeliveries();
+            assertEquals(0L, assembler.lastResolvedSequence());
+            assertNull(assembler.failure());
+        } finally {
+            assembler.dispose();
+        }
+    }
+
+    /// A live terminal marker with no header cannot prove its durability
+    /// position: fail closed instead of silently bypassing the gate.
+    @Test
+    void liveTerminalMarkerWithoutHeaderFailsClosed() {
+        final AtomicLong recorded = new AtomicLong(Long.MAX_VALUE);
+        final TransactionAssembler assembler = assembler(recorded);
+        try {
+            assertFalse(assembler.onFragment(new UnsafeBuffer(dataFrame(0L, 4)), 0,
+                    dataFrame(0L, 4).length, liveHeader(64L), true));
+            assertThrows(IllegalStateException.class,
+                    () -> assembler.onFragment(new UnsafeBuffer(commitFrame(0L, 4)), 0,
+                            commitFrame(0L, 4).length, null, true),
+                    "a headerless live COMMIT must not slip past the gate");
+            assertNotNull(assembler.failure(), "the bypass attempt must latch a failure");
+        } finally {
+            assembler.dispose();
+        }
+    }
+
+    /// A genuinely durable commit at max recorded position applies on a
+    /// directly answerable max-recorded query even when nothing is active.
+    @Test
+    void maxRecordedPositionCoversStoppedRecording() {
+        /* A stopped recording reports its recorded maximum, not -1: the gate
+         * treats durably recorded markers as covered. */
+        final AtomicLong recorded = new AtomicLong(128L);
+        final TransactionAssembler assembler = assembler(recorded);
+        try {
+            assertFalse(assembler.onFragment(new UnsafeBuffer(dataFrame(0L, 4)), 0,
+                    dataFrame(0L, 4).length, liveHeader(64L), true));
+            assertFalse(assembler.onFragment(new UnsafeBuffer(commitFrame(0L, 4)), 0,
+                    commitFrame(0L, 4).length, liveHeader(128L), true));
+            assembler.flushDeliveries();
+            assertEquals(0L, assembler.lastResolvedSequence());
+        } finally {
+            assembler.dispose();
+        }
+    }
+
     /// A fresh stall window opens per withheld marker: an admitted commit
     /// resets the budget so one slow recording cannot poison later commits.
     @Test

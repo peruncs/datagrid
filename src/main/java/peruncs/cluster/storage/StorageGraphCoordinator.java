@@ -64,7 +64,10 @@ import static org.eclipse.serializer.util.X.notNull;
 /// write side therefore latches the graph as invalid *before* releasing the
 /// write lock, and every later joined read or write fails with
 /// [GraphInvalidatedException] until the node reloads or reseeds its Store
-/// image. A graph shared only with provably non-mutating writes stays valid.
+/// image. The latch is conservative by design: the coordinator cannot prove
+/// whether the throwing update already mutated state, so ANY failing write
+/// section invalidates the graph — callers that must not invalidate must not
+/// throw from it (pre-validate outside the section).
 public final class StorageGraphCoordinator {
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
     /* Latched while a failed write section still holds the write lock: after

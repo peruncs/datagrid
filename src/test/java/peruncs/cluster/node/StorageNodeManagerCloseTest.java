@@ -80,7 +80,7 @@ class StorageNodeManagerCloseTest {
                 tracked(StorageUsageGauge.class, new CountingHandler()),
                 tracked(ReplicationPositionProvider.class, position),
                 "aeron",
-                role));
+                role, new peruncs.cluster.storage.StorageGraphCoordinator()));
     }
 
     private static StorageNodeManager reader(

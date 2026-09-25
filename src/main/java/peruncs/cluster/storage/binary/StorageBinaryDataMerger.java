@@ -609,13 +609,13 @@ private StorageBinaryDataMerger(final Configuration configuration) {
     }
 
     @Override
-    public void onRefreshBudgetExpired(final long startedNanos, final long rebuildStartedNanos) {
+    public void onRefreshBudgetExpired(final long startedNanos, final long budgetMs) {
         if (this.queue.batchActiveSinceNanos() != startedNanos) return;
         /* The refresh scans the whole store, so a genuinely wedged rebuild —
          * not a large progressing one — is what this bound must catch. */
         final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
                 "Timed out while refreshing reader index views after %s ms; the index refresh is still running"
-                        .formatted(this.materializationBudgetMs));
+                        .formatted(budgetMs));
         if (this.failure.compareAndSet(null, terminal)) {
             LOGGER.log(Level.ERROR, terminal.getMessage(), terminal);
             this.queue.signalAllWaiters();

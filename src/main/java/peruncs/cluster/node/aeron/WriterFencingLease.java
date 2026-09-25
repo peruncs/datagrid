@@ -174,8 +174,27 @@ final class WriterFencingLease implements AutoCloseable {
         final Path path = leasePath(canonicalVolume, clusterId, storeGeneration);
         synchronized (mutexFor(path)) {
             final WriterFencingLease active = ACTIVE.get(path);
-            if (active != null && (active.releaseUnproven || active.isCurrent())) {
+            if (active != null && active.isCurrent()) {
                 throw new IllegalStateException("a writer lease is already held or its release is unresolved in this JVM");
+            }
+            if (active != null && active.releaseUnproven) {
+                /* The fix-up window after an unproven release: the heartbeat
+                 * executor is already stopped and every remaining operation
+                 * is bounded by its lock wait, but an in-flight renewal or
+                 * offer may still be finishing. Block reacquisition for one
+                 * full cool-down, then fence the zombie terminally and clear
+                 * the entry — a stuck registration must not wedge this JVM's
+                 * writer for the lease path forever. */
+                final long cooldownNanos =
+                        Math.max(active.lockTimeout.toNanos(), active.maxStalenessNanos);
+                if (System.nanoTime() - active.releaseUnprovenAtNanos <= cooldownNanos) {
+                    throw new IllegalStateException(
+                            "a writer lease release is unresolved in this JVM; retry after its cool-down");
+                }
+                synchronized (active.stateLock) {
+                    active.closed = true;
+                }
+                ACTIVE.remove(path, active);
             }
             return acquireLocked(canonicalVolume, clusterId, storeGeneration, nodeId, maxStaleness, lockTimeout);
         }
@@ -343,6 +362,10 @@ final class WriterFencingLease implements AutoCloseable {
     private final Object stateLock = new Object();
     private boolean closed;
     private volatile boolean releaseUnproven;
+    /* Monotonic stamp of the unproven release: reacquisition in this JVM is
+     * blocked for one cool-down (the worst bounded in-flight operation),
+     * never forever. */
+    private volatile long releaseUnprovenAtNanos;
     private boolean hasCheck;
     private long lastCheckNanos;
     private boolean lastCheckResult;
@@ -499,6 +522,10 @@ final class WriterFencingLease implements AutoCloseable {
                      * generic renewal failure would misdirect recovery diagnostics. */
                     throw fenced;
                 }
+                if (concurrentLockOverlap(failure)) {
+                    throw new WriterFencedException(
+                            "writer lease lock is held concurrently in this JVM; this writer is fenced", failure);
+                }
                 throw new IllegalStateException("writer lease heartbeat renewal failed", failure);
             }
         }
@@ -613,9 +640,28 @@ final class WriterFencingLease implements AutoCloseable {
                 }
             } catch (final IOException failure) {
                 this.publishFailedCheck(System.nanoTime());
+                if (concurrentLockOverlap(failure)) {
+                    throw new WriterFencedException(
+                            "writer lease lock is held concurrently in this JVM; this writer is fenced", failure);
+                }
                 throw new IllegalStateException("writer lease commit offer failed", failure);
             }
         }
+    }
+
+    /// The per-path JVM mutex already serializes same-path operations, so an
+    /// [OverlappingFileLockException] means the same lock file was reached
+    /// through an aliased path: a fencing-typed failure keeps recovery
+    /// diagnostics pointed at lease ownership instead of raw I/O.
+    private static boolean concurrentLockOverlap(final Throwable failure) {
+        Throwable cursor = failure;
+        while (cursor != null) {
+            if (cursor instanceof OverlappingFileLockException) {
+                return true;
+            }
+            cursor = cursor.getCause();
+        }
+        return false;
     }
 
     private void refreshHeartbeatIfDueLocked() {
@@ -672,6 +718,7 @@ final class WriterFencingLease implements AutoCloseable {
             releaseProven = true;
         } catch (final IOException | RuntimeException releaseFailure) {
             this.releaseUnproven = true;
+            this.releaseUnprovenAtNanos = System.nanoTime();
             System.getLogger(WriterFencingLease.class.getName()).log(WARNING,
                     "writer lease lock was not available during release; a concurrent heartbeat or offer may still be finishing",
                     releaseFailure);

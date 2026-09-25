@@ -567,7 +567,8 @@ final class NodeCollaborators {
                 this.getStorageUsageGauge(),
                 this.getReplicationPositionProvider(),
                 transport,
-                writer ? StorageNodeManager.Role.WRITER : StorageNodeManager.Role.READER));
+                writer ? StorageNodeManager.Role.WRITER : StorageNodeManager.Role.READER,
+                this.graphCoordinator));
     }
 
     /// Creates the configured replication publisher.

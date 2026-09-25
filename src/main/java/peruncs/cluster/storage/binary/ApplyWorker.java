@@ -40,6 +40,12 @@ final class ApplyWorker {
      * caller's retries instead of being declared terminal by the worker on
      * the first per-attempt expiry. */
     private final long materializationBudgetMs;
+    /* The index refresh scans the whole store, so its bound is a multiple of
+     * the materialization budget rather than the same value: a large,
+     * progressing rebuild deserves headroom, while a wedged one still fails
+     * bounded. */
+    static final long INDEX_REFRESH_BUDGET_MULTIPLIER = 10L;
+    private final long indexRefreshBudgetMs;
     /* Reused batch drain: only ever touched under the materialization
      * lock, which serializes the worker drain and any await-thread drain,
      * so no further synchronization is needed. The populated prefix holds
@@ -78,6 +84,13 @@ final class ApplyWorker {
         this.cachingTimeoutMs = cachingTimeoutMs;
         this.maxValidatedIndexObjects = maxValidatedIndexObjects;
         this.materializationBudgetMs = materializationBudgetMs;
+        try {
+            this.indexRefreshBudgetMs = Math.multiplyExact(materializationBudgetMs, INDEX_REFRESH_BUDGET_MULTIPLIER);
+        } catch (final ArithmeticException overflow) {
+            throw new IllegalArgumentException(
+                    "materializationBudgetMs is too large for the index-refresh bound: %s".formatted(materializationBudgetMs),
+                    overflow);
+        }
     }
 
     /// Coalesces and applies queued batches until the queue runs dry.
@@ -204,14 +217,13 @@ final class ApplyWorker {
                      * under the budget lock so a concurrent expiry loses the
                      * race deterministically instead of latching a completed
                      * phase. */
-                    final long materializedAt;
                     synchronized (this.budgetLock) {
-                        materializedAt = this.materializedAtNanos = System.nanoTime();
+                        this.materializedAtNanos = System.nanoTime();
                         materializationWatchdog.cancel(false);
                     }
                     final ScheduledFuture<?> refreshWatchdog = this.watchdog.schedule(
-                            () -> this.refreshBudgetExpired(startedNanos, materializedAt),
-                            this.materializationBudgetMs,
+                            () -> this.refreshBudgetExpired(startedNanos),
+                            this.indexRefreshBudgetMs,
                             TimeUnit.MILLISECONDS);
                     try {
                         /* Reader-side index enforcement plus the vector
@@ -238,6 +250,11 @@ final class ApplyWorker {
             } catch (final RuntimeException | Error failure) {
                 /* A genuine failure says failed; only an overrun says timed
                  * out. The two are never conflated into one message. */
+                /* A failed batch must not leave its half-planned index
+                 * scratch populated: the pinned entries retain the affected
+                 * indexes and their reachable graphs across the latched
+                 * terminal failure. */
+                this.indexMaintenance.resetScratch();
                 if (failure instanceof RuntimeException runtime) {
                     this.owner.noteFailure("Store graph update failed", runtime);
                 }
@@ -272,11 +289,11 @@ final class ApplyWorker {
     ///
     /// @param startedNanos        nanoTime stamp of the batch being applied
     /// @param rebuildStartedNanos nanoTime stamp at the start of the index phase
-    void refreshBudgetExpired(final long startedNanos, final long rebuildStartedNanos) {
+    void refreshBudgetExpired(final long startedNanos) {
         synchronized (this.budgetLock) {
             if (this.indexRefreshedAtNanos != 0L) return;
         }
-        this.owner.onRefreshBudgetExpired(startedNanos, rebuildStartedNanos);
+        this.owner.onRefreshBudgetExpired(startedNanos, this.indexRefreshBudgetMs);
     }
 
     /// Checks each completed phase against its own budget after the batch returns.
@@ -310,10 +327,10 @@ final class ApplyWorker {
              * whole store, so including the import and materialization time
              * would fail a healthy large import. */
             final long refreshElapsedMs = TimeUnit.NANOSECONDS.toMillis(refreshedAt - materializedAt);
-            if (refreshElapsedMs > this.materializationBudgetMs) {
+            if (refreshElapsedMs > this.indexRefreshBudgetMs) {
                 final ReplicationUnavailableException terminal = new ReplicationUnavailableException(
                         "Timed out while refreshing reader index views: refresh took %s ms with a budget of %s ms"
-                                .formatted(refreshElapsedMs, this.materializationBudgetMs));
+                                .formatted(refreshElapsedMs, this.indexRefreshBudgetMs));
                 this.owner.noteFailure(terminal.getMessage(), terminal);
                 throw terminal;
             }

@@ -51,10 +51,36 @@ class StorageNodeManagerRolesTest {
                 stub(StorageUsageGauge.class),
                 stub(ReplicationPositionProvider.class),
                 "none",
-                StorageNodeManager.Role.READER));
+                StorageNodeManager.Role.READER, new peruncs.cluster.storage.StorageGraphCoordinator()));
 
         assertFalse(manager.isWriter());
         assertEquals(0L, manager.currentSequence());
+    }
+
+        /// A latched graph invalidity surfaces through status: the node is
+        /// neither healthy nor ready until it reloads or reseeds.
+    @Test
+    void graphInvalidationMakesTheNodeUnhealthy() {
+        final peruncs.cluster.storage.StorageGraphCoordinator coordinator =
+                new peruncs.cluster.storage.StorageGraphCoordinator();
+        final StorageNodeManager manager = StorageNodeManager.create(new StorageNodeManager.Configuration(
+                stub(ReplicationPublisher.class),
+                stub(StorageTaskExecutor.class),
+                stub(ReplicationApplier.class),
+                stub(StorageNodeHealthCheck.class),
+                stub(StorageUsageGauge.class),
+                stub(ReplicationPositionProvider.class),
+                "aeron",
+                StorageNodeManager.Role.WRITER,
+                coordinator));
+        assertTrue(manager.isHealthy(), "healthy before any failed update");
+        assertTrue(manager.isReady(), "ready before any failed update");
+        assertThrows(IllegalStateException.class, () ->
+                coordinator.write(() -> {
+                    throw new IllegalStateException("mid-batch failure");
+                }));
+        assertFalse(manager.isHealthy(), "an invalidated graph must fail health");
+        assertFalse(manager.isReady(), "an invalidated graph must fail readiness");
     }
 
         /// The writer flag reflects the fixed role.
@@ -76,7 +102,7 @@ class StorageNodeManagerRolesTest {
                 stub(StorageUsageGauge.class),
                 stub(ReplicationPositionProvider.class),
                 transport,
-                role));
+                role, new peruncs.cluster.storage.StorageGraphCoordinator()));
     }
 
     @SuppressWarnings("unchecked")

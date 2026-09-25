@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /// Reads committed Store transactions from an Archive and then from the live
 /// publication.
@@ -72,7 +73,9 @@ public final class AeronArchiveReader implements Disposable {
     /// @param deliveryListener         callback around Store materialization
     /// @param recordedPosition         current recorded position of the Archive recording;
     ///                                 terminal markers observed on the live publication are
-    ///                                 withheld until it covers them
+    ///                                 withheld until it covers them. Queried by the
+    ///                                 reader's background refresher, never from the
+    ///                                 polling thread.
     public record Configuration(
             Aeron aeron,
             AeronArchive.Context archiveContext,
@@ -91,7 +94,7 @@ public final class AeronArchiveReader implements Disposable {
             StorageBinaryDataReceiver receiver,
             Consumer<CursorSnapshot> transactionResolved,
             ReaderDeliveryListener deliveryListener,
-            java.util.function.LongSupplier recordedPosition
+            LongSupplier recordedPosition
     ) {
         /// Validates required reader collaborators and recovered cursor bounds.
     public Configuration {
@@ -136,7 +139,7 @@ public final class AeronArchiveReader implements Disposable {
             private Consumer<CursorSnapshot> transactionResolved = ignored -> {
             };
             private ReaderDeliveryListener deliveryListener;
-            private java.util.function.LongSupplier recordedPosition;
+            private LongSupplier recordedPosition;
 
             /// Creates an empty reader configuration builder.
             public Builder() {
@@ -241,7 +244,7 @@ public final class AeronArchiveReader implements Disposable {
             ///
             /// @param value recorded-position supplier over the configured recording
             /// @return this builder
-            public Builder recordedPosition(final java.util.function.LongSupplier value) { this.recordedPosition = value; return this; }
+            public Builder recordedPosition(final LongSupplier value) { this.recordedPosition = value; return this; }
 
             /// Builds the immutable reader configuration.
             ///
@@ -324,6 +327,18 @@ public final class AeronArchiveReader implements Disposable {
      * value means the Archive client signalled a control-channel problem.
      * Shared with every replacement subscription created on reconnect. */
     private final AtomicReference<Exception> archiveIncidentSignal;
+    /* The durability gate reads only this cache; a daemon refresher performs
+     * the Archive control round trips, so live delivery never parks the
+     * polling thread on a synchronous (possibly cross-host) RPC. Sampling
+     * can only lag the recording — never lead it — so a stale cache may
+     * delay a covered commit but can never admit an unrecorded one. Seeded
+     * with the replay resume position, which is recorded by definition. */
+    private final AtomicLong recordedPositionCache;
+    private final AtomicBoolean positionRefreshActive = new AtomicBoolean();
+    /* Cadence of the background recorded-position refresh while the reader
+     * runs. */
+    private static final long RECORDED_POSITION_REFRESH_MILLIS = 1L;
+    private volatile Thread positionRefresher;
 
 
     AeronArchiveReader(
@@ -340,11 +355,12 @@ public final class AeronArchiveReader implements Disposable {
             this.fragmentsPerPoll = requiredConfiguration.readerFragmentsPerPoll();
             this.barrierIdleFlushNanos = requiredConfiguration.readerBarrierIdleFlushNanos();
             this.idleStrategy = requiredConfiguration.retryPolicy().idleStrategy();
+            this.recordedPositionCache = new AtomicLong(required.initialPosition());
             this.assembler = new TransactionAssembler(
                     requiredConfiguration, required.clusterId(), required.epoch(), required.initialSequence(),
                     required.initialPosition(), required.receiver(), required.transactionResolved(),
                     required.deliveryListener(), required.wireNonce(),
-                    requiredPosition -> required.recordedPosition().getAsLong() >= requiredPosition
+                    requiredPosition -> this.recordedPositionCache.get() >= requiredPosition
             );
             this.fragmentHandler = (buffer, offset, length, header) -> {
                 final PersistentSubscription source = this.subscription;
@@ -515,6 +531,49 @@ public final class AeronArchiveReader implements Disposable {
          * thread must also bridge blockingly to the Store importer. */
         this.thread = Thread.ofPlatform().daemon().name("datagrid-aeron-archive-reader").unstarted(this::run);
         this.thread.start();
+        this.startPositionRefresher();
+    }
+
+    /// Starts the background recorded-position refresher exactly once.
+    ///
+    /// The gate's Archive query runs here instead of on the polling thread:
+    /// a synchronous control RTT per live terminal marker would serialize
+    /// delivery on cross-host latency and hammer a stalled control channel at
+    /// poll rate. A refresh failure is not a durability verdict — the stale
+    /// cache simply keeps withholding, and the assembler's stall budget
+    /// bounds how long.
+    private void startPositionRefresher() {
+        if (!this.positionRefreshActive.compareAndSet(false, true)) {
+            return;
+        }
+        this.positionRefresher = Thread.ofPlatform().daemon()
+                .name("datagrid-aeron-recorded-position")
+                .start(this::refreshRecordedPositions);
+    }
+
+    private void refreshRecordedPositions() {
+        final LongSupplier recordedPosition = this.configuration.recordedPosition();
+        while (this.positionRefreshActive.get() && !this.disposeRequested) {
+            try {
+                this.recordedPositionCache.set(recordedPosition.getAsLong());
+            } catch (final RuntimeException ignored) {
+                /* Stale is safe: never leads the recording, only delays. */
+            }
+            try {
+                Thread.sleep(RECORDED_POSITION_REFRESH_MILLIS);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    private void stopPositionRefresher() {
+        this.positionRefreshActive.set(false);
+        final Thread refresher = this.positionRefresher;
+        if (refresher != null) {
+            refresher.interrupt();
+        }
     }
 
     private void run() {
@@ -992,9 +1051,11 @@ public final class AeronArchiveReader implements Disposable {
                     final PersistentSubscription current = this.subscription;
                     if (current != null) current.close();
                 }, this.stopTimeoutNanos);
+        this.stopPositionRefresher();
         synchronized (this) {
             this.assembler.dispose();
             this.thread = null;
+            this.positionRefresher = null;
             this.disposed = true;
             /* A failed or timed-out reader must not be reported as a clean close. */
             this.updateOutcome(ReplicationApplier.StopOutcome.CLOSED);

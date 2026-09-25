@@ -27,7 +27,7 @@ class ClusterStorageManagerShutdownTest {
                 });
         final ClusterStorageManager<Object> manager = ClusterStorageManager.create(store, () -> true, () -> {
             if (callbacks.incrementAndGet() == 1) throw new IllegalStateException("retry me");
-        });
+        }, new peruncs.cluster.storage.StorageGraphCoordinator());
         assertThrows(IllegalStateException.class, manager::shutdown);
         assertEquals(1, storeShutdowns.get());
         assertFalse(manager.shutdown());

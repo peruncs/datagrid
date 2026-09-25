@@ -99,15 +99,19 @@ public final class ReaderCrashChildMain {
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(true);
         try (MediaDriver driver = Boolean.getBoolean("dg.reader.sharedDriver") ? null : MediaDriver.launch(mediaContext);
-             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDirectory.toString()))) {
+             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDirectory.toString()));
+             AeronArchive positionProbe = AeronArchive.connect(new AeronArchive.Context()
+                     .aeron(aeron).ownsAeronClient(false)
+                     .aeronDirectoryName(aeronDirectory.toString())
+                     .controlRequestChannel(required("dg.reader.controlChannel"))
+                     .controlResponseChannel(required("dg.reader.controlResponseChannel"))
+                     .messageTimeoutNs(configuration.offerTimeoutNanos()))) {
             final AeronArchive.Context archiveContext = new AeronArchive.Context()
                     .aeron(aeron)
                     .aeronDirectoryName(aeronDirectory.toString())
                     .controlRequestChannel(required("dg.reader.controlChannel"))
                     .controlResponseChannel(required("dg.reader.controlResponseChannel"))
                     .messageTimeoutNs(configuration.offerTimeoutNanos());
-            final AeronArchive positionProbe =
-                    AeronArchive.connect(archiveContext.clone().aeron(aeron).ownsAeronClient(false));
             final long recordingId = Long.parseLong(required("dg.reader.recordingId"));
             final Cursor cursor = readCursor(base.resolve("reader.cursor"));
             /* Whether this phase must replay recorded history from behind the
@@ -129,7 +133,7 @@ public final class ReaderCrashChildMain {
                         .initialSequence(cursor == null ? -1 : cursor.sequence)
                         .initialPosition(cursor == null ? -1 : cursor.position)
                         .receiver(fixture)
-                        .recordedPosition(() -> positionProbe.getRecordingPosition(recordingId))
+                        .recordedPosition(() -> positionProbe.getMaxRecordedPosition(recordingId))
                         .transactionResolved(ignored ->
                         {
                             if (ignored.sequence() < 0) return;

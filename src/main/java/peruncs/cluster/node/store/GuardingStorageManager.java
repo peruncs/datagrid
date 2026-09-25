@@ -8,6 +8,7 @@ import org.eclipse.serializer.persistence.types.*;
 import org.eclipse.serializer.persistence.types.PersistenceStorer.Creator;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.store.storage.types.*;
+import peruncs.cluster.errors.GraphInvalidatedException;
 import peruncs.cluster.errors.StorageLimitReachedException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
 
@@ -54,15 +55,29 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
                 () -> new BinaryPersistenceManagerAdapter(delegate.persistenceManager()));
     }
 
-    /* The limit gates only the write entry points (store, storeAll,
-     * storeRoot, and Storer.commit). Reads, maintenance, registration,
-     * and restore must keep working on a full disk so the node can
-     * drain, back up, or recover instead of failing every operation. */
-    void validateState() throws StorageLimitReachedException {
+    /* The write gates cover every write entry point (store, storeAll,
+     * storeRoot, setRoot, and Storer.commit): a latched graph invalidity
+     * rejects first — a torn graph can never be persisted further — and the
+     * storage limit gates persistence so reads, maintenance, registration,
+     * and restore keep working on a full disk. */
+    void validateState() throws StorageLimitReachedException, GraphInvalidatedException {
+        this.ensureGraphValid();
         if (this.storageSizeValidation.isStorageLimitReached()) {
             throw new StorageLimitReachedException(
                     "Can not store more objects in storage as the storage limit has been reached"
             );
+        }
+    }
+
+    /// Fails closed with the latched graph invalidity, if any.
+    ///
+    /// A failed update section may leave the graph partially applied; no
+    /// fresh write — and no read that would escape the coordinated
+    /// boundary — may run until the node reloads or reseeds.
+    void ensureGraphValid() {
+        final GraphInvalidatedException failure = this.graphCoordinator.graphFailure();
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -208,6 +223,11 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
     @Override
     public PersistenceManager<Binary> persistenceManager() {
+        /* A borrowed binary-level adapter for fluent Store flows. Writes
+         * through it stay on this manager's gates; graph reads escaping a
+         * coordinated boundary remain the caller's responsibility — the
+         * failure atomicity contract is honored by [#readRoot] and
+         * [#writeRoot]. */
         return this.persistenceManager.get();
     }
 
@@ -215,7 +235,10 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @SuppressWarnings("unchecked")
     public Object setRoot(final Object newRoot) {
         this.validateState();
-        return this.delegate.setRoot(newRoot);
+        /* Exclusive write section: the coordinator invalidates the graph on
+         * failure before its write lock releases, so a torn persistence
+         * attempt is never served to later coordinated reads. */
+        return this.graphCoordinator.write(() -> this.delegate.setRoot(newRoot));
     }
 
     @Override
@@ -232,25 +255,28 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @Override
     public long store(final Object instance) {
         this.validateState();
-        return this.delegate.store(instance);
+        /* Exclusive write section: concurrent application writers serialize,
+         * and a persistence failure invalidates the graph before the lock
+         * releases instead of leaving a torn-but-servable image behind. */
+        return this.graphCoordinator.write(() -> this.delegate.store(instance));
     }
 
     @Override
     public long[] storeAll(final Object... instances) {
         this.validateState();
-        return this.delegate.storeAll(instances);
+        return this.graphCoordinator.write(() -> this.delegate.storeAll(instances));
     }
 
     @Override
     public void storeAll(final Iterable<?> instances) {
         this.validateState();
-        this.delegate.storeAll(instances);
+        this.graphCoordinator.write(() -> this.delegate.storeAll(instances));
     }
 
     @Override
     public long storeRoot() {
         this.validateState();
-        return this.delegate.storeRoot();
+        return this.graphCoordinator.write(this.delegate::storeRoot);
     }
 
     @Override
@@ -260,6 +286,10 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
     @Override
     public PersistenceRootsView viewRoots() {
+        /* Live root accessors outside a coordinated read are only tolerable
+         * while the graph is provably valid. Note that callers still must
+         * not traverse the returned view past a coordinated boundary. */
+        this.ensureGraphValid();
         return this.delegate.viewRoots();
     }
 
@@ -304,12 +334,15 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     }
 
     @Override
-    @SuppressWarnings("unchecked") // fixing the inherited type variable to this Store's root type is sound for typed managers
+    @SuppressWarnings("unchecked")
     public Lazy<T> root() {
         /* Writers own their image and mutate it through store(); returning
-         * the live reference preserves the Store write flow. Readers
-         * override this to throw: a live reference would escape the
-         * coordinator read lock and observe a half-materialized batch. */
+         * the live reference preserves the Store write flow, but a latched
+         * graph invalidity must not be served: the image may be partially
+         * applied. Readers override this to throw outright: a live reference
+         * would escape the coordinator read lock and observe a
+         * half-materialized batch. */
+        this.ensureGraphValid();
         return this.delegate.root();
     }
 
@@ -331,6 +364,16 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
              * the write lock releases, so later coordinated reads and writes
              * fail closed until the node reloads or reseeds. */
             final R result = action.apply((T) value);
+            /* Even writeRoot(root -> root) would hand a mutable graph object
+             * to retention outside the exclusive boundary. Reject direct
+             * escapes; callers must copy what they need inside the closure. */
+            if (result != null && (result == value || result == raw)) {
+                throw new IllegalStateException(
+                        "writeRoot action must not return the live root; copy the needed state inside the closure");
+            }
+            /* Re-validate inside the exclusive section: the limit or role
+             * may have flipped between the outer gate and persistence. */
+            this.validateState();
             this.delegate.storeRoot();
             return result;
         });
@@ -362,7 +405,9 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
     @Override
     public List<StorageAdjacencyDataExporter.AdjacencyFiles> exportAdjacencyData(final Path workingDir) {
-        return this.delegate.exportAdjacencyData(workingDir);
+        /* Whole-graph export joins the coordinated read side: it must never
+         * observe a half-applied batch or a torn graph. */
+        return this.graphCoordinator.read(() -> this.delegate.exportAdjacencyData(workingDir));
     }
 
     /// Adapts the cluster manager to Store's binary persistence manager.
@@ -632,7 +677,10 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
         @Override
         public Object commit() {
             GuardingStorageManager.this.validateState();
-            return this.storer.commit();
+            /* Commits persist, so they join the exclusive write section like
+             * store()/storeRoot(): a failed commit invalidates the graph
+             * instead of leaving a torn image servable. */
+            return GuardingStorageManager.this.graphCoordinator.write(this.storer::commit);
         }
 
         @Override

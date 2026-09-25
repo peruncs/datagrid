@@ -67,11 +67,12 @@ interface MergerLifecycle {
     /// The index refresh (root validation plus changed vector-graph rebuild)
     /// is bounded separately from materialization: it scans the whole store,
     /// so its cost grows with data size, not batch size, and must never be
-    /// charged against the materialization budget. Invoked by the watchdog;
-    /// a no-op unless `startedNanos` still matches the batch the worker is
-    /// applying.
+    /// charged against the materialization budget. Its budget is therefore a
+    /// multiple of the materialization budget, sized for whole-store scans.
+    /// Invoked by the watchdog; a no-op unless `startedNanos` still matches
+    /// the batch the worker is applying.
     ///
-    /// @param startedNanos       nanoTime stamp of the batch being applied
-    /// @param rebuildStartedNanos nanoTime stamp at the start of the index phase
-    void onRefreshBudgetExpired(long startedNanos, long rebuildStartedNanos);
+    /// @param startedNanos nanoTime stamp of the batch being applied
+    /// @param budgetMs     the refresh phase budget that was exceeded
+    void onRefreshBudgetExpired(long startedNanos, long budgetMs);
 }
