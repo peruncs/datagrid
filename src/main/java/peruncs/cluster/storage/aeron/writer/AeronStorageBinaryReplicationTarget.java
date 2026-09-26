@@ -166,20 +166,20 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                 prepared.abandonWithoutAbort();
                 throw failure;
             } catch (final RuntimeException failure) {
+                /* A failing delegate write is not proof of rejection: Store
+                 * enqueue-then-wait can surface the exception while the queued
+                 * transaction still completes. do NOT publish ABORT —
+                 * recording REJECTED would permanently drop acknowledged
+                 * bytes. Mark the commit uncertain and abandon the token so
+                 * restart recovery fails closed on the in-flight fence (front
+                 * and back admission rejection stay safe: only a caught
+                 * failure after entering local persistence reaches this). */
                 try {
-                    if (localAccepted) {
-                        try {
-                            this.coordinator.markCommittingUncertain(prepared);
-                        } finally {
-                            /* Never let try-with-resources manufacture an ABORT after
-                             * local Store acceptance, even when the uncertainty marker
-                             * itself cannot be persisted. */
-                            prepared.abandonWithoutAbort();
-                        }
-                    } else this.coordinator.abort(prepared);
-                } catch (final RuntimeException abortFailure) {
-                    failure.addSuppressed(abortFailure);
+                    this.coordinator.markCommittingUncertain(prepared);
+                } catch (final RuntimeException maskFailure) {
+                    failure.addSuppressed(maskFailure);
                 }
+                prepared.abandonWithoutAbort();
                 throw failure;
             }
             handedOff = true;

@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static java.lang.System.Logger.Level.*;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Measures the bytes currently used by a storage directory.
@@ -86,9 +87,9 @@ public interface StorageUsageGauge {
             this.measuredAtNanos = System.nanoTime();
             final long nowMillis = System.currentTimeMillis();
             final long previousLog = this.lastLog.get();
-            if (LOGGER.isLoggable(System.Logger.Level.TRACE) && nowMillis - previousLog > 600_000L &&
+            if (LOGGER.isLoggable(TRACE) && nowMillis - previousLog > 600_000L &&
                 this.lastLog.compareAndSet(previousLog, nowMillis)) {
-                LOGGER.log(System.Logger.Level.TRACE, "Read current storage disk space (%s)".formatted(sizeBytes));
+                LOGGER.log(TRACE, "Read current storage disk space (%s)".formatted(sizeBytes));
             }
         }
 
@@ -111,11 +112,11 @@ public interface StorageUsageGauge {
                         total[0] = Long.MAX_VALUE;
                         if (!overflowLogged[0]) {
                             overflowLogged[0] = true;
-                            LOGGER.log(System.Logger.Level.WARNING, "Storage size overflow while measuring %s".formatted(f));
+                            LOGGER.log(WARNING, "Storage size overflow while measuring %s".formatted(f));
                         }
                     }
                 } catch (final RuntimeException e) {
-                    LOGGER.log(System.Logger.Level.DEBUG, "Could not measure storage file %s; it may have been removed".formatted(f), e);
+                    LOGGER.log(DEBUG, "Could not measure storage file %s; it may have been removed".formatted(f), e);
                 }
             });
             try {
@@ -129,7 +130,7 @@ public interface StorageUsageGauge {
                     }
                 });
             } catch (final RuntimeException failure) {
-                LOGGER.log(System.Logger.Level.DEBUG, "Could not measure a storage directory; it may have been removed", failure);
+                LOGGER.log(DEBUG, "Could not measure a storage directory; it may have been removed", failure);
             }
             return total[0];
         }

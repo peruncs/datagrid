@@ -330,7 +330,7 @@ final class TransactionAssembler {
     @FunctionalInterface
     interface CommitDurabilityGate {
         /// No gating: every marker is treated as recorded (replay sources).
-        CommitDurabilityGate ALWAYS = requiredPosition -> true;
+        CommitDurabilityGate ALWAYS = _ -> true;
 
         /// Reports whether the recording has durably reached `requiredPosition`.
         ///

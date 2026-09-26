@@ -189,13 +189,14 @@ public interface StorageBackupManager {
              * The backup generation comes from that same cursor, so a node
              * on a shared volume only ever restores its own cluster, epoch,
              * and recording. The backup id is random, so concurrent
-             * publishers never share an archive name. */
-            final ReplicationCursor cursor = this.cursorSupplier.get();
-            final var newBackup = BackupMetadata.create(timestamp, useManualSlot, cursor);
-            final var localIdentity = BackupMetadata.Identity.of(cursor);
-
+             * publishers never share an archive name. Acquire the cursor and
+             * build the metadata INSIDE the try: a failed preparation after a
+             * successful stop must resume the reader just the same. */
             Throwable operationFailure = null;
             try {
+                final ReplicationCursor cursor = this.cursorSupplier.get();
+                final var newBackup = BackupMetadata.create(timestamp, useManualSlot, cursor);
+                final var localIdentity = BackupMetadata.Identity.of(cursor);
                 this.backend.createBackup(this.storageConnection, cursor, newBackup);
                 this.runMaintenance(backups, useManualSlot, newBackup, localIdentity);
             } catch (final RuntimeException | Error failure) {

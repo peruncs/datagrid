@@ -6,6 +6,8 @@ import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static java.lang.System.Logger.Level.ERROR;
+
 /// Runs storage maintenance work away from the caller thread.
 ///
 /// Only one check task may run at a time. A later request while that task is
@@ -131,10 +133,10 @@ public interface StorageTaskExecutor extends AutoCloseable {
                 this.failure.set(null);
             } catch (final Exception failure) {
                 this.failure.set(failure);
-                LOGGER.log(System.Logger.Level.ERROR, "Storage checks failed", failure);
+                LOGGER.log(ERROR, "Storage checks failed", failure);
             } catch (final Error failure) {
                 this.failure.set(failure);
-                LOGGER.log(System.Logger.Level.ERROR, "Fatal storage-check failure", failure);
+                LOGGER.log(ERROR, "Fatal storage-check failure", failure);
                 throw failure;
             }
         }

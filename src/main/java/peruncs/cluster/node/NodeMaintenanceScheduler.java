@@ -8,6 +8,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static java.lang.System.Logger.Level.*;
+import static java.lang.System.Logger.Level.WARNING;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Triggers periodic maintenance on one platform thread and runs the work on virtual threads.
@@ -54,14 +56,14 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
     }
 
     private void runGuarded(final ScheduledTask scheduled) {
-        LOGGER.log(System.Logger.Level.DEBUG, "Running housekeeper task '%s'".formatted(scheduled.name()));
+        LOGGER.log(DEBUG, "Running housekeeper task '%s'".formatted(scheduled.name()));
         try {
             scheduled.task().run();
             this.consecutiveFailures.remove(scheduled.name());
             this.degradedFailures.remove(scheduled.name());
-            LOGGER.log(System.Logger.Level.DEBUG, "Finished housekeeper task '%s'".formatted(scheduled.name()));
+            LOGGER.log(DEBUG, "Finished housekeeper task '%s'".formatted(scheduled.name()));
         } catch (final RuntimeException failure) {
-            LOGGER.log(System.Logger.Level.ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
+            LOGGER.log(ERROR, "Housekeeper task '%s' failed".formatted(scheduled.name()), failure);
             final int failures = this.consecutiveFailures
                     .computeIfAbsent(scheduled.name(), ignored -> new AtomicInteger())
                     .incrementAndGet();
@@ -74,7 +76,7 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
              * condition so the node health boundary fails closed while later tasks and
              * diagnostics remain schedulable. */
             this.fatalFailure.compareAndSet(null, failure);
-            LOGGER.log(System.Logger.Level.ERROR, "Fatal housekeeper task '%s' failure".formatted(scheduled.name()), failure);
+            LOGGER.log(ERROR, "Fatal housekeeper task '%s' failure".formatted(scheduled.name()), failure);
         }
     }
 
@@ -116,7 +118,7 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
             throw new IllegalArgumentException(
                     "Housekeeper task '%s' interval must be at least one millisecond".formatted(name));
         }
-        LOGGER.log(System.Logger.Level.INFO, "Scheduling housekeeper task '%s' every %s".formatted(name, interval));
+        LOGGER.log(INFO, "Scheduling housekeeper task '%s' every %s".formatted(name, interval));
         this.pending.add(new ScheduledTask(name, task, intervalMillis, new AtomicBoolean()));
     }
 
@@ -151,7 +153,7 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
                     TimeUnit.MILLISECONDS
             );
         }
-        LOGGER.log(System.Logger.Level.INFO, "Started node housekeeper with %s task(s)".formatted(this.pending.size()));
+        LOGGER.log(INFO, "Started node housekeeper with %s task(s)".formatted(this.pending.size()));
         this.pending.clear();
     }
 
@@ -170,7 +172,7 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
             }
             this.closing = true;
         }
-        LOGGER.log(System.Logger.Level.INFO, "Shutting down node housekeeper");
+        LOGGER.log(INFO, "Shutting down node housekeeper");
         this.scheduler.shutdownNow();
         this.workers.shutdownNow();
         try {
@@ -179,12 +181,12 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
             final boolean workersStopped = this.workers.awaitTermination(
                     Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
             if (!schedulerStopped || !workersStopped) {
-                LOGGER.log(System.Logger.Level.WARNING,
+                LOGGER.log(WARNING,
                         "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            LOGGER.log(System.Logger.Level.WARNING, "Interrupted while stopping node housekeeper", interrupted);
+            LOGGER.log(WARNING, "Interrupted while stopping node housekeeper", interrupted);
         } finally {
             synchronized (this) {
                 this.closed = true;

@@ -504,6 +504,11 @@ final class ClusterIndexValidation {
         }
         if (type.isInterface() || Modifier.isAbstract(type.getModifiers())) return true;
         if (type.getPackageName().startsWith("java.")) return true;
+        /* A non-final concrete type is an open hierarchy: a subclass may add
+         * index-bearing state, so pruning its fields here would hide them.
+         * Only final classes (and records, which are final) are safe to
+         * prove irrelevant by their field analysis. */
+        if (!Modifier.isFinal(type.getModifiers())) return true;
         if (!inProgress.add(type)) return false;
         try {
             for (Class<?> cursor = type; cursor != null && cursor != Object.class; cursor = cursor.getSuperclass()) {

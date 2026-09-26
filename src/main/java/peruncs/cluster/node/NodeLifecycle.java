@@ -28,6 +28,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 
+import static java.lang.System.Logger.Level.ERROR;
+import static java.lang.System.Logger.Level.INFO;
+
 /// Runs the lifecycle of one assembled cluster node.
 ///
 /// {@link NodeCollaborators} wires and caches every collaborator; this owner
@@ -164,8 +167,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
             }
             if (failure instanceof Error error) throw error;
-            if (failure instanceof RuntimeException runtime) throw runtime;
-            throw new NodeException("Cluster node startup failed", failure);
+            throw (RuntimeException) failure;
         }
     }
 
@@ -173,7 +175,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     ///
     /// @throws NodeException if startup fails
     private void startBackupNode() throws NodeException {
-        LOGGER.log(System.Logger.Level.INFO, "Starting backup cluster node");
+        LOGGER.log(INFO, "Starting backup cluster node");
         final var props = this.assembly.getNodeSettingsSource();
 
         this.assembly.getReplicationPositionProvider().init();
@@ -194,7 +196,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
 
         // user uploaded a new storage
         if (backend.hasUserUploadedStorage()) {
-            LOGGER.log(System.Logger.Level.INFO, "Restoring user uploaded storage");
+            LOGGER.log(INFO, "Restoring user uploaded storage");
 
             installedUserUpload = true;
             // since the storage is now different from before,
@@ -211,9 +213,9 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             backend.restoreUserUploadedStorage(storageParentPath);
             backend.deleteUserUploadedStorage();
         } else if (this.assembly.createBackupRestorePolicy().restoreLatestBackupIfRequired(storageRootPath, backend)) {
-            LOGGER.log(System.Logger.Level.INFO, "Restored the newest compatible storage backup");
+            LOGGER.log(INFO, "Restored the newest compatible storage backup");
         } else {
-            LOGGER.log(System.Logger.Level.INFO, "Starting with local storage");
+            LOGGER.log(INFO, "Starting with local storage");
         }
         /* A backup node owns no authoritative image of its own. It may
          * manufacture a root only from a user-uploaded Store it then
@@ -277,7 +279,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         final StorageConnection gcConnection = this.assembly.clusterStorageManager;
         maintenance.schedule("GcWorkaround", () ->
         {
-            LOGGER.log(System.Logger.Level.INFO, "Issuing GC and CC");
+            LOGGER.log(INFO, "Issuing GC and CC");
             gcConnection.issueFullCacheCheck();
             gcConnection.issueFullGarbageCollection();
         }, NodeCollaborators.maintenanceInterval(props.gcIntervalMinutes(), EnvKeys.GC_INTERVAL_MINUTES, 30));
@@ -289,7 +291,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
 
         // storage nodes need an initial backup to start from
         if (mustPublishStarterBackup) {
-            LOGGER.log(System.Logger.Level.INFO, "Uploading starter backup for storage nodes");
+            LOGGER.log(INFO, "Uploading starter backup for storage nodes");
             /* This is a bootstrap barrier.  The storage nodes must not observe the
              * uploaded-storage state until the archive is durable. */
             this.assembly.getStorageBackupManager().createStorageBackup(false);
@@ -302,7 +304,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     ///
     /// @throws NodeException if startup fails
     private void startStorageNode() throws NodeException {
-        LOGGER.log(System.Logger.Level.INFO, "Starting storage cluster node");
+        LOGGER.log(INFO, "Starting storage cluster node");
         final var props = this.assembly.getNodeSettingsSource();
 
         final var storageParentPath = this.assembly.storageParentPath();
@@ -322,9 +324,9 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         final boolean restored = this.assembly.createBackupRestorePolicy()
                 .restoreLatestBackupIfRequired(storageRootPath, backend);
         if (restored) {
-            LOGGER.log(System.Logger.Level.INFO, "Restored the newest compatible storage backup");
+            LOGGER.log(INFO, "Restored the newest compatible storage backup");
         } else {
-            LOGGER.log(System.Logger.Level.INFO, Files.exists(storageRootPath)
+            LOGGER.log(INFO, Files.exists(storageRootPath)
                     ? "Resuming existing local storage and cursor"
                     : "Starting with local storage");
         }
@@ -414,7 +416,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         final StorageConnection gcConnection = this.assembly.clusterStorageManager;
         maintenance.schedule("GcWorkaround", () ->
         {
-            LOGGER.log(System.Logger.Level.INFO, "Issuing GC and CC");
+            LOGGER.log(INFO, "Issuing GC and CC");
             gcConnection.issueFullCacheCheck();
             gcConnection.issueFullGarbageCollection();
         }, NodeCollaborators.maintenanceInterval(props.gcIntervalMinutes(), EnvKeys.GC_INTERVAL_MINUTES, 60));
@@ -474,7 +476,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 /* A node is embedded in an application and must not call
                  * System.exit. Log the fatal error and rethrow so the
                  * application supervisor decides on termination. */
-                LOGGER.log(System.Logger.Level.ERROR, "Shutting down application due to fatal error", exception);
+                LOGGER.log(ERROR, "Shutting down application due to fatal error", exception);
                 throw exception;
             }
         });
@@ -534,7 +536,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     ///
     /// @throws NodeException if startup fails
     private void startDevNode() throws NodeException {
-        LOGGER.log(System.Logger.Level.INFO, "Starting dev cluster node");
+        LOGGER.log(INFO, "Starting dev cluster node");
         final var storage = this.assembly.getEmbeddedStorageFoundation().start();
         this.assembly.embeddedStorageManager = storage;
         this.initializeRoot(storage, true);
@@ -705,7 +707,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                      * graph-section guard at closeNode entry rejects that. */
                     .add(CloseSequencer.stage("graph drain",
                             () -> true,
-                            () -> collaborators.graphCoordinator.drain()))
+                            collaborators.graphCoordinator::drain))
                     /* 5. Close the Store last. A backup that outlived its
                      * executor budget must block this stage instead of losing
                      * the race to a shutdown Store: a running backup fails the
@@ -723,7 +725,14 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                                 if (backupTaskExecutor != null && backupTaskExecutor.isRunningBackup()) {
                                     throw new IllegalStateException("Store close deferred: backup still running");
                                 }
-                                collaborators.embeddedStorageManager.shutdown();
+                                /* Store returns false when the shutdown was
+                                 * interrupted mid-drain: that's not success,
+                                 * so the close must retry instead of clearing
+                                 * references over a partially shut Store. */
+                                if (!collaborators.embeddedStorageManager.shutdown()) {
+                                    throw new IllegalStateException(
+                                            "Store did not complete shutdown; close must be retried");
+                                }
                             }));
             sequencer.run("Failed to close node");
         } catch (final RuntimeException | Error closeFailure) {

@@ -245,7 +245,7 @@ final class AeronRuntime implements AutoCloseable {
     private static boolean namesOwnActiveArchiveMarkFile(final Optional<Path> archiveMarkFile,
                                                          final IllegalStateException rejection) {
         return archiveMarkFile
-                .map(own -> matchesMarkFile(own, ACTIVE_MARK_FILE, rejection))
+                .map(own -> matchesMarkFile(own, rejection))
                 .orElse(false);
     }
 
@@ -253,11 +253,10 @@ final class AeronRuntime implements AutoCloseable {
     /// to its real path so aliases such as macOS's {@code /var} still compare equal.
     ///
     /// @param own     mark file this launch owns
-    /// @param pattern message shape carrying the rejected file path in its first group
     /// @param failure upstream failure to inspect
     /// @return true when the failure names exactly the given file
-    private static boolean matchesMarkFile(final Path own, final Pattern pattern, final RuntimeException failure) {
-        final Matcher rejected = pattern.matcher(String.valueOf(failure.getMessage()));
+    private static boolean matchesMarkFile(final Path own, final RuntimeException failure) {
+        final Matcher rejected = AeronRuntime.ACTIVE_MARK_FILE.matcher(String.valueOf(failure.getMessage()));
         if (!rejected.matches()) return false;
         try {
             return Path.of(rejected.group(1)).toRealPath().equals(own.toRealPath());

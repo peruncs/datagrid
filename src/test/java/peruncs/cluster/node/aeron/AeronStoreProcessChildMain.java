@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.UnaryOperator;
 
@@ -90,14 +91,23 @@ public final class AeronStoreProcessChildMain {
                             value.objects.getFirst().value += "-restart";
                             manager.store(value.objects.getFirst());
                         } else {
-                            /* Retry a genuinely new entity type.  Reusing StoreType would only
-                             * exercise data retry; it would not prove that a dictionary emitted by
-                             * the rejected transaction is retained for the next commit. */
+                            /* Inject one local write rejection. After that
+                             * the local store outcome is uncertain (the seen
+                             * dictionary was already dispatched), so the
+                             * publisher fails closed and the driver's retry
+                             * must refuse instead of hiding acknowledged
+                             * bytes behind a REJECTED restart marker. */
                             value.retryObjects.add(new RetryType());
                             try {
                                 manager.store(value.retryObjects);
-                            } catch (final RuntimeException expected) {
-                                manager.store(value.retryObjects);
+                            } catch (final RuntimeException expectedFromInjection) {
+                                try {
+                                    manager.store(value.retryObjects);
+                                    throw new IllegalStateException("retry after fail-closed publisher must be refused");
+                                } catch (final RuntimeException alsoRefused) {
+                                    /* expected: publisher refuses the retry once the local
+                                     * outcome is uncertain. */
+                                }
                             }
                         }
                     } finally {

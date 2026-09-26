@@ -1,6 +1,7 @@
 package peruncs.cluster.node.backup;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
@@ -9,7 +10,10 @@ import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.storage.ReplicationCursor;
 
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -42,6 +46,38 @@ class BackupRestorePolicyTest {
                 "the identity failure must not be wrapped as its own cause");
     }
 
+    /// A writer with existing local storage keeps it when a compatible
+    /// backup exists and the local cursor is unreachable: reloading an older
+    /// backup must never overwrite acknowledged local writes.
+    @Test
+    void writerKeepsExistingLocalStorageWhenBackupIsCompatible(@TempDir final Path temp) throws Exception {
+        final Path storageDir = temp.resolve("storage");
+        Files.createDirectories(storageDir);
+        Files.writeString(storageDir.resolve("data.dat"), "local-content");
+        final BackupMetadata.Identity identity = new BackupMetadata.Identity(CLUSTER, GENERATION, 4L, 9L);
+        final BackupRestorePolicy policy = policy(
+                transport("aeron", identity),
+                positionProvider(new NodeException("no live position")),
+                cursorManagerFailure(new NodeException("cursor is corrupt")),
+                true);
+
+        final Path volume = temp.resolve("backups");
+        Files.createDirectories(volume);
+        final FakeBackend backend = new FakeBackend(identity);
+        final ReplicationCursor backupCursor = ReplicationCursor.of("aeron", GENERATION, 9L,
+                new peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor(
+                        CLUSTER, UUID.randomUUID(), GENERATION, 7L, 1L, 4L, 0L, 9L).encode());
+        final BackupMetadata backup = BackupMetadata.create(1_000L, false, backupCursor);
+        backend.backups.add(backup);
+        backend.cursorForBackup = backupCursor;
+
+        assertFalse(policy.restoreLatestBackupIfRequired(storageDir, backend),
+                "a writer with existing local storage must not replace it from a backup");
+        assertTrue(Files.exists(storageDir.resolve("data.dat")),
+                "the writer's local files must survive an available backup");
+        assertEquals(0, backend.restoreCalls, "a writer must never call the restore path");
+    }
+
     /// A configured transport identity survives an unreadable local cursor.
     @Test
     void unreadableCursorFallsBackToConfiguredIdentity() {
@@ -60,6 +96,14 @@ class BackupRestorePolicyTest {
             final ClusterReplicationTransport transport,
             final ReplicationPositionProvider positionProvider,
             final DurableCursorFile cursorManager) {
+        return policy(transport, positionProvider, cursorManager, false);
+    }
+
+    private static BackupRestorePolicy policy(
+            final ClusterReplicationTransport transport,
+            final ReplicationPositionProvider positionProvider,
+            final DurableCursorFile cursorManager,
+            final boolean mayCreateRoot) {
         return new BackupRestorePolicy(
                 transport,
                 positionProvider,
@@ -70,7 +114,8 @@ class BackupRestorePolicyTest {
                 () -> {
                 },
                 () -> {
-                });
+                },
+                mayCreateRoot);
     }
 
     private static ClusterReplicationTransport transport(
@@ -135,5 +180,56 @@ class BackupRestorePolicyTest {
         if (type == int.class) return 0;
         if (type == long.class) return 0L;
         throw new AssertionError("unsupported primitive " + type);
+    }
+
+    /// In-memory backup backend stub: backs backup-listing queries; restore
+    /// invocations are counted, never performed.
+    private static final class FakeBackend implements StorageBackupBackend {
+        private final java.util.List<BackupMetadata> backups = new java.util.ArrayList<>();
+        private Object cursorForBackup;
+        int restoreCalls;
+
+        FakeBackend(final BackupMetadata.Identity identity) {
+            Objects.requireNonNull(identity, "identity");
+        }
+
+        @Override
+        public java.util.List<BackupMetadata> listBackups() {
+            return this.backups;
+        }
+
+        @Override
+        public boolean hasUserUploadedStorage() {
+            return false;
+        }
+
+        @Override
+        public void restoreUserUploadedStorage(final Path targetParentPath) {
+            this.restoreCalls++;
+        }
+
+        @Override
+        public void deleteUserUploadedStorage() {
+        }
+
+        @Override
+        public void createBackup(final org.eclipse.store.storage.types.StorageConnection storageConnection,
+                                 final ReplicationCursor cursor,
+                                 final BackupMetadata metadata) {
+        }
+
+        @Override
+        public void deleteBackup(final BackupMetadata metadata) {
+        }
+
+        @Override
+        public ReplicationCursor getCursorForBackup(final BackupMetadata metadata) {
+            return (ReplicationCursor) this.cursorForBackup;
+        }
+
+        @Override
+        public void restoreBackup(final Path targetParentPath, final BackupMetadata metadata) {
+            this.restoreCalls++;
+        }
     }
 }

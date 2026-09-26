@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
+import static java.lang.System.Logger.Level.WARNING;
 import static peruncs.cluster.node.aeron.AeronTransportShared.reseedRequired;
 
 /// Owns the writer side of one transport: the Archive publication, write
@@ -766,7 +767,7 @@ final class AeronWriterTransport {
              * before resuming, so a transient deletion failure must not make a
              * durable commit look unavailable. */
             System.getLogger(AeronWriterTransport.class.getName()).log(
-                    java.lang.System.Logger.Level.WARNING,
+                    WARNING,
                     "cannot clear in-flight writer checkpoint %s; restart recovery will retry".formatted(
                             this.inFlightCheckpointPath()), failure);
         }

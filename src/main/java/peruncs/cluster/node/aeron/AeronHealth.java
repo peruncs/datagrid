@@ -7,9 +7,13 @@ import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+
+import static java.lang.System.Logger.Level.DEBUG;
+import static java.lang.System.Logger.Level.WARNING;
 
 /// Cached health view for one Aeron provider client and storage controller.
 ///
@@ -38,8 +42,7 @@ final class AeronHealth implements ReplicationHealth {
      * supplier bug (not a transient network probe) surfaces at the default
      * log level; repeats stay at debug to keep a degraded-but-known node from
      * flooding the operator. */
-    private final java.util.Set<String> warnedProbes =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.Set<String> warnedProbes = ConcurrentHashMap.newKeySet();
 
     AeronHealth(final StorageControllerAdapter storage, final ReplicationApplier client,
                 final BooleanSupplier closed, final BooleanSupplier driverFailed, final BooleanSupplier capacityAvailable,
@@ -148,12 +151,12 @@ final class AeronHealth implements ReplicationHealth {
     /// @param probeFailure failure thrown by a supplier
     private void logProbeFailure(final String probe, final RuntimeException probeFailure) {
         if (this.warnedProbes.add(probe)) {
-            LOGGER.log(System.Logger.Level.WARNING,
+            LOGGER.log(WARNING,
                     "Aeron replication %s probe failed; reporting the degraded state, later failures log at debug"
                             .formatted(probe), probeFailure);
             return;
         }
-        LOGGER.log(System.Logger.Level.DEBUG,
+        LOGGER.log(DEBUG,
                 "Aeron replication %s probe failed again".formatted(probe), probeFailure);
     }
 

@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 
+import static java.lang.System.Logger.Level.DEBUG;
+
 /// Runs an ordered list of close stages, aggregating every failure with
 /// {@link Error} priority.
 ///
@@ -95,7 +97,7 @@ public final class CloseSequencer {
                 } else if (failure != stageFailure) {
                     failure.addSuppressed(stageFailure);
                 }
-                LOGGER.log(System.Logger.Level.DEBUG,
+                LOGGER.log(DEBUG,
                         "Close stage '%s' failed".formatted(stage.name()), stageFailure);
             }
         }

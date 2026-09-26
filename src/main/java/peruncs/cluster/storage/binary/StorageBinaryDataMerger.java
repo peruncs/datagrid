@@ -622,13 +622,15 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         }
     }
 
-    /// Shuts the materialization worker down, freeing native buffers only
-    /// once the worker truly owns nothing.
+    /// Shuts the materialization worker down without interrupting it.
     ///
-    /// The worker gets an orderly window first, then an interrupt window;
-    /// a timeout stays retryable instead of latching the merger into a
-    /// state where later cleanups silently do nothing. Buffers are
-    /// released only after termination is confirmed, never speculatively.
+    /// Eclipse Store swallows interruption in its import machinery and can
+    /// leave native buffers owned by the Store's async import threads — a
+    /// interrupted disposal would then free those buffers underneath that use.
+    /// The worker hence exclusively finishes its current budget: a worker that
+    /// has not stopped after the orderly timeout is reported as failed; its
+    /// queued native buffers are only released once the worker is confirmed
+    /// terminated, never speculatively under a live reader.
     @Override
     public void dispose() {
         /* A timeout is retryable: the worker may still own native buffers.  Do
@@ -641,27 +643,24 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         }
         this.disposed = true;
         this.executor.shutdown();
-        boolean terminated = false;
         try {
-            // if any external processes like Kubernetes shuts us down, it will wait for the externally set
-            // grace period and then kill the process. But any other case we will await the task orderly like this.
-            terminated = this.executor.awaitTermination(this.disposeOrderlyTimeoutMs, TimeUnit.MILLISECONDS);
-            if (!terminated) {
-                LOGGER.log(Level.WARNING, "Timed out waiting for storage graph updates; interrupting remaining work");
-                this.executor.shutdownNow();
-                terminated = this.executor.awaitTermination(this.disposeInterruptTimeoutMs, TimeUnit.MILLISECONDS);
-                if (!terminated) {
-                    throw new ReplicationUnavailableException(
-                            "Storage graph update worker did not terminate; native buffers remain owned by it");
-                }
+            /* Orderly bounded wait only — do NOT interrupt: an interrupted
+             * Store import may free no buffers and still pin them in its own
+             * reader threads. If the worker stalls, the merger is failed and
+             * the caller's retry continues to see ownership by the still-live
+             * worker, never a dangling buffer released into its hands. */
+            if (!this.executor.awaitTermination(this.disposeOrderlyTimeoutMs + this.disposeInterruptTimeoutMs,
+                    TimeUnit.MILLISECONDS)) {
+                throw this.recordLifecycleFailure(
+                        "Storage graph update worker did not terminate; native buffers remain owned by it",
+                        new IllegalStateException("orderly shutdown timeout"));
             }
         } catch (final InterruptedException e) {
-            this.executor.shutdownNow();
             Thread.currentThread().interrupt();
-            throw new ReplicationUnavailableException("Interrupted while waiting for storage graph updates", e);
+            throw this.recordLifecycleFailure("Interrupted while waiting for storage graph updates", e);
         } finally {
             this.watchdog.shutdownNow();
-            if (terminated || this.executor.isTerminated()) this.queue.releaseAll();
+            if (this.executor.isTerminated()) this.queue.releaseAll();
         }
     }
 

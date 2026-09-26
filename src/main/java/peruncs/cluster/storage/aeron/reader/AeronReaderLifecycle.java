@@ -103,8 +103,10 @@ final class AeronReaderLifecycle {
         Objects.requireNonNull(active, "active");
         Objects.requireNonNull(closed, "closed");
         Objects.requireNonNull(closeSubscription, "closeSubscription");
-        if (thread != null) Objects.requireNonNull(stopped, "stopped latch is required for a polling thread");
-        if (closed.get()) return;
+        if (thread != null)
+            Objects.requireNonNull(stopped, "stopped latch is required for a polling thread");
+        if (closed.get())
+            return;
         active.set(false);
         RuntimeException failure = null;
         if (thread != null) {

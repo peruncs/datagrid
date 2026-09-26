@@ -15,6 +15,8 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.util.*;
 import java.util.function.BiConsumer;
 
+import static java.lang.System.Logger.Level.WARNING;
+
 /// The node's single file-safety implementation: atomic metadata
 /// writes, verified moves and deletes, and path symbolic-link rejection.
 ///
@@ -145,7 +147,7 @@ public final class AtomicFileWriter {
             try {
                 Files.deleteIfExists(temporary);
             } catch (final IOException | RuntimeException cleanupFailure) {
-                LOGGER.log(Level.WARNING,
+                LOGGER.log(WARNING,
                         "Unable to remove temporary replication metadata file %s".formatted(temporary), cleanupFailure);
             }
         }
@@ -205,7 +207,7 @@ public final class AtomicFileWriter {
             Files.deleteIfExists(probe);
             forceDirectory(parent);
         } catch (final IOException | RuntimeException cleanupFailure) {
-            LOGGER.log(Level.WARNING,
+            LOGGER.log(WARNING,
                     "Unable to remove atomic-metadata probe %s".formatted(probe), cleanupFailure);
         }
     }

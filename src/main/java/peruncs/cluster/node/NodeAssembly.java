@@ -638,7 +638,8 @@ final class NodeCollaborators {
                 this::storageParentPath,
                 this::deleteDirectory,
                 this::closeDurableCursorFile,
-                this::deleteOffsetFile);
+                this::deleteOffsetFile,
+                this.nodeRole.isWriter());
     }
 
     /// Reports whether this node may manufacture a fresh Store root.

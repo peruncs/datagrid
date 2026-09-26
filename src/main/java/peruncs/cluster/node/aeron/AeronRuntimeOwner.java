@@ -9,6 +9,7 @@ import peruncs.cluster.storage.aeron.writer.CrashHook;
 
 import java.util.concurrent.atomic.AtomicReference;
 
+import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.WARNING;
 
 /// Owns the embedded MediaDriver and Archive client runtime of one transport.
@@ -122,7 +123,7 @@ final class AeronRuntimeOwner {
          * here keeps the diagnostic; reader state stays with its own instance. */
         final AeronTransportShared shared = shared();
         if (shared.closing() || shared.closed()) {
-            LOGGER.log(System.Logger.Level.DEBUG, "Aeron subscriber failure during shutdown", failure);
+            LOGGER.log(DEBUG, "Aeron subscriber failure during shutdown", failure);
         } else {
             LOGGER.log(WARNING, "Aeron subscriber failure", failure);
         }

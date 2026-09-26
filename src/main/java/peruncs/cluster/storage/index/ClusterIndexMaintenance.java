@@ -145,7 +145,7 @@ public final class ClusterIndexMaintenance {
             if (id > 0L) this.reachableIds.add(id);
         }, scratch);
         this.rootValues.clear();
-        manager.viewRoots().iterateEntries((identifier, value) -> this.rootValues.put(identifier, value));
+        manager.viewRoots().iterateEntries(this.rootValues::put);
         this.initialized = true;
     }
 
@@ -293,7 +293,7 @@ public final class ClusterIndexMaintenance {
         try {
             storage.persistenceManager()
                     .viewRoots()
-                    .iterateEntries((identifier, value) -> {
+                    .iterateEntries((_, value) -> {
                         if (value != null && scratch.seen.put(value, Boolean.TRUE) == null) {
                             scratch.queue.add(value);
                         }

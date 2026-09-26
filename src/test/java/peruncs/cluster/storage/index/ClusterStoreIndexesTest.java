@@ -47,6 +47,41 @@ class ClusterStoreIndexesTest {
                 .build();
     }
 
+    /* A non-final declared host plus a subclass storing the index: the
+     * relevance classifier must not prune the declared base type, or an
+     * index-bearing subclass would escape validation through the parent. */
+    private static class Base {
+    }
+
+    private static final class SubHolder extends Base {
+        GigaMap<Article> articles;
+    }
+
+    /// Verifies an on-disk vector index hidden behind a subclass instance of a
+    /// plain declared field still fails validation (pruning must not skip it).
+    @Test
+    void polymorphicHolderNeverHidesExternalIndex() {
+        final VectorIndexConfiguration external = VectorIndexConfiguration.builder()
+                .dimension(3)
+                .similarityFunction(VectorSimilarityFunction.COSINE)
+                .onDisk(true)
+                .indexDirectory(this.storagePath.resolve("vectors-polymorphic"))
+                .build();
+        final Root root = new Root();
+        final SubHolder holder = new SubHolder();
+        holder.articles = GigaMap.New();
+        /* Bypass the registered guard — replicate an author class that
+         * smuggles an external index past the registration path. */
+        holder.articles.index().register(VectorIndices.Category())
+                .add("article-vectors", external, new ArticleVectorizer());
+        root.articles = holder.articles;
+        root.holder = holder;
+        assertThrows(IllegalArgumentException.class,
+                () -> ClusterIndexValidation.validateGraph(root,
+                        ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null),
+                "a subtype-held external index must trip validation, not hide behind the declared type");
+    }
+
     /// Verifies Lucene contexts and vector configurations with external directories are rejected.
     @Test
     void externalDirectoriesAreRejected() {
@@ -718,6 +753,7 @@ class ClusterStoreIndexesTest {
 
     private static final class Root {
         GigaMap<Article> articles;
+        Base holder;
         @SuppressWarnings("MismatchedCollectionQueryUpdate")
         List<CatalogEntry> catalog;
     }

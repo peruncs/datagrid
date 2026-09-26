@@ -136,6 +136,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                 return BackupStartResult.BUSY;
             }
             LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage backup");
+            this.backupRunning = true;
             this.backupTask = this.backupExecutor.submit(() ->
             {
                 try {
@@ -148,14 +149,22 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                     this.backupFailure.set(failure);
                     LOGGER.log(ERROR, "Fatal storage-backup failure", failure);
                     throw failure;
+                } finally {
+                    this.backupRunning = false;
                 }
             });
             return BackupStartResult.STARTED;
         }
 
+        /* cancel(false) marks the future done while the callable keeps
+         * running, so isDone() is not evidence that the export has exited.
+         * Track actual execution: the flag flips only when the task body
+         * returns or throws. */
+        private volatile boolean backupRunning;
+
         @Override
         public synchronized boolean isRunningBackup() {
-            return this.backupTask != null && !this.backupTask.isDone();
+            return this.backupRunning;
         }
 
         @Override

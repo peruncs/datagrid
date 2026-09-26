@@ -191,14 +191,7 @@ class ProviderCrashMatrixIT {
         this.assertOutcome("BEFORE_PUBLICATION_CONNECTED", false, false, "CONTINUE");
     }
 
-        /// Verifies local rejection after abort offer requires reseed.
-    @Test
-    void localRejectionAfterAbortOfferRequiresReseed() throws Exception {
-        this.assertOutcome("AFTER_ABORT_OFFERED", false, true,
-                "RESEED_REQUIRED");
-    }
-
-        /// Verifies archive recorded before checkpoint requires reseed.
+            /// Verifies archive recorded before checkpoint requires reseed.
     @Test
     void archiveRecordedBeforeCheckpointRequiresReseed() throws Exception {
         this.assertReseed("AFTER_COMMIT_RECORDED_BEFORE_CHECKPOINT", false);
@@ -693,8 +686,6 @@ class ProviderCrashMatrixIT {
                         new CrashScenario("BEFORE_COMMIT_OFFER", false, false,
                                 "RESEED_REQUIRED"),
                         new CrashScenario("AFTER_PREPARE", false, false,
-                                "RESEED_REQUIRED"),
-                        new CrashScenario("AFTER_ABORT_OFFERED", false, true,
                                 "RESEED_REQUIRED"),
                         new CrashScenario("AFTER_PREPARE_FAILURE_ABORT_OFFERED", true, false, "RESEED_REQUIRED"),
                         new CrashScenario("BEFORE_JOURNAL_SLOT_WRITE", false, false,

@@ -157,10 +157,17 @@ class AeronUdpReplicationIT {
             final PersistenceTarget<Binary> target = AeronStorageBinaryReplicationTarget.create(failingTarget, coordinator);
             assertThrows(IllegalStateException.class,
                     () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{4, 5, 6}))));
-            await(() -> client.lastResolvedSequence() == 0 || client.failure() != null);
-            assertEquals(0, client.lastResolvedSequence());
-            assertNull(receiver.data);
-            assertNull(client.failure());
+            /* No acknowledgement, no abort marker, no replay: the reader must
+             * stick at -1 and the writer must have failed closed. The durable
+             * fence (COMMITTING_UNCERTAIN) is what restart recovery seeds on. */
+            final long window = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+            while (System.nanoTime() < window && client.lastResolvedSequence() < 0 && client.failure() == null) {
+                Thread.sleep(20L);
+            }
+            assertEquals(-1L, client.lastResolvedSequence(), "an uncommitted transaction must never reach the reader");
+            assertNull(receiver.data, "no bytes were applied locally");
+            assertNull(client.failure(), "no reader-side failure is recorded");
+            coordinator.dispose();
             client.dispose();
         }
     }

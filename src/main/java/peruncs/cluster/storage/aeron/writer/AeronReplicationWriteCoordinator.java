@@ -717,9 +717,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     "checkpoint journal write requires exactly one Aeron write-admission hold");
         }
         this.writeLock.unlock();
-        /* The state failure is captured, not thrown from the finally block: a
-         * failed re-acquire must not silently replace the primary checkpoint
-         * I/O exception with the relock timeout. */
         Throwable failure = null;
         try {
             this.notifyState(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
@@ -735,6 +732,22 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                 Thread.currentThread().interrupt();
             }
             if (!relocked) {
+                /* Returning without the single hold would let every caller's
+                 * finally unlock a stack it does not own (or run cleanup
+                 * unguarded). Fail the publisher closed and regain ownership
+                 * — newer admissions already refuse the failed writer, so the
+                 * in-flight holder finishes and releases; lock() then
+                 * preserves the caller's contract and the original failure. */
+                this.publisher.failClosed();
+                try {
+                    this.writeLock.lockInterruptibly();
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    final ReplicationUnavailableException unavailable = new ReplicationUnavailableException(
+                            "timed out or interrupted re-acquiring Aeron write admission after a checkpoint write");
+                    if (failure != null) unavailable.addSuppressed(failure);
+                    throw unavailable;
+                }
                 final ReplicationUnavailableException unavailable = new ReplicationUnavailableException(
                         "timed out or interrupted re-acquiring Aeron write admission after a checkpoint write");
                 if (failure != null) unavailable.addSuppressed(failure);

@@ -34,6 +34,10 @@ public final class BackupRestorePolicy {
     private final Consumer<Path> deleteDirectory;
     private final Runnable closeCursorManager;
     private final Runnable deleteOffsetFile;
+    /* The writer's authoritative restart evidence is its durable checkpoint,
+     * never the reader cursor: a backup-covered restore must not delete a
+     * newer local Store while local files exist. */
+    private final boolean mayCreateRoot;
 
     public BackupRestorePolicy(
             final ClusterReplicationTransport transport,
@@ -42,7 +46,8 @@ public final class BackupRestorePolicy {
             final Supplier<Path> storageParentPath,
             final Consumer<Path> deleteDirectory,
             final Runnable closeCursorManager,
-            final Runnable deleteOffsetFile
+            final Runnable deleteOffsetFile,
+            final boolean mayCreateRoot
     ) {
         this.transport = Objects.requireNonNull(transport, "transport");
         this.positionProvider = Objects.requireNonNull(positionProvider, "positionProvider");
@@ -51,6 +56,7 @@ public final class BackupRestorePolicy {
         this.deleteDirectory = Objects.requireNonNull(deleteDirectory, "deleteDirectory");
         this.closeCursorManager = Objects.requireNonNull(closeCursorManager, "closeCursorManager");
         this.deleteOffsetFile = Objects.requireNonNull(deleteOffsetFile, "deleteOffsetFile");
+        this.mayCreateRoot = mayCreateRoot;
     }
 
         /// Resolves the backup identity this node restores as.
@@ -146,9 +152,21 @@ public final class BackupRestorePolicy {
             return true;
         }
 
-        /* An unreadable local cursor is treated like an unknown boundary: the
-         * backup is the newest trusted image, so it replaces the local files
-         * instead of failing startup with a raw cursor error. */
+        /* A writer never replaces existing local state with an older backup:
+         * it owns the authoritative image, its durable checkpoint and the
+         * archive decide recovery, and the writer's replication client would
+         * not replay into a reverted image. Keep local files and fail closed
+         * through the checkpoint path instead of wiping newer acknowledged
+         * writes. */
+        if (this.mayCreateRoot) {
+            LOGGER.log(System.Logger.Level.INFO,
+                    "Existing local storage found for the writer; keeping it — backups are a reader seed");
+            return false;
+        }
+        /* A reader's unreadable local cursor is treated like an unknown
+         * boundary: the backup is the newest compatible image, so it
+         * replaces the local files instead of failing startup with a raw
+         * cursor error. */
         ReplicationCursor local = null;
         try {
             local = this.cursorManager.get().get();

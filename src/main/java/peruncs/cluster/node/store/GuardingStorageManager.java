@@ -136,7 +136,93 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
     @Override
     public Database database() {
-        return this.delegate.database();
+        /* The raw Database would hand back the unguarded Store manager,
+         * bypassing admission, graph coordination, and reader rejection.
+         * Surface a Database whose operations all route through this facade. */
+        this.ensureOpen();
+        this.ensureGraphValid();
+        return new GuardedDatabase();
+    }
+
+    /// A [Database] view over the guarded manager: every operation routes
+    /// through this facade, so import rejection, the boundary, and the node's
+    /// lifecycle/validity admission all still apply.
+    private final class GuardedDatabase implements Database {
+        @Override
+        public String databaseName() {
+            return GuardingStorageManager.this.delegate.database().databaseName();
+        }
+
+        @Override
+        public String toIdentifyingString() {
+            return GuardingStorageManager.this.delegate.database().toIdentifyingString();
+        }
+
+        @Override
+        public StorageManager storage() {
+            /* The facade itself: never the raw embedded manager. */
+            return GuardingStorageManager.this;
+        }
+
+        @Override
+        public StorageManager setStorage(final StorageManager storage) {
+            throw new UnsupportedOperationException(
+                    "a cluster node's Store is owned by its node lifecycle; setStorage is reserved");
+        }
+
+        @Override
+        public boolean hasStorage() {
+            return GuardingStorageManager.this.isRunning();
+        }
+
+        @Override
+        public Database guaranteeNoActiveStorage() {
+            throw new UnsupportedOperationException(
+                    "a cluster node's Store lifecycle is owned by the node, not the application Database");
+        }
+
+        @Override
+        public StorageManager guaranteeActiveStorage() {
+            GuardingStorageManager.this.validateState();
+            return GuardingStorageManager.this;
+        }
+
+        @Override
+        public Object getObject(final long objectId) {
+            GuardingStorageManager.this.ensureOpen();
+            GuardingStorageManager.this.ensureGraphValid();
+            return GuardingStorageManager.this.delegate.database().getObject(objectId);
+        }
+
+        @Override
+        public long store(final Object instance) {
+            return GuardingStorageManager.this.store(instance);
+        }
+
+        @Override
+        public long[] storeAll(final Object... instances) {
+            return GuardingStorageManager.this.storeAll(instances);
+        }
+
+        @Override
+        public void storeAll(final Iterable<?> instances) {
+            GuardingStorageManager.this.storeAll(instances);
+        }
+
+        @Override
+        public Storer createLazyStorer() {
+            return GuardingStorageManager.this.createLazyStorer();
+        }
+
+        @Override
+        public Storer createStorer() {
+            return GuardingStorageManager.this.createStorer();
+        }
+
+        @Override
+        public Storer createEagerStorer() {
+            return GuardingStorageManager.this.createEagerStorer();
+        }
     }
 
     @Override
@@ -316,31 +402,64 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
         }
     }
 
+    /* A delegated persistence failure is conservatively uncertain — bytes may
+     * already be written locally or offered for replication. Latch the graph
+     * so every later coordinated section fails closed until the node reloads
+     * or reseeds. Called only from writeExclusive sections on the caller
+     * thread that owns exclusivity; admission gate rejections never reach it,
+     * so a failed size/role check cannot poison a healthy graph. */
+    private void reportPersistenceFailure(final Throwable failure) {
+        this.graphCoordinator.invalidate(failure);
+    }
+
+    /// Runs one persistence step under the shared exclusive section:
+    /// admission after lock acquisition, latch only on the delegate's failure.
+    private <R> R persist(final Supplier<R> step) {
+        this.validateState();
+        return this.graphCoordinator.writeExclusive(() ->
+        {
+            this.validateState();
+            try {
+                return step.get();
+            } catch (final RuntimeException | Error failure) {
+                this.reportPersistenceFailure(failure);
+                throw failure;
+            }
+        });
+    }
+
+    private void persist(final Runnable step) {
+        this.validateState();
+        this.graphCoordinator.writeExclusive(() ->
+        {
+            this.validateState();
+            try {
+                step.run();
+            } catch (final RuntimeException | Error failure) {
+                this.reportPersistenceFailure(failure);
+                throw failure;
+            }
+        });
+    }
+
     @Override
     public long store(final Object instance) {
-        this.validateState();
-        /* Exclusive write section: concurrent application writers serialize,
-         * and a persistence failure invalidates the graph before the lock
-         * releases instead of leaving a torn-but-servable image behind. */
-        return this.graphCoordinator.write(() -> this.delegate.store(instance));
+        return this.persist(() -> this.delegate.store(instance));
     }
 
     @Override
     public long[] storeAll(final Object... instances) {
-        this.validateState();
-        return this.graphCoordinator.write(() -> this.delegate.storeAll(instances));
+        return this.persist(() -> this.delegate.storeAll(instances));
     }
 
     @Override
     public void storeAll(final Iterable<?> instances) {
-        this.validateState();
-        this.graphCoordinator.write(() -> this.delegate.storeAll(instances));
+        this.persist(() -> this.delegate.storeAll(instances));
     }
 
     @Override
     public long storeRoot() {
-        this.validateState();
-        return this.graphCoordinator.write(this.delegate::storeRoot);
+        return this.persist(this.delegate::storeRoot);
     }
 
     @Override
@@ -571,23 +690,20 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
         @Override
         public long store(final Object instance) {
-            GuardingStorageManager.this.validateState();
             /* Exclusive section like the facade's own store(): adapter writes
              * must not race application write sections, and a delegate failure
              * invalidates through the same latch. */
-            return GuardingStorageManager.this.graphCoordinator.write(() -> this.delegate.store(instance));
+            return GuardingStorageManager.this.persist(() -> this.delegate.store(instance));
         }
 
         @Override
         public long[] storeAll(final Object... instances) {
-            GuardingStorageManager.this.validateState();
-            return GuardingStorageManager.this.graphCoordinator.write(() -> this.delegate.storeAll(instances));
+            return GuardingStorageManager.this.persist(() -> this.delegate.storeAll(instances));
         }
 
         @Override
         public void storeAll(final Iterable<?> instances) {
-            GuardingStorageManager.this.validateState();
-            GuardingStorageManager.this.graphCoordinator.write(() -> this.delegate.storeAll(instances));
+            GuardingStorageManager.this.persist(() -> this.delegate.storeAll(instances));
         }
 
         @Override
@@ -632,8 +748,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
                 final long highestTypeId,
                 final long highestObjectId
         ) {
-            GuardingStorageManager.this.validateState();
-            GuardingStorageManager.this.graphCoordinator.write(() ->
+            GuardingStorageManager.this.persist(() ->
                     this.delegate.updateMetadata(typeDictionary, highestTypeId, highestObjectId));
         }
 
@@ -665,8 +780,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
         @Override
         public PersistenceManager<Binary> updateCurrentObjectId(final long currentObjectId) {
-            GuardingStorageManager.this.validateState();
-            GuardingStorageManager.this.graphCoordinator.write(() ->
+            GuardingStorageManager.this.persist(() ->
                     this.delegate.updateCurrentObjectId(currentObjectId));
             return this;
         }
@@ -785,11 +899,10 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
         @Override
         public Object commit() {
-            GuardingStorageManager.this.validateState();
-            /* Commits persist, so they join the exclusive write section like
-             * store()/storeRoot(): a failed commit invalidates the graph
-             * instead of leaving a torn image servable. */
-            return GuardingStorageManager.this.graphCoordinator.write(this.storer::commit);
+            /* Same exclusive persist section as store()/storeRoot():
+             * admission before and after the lock, latch only on a delegate
+             * persistence failure. */
+            return GuardingStorageManager.this.persist(this.storer::commit);
         }
 
         @Override
@@ -889,7 +1002,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
              * delegate write itself runs the exclusive section, so a raw
              * fluent write cannot race an application boundary write. */
             this.writeGate.run();
-            GuardingStorageManager.this.graphCoordinator.write(() -> this.delegate.write(data));
+            GuardingStorageManager.this.persist(() -> this.delegate.write(data));
         }
 
         @Override

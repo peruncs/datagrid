@@ -134,6 +134,31 @@ class StorageWriteGatingTest {
         }
     }
 
+    /// Verifies the Database view routes through the cluster manager without
+    /// exposing the raw embedded Store.
+    @Test
+    void databaseNeverExposesTheRawStore(@TempDir final Path dir) {
+        try (EmbeddedStorageManager delegate = start(dir)) {
+            delegate.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Payload("root")));
+            delegate.storeRoot();
+            final ClusterStorageManager<Object> manager =
+                    ClusterStorageManagers.guarding(
+                            delegate, StorageSizeValidation.notReached(), newNodeClose(),
+                            new peruncs.cluster.storage.StorageGraphCoordinator());
+            final org.eclipse.store.storage.types.Database database = manager.database();
+            assertSame(manager, database.storage(),
+                    "database().storage() must return the managed facade, never the raw embedded manager");
+            assertThrows(UnsupportedOperationException.class, database::guaranteeNoActiveStorage,
+                    "the stored side's no-activation signal is not an application operation");
+            assertThrows(UnsupportedOperationException.class,
+                    () -> database.setStorage(null),
+                    "setStorage on a cluster manager is reserved for the node's lifecycle");
+            assertDoesNotThrow(database::databaseName, "database name is exposed normally");
+            assertDoesNotThrow(() -> database.guaranteeActiveStorage(),
+                    "guaranteeing the facade's own active store returns the guarded manager");
+        }
+    }
+
     /// Verifies maintenance and object-id registration still work when the storage limit is reached.
     @Test
     void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {

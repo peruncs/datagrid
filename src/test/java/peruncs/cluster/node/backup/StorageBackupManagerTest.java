@@ -32,6 +32,14 @@ class StorageBackupManagerTest {
     private static StorageBackupManager manager(
             final FakeBackend backend,
             final FakeClient client,
+            final FakeRetention retention
+    ) {
+        return manager(backend, client, retention, 1, () -> CURSOR);
+    }
+
+    private static StorageBackupManager manager(
+            final FakeBackend backend,
+            final FakeClient client,
             final FakeRetention retention,
             final int maxBackupCount,
             final Supplier<ReplicationCursor> cursor
@@ -123,6 +131,22 @@ class StorageBackupManagerTest {
 
         assertEquals(1, backend.created.size());
         assertEquals(3, retention.calls);
+    }
+
+    /// A cursor-resolution failure AFTER the reader stopped at a resolved
+    /// boundary still resumes the reader: replication must not stay parked
+    /// just because backup metadata preparation failed.
+    @Test
+    void cursorFailureAfterResolvedStopStillResumesTheReader() {
+        final FakeClient client = new FakeClient();
+        client.running = true;
+        final StorageBackupManager manager = manager(new FakeBackend(), client, new FakeRetention(), 1,
+                () -> {
+                    throw new NodeException("cursor read failed");
+                });
+        assertThrows(NodeException.class, () -> manager.createStorageBackup(false));
+        assertEquals(1, client.stopCalls);
+        assertEquals(1, client.resumeCalls, "a failed preparation after a stop must still resume the reader");
     }
 
     /// Verifies an unresolved reader stop creates no backup and leaves the reader stopped for diagnosis.

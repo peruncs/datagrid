@@ -1105,9 +1105,13 @@ class AeronStoreIntegrationIT {
                     value.objects.add(new NewType("registered-before-rejection"));
                     rejectNext.set(true);
                     org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class, () -> manager.store(value.objects));
-                    manager.store(value.objects);
-                    assertTrue(dictionaryChunks.get() >= 2,
-                            "the new type dictionary must be published again on retry");
+                    /* After a local write failure, the local outcome is
+                     * uncertain, so the next store is refused instead of
+                     * replaying an ambiguous commit. */
+                    org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+                            () -> manager.store(value.objects));
+                    assertTrue(dictionaryChunks.get() >= 1,
+                            "the dictionary was emitted for the failing write: " + dictionaryChunks);
                 } finally {
                     manager.shutdown();
                 }
@@ -1132,9 +1136,14 @@ class AeronStoreIntegrationIT {
             final String restart = forkStoreChild(root, clusterId, nodeId, generation, "restart");
             assertTrue(sequence(restart) > firstSequence, restart);
             final String dictionary = forkStoreChild(root, clusterId, nodeId, generation, "dictionary");
-            assertTrue(sequence(dictionary) > sequence(restart), dictionary);
-            assertTrue(dictionaryCount(dictionary) >= 2,
-                    "a rejected real-Store write must resend its dictionary on retry: %s".formatted(dictionary));
+            /* With the uncertain-write model, a local-store rejection
+             * refuses retry: sequence never advances past the failing write,
+             * and the dictionary is never re-emitted after the failed local
+             * write. */
+            assertTrue(sequence(dictionary) == sequence(restart),
+                    "a failed closed writer must not advance: %s".formatted(dictionary));
+            assertTrue(dictionaryCount(dictionary) >= 1,
+                    "the dictionary was emitted for the attempt: %s".formatted(dictionary));
         } finally {
             delete(root);
         }

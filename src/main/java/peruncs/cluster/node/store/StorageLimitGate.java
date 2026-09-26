@@ -3,6 +3,8 @@ package peruncs.cluster.node.store;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static java.lang.System.Logger.Level.*;
+
 /// Records whether storage measurements reached the configured limit.
 ///
 /// The maintenance scheduler updates the gate from its measurement thread while
@@ -98,28 +100,28 @@ public final class StorageLimitGate {
         Objects.requireNonNull(diskSpaceReader, "diskSpaceReader");
         return () ->
         {
-            if (LOGGER.isLoggable(System.Logger.Level.TRACE)) {
-                LOGGER.log(System.Logger.Level.TRACE, "Executing storage limit checker task");
+            if (LOGGER.isLoggable(TRACE)) {
+                LOGGER.log(TRACE, "Executing storage limit checker task");
             }
             final long nowMillis = System.currentTimeMillis();
             final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
             final long usedGb = usedBytes / BYTES_PER_GIGABYTE;
-            if (LOGGER.isLoggable(System.Logger.Level.DEBUG)) {
-                LOGGER.log(System.Logger.Level.DEBUG,
+            if (LOGGER.isLoggable(DEBUG)) {
+                LOGGER.log(DEBUG,
                         "Storage Size: %sgb/%sgb (%s bytes)".formatted(usedGb, this.limitGb(), usedBytes));
             }
             final boolean wasLimited = this.limitReached();
             this.updateUsage(usedBytes);
             if (!wasLimited && this.limitReached()) {
                 this.lastFullLogMillis = nowMillis;
-                LOGGER.log(System.Logger.Level.WARNING, "Storage limit reached! No more data will be stored!");
+                LOGGER.log(WARNING, "Storage limit reached! No more data will be stored!");
             } else if (wasLimited && !this.limitReached()) {
                 LOGGER.log(System.Logger.Level.INFO, "Storage usage fell back below the %s GB limit; storing resumes".formatted(this.limitGb()));
             } else if (this.limitReached() && nowMillis - this.lastFullLogMillis >= FULL_REMINDER_INTERVAL_MILLIS) {
                 /* Operators get a throttled reminder while the node stays
                  * full instead of one warning followed by silence. */
                 this.lastFullLogMillis = nowMillis;
-                LOGGER.log(System.Logger.Level.WARNING,
+                LOGGER.log(WARNING,
                         "Storage limit still reached! No more data will be stored!");
             }
         };

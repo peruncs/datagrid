@@ -206,9 +206,11 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-        /// Verifies local rejection emits abort and never commits.
+        /// A delegate write failure after entering local persistence is
+    /// uncertain, not certainly rejected: no ABORT is emitted, and the
+    /// checkpoint records COMMITTING_UNCERTAIN so restart fails closed.
     @Test
-    void localRejectionEmitsAbortAndNeverCommits() {
+    void localWriteFailureRecordsUncertaintyNotRejection() {
         final List<String> events = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
@@ -231,7 +233,11 @@ class AeronReplicationWriteCoordinatorTest {
         };
         assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
-        assertEquals(List.of("PREPARING", "archive", "archive", "REJECTED"), events);
+        /* Data chunks may still stream into the Archive before the local
+         * failure; only the terminal state must change: uncertainty, and
+         * never a contradictory REJECTED. */
+        assertEquals(List.of("PREPARING", "archive", "COMMITTING_UNCERTAIN"), events,
+                "a local write failure records uncertainty, never a rejection that could hide acknowledged bytes");
         coordinator.dispose();
     }
 
@@ -264,8 +270,13 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(local, coordinator);
         assertThrows(IllegalStateException.class,
                 () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
-        target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})));
-        assertEquals(2, kinds.stream().filter(kind -> kind == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY).count());
+        /* After the first local write failed, the publisher is failed closed:
+         * a retry must be refused, or the transaction would risk surviving a
+         * write that was never durably acknowledged as rejected. */
+        assertThrows(IllegalStateException.class,
+                () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2}))));
+        assertTrue(publisher.isFailed(),
+                "the publisher must fail closed after an uncertain local write");
         coordinator.dispose();
     }
 
@@ -306,7 +317,8 @@ class AeronReplicationWriteCoordinatorTest {
         };
         assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
-        assertEquals(List.of("PREPARING:0", "REJECTED:0"), events);
+        assertEquals(List.of("PREPARING:0", "COMMITTING_UNCERTAIN:0"), events,
+                "a delegate write failure after entering local persistence records uncertainty, not rejection");
         assertFalse(fenceCleared.get());
         assertEquals(1L, coordinator.nextSequence());
         coordinator.dispose();
@@ -652,8 +664,13 @@ class AeronReplicationWriteCoordinatorTest {
                 }, () -> true);
         final var first = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}));
         assertThrows(IllegalStateException.class, () -> target.write(first));
-        target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})));
-        assertEquals(2, kinds.stream().filter(kind -> kind == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY).count());
+        /* After an uncertain local write, the publisher is failed closed; a
+         * retried write is refused outright, rather than risking a
+         * contradictory re-commit. */
+        assertThrows(IllegalStateException.class,
+                () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2}))));
+        assertTrue(publisher.isFailed(),
+                "the publisher must be failed closed after the uncertain local write");
         coordinator.dispose();
     }
 

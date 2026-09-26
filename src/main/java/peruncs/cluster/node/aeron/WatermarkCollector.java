@@ -5,6 +5,7 @@ import peruncs.cluster.storage.Crc32C;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.cluster.storage.aeron.reader.CursorSnapshot;
 
+import java.lang.System.Logger;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -25,7 +26,7 @@ import static java.lang.System.Logger.Level.WARNING;
 /// acknowledgement. Malformed, stale, or future watermarks are counted and
 /// rejected without killing delivery of later valid progress.
 final class WatermarkCollector {
-    private static final System.Logger LOGGER = System.getLogger(WatermarkCollector.class.getName());
+    private static final Logger LOGGER = System.getLogger(WatermarkCollector.class.getName());
 
     private final Supplier<Aeron> aeron;
     private final AeronSettings settings;
@@ -210,7 +211,7 @@ final class WatermarkCollector {
     /// hands off through a blocking {@code Future#get}), and the surviving
     /// interrupted-state signal must not surface as a warning that suggests a
     /// reader progress loss. Real rejections still warn.
-    static System.Logger.Level levelFor(final RuntimeException failure) {
+    static Logger.Level levelFor(final RuntimeException failure) {
         for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
             if (cause instanceof InterruptedException) return DEBUG;
         }
