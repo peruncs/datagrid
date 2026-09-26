@@ -97,7 +97,10 @@ class ModuleDescriptorConsistencyTest {
                 .map(ModuleDescriptor.Requires::name)
                 .collect(Collectors.toSet());
 
-        assertEquals(Set.of("org.eclipse.store.storage", "org.eclipse.serializer.base"), transitive,
+        assertEquals(Set.of(
+                        "org.eclipse.store.storage",
+                        "org.eclipse.serializer.base",
+                        "org.eclipse.store.storage.embedded"), transitive,
                 "only the exported Store surface may be transitive: " + transitive);
     }
 

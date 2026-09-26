@@ -177,12 +177,15 @@ import peruncs.cluster.api.GraphBoundary;
 /// @since 1.0
 module peruncs.cluster
 {
-    /* Application-facing types (ClusterStorageManager, GraphBoundary) expose
-     * the Store/Serializer contracts in their signatures; consumers read them
-     * transitively instead of adding their own requires. */
+    /* Application-facing types (ClusterStorageManager, GraphBoundary,
+     * NodeOptions) expose the Store/Serializer contracts in their signatures;
+     * consumers read them transitively instead of adding their own requires.
+     * Storage's own descriptor already re-exports serializer.base and
+     * serializer.persistence.binary transitively, so this module re-exports
+     * only the modules whose types appear directly in its exported types. */
     requires transitive org.eclipse.store.storage;
     requires transitive org.eclipse.serializer.base;
-    requires org.eclipse.store.storage.embedded;
+    requires transitive org.eclipse.store.storage.embedded;
     requires org.eclipse.serializer.persistence;
     requires org.eclipse.serializer.persistence.binary;
     requires org.eclipse.serializer.afs;

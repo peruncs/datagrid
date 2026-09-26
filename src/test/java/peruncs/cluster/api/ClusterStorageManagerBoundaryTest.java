@@ -94,7 +94,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.storeRoot();
             final CountingManager counting = new CountingManager(delegate);
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    counting.proxy(), StorageSizeValidation.notReached(), () -> false,
+                    counting.proxy(), StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             final long id = manager.graphBoundary().write(() ->
             {
@@ -123,7 +123,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.storeRoot();
             final CountingManager counting = new CountingManager(delegate);
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    counting.proxy(), StorageSizeValidation.notReached(), () -> false,
+                    counting.proxy(), StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             final long[] ids = manager.graphBoundary().write(() ->
             {
@@ -149,7 +149,7 @@ class ClusterStorageManagerBoundaryTest {
     void gigaMapPersistsAcrossReload(@TempDir final Path storeDir) {
         try (EmbeddedStorageManager delegate = start(storeDir)) {
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    delegate, StorageSizeValidation.notReached(), () -> false,
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Root()));
             manager.storeRoot();
@@ -185,7 +185,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.setRoot(Lazy.Reference(new Root()));
             delegate.storeRoot();
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.readOnly(
-                    delegate, () -> false, new StorageGraphCoordinator());
+                    delegate, newNodeClose(), new StorageGraphCoordinator());
             final AtomicBoolean ran = new AtomicBoolean();
             assertThrows(ReaderWriteRejectedException.class, () ->
                     manager.graphBoundary().write(() ->
@@ -212,7 +212,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.setRoot(Lazy.Reference(new Root()));
             delegate.storeRoot();
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    delegate, () -> true, () -> false, new StorageGraphCoordinator());
+                    delegate, () -> true, newNodeClose(), new StorageGraphCoordinator());
             final AtomicBoolean ran = new AtomicBoolean();
             assertThrows(StorageLimitReachedException.class, () ->
                     manager.graphBoundary().write(() ->
@@ -235,6 +235,9 @@ class ClusterStorageManagerBoundaryTest {
                     switch (method.getName()) {
                         case "root":
                             return null;
+                        case "isRunning":
+                        case "isActive":
+                            return true;
                         case "store":
                             throw new IllegalStateException("boom");
                         case "storeRoot":
@@ -246,7 +249,7 @@ class ClusterStorageManagerBoundaryTest {
                     }
                 });
         final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                store, StorageSizeValidation.notReached(), () -> false,
+                store, StorageSizeValidation.notReached(), newNodeClose(),
                 new StorageGraphCoordinator());
         assertThrows(IllegalStateException.class, () -> manager.store(new Root()));
         assertThrows(GraphInvalidatedException.class,
@@ -264,7 +267,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.setRoot(Lazy.Reference(new Root()));
             delegate.storeRoot();
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    delegate, StorageSizeValidation.notReached(), () -> false,
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             assertThrows(IllegalStateException.class, () ->
                     manager.graphBoundary().write(() ->
@@ -284,7 +287,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.setRoot(Lazy.Reference(new Root()));
             delegate.storeRoot();
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    delegate, StorageSizeValidation.notReached(), () -> false,
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             final RuntimeException dirty = new RuntimeException("i might have written");
             manager.graphBoundary().write(() ->
@@ -307,7 +310,7 @@ class ClusterStorageManagerBoundaryTest {
         try (EmbeddedStorageManager delegate = start(this.dir)) {
             final CountingManager counting = new CountingManager(delegate);
             final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
-                    counting.proxy(), StorageSizeValidation.notReached(), () -> false,
+                    counting.proxy(), StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             /* Plain replacement is rejected before any mutation: the graph
              * must stay valid afterwards, since nothing was corrupted. */
@@ -327,7 +330,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.setRoot(Lazy.Reference(new Root()));
             delegate.storeRoot();
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    delegate, StorageSizeValidation.notReached(), () -> false,
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             assertThrows(IllegalStateException.class, () ->
                     manager.graphBoundary().read(() ->
@@ -349,7 +352,7 @@ class ClusterStorageManagerBoundaryTest {
             delegate.setRoot(Lazy.Reference(new Root()));
             delegate.storeRoot();
             final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
-                    delegate, StorageSizeValidation.notReached(), () -> false,
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
                     new StorageGraphCoordinator());
             final CountDownLatch done = new CountDownLatch(threads);
             final AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -378,6 +381,95 @@ class ClusterStorageManagerBoundaryTest {
             assertEquals(threads * increments,
                     (int) manager.graphBoundary().read(
                             () -> ((Lazy<Root>) manager.root()).get().values.size()));
+        }
+    }
+
+
+    /// NodeClose stub: never closes, never impossible. The boundary tests
+    /// don't own a lifecycle, so lifecycle admission is open by default.
+    private static peruncs.cluster.node.store.NodeClose newNodeClose() {
+        return new peruncs.cluster.node.store.NodeClose() {
+            @Override
+            public boolean close() {
+                return false;
+            }
+
+            @Override
+            public void checkOpen() {
+            }
+        };
+    }
+
+    /// A plain Store caller's direct persistence paths reject a read-to-write
+    /// upgrade immediately — same failure as boundary.write inside read —
+    /// instead of self-deadlocking on the fair lock.
+    @Test
+    void directWritesInsideReadRejectUpgradeImmediately() {
+        try (EmbeddedStorageManager delegate = start(this.dir)) {
+            delegate.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Root()));
+            delegate.storeRoot();
+            final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
+                    new StorageGraphCoordinator());
+            final Runnable[] attempts = {
+                    () -> {
+                        manager.store(new Root());
+                    },
+                    () -> {
+                        manager.storeRoot();
+                    },
+                    () -> {
+                        manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Root()));
+                    },
+                    () -> {
+                        manager.persistenceManager().store(new Root());
+                    },
+                    () -> manager.persistenceManager().target().write(null)
+            };
+            for (final Runnable attempt : attempts) {
+                assertThrows(IllegalStateException.class, () ->
+                                manager.graphBoundary().read(attempt::run),
+                        "write inside a read section must reject, not self-deadlock");
+            }
+            /* A storer commit inside the read section is rejected too. */
+            assertThrows(IllegalStateException.class, () ->
+                    manager.graphBoundary().read(() ->
+                    {
+                        final Storer storer = manager.createStorer();
+                        storer.commit();
+                        return null;
+                    }));
+            /* Nothing latches: the healthy graph keeps working afterwards. */
+            assertDoesNotThrow(() -> manager.graphBoundary().read(() -> null));
+        }
+    }
+
+    /// A storer and adapters cached before invalidation reject afterwards —
+    /// not only new boundary sections.
+    @Test
+    void cachedAdaptersRejectAfterInvalidation() {
+        try (EmbeddedStorageManager delegate = start(this.dir)) {
+            delegate.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Root()));
+            delegate.storeRoot();
+            final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
+                    new StorageGraphCoordinator());
+            final Storer cached = manager.createStorer();
+            final var persistenceManager = manager.persistenceManager();
+            final var target = persistenceManager.target();
+
+            manager.graphBoundary().invalidate(new IllegalStateException("dirty"));
+
+            assertThrows(GraphInvalidatedException.class, cached::commit,
+                    "cached storer must not commit after invalidation");
+            assertThrows(GraphInvalidatedException.class, () -> persistenceManager.store(new Root()),
+                    "cached persistence manager must not store after invalidation");
+            assertThrows(GraphInvalidatedException.class, () -> target.write(null),
+                    "cached raw target must not write after invalidation");
+            assertThrows(GraphInvalidatedException.class, () -> persistenceManager.getObject(0L),
+                    "cached persistence manager reads must fail closed after invalidation");
+            assertThrows(GraphInvalidatedException.class, manager::storeRoot,
+                    "direct persistence entry must fail closed after invalidation");
         }
     }
 }

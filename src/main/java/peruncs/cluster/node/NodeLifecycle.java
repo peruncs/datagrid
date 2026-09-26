@@ -18,6 +18,7 @@ import peruncs.cluster.api.NodeSettingsSource.Env.EnvKeys;
 import peruncs.cluster.node.backup.BackupNodeControl;
 import peruncs.cluster.node.backup.StorageBackupTaskExecutor;
 import peruncs.cluster.node.store.ClusterStorageManagers;
+import peruncs.cluster.node.store.NodeClose;
 import peruncs.cluster.node.store.StorageSizeValidation;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.storage.ReplicationCursor;
@@ -52,6 +53,21 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
      * no-op, so the facade's shutdown() inside a close cannot recurse. */
     private Thread closer;
     private volatile Throwable closeFailure;
+    /* The complete-close trigger installed on the facade: {@link NodeClose}
+     * binds the full teardown and the admission probe the facade consults on
+     * every persistence entry. */
+    private final NodeClose nodeCloseTrigger =
+            new NodeClose() {
+                @Override
+                public boolean close() {
+                    return NodeLifecycle.this.closeNode();
+                }
+
+                @Override
+                public void checkOpen() {
+                    NodeLifecycle.this.ensureOpen();
+                }
+            };
 
     NodeLifecycle(final NodeCollaborators assembly) {
         this.assembly = assembly;
@@ -250,7 +266,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * so a DI container or try-with-resources owning the StorageManager
          * tears the whole node down in the sequencer's order. */
         this.assembly.clusterStorageManager = ClusterStorageManagers.readOnly(embeddedStorageManager,
-                this::closeNode, this.assembly.graphCoordinator);
+                this.nodeCloseTrigger, this.assembly.graphCoordinator);
 
         this.assembly.getReplicationApplier().start();
         /* Eagerly create the manager so misconfiguration fails at startup.
@@ -381,11 +397,11 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 ? ClusterStorageManagers.guarding(
                         embeddedStorageManager,
                         limitGate::limitReached,
-                        this::closeNode,
+                        this.nodeCloseTrigger,
                         this.assembly.graphCoordinator)
                 : ClusterStorageManagers.readOnly(
                         embeddedStorageManager,
-                        this::closeNode,
+                        this.nodeCloseTrigger,
                         this.assembly.graphCoordinator);
 
         this.assembly.getReplicationApplier().start();
@@ -526,7 +542,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly.clusterStorageManager = ClusterStorageManagers.guarding(
                 storage,
                 StorageSizeValidation.notReached(),
-                this::closeNode,
+                this.nodeCloseTrigger,
                 this.assembly.graphCoordinator
         );
     }
@@ -561,6 +577,14 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// @return `true` when this call performed the teardown, `false` after
     /// observing another caller's successful close
     boolean closeNode() {
+        /* A synchronous close from inside an application graph section would
+         * join node-owned workers that themselves need the boundary: reject
+         * it on BOTH entry points (facade shutdown and ClusterNode.close)
+         * before any teardown begins. */
+        if (this.assembly.graphCoordinator.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "cannot close the node from inside a graph section; unwind the section first");
+        }
         synchronized (this) {
             if (this.closed) {
                 return false;
@@ -588,9 +612,12 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 /* The attempt this caller joined failed: observe its recorded
                  * failure rather than starting an independent retry. The
                  * failure stays recorded so a later, genuinely new close
-                 * retries only the stages still owing work. */
+                 * retries only the stages still owing work. The cast below
+                 * is write-site-driven today; guard it so a future checked
+                 * throwable can never turn this into a ClassCastException. */
                 if (this.closeFailure instanceof Error error) throw error;
-                throw (RuntimeException) this.closeFailure;
+                if (this.closeFailure instanceof RuntimeException runtime) throw runtime;
+                throw new IllegalStateException("node close failed", this.closeFailure);
             }
             this.closing = true;
             this.closer = Thread.currentThread();
@@ -668,6 +695,17 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                     .add(CloseSequencer.stage("stored cursor manager",
                             () -> !collaborators.commitAppliedListener.isInitialized() && collaborators.durableCursorFile != null,
                             collaborators::closeDurableCursorFile))
+                    /* 4b. Application admission is already closed for every
+                     * persistence entry (facade shutdown marked it before
+                     * calling here; ClusterNode.close drives validateState
+                     * through the lifecycle probe), so this drain joins every
+                     * in-flight graph section — inside or before a write —
+                     * and lets it finish before the Store stage runs. The
+                     * close thread itself must never hold the boundary: the
+                     * graph-section guard at closeNode entry rejects that. */
+                    .add(CloseSequencer.stage("graph drain",
+                            () -> true,
+                            () -> collaborators.graphCoordinator.drain()))
                     /* 5. Close the Store last. A backup that outlived its
                      * executor budget must block this stage instead of losing
                      * the race to a shutdown Store: a running backup fails the

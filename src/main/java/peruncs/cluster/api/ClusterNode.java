@@ -179,6 +179,12 @@ public final class ClusterNode<T> implements AutoCloseable {
         return value < 0L ? OptionalLong.empty() : OptionalLong.of(value);
     }
 
+    /// Closes the node and every resource it created.
+    ///
+    /// Equivalent to `storageManager().shutdown()`: the manager's shutdown
+    /// triggers the same complete, ordered, idempotent teardown. A close
+    /// invoked from inside a [GraphBoundary] section is rejected — unwind the
+    /// section first.
     @Override
     public void close() {
         this.assembly.close();

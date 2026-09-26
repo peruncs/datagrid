@@ -73,10 +73,6 @@ public interface NodeSettingsSource {
         /// Reports whether this node restores backups.
     ///
     /// @return `true` for a backup node
-
-        /// Reports whether this node restores backups.
-    ///
-    /// @return `true` for a backup node
     boolean isBackupNode();
 
         /// Returns the number of backups to retain.

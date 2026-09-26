@@ -246,6 +246,36 @@ class NodeAssemblyLifecycleTest {
         }
     }
 
+    /// Verifies a close attempted from inside a graph section is rejected on
+    /// BOTH entry points — the assembly close and the manager's shutdown —
+    /// rather than deadlock-joining the graph lock the caller is holding.
+    @Test
+    void closeInsideAGraphSectionIsRejectedOnBothEntryPoints(@TempDir final Path storagePath) {
+        final NodeAssembly foundation = NodeAssembly.create()
+                .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
+                        .setConfiguration(StorageConfiguration.Builder()
+                                .setStorageFileProvider(Storage.FileProvider(storagePath))
+                                .createConfiguration()))
+                .setRootSupplier(Object::new)
+                .build();
+        try {
+            final var manager = foundation.startStorageManager();
+            manager.graphBoundary().read(() ->
+            {
+                assertThrows(IllegalStateException.class, manager::shutdown,
+                        "manager shutdown must reject close from inside a graph read");
+                assertThrows(IllegalStateException.class, foundation::close,
+                        "node close must reject close from inside a graph read");
+            });
+            /* Clean state afterwards: the node was never torn down. */
+            manager.graphBoundary().read(() -> {
+            });
+            foundation.close();
+        } finally {
+            foundation.close();
+        }
+    }
+
     /// Verifies a concurrent close during an in-flight close waits for it and
     /// completes without tripping over the active teardown.
     @Test
@@ -259,22 +289,19 @@ class NodeAssemblyLifecycleTest {
                 .build();
         final var manager = foundation.startStorageManager();
 
-        final java.util.concurrent.CountDownLatch closeStarted = new java.util.concurrent.CountDownLatch(1);
         final java.util.concurrent.CountDownLatch closeDone = new java.util.concurrent.CountDownLatch(1);
         final AtomicReference<Throwable> backgroundFailure = new AtomicReference<>();
         final Thread first = Thread.ofVirtual().start(() ->
         {
             try {
                 foundation.close();
-                closeDone.countDown();
             } catch (final Throwable t) {
                 backgroundFailure.set(t);
-                closeDone.countDown();
             }
+            closeDone.countDown();
         });
-        closeStarted.countDown();
         /* Yield the foreground to the closing thread, then join the same
-         * teardown without throwing. */
+         * teardown without throwing through the facade. */
         manager.shutdown();
         assertTrue(closeDone.await(30, java.util.concurrent.TimeUnit.SECONDS));
         if (backgroundFailure.get() != null) throw new AssertionError(backgroundFailure.get());

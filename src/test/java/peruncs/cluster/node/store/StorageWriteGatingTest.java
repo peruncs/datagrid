@@ -26,7 +26,7 @@ class StorageWriteGatingTest {
     void writesAreRejectedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> true, () -> false, new peruncs.cluster.storage.StorageGraphCoordinator());
+                    ClusterStorageManagers.guarding(delegate, () -> true, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(StorageLimitReachedException.class, () -> manager.store(new Payload("a")));
             assertThrows(StorageLimitReachedException.class, () -> manager.storeAll(new Payload("b")));
@@ -40,7 +40,7 @@ class StorageWriteGatingTest {
     void everyFluentStorerPathIsGatedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> true, () -> false, new peruncs.cluster.storage.StorageGraphCoordinator());
+                    ClusterStorageManagers.guarding(delegate, () -> true, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(StorageLimitReachedException.class, () -> {
                 final var storer = manager.createStorer().reinitialize();
@@ -86,7 +86,7 @@ class StorageWriteGatingTest {
             delegate.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Payload("root")));
             delegate.storeRoot();
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.readOnly(delegate, () -> false, new peruncs.cluster.storage.StorageGraphCoordinator());
+                    ClusterStorageManagers.readOnly(delegate, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(ReaderWriteRejectedException.class, () -> manager.store(new Payload("a")));
             assertThrows(ReaderWriteRejectedException.class, () -> manager.storeAll(new Payload("c")));
@@ -139,7 +139,7 @@ class StorageWriteGatingTest {
     void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> true, () -> false, new peruncs.cluster.storage.StorageGraphCoordinator());
+                    ClusterStorageManagers.guarding(delegate, () -> true, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(UnsupportedOperationException.class, () -> manager.importData(X.Enum()));
             assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("c")));
@@ -152,7 +152,7 @@ class StorageWriteGatingTest {
     void persistenceManagerViewDoesNotOwnTheStore(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> false, () -> false, new peruncs.cluster.storage.StorageGraphCoordinator());
+                    ClusterStorageManagers.guarding(delegate, () -> false, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             manager.persistenceManager().close();
             /* The borrowed target view is non-owning one level down as well:
@@ -180,5 +180,18 @@ class StorageWriteGatingTest {
         Payload(final String value) {
             this.value = value;
         }
+    }
+
+    private static NodeClose newNodeClose() {
+        return new NodeClose() {
+            @Override
+            public boolean close() {
+                return false;
+            }
+
+            @Override
+            public void checkOpen() {
+            }
+        };
     }
 }

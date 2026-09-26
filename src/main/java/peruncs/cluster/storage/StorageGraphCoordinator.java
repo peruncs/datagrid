@@ -69,6 +69,15 @@ import static org.eclipse.serializer.util.X.notNull;
 /// whether the throwing update already mutated state, so ANY failing write
 /// section invalidates the graph — callers that must not invalidate must not
 /// throw from it (pre-validate outside the section).
+///
+/// The two write flavors differ ONLY in invalidation ownership:
+/// [#write(Runnable)] auto-invalidates a throwing section (replication,
+/// persistence entries with uncertain durability), while
+/// [#writeExclusive(Supplier)] requires the caller to report a dirty failure
+/// explicitly through [#invalidate(Throwable)] — clean application validation
+/// failures must not poison a healthy graph. Both flavors reject a
+/// read-to-write upgrade immediately: a thread holding only a read hold would
+/// deadlock against the fair write lock otherwise.
 public final class StorageGraphCoordinator {
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
     /* Latched while a failed write section still holds the write lock: after
@@ -127,6 +136,7 @@ public final class StorageGraphCoordinator {
     /// @throws GraphInvalidatedException when a previous write section failed
     public void write(final Runnable update) {
         notNull(update);
+        this.rejectReadToWriteUpgrade();
         this.lock.writeLock().lock();
         try {
             this.ensureValid();
@@ -151,6 +161,7 @@ public final class StorageGraphCoordinator {
     /// @throws GraphInvalidatedException when a previous write section failed
     public <T> T write(final Supplier<T> update) {
         notNull(update);
+        this.rejectReadToWriteUpgrade();
         this.lock.writeLock().lock();
         try {
             this.ensureValid();
@@ -194,10 +205,7 @@ public final class StorageGraphCoordinator {
     /// @throws IllegalStateException     when the calling thread already holds the read lock
     public <T> T writeExclusive(final Supplier<T> update) {
         notNull(update);
-        if (!this.lock.isWriteLockedByCurrentThread() && this.lock.getReadHoldCount() > 0) {
-            throw new IllegalStateException(
-                    "read-to-write lock upgrade is not supported; start a write section before holding a read");
-        }
+        this.rejectReadToWriteUpgrade();
         this.lock.writeLock().lock();
         try {
             this.ensureValid();
@@ -215,11 +223,15 @@ public final class StorageGraphCoordinator {
     /// @throws GraphInvalidatedException when the graph was previously invalidated
     /// @throws IllegalStateException     when the calling thread already holds the read lock
     public void writeExclusive(final Runnable update) {
-        this.writeExclusive(() ->
-        {
+        notNull(update);
+        this.rejectReadToWriteUpgrade();
+        this.lock.writeLock().lock();
+        try {
+            this.ensureValid();
             update.run();
-            return null;
-        });
+        } finally {
+            this.lock.writeLock().unlock();
+        }
     }
 
     /// Explicitly invalidates the graph: the first cause wins and cannot be reset.
@@ -243,6 +255,29 @@ public final class StorageGraphCoordinator {
     /// @return `true` when this thread holds the read or write side
     public boolean isHeldByCurrentThread() {
         return this.lock.isWriteLockedByCurrentThread() || this.lock.getReadHoldCount() > 0;
+    }
+
+    /// Waits until no graph section is active, without touching validity.
+    ///
+    /// The close sequencer runs this as its drain stage after application
+    /// admission stopped: every reader or writer in flight completes before
+    /// teardown proceeds. New admissions arriving from other threads are
+    /// rejected by the closed check in their own entry points; writers must
+    /// not hold this lock themselves while draining.
+    public void drain() {
+        this.lock.writeLock().lock();
+        this.lock.writeLock().unlock();
+    }
+
+    /* ReentrantReadWriteLock never upgrades a read hold to a write hold, so
+     * any store/commit round entered while holding a read would block on its
+     * own lock forever. Fail immediately instead: replication never holds the
+     * read side when it takes the write side. */
+    private void rejectReadToWriteUpgrade() {
+        if (!this.lock.isWriteLockedByCurrentThread() && this.lock.getReadHoldCount() > 0) {
+            throw new IllegalStateException(
+                    "read-to-write lock upgrade is not supported; start a write section before holding a read");
+        }
     }
 
     private void ensureValid() {

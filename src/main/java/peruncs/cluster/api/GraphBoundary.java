@@ -32,6 +32,12 @@ import java.util.function.Supplier;
 /// separate durable phases. Application writes on a reader or backup-reader
 /// node are rejected before the callback runs.
 ///
+/// Lock order: graph boundary first, then domain/keyed locks, registration,
+/// last commit; never take the global write lock while holding a domain lock.
+/// The boundary's lock guards the calling thread only — sections are not
+/// inherited by virtual threads the callback spawns. Nested writes and reads
+/// inside a write are reentrant; reads never upgrade.
+///
 /// Choose the section before binding live context: never read the graph
 /// outside its read section, and keep slow I/O and streaming outside both.
 ///
@@ -42,9 +48,11 @@ import java.util.function.Supplier;
 /// FIRST store failure. When a failure may already have mutated the graph
 /// or written undetermined bytes, the application reports it through
 /// [#invalidate(Throwable)] before leaving the enclosing write section.
-/// Invalidation latches the first cause, cannot be reset, fails every later
-/// coordinated read and both boundary and direct writes, and flips the node's
-/// health until the node reloads or reseeds.
+/// Plain applications without dirty tracking should validate before mutation
+/// and conservatively invalidate a failing mutation/persistence block before
+/// the write section ends. Invalidation latches the first cause, cannot be
+/// reset, fails every later coordinated read and both boundary and direct
+/// writes, and flips the node's health until the node reloads or reseeds.
 public interface GraphBoundary {
     /// Runs a read section over the node graph.
     ///
