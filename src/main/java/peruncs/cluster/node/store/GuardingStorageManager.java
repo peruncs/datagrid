@@ -19,11 +19,9 @@ import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
-import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
-import static org.eclipse.serializer.util.X.notNull;
 
 /// Store facade with the write gates, the raw-target gate, and the shared
 /// graph-boundary adapter.
@@ -410,7 +408,6 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public Lazy<T> root() {
         /* The live root stays accessible to both roles — readers traverse it
          * inside `graphBoundary().read(...)`, writers under the documented

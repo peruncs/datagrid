@@ -90,7 +90,7 @@ interface StorageNodeManager extends StorageNodeControl, AutoCloseable {
     void close();
 
         /// Shared reader monitoring, health, and lifecycle for both roles.
-    static final class Default implements StorageNodeManager {
+    final class Default implements StorageNodeManager {
         private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
         private final ReplicationPublisher dataDistributor;

@@ -1,6 +1,5 @@
 package peruncs.cluster.storage.index;
 
-import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
 import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.jvector.VectorSimilarityFunction;
@@ -115,7 +114,7 @@ class ClusterIndexProbeScratchTest {
             /* The scratch must not pin the retired map's index across the
              * replacement; probe keys are dimensions, never index instances. */
             assertTrue(scratchOf(maintenance).vectorProbes.keySet().stream()
-                            .noneMatch(key -> key == (Object) retired),
+                            .noneMatch(key -> key == retired),
                     "the retired index must not stay reachable through probe scratch");
         }
     }

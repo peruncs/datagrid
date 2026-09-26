@@ -200,19 +200,16 @@ class NodeAssemblyLifecycleTest {
                         .createConfiguration())) {
             seeded.storeRoot();
         }
-        final NodeAssembly foundation = NodeAssembly.create()
+        try (final NodeAssembly foundation = NodeAssembly.create()
                 .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
                         .setConfiguration(StorageConfiguration.Builder()
                                 .setStorageFileProvider(Storage.FileProvider(storagePath))
                                 .createConfiguration()))
                 .setRootSupplier(Object::new)
-                .build();
-        try {
+                .build()) {
             assertThrows(peruncs.cluster.errors.ReseedRequiredException.class,
                     foundation::startStorageManager,
                     "a non-Lazy stored root means reseed, never silent repair");
-        } finally {
-            foundation.close();
         }
     }
 
@@ -251,14 +248,13 @@ class NodeAssemblyLifecycleTest {
     /// rather than deadlock-joining the graph lock the caller is holding.
     @Test
     void closeInsideAGraphSectionIsRejectedOnBothEntryPoints(@TempDir final Path storagePath) {
-        final NodeAssembly foundation = NodeAssembly.create()
+        try (final NodeAssembly foundation = NodeAssembly.create()
                 .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
                         .setConfiguration(StorageConfiguration.Builder()
                                 .setStorageFileProvider(Storage.FileProvider(storagePath))
                                 .createConfiguration()))
                 .setRootSupplier(Object::new)
-                .build();
-        try {
+                .build()) {
             final var manager = foundation.startStorageManager();
             manager.graphBoundary().read(() ->
             {
@@ -270,8 +266,6 @@ class NodeAssemblyLifecycleTest {
             /* Clean state afterwards: the node was never torn down. */
             manager.graphBoundary().read(() -> {
             });
-            foundation.close();
-        } finally {
             foundation.close();
         }
     }

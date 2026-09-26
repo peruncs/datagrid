@@ -272,7 +272,7 @@ public final class ClusterIndexMaintenance {
             for (final VectorIndex<?> index : scratch.vectorIndexes) {
                 final Long before = scratch.vectorModCounts.get(index);
                 if (!(index instanceof VectorIndex.Default<?> known) || before == null ||
-                    before.longValue() != known.getStructuralModCount()) {
+                    before != known.getStructuralModCount()) {
                     resetVectorSearchGraph(index);
                     scratch.dirtyVectorIndexes.add(index);
                 }

@@ -1,7 +1,6 @@
 package peruncs.cluster.api;
 
 import org.eclipse.serializer.reference.Lazy;
-import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.serializer.persistence.types.Storer;
@@ -72,6 +71,14 @@ class ClusterStorageManagerBoundaryTest {
             if ("store".equals(method.getName())) {
                 this.storeCalls.incrementAndGet();
             }
+            if (method.getDeclaringClass() == Object.class) {
+                return switch (method.getName()) {
+                    case "equals" -> proxy == args[0];
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "toString" -> "countingManager";
+                    default -> null;
+                };
+            }
             try {
                 return method.invoke(this.delegate, args);
             } catch (final java.lang.reflect.InvocationTargetException thrown) {
@@ -98,7 +105,7 @@ class ClusterStorageManagerBoundaryTest {
                     new StorageGraphCoordinator());
             final long id = manager.graphBoundary().write(() ->
             {
-                final Root root = ((Lazy<Root>) manager.root()).get();
+                final Root root = (manager.root()).get();
                 root.values.add("buffered-not-yet-stored");
                 /* Explicit persistence is the application's own choice. */
                 final Storer storer = manager.createStorer();
@@ -127,7 +134,7 @@ class ClusterStorageManagerBoundaryTest {
                     new StorageGraphCoordinator());
             final long[] ids = manager.graphBoundary().write(() ->
             {
-                final Root root = ((Lazy<Root>) manager.root()).get();
+                final Root root = (manager.root()).get();
                 root.values.add("phase-a");
                 final Storer first = manager.createStorer();
                 final long firstId = first.store(root);
@@ -155,7 +162,7 @@ class ClusterStorageManagerBoundaryTest {
             manager.storeRoot();
             final long stored = manager.graphBoundary().write(() ->
             {
-                final Root root = ((Lazy<Root>) manager.root()).get();
+                final Root root = (manager.root()).get();
                 root.values.add("first");
                 /* Explicit storer commit: the boundary persists nothing by
                  * itself, so this is the only durable phase of the write.
@@ -200,7 +207,7 @@ class ClusterStorageManagerBoundaryTest {
                     }));
             /* The reader still reads its graph through the boundary. */
             assertEquals(0, (int) manager.graphBoundary().read(
-                    () -> ((Lazy<Root>) manager.root()).get().values.size()));
+                    () -> (manager.root()).get().values.size()));
         }
     }
 
@@ -233,19 +240,19 @@ class ClusterStorageManagerBoundaryTest {
                 (proxy, method, args) ->
                 {
                     switch (method.getName()) {
-                        case "root":
-                            return null;
-                        case "isRunning":
-                        case "isActive":
+                        case "isRunning", "isActive" -> {
                             return true;
-                        case "store":
-                            throw new IllegalStateException("boom");
-                        case "storeRoot":
+                        }
+                        case "store" -> throw new IllegalStateException("boom");
+                        case "storeRoot" -> {
                             return 0L;
-                        case "setRoot":
+                        }
+                        case "setRoot" -> {
                             return new Object();
-                        default:
+                        }
+                        default -> {
                             return null;
+                        }
                     }
                 });
         final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
@@ -363,7 +370,7 @@ class ClusterStorageManagerBoundaryTest {
                         for (int step = 0; step < increments; step++) {
                             manager.graphBoundary().write(() ->
                             {
-                                final Root root = ((Lazy<Root>) manager.root()).get();
+                                final Root root = (manager.root()).get();
                                 root.values.add("v");
                                 manager.store(root);
                                 return null;
@@ -380,7 +387,7 @@ class ClusterStorageManagerBoundaryTest {
             assertNull(failure.get(), String.valueOf(failure.get()));
             assertEquals(threads * increments,
                     (int) manager.graphBoundary().read(
-                            () -> ((Lazy<Root>) manager.root()).get().values.size()));
+                            () -> (manager.root()).get().values.size()));
         }
     }
 

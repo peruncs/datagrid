@@ -640,9 +640,9 @@ class WriterFencingLeaseTest {
         final UUID cluster = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
         final Path lockPath = WriterFencingLease.lockPath(volume, cluster, generation);
-        final WriterFencingLease holder = WriterFencingLease.acquire(
-                volume, cluster, generation, UUID.randomUUID(), Duration.ofMillis(300L), Duration.ofMillis(100L));
-        try (var channel = java.nio.channels.FileChannel.open(
+        try (final WriterFencingLease holder = WriterFencingLease.acquire(
+                     volume, cluster, generation, UUID.randomUUID(), Duration.ofMillis(300L), Duration.ofMillis(100L));
+             var channel = java.nio.channels.FileChannel.open(
                      lockPath, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
              var ignored = channel.lock()) {
             final var failure = assertThrows(WriterFencedException.class,
@@ -650,8 +650,6 @@ class WriterFencingLeaseTest {
                     "a same-JVM lock overlap must fail with a fencing type");
             assertTrue(failure.getMessage().contains("concurrently"),
                     "the failure must name the concurrent hold: " + failure.getMessage());
-        } finally {
-            holder.close();
         }
     }
 

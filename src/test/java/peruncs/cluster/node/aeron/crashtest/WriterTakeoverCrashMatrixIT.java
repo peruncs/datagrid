@@ -253,7 +253,12 @@ final class WriterTakeoverCrashMatrixIT {
                 }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER_ID),
                 /* These cells drive replay-shaped frames; no durability gate needed. */
                 java.lang.reflect.Proxy.newProxyInstance(gateType.getClassLoader(),
-                        new Class<?>[]{gateType}, (proxy, method, args) -> true));
+                        new Class<?>[]{gateType}, (proxy, method, args) -> switch (method.getName()) {
+                            case "equals" -> proxy == args[0];
+                            case "hashCode" -> System.identityHashCode(proxy);
+                            case "toString" -> "alwaysRecorded";
+                            default -> true;
+                        }));
     }
 
     private static Object invoke(final Object target, final String name, final Class<?>[] types,

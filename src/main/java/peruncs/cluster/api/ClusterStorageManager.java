@@ -51,7 +51,7 @@ public interface ClusterStorageManager<T> extends StorageManager {
 
     /// Starts the manager.
     ///
-    /// The manager handed out by [ClusterNode#open] is already started, so
+    /// The manager handed out by ClusterNode.open(...) is already started, so
     /// this is an idempotent check-and-return: on a closed, closing, or
     /// invalidated node it fails instead of resurrecting its Store.
     ///

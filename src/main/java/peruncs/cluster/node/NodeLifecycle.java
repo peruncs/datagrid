@@ -572,7 +572,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// Runs the complete node teardown exactly once, sharing it with the
     /// storage facade's shutdown.
     ///
-    /// Called by the manager's `shutdown()` trigger and by [ClusterNode#close].
+    /// Called by the manager's `shutdown()` trigger and by `ClusterNode.close()`.
     ///
     /// @return `true` when this call performed the teardown, `false` after
     /// observing another caller's successful close
@@ -749,7 +749,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 this.notifyAll();
             }
         }
-        return failure == null;
+        return true;
     }
 
     private void ensureOpen() {
