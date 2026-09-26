@@ -34,7 +34,7 @@ class AeronPositionProviderTest {
     private static AeronPositionProvider provider(final boolean writer, final boolean initialized,
                                                   final java.util.function.LongSupplier fencingToken) {
         return new AeronPositionProvider(() -> writer, () -> initialized, () -> {
-        }, () -> new AeronWriterBoundary(7L, 8L, 9L), () -> ID, () -> ID, () -> ID,
+        }, () -> new AeronWriterRecoveryBoundary(7L, 8L, 9L), () -> ID, () -> ID, () -> ID,
                 () -> 1L, fencingToken);
     }
 }

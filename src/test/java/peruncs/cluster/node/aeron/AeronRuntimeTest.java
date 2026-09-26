@@ -15,7 +15,6 @@ import java.io.IOException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -60,7 +59,7 @@ class AeronRuntimeTest {
         final Path markFile = archiveMarkFile(root, 0);
         final AtomicInteger launches = new AtomicInteger();
         final AutoCloseable launched = AeronRuntime.launchDriver(new MediaDriver.Context(),
-                Optional.of(markFile),
+                markFile,
                 () -> {
                     launches.incrementAndGet();
                     return (AutoCloseable) () -> { };
@@ -77,7 +76,7 @@ class AeronRuntimeTest {
         final Path markFile = root.resolve("archive").resolve(ArchiveMarkFile.FILENAME);
         final AtomicInteger launches = new AtomicInteger();
         final AutoCloseable launched = AeronRuntime.launchDriver(new MediaDriver.Context(),
-                Optional.of(markFile),
+                markFile,
                 () -> {
                     if (launches.incrementAndGet() == 1) {
                         try {
@@ -101,7 +100,7 @@ class AeronRuntimeTest {
         final Path markFile = archiveMarkFile(root, SemanticVersion.compose(2, 0, 0));
         final AtomicInteger launches = new AtomicInteger();
         assertThrows(IllegalArgumentException.class, () -> AeronRuntime.<AutoCloseable>launchDriver(
-                new MediaDriver.Context(), Optional.of(markFile), () -> {
+                new MediaDriver.Context(), markFile, () -> {
                     launches.incrementAndGet();
                     throw rejectedVersion(markFile, 2);
                 }));
@@ -118,7 +117,7 @@ class AeronRuntimeTest {
         Files.write(foreign, new byte[1024]);
         final AtomicInteger launches = new AtomicInteger();
         assertThrows(IllegalArgumentException.class, () -> AeronRuntime.<AutoCloseable>launchDriver(
-                new MediaDriver.Context(), Optional.of(markFile), () -> {
+                new MediaDriver.Context(), markFile, () -> {
                     launches.incrementAndGet();
                     throw rejectedVersion(foreign, 0);
                 }));
@@ -134,7 +133,7 @@ class AeronRuntimeTest {
         final Path markFile = archiveMarkFile(root, ArchiveMarkFile.SEMANTIC_VERSION);
         final AtomicInteger launches = new AtomicInteger();
         assertThrows(IllegalArgumentException.class, () -> AeronRuntime.<AutoCloseable>launchDriver(
-                new MediaDriver.Context(), Optional.of(markFile), () -> {
+                new MediaDriver.Context(), markFile, () -> {
                     launches.incrementAndGet();
                     throw rejectedVersion(markFile, 0);
                 }));
@@ -149,7 +148,7 @@ class AeronRuntimeTest {
         final Path markFile = archiveMarkFile(root, ArchiveMarkFile.SEMANTIC_VERSION);
         final AtomicInteger launches = new AtomicInteger();
         final AutoCloseable launched = AeronRuntime.launchDriver(new MediaDriver.Context(),
-                Optional.of(markFile),
+                markFile,
                 () -> {
                     if (launches.incrementAndGet() == 1) {
                         throw new IllegalStateException(
@@ -172,7 +171,7 @@ class AeronRuntimeTest {
         Files.write(foreign, new byte[1024]);
         final AtomicInteger launches = new AtomicInteger();
         assertThrows(IllegalStateException.class, () -> AeronRuntime.<AutoCloseable>launchDriver(
-                new MediaDriver.Context(), Optional.of(markFile), () -> {
+                new MediaDriver.Context(), markFile, () -> {
                     launches.incrementAndGet();
                     throw new IllegalStateException(
                             "active mark file detected: %s".formatted(foreign.toFile().getAbsolutePath()));
@@ -186,7 +185,7 @@ class AeronRuntimeTest {
     void failsClosedOnUnrelatedIllegalState() {
         final AtomicInteger launches = new AtomicInteger();
         assertThrows(IllegalStateException.class, () -> AeronRuntime.<AutoCloseable>launchDriver(
-                new MediaDriver.Context(), Optional.empty(), () -> {
+                new MediaDriver.Context(), null, () -> {
                     launches.incrementAndGet();
                     throw new IllegalStateException("configurations are broken");
                 }));

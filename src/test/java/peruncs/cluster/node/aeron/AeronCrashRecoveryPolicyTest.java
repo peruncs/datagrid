@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that archive gaps and tails select the documented recovery policy.
 class AeronCrashRecoveryPolicyTest {
-    private static final AeronWriterBoundary BOUNDARY = new AeronWriterBoundary(1, 7, 100);
+    private static final AeronWriterRecoveryBoundary BOUNDARY = new AeronWriterRecoveryBoundary(1, 7, 100);
 
         /// Verifies exact archive prefix can be extended.
     @Test

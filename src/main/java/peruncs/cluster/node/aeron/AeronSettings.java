@@ -6,20 +6,14 @@ import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.codecs.*;
 import io.aeron.driver.ThreadingMode;
-import io.aeron.security.*;
 import org.agrona.SystemUtil;
-import peruncs.cluster.node.NodeRole;
 import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.node.NodeRole;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
@@ -28,23 +22,18 @@ import java.util.function.Predicate;
 /// Validated configuration for one Aeron transport. Structural values are
 /// immutable and grouped by concern into composed sub-records.
 ///
-/// The environment keys are grouped into four concerns: [Topology] (cluster
-/// and node identity, channels, stream ids, directories), [Authentication]
-/// (Archive control credentials and the wire nonce), [ArchivePolicy]
-/// (recording, retention, and capacity), and [Timeouts] (the per-operation
-/// budgets). Each group is parsed and validated by its own step in
-/// [#fromEnvironment], and the result is assembled once. `offerTimeoutNanos`
-/// on the nested replication configuration bounds publication offers only;
-/// Archive control requests, watermark-channel shutdown, and lease locking
-/// have their own budgets in [Timeouts].
+/// The environment keys are grouped into three concerns: [Topology] (cluster
+/// and node identity, channels, stream ids, directories, wire nonce),
+/// [ArchivePolicy] (recording, retention, and capacity), and [Timeouts] (the
+/// per-operation budgets). Each group is parsed and validated by its own step
+/// in [#fromEnvironment], and the result is assembled once.
 ///
 /// @param replication          validated publication framing and offer-timeout settings
 /// @param topology             cluster identity, role, channels, stream ids, and directories
 /// @param archivePolicy        Archive recording, retention, and capacity policy
 /// @param timeouts             operation deadlines for driver, Archive control, watermark close, and lease lock
-/// @param authentication       Archive control-session credentials and the wire nonce; disabled auth
-///                             in production mode requires the explicit
-///                             `ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE=true` acknowledgement
+/// @param wireNonce            shared non-authenticating nonce that rejects accidental cross-wiring;
+///                             required in production mode, derived from the cluster id otherwise
 /// @param threadingMode        MediaDriver threading mode
 /// @param archiveThreadingMode embedded Archive threading mode
 /// @param productionMode       whether production-only validation is enabled
@@ -53,7 +42,7 @@ record AeronSettings(
         Topology topology,
         ArchivePolicy archivePolicy,
         Timeouts timeouts,
-        Authentication authentication,
+        long wireNonce,
         ThreadingMode threadingMode,
         ArchiveThreadingMode archiveThreadingMode,
         boolean productionMode
@@ -236,52 +225,6 @@ record AeronSettings(
         }
     }
 
-    /// The Archive control-session authentication group and the wire nonce.
-    ///
-    /// Credential arrays are copied in and copied out so the settings never
-    /// share caller-owned state; [erase] zeroes the held copies when the
-    /// owning transport closes.
-    ///
-    /// @param enabled           whether Aeron Archive control authentication is enabled
-    /// @param principal         configured principal, or `null` when disabled
-    /// @param credentials        copied credentials, or `null` when disabled
-    /// @param readerPrincipal   optional reader principal accepted by a writer Archive
-    /// @param readerCredentials copied credentials for the optional reader principal
-    /// @param wireNonce         shared non-authenticating nonce that rejects accidental cross-wiring;
-    ///                          required explicitly in production mode, derived from the cluster id otherwise
-    record Authentication(
-            boolean enabled,
-            String principal,
-            byte[] credentials,
-            String readerPrincipal,
-            byte[] readerCredentials,
-            long wireNonce
-    ) {
-        Authentication {
-            credentials = credentials == null ? null : credentials.clone();
-            readerCredentials = readerCredentials == null ? null : readerCredentials.clone();
-        }
-
-        @Override
-        public byte[] credentials() {
-            return this.credentials == null ? null : this.credentials.clone();
-        }
-
-        @Override
-        public byte[] readerCredentials() {
-            return this.readerCredentials == null ? null : this.readerCredentials.clone();
-        }
-
-        /// Zeroes the credential copies held by this group.
-        ///
-        /// The principal is a non-secret identity string and has no
-        /// erasable form.
-        void erase() {
-            if (this.credentials != null) java.util.Arrays.fill(this.credentials, (byte) 0);
-            if (this.readerCredentials != null) java.util.Arrays.fill(this.readerCredentials, (byte) 0);
-        }
-    }
-
     static AeronSettings fromEnvironment(final NodeSettingsSource properties) {
         Objects.requireNonNull(properties, "properties");
         final String configuredRole = properties.replicationRole();
@@ -304,15 +247,13 @@ record AeronSettings(
         final ArchivePolicy archivePolicy = archivePolicy(properties, productionMode, replication, trustedNetwork);
         final Topology topology = topology(properties, role, productionMode, replication,
                 archivePolicy.externalArchive());
-        final Authentication authentication = authentication(properties, role, productionMode,
-                archivePolicy.externalArchive(), topology.clusterId());
         final ThreadingMode threadingMode = threadingMode(properties);
         return new AeronSettings(
                 replication,
                 topology,
                 archivePolicy,
                 timeouts(properties),
-                authentication,
+                wireNonce(properties, productionMode, topology.clusterId()),
                 threadingMode,
                 threadingMode == ThreadingMode.DEDICATED
                         ? ArchiveThreadingMode.DEDICATED : ArchiveThreadingMode.SHARED,
@@ -528,14 +469,14 @@ record AeronSettings(
                 archiveReplicationChannel, watermarkChannel);
     }
 
-    /// Parses and validates the Archive authentication contract and the wire nonce.
-    private static Authentication authentication(final NodeSettingsSource properties, final NodeRole role,
-                                                 final boolean productionMode, final boolean externalArchive,
-                                                 final UUID clusterId) {
+    /// Parses and validates the wire nonce: an accidental cross-wiring guard,
+    /// not authentication. Nothing else of the tooling reads this.
+    private static long wireNonce(final NodeSettingsSource properties,
+                                  final boolean productionMode,
+                                  final UUID clusterId) {
         final String configuredNonce = value(properties, "ECLIPSE_DATAGRID_AERON_WIRE_NONCE", null);
         if (productionMode && (configuredNonce == null || configuredNonce.isBlank())) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_WIRE_NONCE is required in production");
+            throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_WIRE_NONCE is required in production");
         }
         final long wireNonce = configuredNonce == null || configuredNonce.isBlank()
                 ? AeronReplicationEnvelope.defaultWireNonce(clusterId)
@@ -543,147 +484,12 @@ record AeronSettings(
         if (wireNonce == 0L) {
             throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_WIRE_NONCE must not be zero");
         }
-        final boolean authEnabled = booleanSetting(properties,
-                "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED", false);
-        /* Archive control authentication needs its own explicit
-         * acknowledgement: control operations are a separate protection
-         * domain from replication traffic. */
-        if (!authEnabled && productionMode
-            && !booleanSetting(properties, "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE", false)) {
-            throw new IllegalArgumentException(
-                    "Aeron Archive authentication must be enabled in production mode "
-                    + "(ECLIPSE_DATAGRID_AERON_AUTH_ENABLED=true), or explicitly acknowledge unauthenticated "
-                    + "operation with ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE=true");
-        }
-        final String authPrincipal = value(properties, "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL", null);
-        final byte[] authCredentials = authCredentials(properties);
-        final String authReaderPrincipal = value(
-                properties, "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL", null);
-        final byte[] authReaderCredentials = authCredentials(
-                properties,
-                "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS",
-                "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS_FILE");
-        if (!authEnabled) {
-            if ((authPrincipal != null && !authPrincipal.isBlank()) || authCredentials != null ||
-                (authReaderPrincipal != null && !authReaderPrincipal.isBlank()) || authReaderCredentials != null) {
-                throw new IllegalArgumentException(
-                        "Aeron auth principals and credentials require ECLIPSE_DATAGRID_AERON_AUTH_ENABLED=true");
-            }
-        } else {
-            if (authPrincipal == null || authPrincipal.isBlank()) {
-                throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL is required when auth is enabled");
-            }
-            if (authPrincipal.chars().anyMatch(character -> character < 0x21 || character > 0x7e)) {
-                throw new IllegalArgumentException(
-                        "ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL must contain printable ASCII characters");
-            }
-            if (authCredentials == null) {
-                throw new IllegalArgumentException(
-                        "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS or *_CREDENTIALS_FILE is required when auth is enabled");
-            }
-            if (authReaderPrincipal != null && !authReaderPrincipal.isBlank()) {
-                if (authReaderPrincipal.chars().anyMatch(character -> character < 0x21 || character > 0x7e)) {
-                    throw new IllegalArgumentException(
-                            "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL must contain printable ASCII characters");
-                }
-                if (authReaderCredentials == null) {
-                    throw new IllegalArgumentException(
-                            "ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS or *_CREDENTIALS_FILE is required when a reader principal is configured");
-                }
-                if (authReaderPrincipal.trim().equals(authPrincipal.trim()) ||
-                    Arrays.equals(authReaderCredentials, authCredentials)) {
-                    throw new IllegalArgumentException(
-                            "writer and reader Archive identities must use different principals and credentials");
-                }
-            } else if (authReaderCredentials != null) {
-                throw new IllegalArgumentException(
-                        "ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL is required when reader credentials are configured");
-            }
-            if (productionMode && !externalArchive && role.isWriter() &&
-                (authReaderPrincipal == null || authReaderPrincipal.isBlank())) {
-                throw new IllegalArgumentException(
-                        "production writers require a separate ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL and credentials");
-            }
-        }
-        final Authentication authentication = new Authentication(authEnabled,
-                authEnabled ? authPrincipal.trim() : null,
-                authCredentials,
-                authReaderPrincipal == null || authReaderPrincipal.isBlank() ? null : authReaderPrincipal.trim(),
-                authReaderCredentials,
-                wireNonce);
-        /* The record constructor keeps its own defensive copy. Erase the parser's
-         * temporaries immediately so configuration loading does not leave extra
-         * long-lived credential copies on the heap. */
-        if (authCredentials != null) Arrays.fill(authCredentials, (byte) 0);
-        if (authReaderCredentials != null) Arrays.fill(authReaderCredentials, (byte) 0);
-        return authentication;
+        return wireNonce;
     }
 
-    /** Reads one secret file through a bounded, stable descriptor snapshot. */
-    private static byte[] readSecretFile(final Path path) throws IOException {
-        final int maxBytes = MAX_SECRET_FILE_BYTES;
-        final String description = "auth credentials";
-        final BasicFileAttributes before = Files.readAttributes(
-                path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        if (!before.isRegularFile() || Files.isSymbolicLink(path) || before.size() > maxBytes) {
-            throw new IOException("%s file must be a regular, non-symbolic file <= %s bytes"
-                    .formatted(description, maxBytes));
-        }
-        validateSecretFilePermissions(path, description);
-        final byte[] encoded = new byte[maxBytes + 1];
-        try {
-            final int length;
-            try (FileChannel channel = FileChannel.open(
-                    path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-                if (channel.size() > maxBytes) {
-                    throw new IOException("%s file exceeds %s bytes".formatted(description, maxBytes));
-                }
-                final ByteBuffer destination = ByteBuffer.wrap(encoded);
-                while (destination.hasRemaining()) {
-                    final int read = channel.read(destination);
-                    if (read < 0) break;
-                    if (read == 0) throw new IOException("%s file read made no progress".formatted(description));
-                }
-                if (destination.position() > maxBytes) {
-                    throw new IOException("%s file exceeds %s bytes".formatted(description, maxBytes));
-                }
-                length = destination.position();
-            }
-            final BasicFileAttributes after = Files.readAttributes(
-                    path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            if (before.fileKey() == null || after.fileKey() == null ||
-                !Objects.equals(before.fileKey(), after.fileKey()) ||
-                !after.isRegularFile() || Files.isSymbolicLink(path)) {
-                throw new IOException("%s file changed while it was being read".formatted(description));
-            }
-            return Arrays.copyOf(encoded, length);
-        } finally {
-            Arrays.fill(encoded, (byte) 0);
-        }
-    }
 
-    private static void validateSecretFilePermissions(final Path path, final String description)
-            throws IOException {
-        try {
-            final Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(
-                    path, LinkOption.NOFOLLOW_LINKS);
-            if (permissions.stream().anyMatch(permission -> permission.name().startsWith("GROUP_") ||
-                                                            permission.name().startsWith("OTHERS_"))) {
-                throw new IOException("%s file must not be accessible by group or others".formatted(description));
-            }
-            final Path parent = path.getParent();
-            if (parent != null) {
-                final Set<PosixFilePermission> parentPermissions = Files.getPosixFilePermissions(
-                        parent, LinkOption.NOFOLLOW_LINKS);
-                if (parentPermissions.contains(PosixFilePermission.GROUP_WRITE) ||
-                    parentPermissions.contains(PosixFilePermission.OTHERS_WRITE)) {
-                    throw new IOException("%s file parent must not be writable by group or others".formatted(description));
-                }
-            }
-        } catch (final UnsupportedOperationException unsupported) {
-            throw new IOException("%s file permissions cannot be verified".formatted(description), unsupported);
-        }
-    }
+
+
 
     private static Set<UUID> retentionReaders(final NodeSettingsSource properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", null);
@@ -699,44 +505,6 @@ record AeronSettings(
         return Set.copyOf(readers);
     }
 
-        /// Decodes an inline secret value, labelling failures with its property.
-    private interface InlineSecretDecoder {
-        byte[] decode(String configured, String property);
-    }
-
-        /// Decodes a secret file, labelling failures with its property.
-    private interface FileSecretDecoder {
-        byte[] decode(String fileName, String property);
-    }
-
-        /// Reads credentials from an inline value or a secret file, which stay
-    /// mutually exclusive. The two decoder types are distinct so swapping them
-    /// at a call site fails compilation instead of decoding silently wrong.
-    ///
-    /// @param properties    property provider
-    /// @param inlineKey     inline base64 property name
-    /// @param fileKey       secret-file property name
-    /// @param inlineDecoder decodes an inline value with its property label
-    /// @param fileDecoder   decodes a secret file with its property label
-    /// @return decoded credentials, or `null` when unconfigured
-    private static byte[] credentialsSetting(
-            final NodeSettingsSource properties,
-            final String inlineKey,
-            final String fileKey,
-            final InlineSecretDecoder inlineDecoder,
-            final FileSecretDecoder fileDecoder
-    ) {
-        final String configured = value(properties, inlineKey, null);
-        final String configuredFile = value(properties, fileKey, null);
-        if (configured != null && !configured.isBlank() && configuredFile != null && !configuredFile.isBlank()) {
-            throw new IllegalArgumentException("%s and %s are mutually exclusive".formatted(inlineKey, fileKey));
-        }
-        if (configured == null || configured.isBlank()) {
-            return configuredFile == null || configuredFile.isBlank()
-                    ? null : fileDecoder.decode(configuredFile.trim(), fileKey);
-        }
-        return inlineDecoder.decode(configured.trim(), inlineKey);
-    }
 
     private static boolean booleanSetting(final NodeSettingsSource properties,
                                           final String name, final boolean fallback) {
@@ -747,48 +515,13 @@ record AeronSettings(
         throw new IllegalArgumentException("%s must be true or false".formatted(name));
     }
 
-    private static byte[] authCredentials(final NodeSettingsSource properties) {
-        return authCredentials(properties,
-                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS",
-                "ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS_FILE");
-    }
 
-    private static byte[] authCredentials(
-            final NodeSettingsSource properties,
-            final String credentialsProperty,
-            final String credentialsFileProperty
-    ) {
-        return credentialsSetting(properties, credentialsProperty, credentialsFileProperty,
-                AeronSettings::decodeAuthCredentials, AeronSettings::decodeAuthCredentialsFile);
-    }
 
-    private static byte[] decodeAuthCredentialsFile(final String fileName, final String property) {
-        final Path path = Paths.get(fileName).toAbsolutePath().normalize();
-        try {
-            final byte[] encoded = readSecretFile(path);
-            try {
-                return decodeAuthCredentials(
-                        new String(encoded, StandardCharsets.US_ASCII).trim(),
-                        property);
-            } finally {
-                Arrays.fill(encoded, (byte) 0);
-            }
-        } catch (final IOException | IllegalArgumentException failure) {
-            throw new IllegalArgumentException("%s is invalid: %s".formatted(property, path),
-                    failure);
-        }
-    }
 
-    private static byte[] decodeAuthCredentials(final String configured, final String property) {
-        try {
-            final byte[] credentials = Base64.getDecoder().decode(configured);
-            if (credentials.length < 8) throw new IllegalArgumentException(
-                    "%s must decode to at least 8 bytes".formatted(property));
-            return credentials;
-        } catch (final IllegalArgumentException failure) {
-            throw new IllegalArgumentException("%s must be base64 and decode to at least 8 bytes".formatted(property), failure);
-        }
-    }
+
+
+
+
 
     private static ThreadingMode threadingMode(final NodeSettingsSource properties) {
         final String configured = value(properties, "ECLIPSE_DATAGRID_AERON_THREADING_MODE",
@@ -1060,10 +793,7 @@ record AeronSettings(
     /// contexts they were issued to and are released together with those
     /// contexts by the same close; only this settings-held copy is erased
     /// here. The principal is a non-secret identity string and has no
-    /// erasable form.
-    void clearAuthCredentials() {
-        this.authentication.erase();
-    }
+
 
         /// Builds the Archive authenticator for the embedded Archive, or `null` when auth is disabled.
     ///
@@ -1074,20 +804,7 @@ record AeronSettings(
     /// against observers and denial-of-service.
     ///
     /// @return authenticator supplier, or `null`
-    AuthenticatorSupplier authenticatorSupplier() {
-        if (!this.authentication.enabled()) return null;
-        final byte[] principal = this.authentication.principal().getBytes(StandardCharsets.US_ASCII);
-        final byte[] credentials = this.authentication.credentials();
-        final byte[] readerPrincipal = this.authentication.readerPrincipal() == null
-                ? null : this.authentication.readerPrincipal().getBytes(StandardCharsets.US_ASCII);
-        final byte[] readerCredentials = this.authentication.readerCredentials();
-        return () -> {
-            final SimpleAuthenticator.Builder builder = new SimpleAuthenticator.Builder()
-                    .principal(principal, credentials);
-            if (readerPrincipal != null) builder.principal(readerPrincipal, readerCredentials);
-            return builder.newInstance();
-        };
-    }
+
 
         /// Builds the Archive authorization service for the embedded Archive, or `null` when auth is disabled.
     ///
@@ -1098,51 +815,12 @@ record AeronSettings(
     /// and principals are denied by default.
     ///
     /// @return authorization service supplier, or `null`
-    AuthorisationServiceSupplier authorisationServiceSupplier() {
-        if (!this.authentication.enabled()) return null;
-        final byte[] principal = this.authentication.principal().getBytes(StandardCharsets.US_ASCII);
-        final byte[] readerPrincipal = this.authentication.readerPrincipal() == null
-                ? null : this.authentication.readerPrincipal().getBytes(StandardCharsets.US_ASCII);
-        final int[] actions = this.topology.role().isWriter()
-                ? WRITER_ARCHIVE_ACTIONS : READER_ARCHIVE_ACTIONS;
-        return () -> {
-            final SimpleAuthorisationService.Builder builder = new SimpleAuthorisationService.Builder()
-                    .defaultAuthorisation(AuthorisationService.DENY_ALL);
-            addArchiveRules(builder, actions, principal);
-            if (readerPrincipal != null) addArchiveRules(builder, READER_ARCHIVE_ACTIONS, readerPrincipal);
-            return builder.newInstance();
-        };
-    }
 
-    private static void addArchiveRules(
-            final SimpleAuthorisationService.Builder builder,
-            final int[] actions,
-            final byte[] principal
-    ) {
-        for (final int action : actions) {
-            builder.addPrincipalRule(ARCHIVE_PROTOCOL_ID, action, principal, true);
-        }
-    }
+
+
 
         /// Builds the client credentials presented to the Archive, or `null` when auth is disabled.
     ///
     /// @return credentials supplier, or `null`
-    CredentialsSupplier credentialsSupplier() {
-        if (!this.authentication.enabled()) return null;
-        final byte[] credentials = Objects.requireNonNull(this.authentication.credentials(),
-                "auth credentials must be set when auth is enabled");
-        return new CredentialsSupplier() {
-            @Override
-            public byte[] encodedCredentials() {
-                return credentials.clone();
-            }
 
-            @Override
-            public byte[] onChallenge(final byte[] encodedChallenge) {
-                /* SimpleAuthenticator performs no challenge/response round-trip;
-                 * re-present the same credentials if one is ever issued. */
-                return credentials.clone();
-            }
-        };
-    }
 }

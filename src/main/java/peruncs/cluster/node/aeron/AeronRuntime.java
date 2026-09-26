@@ -24,7 +24,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -113,12 +112,25 @@ final class AeronRuntime implements AutoCloseable {
     /// path, or an unreadable file all fail closed.
     ///
     /// @param context         media driver context whose driver timeout bounds the retry
-    /// @param archiveMarkFile archive mark file this launch owns, empty when the node
+    /// @param archiveMarkFile archive mark file this launch owns; `null` when the node
     ///                        runs without an embedded Archive
     /// @param launcher        starts the driver, or the driver and Archive together
     /// @return the launched resource, owned by the caller for shutdown
     static <T extends AutoCloseable> T launchDriver(final MediaDriver.Context context,
-                                                    final Optional<Path> archiveMarkFile,
+                                                    final Supplier<T> launcher) {
+        return launchDriver(context, null, launcher);
+    }
+
+    /// Launches with the writer's archive mark file known.
+    ///
+    /// @param context         media driver context whose driver timeout bounds the retry
+    /// @param archiveMarkFile archive mark file this launch owns; `null` when the node
+    ///                        runs without an embedded Archive
+    /// @param launcher        starts the driver, or the driver and Archive together
+    /// @param <T>             the launcher return type
+    /// @return the launched resource, owned by the caller for shutdown
+    static <T extends AutoCloseable> T launchDriver(final MediaDriver.Context context,
+                                                    final Path archiveMarkFile,
                                                     final Supplier<T> launcher) {
         RuntimeException lastFailure = null;
         final long timeoutMillis;
@@ -127,7 +139,9 @@ final class AeronRuntime implements AutoCloseable {
         } catch (final ArithmeticException overflow) {
             throw new IllegalArgumentException("Aeron driver timeout is too large", overflow);
         }
-        archiveMarkFile.ifPresent(AeronRuntime::removeNeverSignaledArchiveMarkFile);
+        if (archiveMarkFile != null) {
+            removeNeverSignaledArchiveMarkFile(archiveMarkFile);
+        }
         final long deadline = ReplicationRetry.deadlineNanos(TimeUnit.MILLISECONDS.toNanos(timeoutMillis));
         int attempts = 0;
         while (!ReplicationRetry.expired(deadline)) {
@@ -140,12 +154,13 @@ final class AeronRuntime implements AutoCloseable {
                         "Aeron driver launch is waiting for a stale driver to release its mark file (attempt=%d, timeoutMillis=%d)"
                                 .formatted(attempts, timeoutMillis), failure);
             } catch (final IllegalArgumentException failure) {
-                if (!archiveMarkFile.map(markFile -> repairsNeverSignaledArchiveMarkFile(markFile, failure))
-                        .orElse(false)) throw failure;
+                if (archiveMarkFile == null ||
+                    !repairsNeverSignaledArchiveMarkFile(archiveMarkFile, failure)) throw failure;
                 lastFailure = failure;
                 attempts++;
             } catch (final IllegalStateException failure) {
-                if (!namesOwnActiveArchiveMarkFile(archiveMarkFile, failure)) throw failure;
+                if (archiveMarkFile == null ||
+                    !namesOwnActiveArchiveMarkFile(archiveMarkFile, failure)) throw failure;
                 lastFailure = failure;
                 attempts++;
                 LOGGER.log(DEBUG,
@@ -242,11 +257,9 @@ final class AeronRuntime implements AutoCloseable {
     /// @param archiveMarkFile archive mark file this launch owns, empty without an Archive
     /// @param rejection       upstream rejection of that launch
     /// @return true when the launch may wait and retry
-    private static boolean namesOwnActiveArchiveMarkFile(final Optional<Path> archiveMarkFile,
+    private static boolean namesOwnActiveArchiveMarkFile(final Path archiveMarkFile,
                                                          final IllegalStateException rejection) {
-        return archiveMarkFile
-                .map(own -> matchesMarkFile(own, rejection))
-                .orElse(false);
+        return archiveMarkFile != null && matchesMarkFile(archiveMarkFile, rejection);
     }
 
     /// Reports whether an upstream failure message names the given mark file, resolved
@@ -382,17 +395,10 @@ final class AeronRuntime implements AutoCloseable {
                     .errorHandler(this.errorHandler)
                     .fileSyncLevel(this.settings.archivePolicy().fileSyncLevel())
                     .catalogFileSyncLevel(this.settings.archivePolicy().fileSyncLevel());
-            /* The MediaDriver context in this Aeron version exposes no authentication
-             * hooks, so the embedded Archive is the enforcement point: it authenticates
-             * control sessions while the driver stays a local IPC detail. */
-            if (this.settings.authentication().enabled()) {
-                archiveContext.authenticatorSupplier(this.settings.authenticatorSupplier());
-                archiveContext.authorisationServiceSupplier(this.settings.authorisationServiceSupplier());
-            }
-            this.driver = launchDriver(media, Optional.of(archiveMarkFile(this.settings)),
+            this.driver = launchDriver(media, archiveMarkFile(this.settings),
                     () -> ArchivingMediaDriver.launch(media.clone(), archiveContext.clone()));
         } else {
-            this.driver = launchDriver(media, Optional.empty(), () -> MediaDriver.launch(media.clone()));
+            this.driver = launchDriver(media, null, () -> MediaDriver.launch(media.clone()));
         }
         this.aeron = Aeron.connect(new Aeron.Context()
                 .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
@@ -418,9 +424,6 @@ final class AeronRuntime implements AutoCloseable {
                 .controlResponseChannel(this.settings.topology().channels().controlResponse())
                 .errorHandler(this.errorHandler)
                 .messageTimeoutNs(this.settings.timeouts().archiveControlTimeoutNanos());
-        if (this.settings.authentication().enabled()) {
-            context.credentialsSupplier(this.settings.credentialsSupplier());
-        }
         return context;
     }
 
@@ -477,9 +480,6 @@ final class AeronRuntime implements AutoCloseable {
             } catch (final Throwable closeFailure) {
                 failure = append(failure, closeFailure, "Aeron driver");
             }
-        }
-        if (failure == null) {
-            this.settings.clearAuthCredentials();
         }
         return failure;
     }

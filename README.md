@@ -214,22 +214,12 @@ restart with the same recording and checkpoint. Do not delete active recording
 segments or manually advance a reader cursor; if the Archive cannot be
 restored, initialize a new epoch and reseed every reader.
 
-Aeron Archive control and replay channels support control-session authentication when
-`ECLIPSE_DATAGRID_AERON_AUTH_ENABLED=true`. Configure the principal and
-credentials with `ECLIPSE_DATAGRID_AERON_AUTH_PRINCIPAL` and either
-`ECLIPSE_DATAGRID_AERON_AUTH_CREDENTIALS` or its file variant. Reader roles are
-limited to discovery, position queries, and replay; writer roles additionally
-receive recording and retention-maintenance actions. Production deployments
-must still isolate those endpoints with private interfaces, firewall rules,
-and Kubernetes NetworkPolicies/security groups. Cluster UUIDs and CRCs validate
-data identity and integrity only; they are not credentials. Do not enable
-ACK-driven deletion on an untrusted network.
-
-When Archive authentication is enabled on a writer, configure a separate
-reader identity with `ECLIPSE_DATAGRID_AERON_AUTH_READER_PRINCIPAL` and either
-`ECLIPSE_DATAGRID_AERON_AUTH_READER_CREDENTIALS` or its file variant. Use that
-reader identity on every reader node; sharing the writer identity would grant
-the writer's recording permissions.
+Aeron Archive control and replay channels expose no node authentication:
+cluster membership is proven by the VPN, and the wire nonce only rejects
+accidental cross-wiring. Production deployments still isolate those endpoints
+with private interfaces, firewall rules, and Kubernetes NetworkPolicies.
+Cluster UUIDs and CRCs validate data identity and integrity only; they are not
+credentials. Do not enable ACK-driven deletion on an untrusted network.
 
 ## Network boundary
 
@@ -237,19 +227,13 @@ Fencing tokens and CRC32C are correctness checks, not security: what each
 control does and does not prove is a design decision recorded in the module
 documentation. Operationally, none of them replaces the network boundary:
 
-- Aeron Archive authentication gates control-plane commands (recording,
-  retention, replay). It is defense in depth behind firewall rules and
-  NetworkPolicies, which remain the primary boundary and the only per-node
-  identity below full PKI.
+- The isolated VPN stays the primary boundary: firewall rules and
+  NetworkPolicies must scope every live, replay, storage-data, and watermark
+  endpoint to cluster members. That is the only per-node identity layer
+  below a full PKI.
 
 Run replication on a VPN-contained network: the isolated network is the only
-traffic boundary for replication frames and reader watermarks. Archive
-control authentication is a separate protection domain and always needs its
-own acknowledgement (`ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE`) when
-disabled. Running without it never disables fencing or CRC32C.
-
-Archive control credentials have no overlap mechanism: rotate those with a
-coordinated restart.
+traffic boundary for replication frames and reader watermarks.
 
 A writer requires a shared `ECLIPSE_DATAGRID_BACKUP_PATH` for its fencing
 lease; manual promotion and automated failover remain

@@ -250,8 +250,7 @@ public interface NodeSettingsSource {
         }
 
         private boolean hasProductionOnlySetting() {
-            return this.envString(EnvKeys.AERON_AUTH_ENABLED) != null
-                    || this.envString(EnvKeys.AERON_CHECKPOINT_PATH) != null
+            return this.envString(EnvKeys.AERON_CHECKPOINT_PATH) != null
                     || this.envString(EnvKeys.AERON_ARCHIVE_DIRECTORY) != null
                     || this.envString(EnvKeys.AERON_LEASE_PATH) != null;
         }
@@ -380,8 +379,6 @@ public interface NodeSettingsSource {
             public static final String DATA_MERGER_APPLY_TIMEOUT = "ECLIPSE_DATAGRID_DATA_MERGER_APPLY_TIMEOUT";
                         /// Writer lease staleness environment variable.
             public static final String WRITER_LEASE_STALENESS_MILLIS = "ECLIPSE_DATAGRID_AERON_LEASE_STALENESS_MILLIS";
-                        /// Live-channel authentication setting.
-            public static final String AERON_AUTH_ENABLED = "ECLIPSE_DATAGRID_AERON_AUTH_ENABLED";
                         /// Durable checkpoint path.
             public static final String AERON_CHECKPOINT_PATH = "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH";
                         /// Archive directory.

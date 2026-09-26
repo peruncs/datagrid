@@ -25,7 +25,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
     private final BooleanSupplier writer;
     private final BooleanSupplier initialized;
     private final Runnable ensureWriter;
-    private final Supplier<AeronWriterBoundary> writerBoundary;
+    private final Supplier<AeronWriterRecoveryBoundary> writerBoundary;
     private final Supplier<UUID> clusterId;
     private final Supplier<UUID> nodeId;
     private final Supplier<UUID> storeGeneration;
@@ -34,7 +34,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
 
     AeronPositionProvider(final BooleanSupplier writer, final BooleanSupplier initialized,
                           final Runnable ensureWriter,
-                          final Supplier<AeronWriterBoundary> writerBoundary, final Supplier<UUID> clusterId,
+                          final Supplier<AeronWriterRecoveryBoundary> writerBoundary, final Supplier<UUID> clusterId,
                           final Supplier<UUID> nodeId, final Supplier<UUID> storeGeneration, final LongSupplier epoch,
                           final LongSupplier fencingToken) {
         this.writer = Objects.requireNonNull(writer, "writer");
@@ -73,7 +73,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
             throw new ReplicationPositionUnavailableException(
                     "Aeron writer fencing lease is not held; no writer position can be established");
         }
-        final AeronWriterBoundary boundary = this.writerBoundary.get();
+        final AeronWriterRecoveryBoundary boundary = this.writerBoundary.get();
         final UUID generation = this.storeGeneration.get();
         final byte[] encoded = boundary.recordingId() < 0 || boundary.position() < 0
                 ? new byte[0]

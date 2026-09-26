@@ -120,9 +120,13 @@ public record AeronReaderWatermark(
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
         }
         final var reader = new FrameReader(encoded, 0);
+        final int magic = reader.readInt();
+        final short type = reader.readShort();
+        final short flags = reader.readShort();
+        final SerializedNodeIdentity identity = reader.readNodeIdentity();
         return decodeFrame(
-                reader.readInt(), reader.readShort(), reader.readShort(),
-                reader.readUuid(), reader.readUuid(), reader.readUuid(),
+                magic, type, flags,
+                identity.clusterId(), identity.nodeId(), identity.storeGeneration(),
                 reader.readLong(), reader.readLong(), reader.readLong(), reader.readLong(),
                 reader.readInt(), Crc32C.compute(encoded, 0, CRC_OFFSET));
     }

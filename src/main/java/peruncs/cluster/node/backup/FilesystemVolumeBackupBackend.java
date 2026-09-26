@@ -97,7 +97,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// @param backupVolumePath backup volume path
     /// @param limits           extraction and entry budgets
     /// @return filesystem backup backend
-    public static FilesystemVolumeBackupBackend create(
+    static FilesystemVolumeBackupBackend create(
             final Path backupVolumePath,
             final BackupArchiveLimits limits
     ) {
@@ -112,7 +112,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// @param limits extraction and entry budgets
     /// @param publicationLockTimeout maximum wait for a peer publisher
     /// @return filesystem backup backend
-    public static FilesystemVolumeBackupBackend create(
+    static FilesystemVolumeBackupBackend create(
             final Path backupVolumePath,
             final BackupArchiveLimits limits,
             final Duration publicationLockTimeout

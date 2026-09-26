@@ -41,7 +41,7 @@ class AeronArchiveRetentionTest {
     private static AeronArchiveRetention retention(final Runnable ensureWriter, final Path state,
                                                    final boolean watermarkDeliveryAvailable) {
         return new AeronArchiveRetention(Set.of(READER), ensureWriter, unavailableRecording(), () -> 17,
-                () -> new AeronWriterBoundary(4, 17, 8_192), ignored -> 0L,
+                () -> new AeronWriterRecoveryBoundary(4, 17, 8_192), ignored -> 0L,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
                 () -> watermarkDeliveryAvailable, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
@@ -54,7 +54,7 @@ class AeronArchiveRetentionTest {
     private static AeronArchiveRetention retention(final Set<UUID> readers, final Path state,
                                                    final Runnable ensureWriter) {
         return new AeronArchiveRetention(readers, ensureWriter, unavailableRecording(), () -> 17,
-                () -> new AeronWriterBoundary(4, 17, 8_192), ignored -> 0L,
+                () -> new AeronWriterRecoveryBoundary(4, 17, 8_192), ignored -> 0L,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
                 () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
@@ -77,7 +77,7 @@ class AeronArchiveRetentionTest {
         },
                 new AeronArchiveRetention.RecordingPositions(
                         ignored -> 0L, ignored -> 16L * 1_024 * 1_024, ignored -> -1L), () -> 17,
-                () -> new AeronWriterBoundary(4, 17, 16L * 1_024 * 1_024), purger,
+                () -> new AeronWriterRecoveryBoundary(4, 17, 16L * 1_024 * 1_024), purger,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, null, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
@@ -96,7 +96,7 @@ class AeronArchiveRetentionTest {
         },
                 new AeronArchiveRetention.RecordingPositions(
                         ignored -> 0L, ignored -> -1L, ignored -> recordedPosition), () -> 17,
-                () -> new AeronWriterBoundary(4, 17, 8_192), purger,
+                () -> new AeronWriterRecoveryBoundary(4, 17, 8_192), purger,
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, null,
                 AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
@@ -448,7 +448,7 @@ class AeronArchiveRetentionTest {
             Files.deleteIfExists(state);
             final AeronArchiveRetention first = new AeronArchiveRetention(Set.of(READER, secondReader),
                     () -> {
-                    }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
+                    }, unavailableRecording(), () -> 17, () -> new AeronWriterRecoveryBoundary(4, 17, 8_192),
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             first.retireReader(secondReader);
@@ -459,7 +459,7 @@ class AeronArchiveRetentionTest {
 
             final AeronArchiveRetention restarted = new AeronArchiveRetention(Set.of(READER, secondReader),
                     () -> {
-                    }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
+                    }, unavailableRecording(), () -> 17, () -> new AeronWriterRecoveryBoundary(4, 17, 8_192),
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             assertTrue(restarted.isSupported());
@@ -590,7 +590,7 @@ class AeronArchiveRetentionTest {
             }
             assertTrue(released, "ensureWriter was never released");
         },
-                unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
+                unavailableRecording(), () -> 17, () -> new AeronWriterRecoveryBoundary(4, 17, 8_192),
                 ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
                 () -> true, null, 60_000L)) {
             final AtomicReference<Throwable> background = new AtomicReference<>();
@@ -639,7 +639,7 @@ class AeronArchiveRetentionTest {
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }
-        }, unavailableRecording(), () -> 17, () -> new AeronWriterBoundary(4, 17, 8_192),
+        }, unavailableRecording(), () -> 17, () -> new AeronWriterRecoveryBoundary(4, 17, 8_192),
                 ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
                 () -> true, null, 50L)) {
             try {

@@ -5,12 +5,12 @@ import io.aeron.exceptions.AeronException;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.api.ReplicationState;
 import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.errors.WriterFencedException;
-import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.RejectingPersistenceTarget;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
@@ -64,7 +64,7 @@ final class AeronWriterTransport {
     private volatile AeronReplicationWriteCoordinator coordinator;
     /* Published together after the terminal checkpoint is durable.  Readers of
      * positionProvider() must never combine fields from two transactions. */
-    private volatile AeronWriterBoundary writerBoundary = new AeronWriterBoundary(-1, -1, -1);
+    private volatile AeronWriterRecoveryBoundary writerBoundary = new AeronWriterRecoveryBoundary(-1, -1, -1);
     private volatile boolean writerRecoveryInProgress;
     private volatile ReplicationState writerRecoveryState;
     /* The classified failure behind writerRecoveryState. A later ensureWriter
@@ -293,7 +293,7 @@ final class AeronWriterTransport {
     /// Returns the last published writer boundary snapshot.
     ///
     /// @return immutable writer boundary
-    AeronWriterBoundary writerBoundary() {
+    AeronWriterRecoveryBoundary writerBoundary() {
         return this.writerBoundary;
     }
 
@@ -375,10 +375,10 @@ final class AeronWriterTransport {
                     candidate = (settings().archivePolicy().externalArchive()
                             ? AeronArchiveReplicationPublisher.extendRemote(this.runtime().archive(), recordingId,
                             settings().topology().streamId(), settings().replication(), settings().topology().clusterId(),
-                            settings().topology().epoch(), initialSequence, settings().authentication().wireNonce())
+                            settings().topology().epoch(), initialSequence, settings().wireNonce())
                             : AeronArchiveReplicationPublisher.extend(this.runtime().archive(), recordingId,
                             settings().topology().streamId(), settings().replication(), settings().topology().clusterId(),
-                            settings().topology().epoch(), initialSequence, settings().authentication().wireNonce()));
+                            settings().topology().epoch(), initialSequence, settings().wireNonce()));
                 } catch (final RuntimeException failure) {
                     throw reseedRequired("cannot extend configured recording %s after restart; the Archive recording is not safely reusable".formatted(recordingId), failure);
                 }
@@ -389,14 +389,14 @@ final class AeronWriterTransport {
                 candidate = (settings().archivePolicy().externalArchive()
                         ? AeronArchiveReplicationPublisher.createRemote(this.runtime().archive(), settings().topology().channels().live(),
                         settings().topology().streamId(), settings().replication(), settings().topology().clusterId(),
-                        settings().topology().epoch(), initialSequence, settings().authentication().wireNonce())
+                        settings().topology().epoch(), initialSequence, settings().wireNonce())
                         : AeronArchiveReplicationPublisher.create(this.runtime().archive(), settings().topology().channels().live(),
                         settings().topology().streamId(), settings().replication(), settings().topology().clusterId(),
-                        settings().topology().epoch(), initialSequence, settings().authentication().wireNonce()));
+                        settings().topology().epoch(), initialSequence, settings().wireNonce()));
             }
             final long discoveredRecordingId = candidate.recordingId();
             final long recoveredRecordingId = discoveredRecordingId >= 0 ? discoveredRecordingId : recordingId;
-            AeronWriterBoundary recoveredBoundary = this.writerBoundary;
+            AeronWriterRecoveryBoundary recoveredBoundary = this.writerBoundary;
             if (checkpoint == null && recoveredRecordingId >= 0) {
                 long startPosition = -1L;
                 try {
@@ -410,7 +410,7 @@ final class AeronWriterTransport {
                      * first image is connected. Keep the boundary sequence explicit and
                      * leave the position unknown rather than inventing a byte offset. */
                 }
-                recoveredBoundary = new AeronWriterBoundary(initialSequence - 1,
+                recoveredBoundary = new AeronWriterRecoveryBoundary(initialSequence - 1,
                         recoveredRecordingId, startPosition);
             }
             CrashHook.invoke("AFTER_RECOVERY_PUBLISHER_CREATED", initialSequence);
@@ -615,7 +615,7 @@ final class AeronWriterTransport {
         final AeronReplicationCheckpoint checkpoint = this.readWriterCheckpoint();
         if (checkpoint != null) {
             if (checkpoint.recordingId() >= 0) this.writerRecordingId.set(checkpoint.recordingId());
-            this.writerBoundary = new AeronWriterBoundary(
+            this.writerBoundary = new AeronWriterRecoveryBoundary(
                     checkpoint.transactionSequence(), checkpoint.recordingId(), checkpoint.recordingPosition());
         }
         return checkpoint;
@@ -713,7 +713,7 @@ final class AeronWriterTransport {
         } catch (final RuntimeException failure) {
             throw reseedRequired("cannot inspect recording tail %s".formatted(recordingId), failure);
         }
-        new AeronWriterBoundary(checkpoint.transactionSequence(), recordingId,
+        new AeronWriterRecoveryBoundary(checkpoint.transactionSequence(), recordingId,
                 checkpoint.recordingPosition()).validateArchiveStop(stopPosition);
     }
 
@@ -753,7 +753,7 @@ final class AeronWriterTransport {
         /* The terminal checkpoint is the durable boundary. Publish it to
          * readers before best-effort cleanup of the diagnostic fence so a
          * cleanup failure cannot make a durable commit look unavailable. */
-        this.writerBoundary = new AeronWriterBoundary(sequence, this.writerRecordingId.get(), position);
+        this.writerBoundary = new AeronWriterRecoveryBoundary(sequence, this.writerRecordingId.get(), position);
         try {
             /* The terminal checkpoint above is durable and restart already
              * recognizes and removes a covered in-flight fence, so a stale

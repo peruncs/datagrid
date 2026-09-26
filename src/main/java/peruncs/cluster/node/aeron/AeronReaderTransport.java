@@ -160,7 +160,7 @@ final class AeronReaderTransport {
                     .replayStreamId(settings().topology().streamId() + 1)
                     .replicationConfiguration(settings().replication())
                     .clusterId(settings().topology().clusterId())
-                    .wireNonce(settings().authentication().wireNonce())
+                    .wireNonce(settings().wireNonce())
                     .epoch(settings().topology().epoch())
                     .initialSequence(aeronCursor ? cursor.logicalSequence() : -1)
                     .initialPosition(aeronCursor ? cursorPosition : -1)

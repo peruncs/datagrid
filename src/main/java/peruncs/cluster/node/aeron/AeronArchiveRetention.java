@@ -43,7 +43,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private final Runnable ensureWriter;
     private final RecordingPositions recordingPositions;
     private final LongSupplier recordingId;
-    private final Supplier<AeronWriterBoundary> writerBoundary;
+    private final Supplier<AeronWriterRecoveryBoundary> writerBoundary;
     private final LongUnaryOperator segmentPurger;
     private final UUID clusterId;
     private final UUID storeGeneration;
@@ -84,7 +84,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             final Runnable ensureWriter,
             final RecordingPositions recordingPositions,
             final LongSupplier recordingId,
-            final Supplier<AeronWriterBoundary> writerBoundary,
+            final Supplier<AeronWriterRecoveryBoundary> writerBoundary,
             final LongUnaryOperator segmentPurger,
             final UUID clusterId,
             final UUID storeGeneration,
@@ -237,7 +237,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                         "Aeron reader quorum has not acknowledged the requested boundary; missing=%s".formatted(this.quorum.missingReaders()));
             }
             final AeronReaderWatermark quorumWatermark = this.quorum.aggregate();
-            final AeronWriterBoundary requested = this.requestedBoundary(cursor);
+            final AeronWriterRecoveryBoundary requested = this.requestedBoundary(cursor);
             if (quorumWatermark.sequence() < requested.sequence() ||
                 quorumWatermark.sequence() == requested.sequence() &&
                 quorumWatermark.position() < requested.position())
@@ -496,7 +496,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// the recorded position, is genuinely impossible for a reader to know and
     /// fails closed.
     private void requireWithinDurableBoundary(final long sequence, final long position) {
-        final AeronWriterBoundary terminal = this.writerBoundary.get();
+        final AeronWriterRecoveryBoundary terminal = this.writerBoundary.get();
         if (terminal == null || terminal.sequence() < 0 || terminal.position() < 0 ||
             sequence < terminal.sequence() ||
             sequence == terminal.sequence() && position <= terminal.position()) {
@@ -518,7 +518,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         return stop >= 0 ? stop : this.recordingPositions.recordingPosition().applyAsLong(recordingId);
     }
 
-    private AeronWriterBoundary requestedBoundary(final ReplicationCursor cursor) {
+    private AeronWriterRecoveryBoundary requestedBoundary(final ReplicationCursor cursor) {
         if (!this.storeGeneration.equals(cursor.storeGeneration())) {
             throw new IllegalArgumentException("retention cursor belongs to another Store generation");
         }
@@ -530,7 +530,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 requested.recordingPosition() < 0) {
                 throw new IllegalArgumentException("retention cursor identity does not match the active writer");
             }
-            return new AeronWriterBoundary(
+            return new AeronWriterRecoveryBoundary(
                     requested.sequence(), requested.recordingId(), requested.recordingPosition());
         } catch (final RuntimeException failure) {
             throw new IllegalArgumentException("retention cursor must carry a valid Aeron replication cursor", failure);

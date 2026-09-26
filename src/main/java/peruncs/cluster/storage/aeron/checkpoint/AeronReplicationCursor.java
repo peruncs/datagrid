@@ -79,9 +79,10 @@ public record AeronReplicationCursor(
         if (headerFlags(encoded) != 0)
             throw new IllegalArgumentException("unsupported Aeron cursor flags");
         final var reader = new FrameReader(encoded, AeronCheckpointCodec.HEADER_LENGTH);
-        final UUID clusterId = reader.readUuid();
-        final UUID nodeId = reader.readUuid();
-        final UUID storeGeneration = reader.readUuid();
+        final SerializedNodeIdentity identity = reader.readNodeIdentity();
+        final UUID clusterId = identity.clusterId();
+        final UUID nodeId = identity.nodeId();
+        final UUID storeGeneration = identity.storeGeneration();
         final long epoch = reader.readLong();
         final long fencingToken = reader.readLong();
         final long recordingId = reader.readLong();

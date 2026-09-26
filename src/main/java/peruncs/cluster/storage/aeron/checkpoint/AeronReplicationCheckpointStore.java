@@ -170,9 +170,10 @@ public final class AeronReplicationCheckpointStore {
                         "unknown replication durability mode: %s".formatted(durabilityCode));
             }
             final var state = AeronReplicationCheckpoint.State.from(Byte.toUnsignedInt(reader.readByte()));
-            final UUID clusterId = reader.readUuid();
-            final UUID nodeId = reader.readUuid();
-            final UUID storeGeneration = reader.readUuid();
+            final SerializedNodeIdentity identity = reader.readNodeIdentity();
+            final UUID clusterId = identity.clusterId();
+            final UUID nodeId = identity.nodeId();
+            final UUID storeGeneration = identity.storeGeneration();
             final long recordingId = reader.readLong();
             final long writerEpoch = reader.readLong();
             final long fencingToken = reader.readLong();

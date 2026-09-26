@@ -138,8 +138,6 @@ final class AeronCheckpointCodec {
             this.source = source;
             this.offset = offset;
         }
-
-        /// Reads one byte and advances past it.
         ///
         /// @return byte value
         byte readByte() {
@@ -184,11 +182,24 @@ final class AeronCheckpointCodec {
             return value;
         }
 
+        /// Reads one `(clusterId, nodeId, storeGeneration)` record as three
+        /// consecutive big-endian UUIDs and advances past all three.
+        ///
+        /// @return decoded identity triple
+        SerializedNodeIdentity readNodeIdentity() {
+            return new SerializedNodeIdentity(readUuid(), readUuid(), readUuid());
+        }
+
         /// Returns the offset of the next unread byte.
         ///
         /// @return current offset
         int offset() {
             return offset;
         }
+    }
+
+    /// The `(clusterId, nodeId, storeGeneration)` triplet read by every
+    /// checkpoint/cursor decode path.
+    record SerializedNodeIdentity(UUID clusterId, UUID nodeId, UUID storeGeneration) {
     }
 }

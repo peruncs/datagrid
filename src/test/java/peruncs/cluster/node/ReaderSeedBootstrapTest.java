@@ -1,11 +1,11 @@
 package peruncs.cluster.node;
-import peruncs.cluster.api.NodeSettingsSource;
 
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.ReaderWriteRejectedException;
 import peruncs.cluster.errors.ReseedRequiredException;
 
@@ -281,7 +281,6 @@ class ReaderSeedBootstrapTest {
                 case "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY" -> this.aeronHome.resolve("archive").toString();
                 case "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH" ->
                         this.aeronHome.resolve("writer.checkpoint").toString();
-                case "ECLIPSE_DATAGRID_AERON_AUTH_ALLOW_INSECURE" -> "true";
                 /* Documentation addresses: the seed gate under test throws
                  * before any Aeron channel is opened, so these are never
                  * connected. Production mode only requires them to be
