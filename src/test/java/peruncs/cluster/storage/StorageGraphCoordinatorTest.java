@@ -280,4 +280,67 @@ class StorageGraphCoordinatorTest {
         }
         assertNull(torn.get());
     }
+
+        /// drain() closes admission permanently: reads and writes admitted
+    /// after the drain — or threads that passed the outer check only to be
+    /// preempted — all fail closed instead of touching a closing Store.
+    @Test
+    void drainClosesAdmissionForReadersAndWriters() {
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        coordinator.write(() -> {
+        });
+        assertDoesNotThrow(coordinator::drain);
+        assertTrue(coordinator.admissionClosed());
+        assertThrows(IllegalStateException.class, () -> coordinator.write(() -> {
+        }), "a write admitted after drain must fail closed");
+        assertThrows(IllegalStateException.class, () -> coordinator.read(() -> {
+        }), "a read admitted after drain must fail closed");
+        assertThrows(IllegalStateException.class, () -> coordinator.read(() -> 1),
+                "a value read admitted after drain must fail closed");
+        assertThrows(IllegalStateException.class, () -> coordinator.writeExclusive(() -> {
+        }), "an exclusive write admitted after drain must fail closed");
+        /* Drain is idempotent: the close sequencer re-runs it on retry. */
+        assertDoesNotThrow(coordinator::drain);
+    }
+
+        /// A section already holding the lock completes normally; a thread
+    /// that passed admission but waits on the section fails when the latch
+    /// is checked inside the lock.
+    @Test
+    void drainLetsInFlightSectionsFinishButRejectsPreemptedAdmissions() throws Exception {
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        final java.util.concurrent.CountDownLatch sectionInside = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.CountDownLatch releaseSection = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicReference<Throwable> lateReadFailure =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final Thread holder = Thread.ofVirtual().start(() -> coordinator.write(() -> {
+            sectionInside.countDown();
+            try {
+                releaseSection.await(TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        try {
+            assertTrue(sectionInside.await(TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
+            final Thread lateReader = Thread.ofVirtual().start(() -> {
+                try {
+                    coordinator.read(() -> {
+                    });
+                } catch (final Throwable failure) {
+                    lateReadFailure.set(failure);
+                }
+            });
+            Thread.sleep(100L);
+            coordinator.drain();
+            releaseSection.countDown();
+            lateReader.join(TIMEOUT.toMillis());
+            assertNotNull(lateReadFailure.get(), "a preempted admission must observe the closed latch");
+            assertTrue(lateReadFailure.get() instanceof IllegalStateException,
+                    "preempted admission reports closed admission: " + lateReadFailure.get());
+        } finally {
+            releaseSection.countDown();
+            holder.join(TIMEOUT.toMillis());
+        }
+    }
 }

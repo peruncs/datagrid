@@ -111,10 +111,11 @@ final class AeronRuntime implements AutoCloseable {
     /// Any other failure propagates immediately: a wrong major version, a foreign
     /// path, or an unreadable file all fail closed.
     ///
-    /// @param context         media driver context whose driver timeout bounds the retry
-    /// @param archiveMarkFile archive mark file this launch owns; `null` when the node
-    ///                        runs without an embedded Archive
-    /// @param launcher        starts the driver, or the driver and Archive together
+    /// Launches without an archive mark file.
+    ///
+    /// @param context  media driver context whose driver timeout bounds the retry
+    /// @param launcher starts the driver
+    /// @param <T>      the launcher return type
     /// @return the launched resource, owned by the caller for shutdown
     static <T extends AutoCloseable> T launchDriver(final MediaDriver.Context context,
                                                     final Supplier<T> launcher) {

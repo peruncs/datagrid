@@ -26,6 +26,13 @@ class ClusterStorageManagerShutdownTest {
                         storeShutdowns.incrementAndGet();
                         return true;
                     }
+                    if (method.getName().equals("database")) {
+                        return Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[]{org.eclipse.store.storage.types.Database.class},
+                                (dbProxy, dbMethod, dbArgs) -> {
+                                    throw new UnsupportedOperationException(dbMethod.getName());
+                                });
+                    }
                     throw new UnsupportedOperationException(method.getName());
                 });
         /* Stand-in for the owning lifecycle's close: fails once, then
@@ -67,6 +74,13 @@ class ClusterStorageManagerShutdownTest {
                 (proxy, method, args) -> {
                     if (method.getName().equals("shutdown")) return true;
                     if (method.getName().equals("isRunning")) return true;
+                    if (method.getName().equals("database")) {
+                        return Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[]{org.eclipse.store.storage.types.Database.class},
+                                (dbProxy, dbMethod, dbArgs) -> {
+                                    throw new UnsupportedOperationException(dbMethod.getName());
+                                });
+                    }
                     throw new UnsupportedOperationException(method.getName());
                 });
         final java.util.concurrent.CountDownLatch inClose = new java.util.concurrent.CountDownLatch(1);
@@ -140,6 +154,13 @@ class ClusterStorageManagerShutdownTest {
                 getClass().getClassLoader(), new Class<?>[]{StorageManager.class},
                 (proxy, method, args) -> {
                     if (method.getName().equals("shutdown")) return true;
+                    if (method.getName().equals("database")) {
+                        return Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[]{org.eclipse.store.storage.types.Database.class},
+                                (dbProxy, dbMethod, dbArgs) -> {
+                                    throw new UnsupportedOperationException(dbMethod.getName());
+                                });
+                    }
                     throw new UnsupportedOperationException(method.getName());
                 });
         final AtomicInteger closeCalls = new AtomicInteger();

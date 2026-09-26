@@ -167,7 +167,8 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
             }
             if (failure instanceof Error error) throw error;
-            throw (RuntimeException) failure;
+            if (failure instanceof RuntimeException runtime) throw runtime;
+            throw new NodeException("Failed to start node", failure);
         }
     }
 

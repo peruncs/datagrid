@@ -103,7 +103,7 @@ class BackupRestorePolicyTest {
             final ClusterReplicationTransport transport,
             final ReplicationPositionProvider positionProvider,
             final DurableCursorFile cursorManager,
-            final boolean mayCreateRoot) {
+            final boolean ownAuthoritativeStore) {
         return new BackupRestorePolicy(
                 transport,
                 positionProvider,
@@ -115,7 +115,7 @@ class BackupRestorePolicyTest {
                 },
                 () -> {
                 },
-                mayCreateRoot);
+                ownAuthoritativeStore);
     }
 
     private static ClusterReplicationTransport transport(

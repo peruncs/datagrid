@@ -154,10 +154,8 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
         boolean handedOff = false;
         try {
             CrashHook.invoke("AFTER_PREPARE_BEFORE_LOCAL_WRITE", prepared.sequence());
-            boolean localAccepted = false;
             try {
                 this.delegate.write(data);
-                localAccepted = true;
                 CrashHook.invoke("AFTER_LOCAL_WRITE_BEFORE_COMMIT", prepared.sequence());
             } catch (final Error failure) {
                 /* The local Store may already have accepted the bytes.  Abandon the

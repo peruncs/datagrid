@@ -659,8 +659,13 @@ private StorageBinaryDataMerger(final Configuration configuration) {
             Thread.currentThread().interrupt();
             throw this.recordLifecycleFailure("Interrupted while waiting for storage graph updates", e);
         } finally {
-            this.watchdog.shutdownNow();
-            if (this.executor.isTerminated()) this.queue.releaseAll();
+            /* Terminate the watchdog only when the worker is actually gone:
+             * on a failed (retryable) dispose the still-live worker's
+             * later batches must keep their watchdog protection. */
+            if (this.executor.isTerminated()) {
+                this.watchdog.shutdownNow();
+                this.queue.releaseAll();
+            }
         }
     }
 

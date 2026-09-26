@@ -574,6 +574,46 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
+        /// An interrupt landing on the unlock/relock hand-off must restore
+    /// write-lock ownership before surfacing the failure: the caller's finally
+    /// unlocks unconditionally, so throwing without the hold would mask the
+    /// original fault behind an IllegalMonitorStateException.
+    @Test
+    void interruptDuringCheckpointRelockFailsClosedWithRestoredOwnership() {
+        final List<AeronReplicationCheckpoint.State> states = new ArrayList<>();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length,
+                configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, (state, sequence, length, chunks, crc, position) -> {
+            states.add(state);
+            /* Interrupt the writer while the admission hold is released: the
+             * relock path must still regain the lock, fail the publisher
+             * closed, and surface a single primary failure. */
+            Thread.currentThread().interrupt();
+        });
+        try {
+            final ReplicationUnavailableException failure = assertThrows(
+                    ReplicationUnavailableException.class,
+                    () -> coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
+            assertTrue(failure.getMessage().contains("re-acquiring"),
+                    "the interrupt is reported as a relock failure, was: %s".formatted(failure.getMessage()));
+            assertTrue(Thread.currentThread().isInterrupted(),
+                    "the caller's interrupt flag must survive the uninterruptible restore");
+            assertTrue(publisher.isFailed(),
+                    "a relock that cannot reach its writer must fail the publisher closed");
+            assertTrue(states.contains(AeronReplicationCheckpoint.State.PREPARING),
+                    "the interrupted notify still recorded its state before failing");
+            assertDoesNotThrow(coordinator::dispose,
+                    "no unbalanced unlock from the interrupted prepare poisons disposal");
+        } finally {
+            Thread.interrupted();
+            coordinator.dispose();
+        }
+    }
+
         /// Verifies persistence target consumes dictionary from shared distributor.
     @Test
     void persistenceTargetConsumesDictionaryFromSharedDistributor() {

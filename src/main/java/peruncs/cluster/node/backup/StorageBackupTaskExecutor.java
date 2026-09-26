@@ -136,9 +136,13 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                 return BackupStartResult.BUSY;
             }
             LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage backup");
-            this.backupRunning = true;
             this.backupTask = this.backupExecutor.submit(() ->
             {
+                /* Mark the running status out of the body: cancel(false) on a
+                 * queued task never runs it, so this flag is the only signal
+                 * the close stage can trust — it sets on task start, so a
+                 * cancelled-queued task keeps the Store-close stage free. */
+                this.backupRunning = true;
                 try {
                     this.backupManager.createStorageBackup(useManualSlot);
                     this.backupFailure.set(null);

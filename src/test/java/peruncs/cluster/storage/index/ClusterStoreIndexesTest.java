@@ -74,7 +74,12 @@ class ClusterStoreIndexesTest {
          * smuggles an external index past the registration path. */
         holder.articles.index().register(VectorIndices.Category())
                 .add("article-vectors", external, new ArticleVectorizer());
-        root.articles = holder.articles;
+        /* The GigaMap must be reachable ONLY through the polymorphic holder:
+         * keeping it on the root too would let the test pass even when the
+         * relevance classifier pruned the declared Base type and skipped the
+         * subtype field entirely. With the fix, descending into the runtime
+         * SubHolder type finds it; under the pre-fix prune the test passes
+         * silently. */
         root.holder = holder;
         assertThrows(IllegalArgumentException.class,
                 () -> ClusterIndexValidation.validateGraph(root,

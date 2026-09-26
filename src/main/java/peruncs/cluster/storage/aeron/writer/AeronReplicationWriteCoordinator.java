@@ -732,22 +732,24 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                 Thread.currentThread().interrupt();
             }
             if (!relocked) {
-                /* Returning without the single hold would let every caller's
-                 * finally unlock a stack it does not own (or run cleanup
-                 * unguarded). Fail the publisher closed and regain ownership
-                 * — newer admissions already refuse the failed writer, so the
-                 * in-flight holder finishes and releases; lock() then
-                 * preserves the caller's contract and the original failure. */
+                /* The caller's finally unlocks only while a hold exists, and
+                 * the failure-blocking path must never surrender the lock.
+                 * Fail the writer closed (new admissions already refuse) —
+                 * the pending holders finish their bounded admission waits —
+                 * then restore ownership uninterruptibly so the catch and
+                 * finally never see an unbalanced stack: interrupts accumulated
+                 * during the wait are re-asserted; primary failure wins. */
                 this.publisher.failClosed();
-                try {
-                    this.writeLock.lockInterruptibly();
-                } catch (final InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    final ReplicationUnavailableException unavailable = new ReplicationUnavailableException(
-                            "timed out or interrupted re-acquiring Aeron write admission after a checkpoint write");
-                    if (failure != null) unavailable.addSuppressed(failure);
-                    throw unavailable;
+                boolean interrupted = false;
+                while (!relocked) {
+                    try {
+                        this.writeLock.lockInterruptibly();
+                        relocked = true;
+                    } catch (final InterruptedException exit) {
+                        interrupted = true;
+                    }
                 }
+                if (interrupted) Thread.currentThread().interrupt();
                 final ReplicationUnavailableException unavailable = new ReplicationUnavailableException(
                         "timed out or interrupted re-acquiring Aeron write admission after a checkpoint write");
                 if (failure != null) unavailable.addSuppressed(failure);

@@ -63,7 +63,16 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
          * everyone. */
         this.persistenceManager = LazyConstant.of(
                 () -> new BinaryPersistenceManagerAdapter(delegate.persistenceManager()));
+        /* One adapter per manager lifetime: the raw Database lookup and the
+         * guarded view are identity-stable, so no wrapper or delegate lookup
+         * is needed per database() call. */
+        this.delegateDatabase = delegate.database();
+        this.guardedDatabase = this.new GuardedDatabase();
     }
+
+    /* Cached once: identical to re-resolving on every accessor. */
+    private final Database delegateDatabase;
+    private final Database guardedDatabase;
 
     /* The write gates cover every write entry point (store, storeAll,
      * storeRoot, setRoot, and Storer.commit): a latched graph invalidity
@@ -141,7 +150,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
          * Surface a Database whose operations all route through this facade. */
         this.ensureOpen();
         this.ensureGraphValid();
-        return new GuardedDatabase();
+        return this.guardedDatabase;
     }
 
     /// A [Database] view over the guarded manager: every operation routes
@@ -150,12 +159,12 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     private final class GuardedDatabase implements Database {
         @Override
         public String databaseName() {
-            return GuardingStorageManager.this.delegate.database().databaseName();
+            return GuardingStorageManager.this.delegateDatabase.databaseName();
         }
 
         @Override
         public String toIdentifyingString() {
-            return GuardingStorageManager.this.delegate.database().toIdentifyingString();
+            return GuardingStorageManager.this.delegateDatabase.toIdentifyingString();
         }
 
         @Override
@@ -189,9 +198,13 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
 
         @Override
         public Object getObject(final long objectId) {
+            /* Object retrieval reads the managed graph: it joins the same
+             * coordinated read section as every other read, so a failed or
+             * draining Store never serves identifiers. */
             GuardingStorageManager.this.ensureOpen();
             GuardingStorageManager.this.ensureGraphValid();
-            return GuardingStorageManager.this.delegate.database().getObject(objectId);
+            return GuardingStorageManager.this.graphCoordinator.read(
+                    () -> GuardingStorageManager.this.delegateDatabase.getObject(objectId));
         }
 
         @Override
@@ -352,7 +365,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
          * storeRoot): it runs the exclusive section for ordering but does not
          * latch the graph on an ordinary delegate failure — a failed swap is
          * not an uncertain durable write. */
-        return this.graphCoordinator.writeExclusive(() -> this.delegate.setRoot(newRoot));
+        return this.persist(() -> this.delegate.setRoot(newRoot));
     }
 
     @Override

@@ -138,6 +138,7 @@ final class AeronCheckpointCodec {
             this.source = source;
             this.offset = offset;
         }
+        /// Reads one big-endian byte and advances past it.
         ///
         /// @return byte value
         byte readByte() {

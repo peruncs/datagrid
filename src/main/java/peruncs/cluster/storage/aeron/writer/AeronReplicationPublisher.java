@@ -968,7 +968,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
             action.accept(position);
         }
 
-                /// Detaches this token without emitting an abort marker. This is used only
+        /// Detaches this token without emitting an abort marker. This is used only
         /// after the local Store accepted data but a later step failed: an abort would
         /// contradict the accepted Store state, so the publisher is failed closed and
         /// the durable uncertainty fence is left for restart recovery.

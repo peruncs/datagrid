@@ -2,13 +2,17 @@ package peruncs.cluster.node.aeron;
 
 import peruncs.cluster.errors.ReseedRequiredException;
 
-/// Immutable writer terminal boundary published after its checkpoint is durable.
+/// Immutable recovery boundary the writer publishes once its checkpoint is durable.
+///
+/// The writer's restart evidence compares the Archive stop position against
+/// this boundary: anything recorded past it is an uncheckpointed tail that
+/// restart recovery must reject instead of replaying silently.
 ///
 /// @param sequence    durable replication sequence
 /// @param recordingId Archive recording containing the boundary
 /// @param position    exact durable Archive position
 record AeronWriterRecoveryBoundary(long sequence, long recordingId, long position) {
-        /// Fails closed unless a stopped Archive ends exactly at this durable boundary.
+    /// Fails closed unless a stopped Archive ends exactly at this durable boundary.
     void validateArchiveStop(final long stopPosition) {
         if (stopPosition < 0)
             throw new ReseedRequiredException("recording is still active");

@@ -5,6 +5,7 @@ import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
@@ -84,6 +85,10 @@ public final class StorageGraphCoordinator {
      * release, every coordinated access must fail closed instead of serving a
      * potentially half-applied graph. */
     private final AtomicReference<GraphInvalidatedException> invalidity = new AtomicReference<>();
+    /* Set when the node begins tearing down. Every read* and write* entry
+     * must fail closed afterwards: the close sequencer drains first, so no
+     * admitted section can execute on a dead Store. */
+    private final AtomicBoolean admissionClosed = new AtomicBoolean();
 
     /// Creates a fair coordinator for one Store object graph.
     public StorageGraphCoordinator() {
@@ -101,6 +106,7 @@ public final class StorageGraphCoordinator {
         notNull(action);
         this.lock.readLock().lock();
         try {
+            this.ensureAdmission();
             this.ensureValid();
             action.run();
         } finally {
@@ -118,6 +124,7 @@ public final class StorageGraphCoordinator {
         notNull(action);
         this.lock.readLock().lock();
         try {
+            this.ensureAdmission();
             this.ensureValid();
             return action.get();
         } finally {
@@ -139,6 +146,7 @@ public final class StorageGraphCoordinator {
         this.rejectReadToWriteUpgrade();
         this.lock.writeLock().lock();
         try {
+            this.ensureAdmission();
             this.ensureValid();
             update.run();
         } catch (final RuntimeException | Error failure) {
@@ -164,6 +172,7 @@ public final class StorageGraphCoordinator {
         this.rejectReadToWriteUpgrade();
         this.lock.writeLock().lock();
         try {
+            this.ensureAdmission();
             this.ensureValid();
             return update.get();
         } catch (final RuntimeException | Error failure) {
@@ -208,6 +217,7 @@ public final class StorageGraphCoordinator {
         this.rejectReadToWriteUpgrade();
         this.lock.writeLock().lock();
         try {
+            this.ensureAdmission();
             this.ensureValid();
             return update.get();
         } finally {
@@ -227,6 +237,7 @@ public final class StorageGraphCoordinator {
         this.rejectReadToWriteUpgrade();
         this.lock.writeLock().lock();
         try {
+            this.ensureAdmission();
             this.ensureValid();
             update.run();
         } finally {
@@ -265,8 +276,20 @@ public final class StorageGraphCoordinator {
     /// rejected by the closed check in their own entry points; writers must
     /// not hold this lock themselves while draining.
     public void drain() {
+        /* Admission closes BEFORE the lock is taken: a thread that passed the
+         * outer check can then only see the latch inside an acquired section.
+         * Sets from within a graph section are impossible because every write
+         * caller re-checks the latch after acquiring the lock and fails. */
+        this.admissionClosed.set(true);
         this.lock.writeLock().lock();
         this.lock.writeLock().unlock();
+    }
+
+    /// Reports whether admission has been closed by a drain.
+    ///
+    /// @return `true` after [#drain()] rejected new sections
+    public boolean admissionClosed() {
+        return this.admissionClosed.get();
     }
 
     /* ReentrantReadWriteLock never upgrades a read hold to a write hold, so
@@ -277,6 +300,12 @@ public final class StorageGraphCoordinator {
         if (!this.lock.isWriteLockedByCurrentThread() && this.lock.getReadHoldCount() > 0) {
             throw new IllegalStateException(
                     "read-to-write lock upgrade is not supported; start a write section before holding a read");
+        }
+    }
+
+    private void ensureAdmission() {
+        if (this.admissionClosed.get()) {
+            throw new IllegalStateException("graph coordinator admission is closed; the node is closing");
         }
     }
 

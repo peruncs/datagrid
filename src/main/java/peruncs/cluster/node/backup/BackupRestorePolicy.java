@@ -37,7 +37,7 @@ public final class BackupRestorePolicy {
     /* The writer's authoritative restart evidence is its durable checkpoint,
      * never the reader cursor: a backup-covered restore must not delete a
      * newer local Store while local files exist. */
-    private final boolean mayCreateRoot;
+    private final boolean ownAuthoritativeStore;
 
     public BackupRestorePolicy(
             final ClusterReplicationTransport transport,
@@ -47,7 +47,7 @@ public final class BackupRestorePolicy {
             final Consumer<Path> deleteDirectory,
             final Runnable closeCursorManager,
             final Runnable deleteOffsetFile,
-            final boolean mayCreateRoot
+            final boolean ownAuthoritativeStore
     ) {
         this.transport = Objects.requireNonNull(transport, "transport");
         this.positionProvider = Objects.requireNonNull(positionProvider, "positionProvider");
@@ -56,7 +56,7 @@ public final class BackupRestorePolicy {
         this.deleteDirectory = Objects.requireNonNull(deleteDirectory, "deleteDirectory");
         this.closeCursorManager = Objects.requireNonNull(closeCursorManager, "closeCursorManager");
         this.deleteOffsetFile = Objects.requireNonNull(deleteOffsetFile, "deleteOffsetFile");
-        this.mayCreateRoot = mayCreateRoot;
+        this.ownAuthoritativeStore = ownAuthoritativeStore;
     }
 
         /// Resolves the backup identity this node restores as.
@@ -158,7 +158,7 @@ public final class BackupRestorePolicy {
          * not replay into a reverted image. Keep local files and fail closed
          * through the checkpoint path instead of wiping newer acknowledged
          * writes. */
-        if (this.mayCreateRoot) {
+        if (this.ownAuthoritativeStore) {
             LOGGER.log(System.Logger.Level.INFO,
                     "Existing local storage found for the writer; keeping it — backups are a reader seed");
             return false;

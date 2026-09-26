@@ -169,6 +169,52 @@ class NodeAssemblyLifecycleTest {
         assertFalse(manager.isRunning(), "the raw Store must be down");
     }
 
+    /// Verifies the close sequencer retries the Store stage when the raw
+    /// delegate reports an incomplete shutdown (returns false): the first
+    /// close attempt fails for the caller, the retried close completes, and
+    /// the node ends up down.
+    @Test
+    void storeShutdownFalseThenTrueIsRetried(@TempDir final Path storagePath) {
+        /* Drive the lifecycle directly (not through the NodeAssembly
+         * interface) so the test can substitute the raw Store delegate: the
+         * NodeCollaborators slots are the fields the close stage consults. */
+        final NodeCollaborators collaborators = new NodeCollaborators(
+                Object::new,
+                EmbeddedStorageFoundation.New()
+                        .setConfiguration(StorageConfiguration.Builder()
+                                .setStorageFileProvider(Storage.FileProvider(storagePath))
+                                .createConfiguration()),
+                (NodeSettingsSource) null);
+        final NodeLifecycle lifecycle = new NodeLifecycle(collaborators);
+        lifecycle.startStorageManager();
+        final org.eclipse.store.storage.types.StorageManager delegate = collaborators.embeddedStorageManager;
+        final java.util.concurrent.atomic.AtomicInteger shutdownCalls = new java.util.concurrent.atomic.AtomicInteger();
+        final org.eclipse.store.storage.types.StorageManager flaky =
+                (org.eclipse.store.storage.types.StorageManager) java.lang.reflect.Proxy.newProxyInstance(
+                        NodeAssemblyLifecycleTest.class.getClassLoader(),
+                        new Class<?>[]{org.eclipse.store.storage.types.StorageManager.class},
+                        (proxy, method, args) ->
+                        {
+                            if (method.getName().equals("shutdown") && shutdownCalls.getAndIncrement() == 0) {
+                                return Boolean.FALSE;
+                            }
+                            try {
+                                return method.invoke(delegate, args);
+                            } catch (final java.lang.reflect.InvocationTargetException failure) {
+                                throw failure.getTargetException();
+                            }
+                        });
+        collaborators.embeddedStorageManager = flaky;
+
+        final RuntimeException first = assertThrows(RuntimeException.class, lifecycle::close,
+                "an incomplete Store shutdown must fail the close for retry");
+        assertTrue(String.valueOf(first.getMessage()).contains("did not complete shutdown"),
+                "the failure names the unfinished Store shutdown, not a successor stage");
+        assertDoesNotThrow(lifecycle::close, "the retried close re-runs only the unfinished Store stage");
+        assertFalse(delegate.isRunning(), "the raw Store must be down after the retried close");
+        assertEquals(2, shutdownCalls.get(), "the Store stage was executed exactly twice, not skipped");
+    }
+
     /// Verifies try-with-resources on the manager closes the owning node.
     @Test
     void tryWithResourcesOnManagerClosesNode(@TempDir final Path storagePath) {

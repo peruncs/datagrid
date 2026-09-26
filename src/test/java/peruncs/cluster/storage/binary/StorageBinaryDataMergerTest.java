@@ -265,6 +265,58 @@ class StorageBinaryDataMergerTest {
                 "a clean refusal must not carry a cleanup failure: " + java.util.Arrays.toString(failure.getSuppressed()));
     }
 
+        /// A dispose racing a live worker must fail retryably — never
+    /// releasing buffers under a still-live owner — and the retried dispose
+    /// must complete once the worker drains.
+    @Test
+    void disposeTimesOutWhileWorkerIsBusyAndRetries(@TempDir final Path root) throws Exception {
+        final EmbeddedStorageManager storage = startStorage(root);
+        try {
+            final PersistenceManager<Binary> persistenceManager = storage.createConnection().persistenceManager();
+            final CountDownLatch importEntered = new CountDownLatch(1);
+            final CountDownLatch releaseImport = new CountDownLatch(1);
+            final StorageConnection connection = (StorageConnection) Proxy.newProxyInstance(
+                    StorageConnection.class.getClassLoader(),
+                    new Class<?>[]{StorageConnection.class},
+                    (proxy, method, args) ->
+                    {
+                        switch (method.getName()) {
+                            case "persistenceManager":
+                                return persistenceManager;
+                            case "importData":
+                                importEntered.countDown();
+                                await(releaseImport);
+                                return null;
+                            default:
+                                return defaultValue(method.getReturnType());
+                        }
+                    });
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(
+                    new StorageBinaryDataMerger.Configuration(
+                            foundation(), connection,
+                            ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()),
+                            0L, 1L, StorageBinaryDataMerger.MAX_CACHED_BYTES, 60_000L, 200L, 200L,
+                            StorageBinaryDataMerger.MAX_VALIDATED_INDEX_OBJECTS, null));
+            /* The merger drives the deferred import on the delivery thread
+             * while the queue is empty enough to accept work eagerly, so the
+             * import must block a *separate* delivery thread for the dispose
+             * to observe a busy worker. */
+            final Thread delivery = Thread.ofVirtual().start(() -> merger.receiveDataOwned(binary(1)));
+            assertTrue(importEntered.await(10, TimeUnit.SECONDS), "the Store import never started");
+            final ReplicationUnavailableException failure = assertThrows(
+                    ReplicationUnavailableException.class, merger::dispose,
+                    "a busy worker must fail the first dispose, owning its buffers still");
+            assertTrue(failure.getMessage().contains("did not terminate"),
+                    "the dispose failure names the live worker: " + failure.getMessage());
+            releaseImport.countDown();
+            delivery.join(TimeUnit.SECONDS.toMillis(10));
+            assertDoesNotThrow(merger::dispose,
+                    "the retried dispose re-joins the drained worker and completes");
+        } finally {
+            storage.shutdown();
+        }
+    }
+
         /// The dictionary merge and the Store import must never overlap: both
         /// mutate the same persistence state under the materialization lock.
     @Test
