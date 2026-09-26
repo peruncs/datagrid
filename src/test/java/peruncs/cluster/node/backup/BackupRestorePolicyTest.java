@@ -10,7 +10,6 @@ import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.storage.ReplicationCursor;
 
 import java.lang.reflect.Proxy;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;

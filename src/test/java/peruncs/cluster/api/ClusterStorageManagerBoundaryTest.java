@@ -1,9 +1,9 @@
 package peruncs.cluster.api;
 
+import org.eclipse.serializer.persistence.types.Storer;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
-import org.eclipse.serializer.persistence.types.Storer;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.eclipse.store.storage.types.StorageManager;

@@ -1,7 +1,7 @@
 package peruncs.cluster.node;
-import peruncs.cluster.api.NodeSettingsSource;
 
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.NodeException;
 
 import java.util.Map;

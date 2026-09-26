@@ -1,5 +1,4 @@
 package peruncs.cluster.node;
-import peruncs.cluster.api.NodeSettingsSource;
 
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
@@ -7,6 +6,7 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.WrongRoleException;
 
 import java.nio.file.Path;
@@ -14,11 +14,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the foundation's single close boundary.
 class NodeAssemblyLifecycleTest {

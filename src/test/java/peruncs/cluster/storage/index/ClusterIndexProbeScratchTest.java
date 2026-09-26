@@ -15,7 +15,7 @@ import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Verifies the maintenance scratch never retains a vector index — or the
 /// graph reachable through it — once a rebuild pass ends. Rebuild probes are

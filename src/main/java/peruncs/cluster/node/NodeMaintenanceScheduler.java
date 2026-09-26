@@ -9,7 +9,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static java.lang.System.Logger.Level.*;
-import static java.lang.System.Logger.Level.WARNING;
 import static org.eclipse.serializer.util.X.notNull;
 
 /// Triggers periodic maintenance on one platform thread and runs the work on virtual threads.

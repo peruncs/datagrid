@@ -7,9 +7,9 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.errors.ReaderWriteRejectedException;
 import peruncs.cluster.errors.StorageLimitReachedException;
-import peruncs.cluster.api.ClusterStorageManager;
 
 import java.nio.file.Path;
 

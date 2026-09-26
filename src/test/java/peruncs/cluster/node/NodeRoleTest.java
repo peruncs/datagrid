@@ -1,9 +1,9 @@
 package peruncs.cluster.node;
-import peruncs.cluster.api.NodeSettingsSource;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import peruncs.cluster.api.NodeSettingsSource;
 
 import java.util.Map;
 
