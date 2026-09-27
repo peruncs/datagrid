@@ -100,9 +100,9 @@ class StorageBackupTaskExecutorTest {
             }
         };
         try (final StorageBackupTaskExecutor executor =
-                     StorageBackupTaskExecutor.create(new TestStorageConnection(), failing)) {
+            StorageBackupTaskExecutor.create(new TestStorageConnection(), failing)) {
             assertEquals(StorageBackupTaskExecutor.BackupStartResult.STARTED, executor.runBackup(false));
-            await(() -> !executor.isRunningBackup());
+            await(() -> executor.backupFailure() != null);
             assertNotNull(executor.backupFailure());
         }
     }

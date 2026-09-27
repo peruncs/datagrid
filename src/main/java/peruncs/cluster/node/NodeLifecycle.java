@@ -206,7 +206,6 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             /* Restore stages and validates a private archive copy before it
              * replaces the existing Store image. */
             backend.restoreUserUploadedStorage(storageParentPath);
-            backend.deleteUserUploadedStorage();
         } else if (this.assembly.createBackupRestorePolicy().restoreLatestBackupIfRequired(storageRootPath, backend)) {
             LOGGER.log(INFO, "Restored the newest compatible storage backup");
         } else {
@@ -287,9 +286,12 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         // storage nodes need an initial backup to start from
         if (mustPublishStarterBackup) {
             LOGGER.log(INFO, "Uploading starter backup for storage nodes");
-            /* This is a bootstrap barrier.  The storage nodes must not observe the
-             * uploaded-storage state until the archive is durable. */
+            /* This is a bootstrap barrier. The storage nodes must not observe
+             * uploaded storage until its cursor and backup are durable. Keep
+             * the source upload until that boundary is safely published so a
+             * failed bootstrap can retry from the same image. */
             this.assembly.getStorageBackupManager().createStorageBackup(false);
+            backend.deleteUserUploadedStorage();
         }
 
         maintenance.start();

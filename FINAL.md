@@ -1,6 +1,6 @@
 # Consolidated review findings
 
-Reviewed the six `*review.md` files modified on 2026-09-26: `SPARK-REVIEW.md`, `final-review.md`, `KIMI-REVIEW.md`, `MIMO-REVIEW.md`, `ds-review.md`, and `glm-review.md`. Each candidate below was checked against the code before implementation; duplicate and already-fixed reports were consolidated. All surviving mitigations below have since been applied, and the focused regression suites pass. The review itself was static analysis; verification followed implementation.
+Reviewed the six `*review.md` files modified on 2026-09-26: `SPARK-REVIEW.md`, `final-review.md`, `KIMI-REVIEW.md`, `MIMO-REVIEW.md`, `ds-review.md`, and `glm-review.md`. Each candidate below was checked against the code before implementation; duplicate and already-fixed reports were consolidated. All surviving mitigations below have been applied. A follow-up code sweep added the hardening and regression checks below; the full unit, integration, crash-matrix, and soak profiles pass.
 
 ## P0 — Stop writer startup on a missing authoritative Store
 
@@ -82,9 +82,9 @@ Public index registration methods serialize their own check-and-act operations t
 
 ## P3 — Remove authentication documentation left behind after the feature was removed
 
-The current project contract says the node has no authentication feature and requires a trusted network. `AeronRuntime` still claims Archive authentication is configured (`src/main/java/peruncs/cluster/node/aeron/AeronRuntime.java:35-43,453-458`), while `AeronSettings` retains orphaned authentication/authorization supplier documentation with no declarations (`src/main/java/peruncs/cluster/node/aeron/AeronSettings.java:787-824`). This gives operators a false security expectation.
+The project has no node authentication and requires a trusted network. Removing the stale claims from `AeronRuntime` and `AeronSettings` exposed remaining claims that Archive control authentication exists in `README.md:137`, `module-info.java:33`, and `AeronReplicationEnvelope.java:23`. Those statements could lead operators to expose unauthenticated control or replay channels.
 
-**Mitigation:** Delete the orphaned method documentation and rewrite the runtime class description to state only the current trusted-network boundary.
+**Mitigation:** Remove the stale claims and state consistently across runtime, module, envelope, and operator documentation that none of the node's channels provides authentication; require network isolation.
 
 ## Claims not carried forward
 
@@ -93,3 +93,22 @@ The current project contract says the node has no authentication feature and req
 - Making graph write callbacks automatically invalidate on every exception contradicts `GraphBoundary`’s documented dirty-state contract (`src/main/java/peruncs/cluster/api/GraphBoundary.java:44-55`).
 - Authentication APIs, runtime role promotion, and replacing the fixed-role lease design conflict with the repository’s explicit cluster constraints.
 - Duplicated findings already fixed in the current checkout were not repeated as open issues.
+
+## Follow-up sweep
+
+- Backup extraction now uses overflow-safe remaining-budget accounting and rejects content whose actual length differs from its declared ZIP size. The under-sized-entry regression test passes.
+- Index registration stays excluded for the whole reader import/materialize/refresh batch, closing the gap between the previous before/after guards.
+- Uploaded storage remains available until the restored cursor and starter backup are durable, allowing bootstrap retry from the same source image.
+- Failed Store replacement before its directory-sync durability point restores the previous image; a fault-injection regression test covers failure after the new directory rename.
+- Public `ReplicationStatus` construction rejects negative present sequence and byte metrics, matching its documented unknown-value representation.
+- The README now describes VPN, firewall, and NetworkPolicy rules as network isolation; it no longer implies that they provide Data Grid node identity or that the transport encrypts traffic.
+- The compatible-backup restore test now publishes a populated Store image and checks the restored root, rather than relying on an empty archive fixture. An async backup failure test now waits for the failure signal instead of racing the worker's initial idle state.
+
+## Verification
+
+All commands ran on the configured JDK with local Aeron sockets enabled:
+
+- `mvn -o verify` — 740 unit tests (1 skipped), 12 default integration tests; passed.
+- `mvn -o -Pintegration verify` — 740 unit tests (1 skipped), 10 integration tests; passed.
+- `mvn -o -Pcrashmatrix verify` — 740 unit tests (1 skipped), 69 integration tests, including 35 provider crash scenarios; passed.
+- `mvn -o -Psoak verify` — 740 unit tests (1 skipped), soak passed with 395 transactions, 31,556 queries, zero torn reads, and successful reader convergence.

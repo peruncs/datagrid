@@ -38,6 +38,12 @@ public record ReplicationStatus(
         Objects.requireNonNull(archiveUsableBytes, "archiveUsableBytes");
         Objects.requireNonNull(writerDurableBoundary, "writerDurableBoundary");
         Objects.requireNonNull(appliedSequence, "appliedSequence");
+        requireNonNegative("currentSequence", currentSequence);
+        requireNonNegative("latestSequence", latestSequence);
+        requireNonNegative("archiveUsableBytes", archiveUsableBytes);
+        requireNonNegative("writerDurableBoundary.position", writerDurableBoundary.position());
+        requireNonNegative("writerDurableBoundary.sequence", writerDurableBoundary.sequence());
+        requireNonNegative("appliedSequence", appliedSequence);
     }
 
     /// The writer's durable recording position and transaction sequence,
@@ -55,6 +61,8 @@ public record ReplicationStatus(
         public WriterDurableBoundary {
             Objects.requireNonNull(position, "position");
             Objects.requireNonNull(sequence, "sequence");
+            requireNonNegative("position", position);
+            requireNonNegative("sequence", sequence);
         }
     }
 
@@ -67,5 +75,11 @@ public record ReplicationStatus(
     public OptionalLong lagTransactions() {
         if (this.currentSequence.isEmpty() || this.latestSequence.isEmpty()) return OptionalLong.empty();
         return OptionalLong.of(Math.max(0L, this.latestSequence.getAsLong() - this.currentSequence.getAsLong()));
+    }
+
+    private static void requireNonNegative(final String name, final OptionalLong value) {
+        if (value.isPresent() && value.getAsLong() < 0L) {
+            throw new IllegalArgumentException(name + " must be non-negative when present");
+        }
     }
 }

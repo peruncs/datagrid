@@ -117,6 +117,34 @@ class AtomicFileWriterTest {
         }
     }
 
+    /// Verifies a failed Store directory install restores the previous image after the new rename.
+    @Test
+    void failedStorageReplacementRestoresPreviousImage() throws Exception {
+        final Path parent = Files.createTempDirectory("atomic-storage-replace-");
+        final Path source = parent.resolve("staged");
+        final Path destination = parent.resolve("storage");
+        Files.createDirectories(source);
+        Files.createDirectories(destination);
+        Files.writeString(source.resolve("data"), "new");
+        Files.writeString(destination.resolve("data"), "old");
+        try {
+            AtomicFileWriter.runWithTestHook((phase, ignored) -> {
+                if ("AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC".equals(phase)) {
+                    throw new IllegalStateException("simulated install failure");
+                }
+            }, () -> assertThrows(IllegalStateException.class,
+                    () -> AtomicFileWriter.replaceStorage(source, destination)));
+
+            assertEquals("old", Files.readString(destination.resolve("data")));
+            assertTrue(Files.exists(source.resolve("data")), "the staged replacement stays available for cleanup");
+            try (var paths = Files.list(parent)) {
+                assertEquals(2L, paths.count(), "rollback must not leave a hidden previous Store directory");
+            }
+        } finally {
+            delete(parent);
+        }
+    }
+
         /// Verifies metadata writes cannot be redirected through a nested symlink.
     @Test
     void rejectsNestedSymbolicLink() throws Exception {

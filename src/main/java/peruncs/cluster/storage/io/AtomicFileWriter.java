@@ -374,12 +374,16 @@ public final class AtomicFileWriter {
     /// The old image remains in a sibling directory until the new image is
     /// installed and the parent directory is forced. An ordinary install
     /// failure moves the old image back into place.
+    ///
+    /// @param source      complete restored Store directory
+    /// @param destination live Store directory to replace
     public static void replaceStorage(final Path source, final Path destination) {
         final Path parent = destination.toAbsolutePath().normalize().getParent();
         final Path absoluteDestination = destination.toAbsolutePath().normalize();
         final Path absoluteSource = source.toAbsolutePath().normalize();
         final Path previous = parent.resolve(".storage-previous-" + UUID.randomUUID());
         boolean previousMoved = false;
+        boolean replacementDurable = false;
         try {
             ensureNoSymbolicLinks(absoluteSource);
             ensureNoSymbolicLinks(parent);
@@ -396,18 +400,25 @@ public final class AtomicFileWriter {
             previousMoved = true;
             forceDirectory(parent);
             Files.move(absoluteSource, absoluteDestination, StandardCopyOption.ATOMIC_MOVE);
+            testPoint("AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC", absoluteDestination);
             ensureNoSymbolicLinks(absoluteDestination);
             if (!sourceFileKey.equals(stableFileKey(absoluteDestination))) {
                 throw new IOException("Installed Store does not match its staged source");
             }
             forceDirectory(parent);
+            replacementDurable = true;
             deleteDirectory(previous);
             forceDirectory(parent);
         } catch (final IOException | RuntimeException failure) {
-            if (previousMoved && !Files.exists(absoluteDestination, LinkOption.NOFOLLOW_LINKS) &&
+            if (previousMoved && !replacementDurable &&
                 Files.exists(previous, LinkOption.NOFOLLOW_LINKS)) {
                 try {
-                    Files.move(previous, absoluteDestination, StandardCopyOption.ATOMIC_MOVE);
+                    if (Files.exists(absoluteDestination, LinkOption.NOFOLLOW_LINKS)) {
+                        Files.move(absoluteDestination, absoluteSource, StandardCopyOption.ATOMIC_MOVE);
+                    }
+                    if (!Files.exists(absoluteDestination, LinkOption.NOFOLLOW_LINKS)) {
+                        Files.move(previous, absoluteDestination, StandardCopyOption.ATOMIC_MOVE);
+                    }
                     forceDirectory(parent);
                 } catch (final IOException | RuntimeException rollbackFailure) {
                     failure.addSuppressed(rollbackFailure);

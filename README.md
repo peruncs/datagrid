@@ -133,9 +133,9 @@ a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID` and the same non-zero
 may derive the nonce from the cluster id for local fixtures only. (Why namespaces can't be shared
 is a design constraint; see the module documentation.)
 
-Network policy must still restrict which nodes can publish to
-each cluster's live and watermark endpoints. Archive control authentication is
-separate and does not isolate live replication traffic.
+Network policy must still restrict access to each cluster's live and watermark
+endpoints. Archive control and replay channels have no node authentication, so
+isolate those endpoints on the same trusted network.
 
 The development live-channel default is a dynamic MDC loopback channel
 (`control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=datagrid-<cluster>`)
@@ -214,12 +214,12 @@ restart with the same recording and checkpoint. Do not delete active recording
 segments or manually advance a reader cursor; if the Archive cannot be
 restored, initialize a new epoch and reseed every reader.
 
-Aeron Archive control and replay channels expose no node authentication:
-cluster membership is proven by the VPN, and the wire nonce only rejects
-accidental cross-wiring. Production deployments still isolate those endpoints
-with private interfaces, firewall rules, and Kubernetes NetworkPolicies.
-Cluster UUIDs and CRCs validate data identity and integrity only; they are not
-credentials. Do not enable ACK-driven deletion on an untrusted network.
+Aeron Archive control and replay channels have no node authentication or
+transport encryption. The wire nonce only rejects accidental cross-wiring;
+cluster UUIDs and CRCs validate data identity and integrity, not credentials.
+Production deployments must isolate every endpoint with private interfaces,
+firewall rules, and Kubernetes NetworkPolicies. Do not enable ACK-driven
+deletion on an untrusted network.
 
 ## Network boundary
 
@@ -227,10 +227,10 @@ Fencing tokens and CRC32C are correctness checks, not security: what each
 control does and does not prove is a design decision recorded in the module
 documentation. Operationally, none of them replaces the network boundary:
 
-- The isolated VPN stays the primary boundary: firewall rules and
+- The isolated VPN stays the primary network boundary: firewall rules and
   NetworkPolicies must scope every live, replay, storage-data, and watermark
-  endpoint to cluster members. That is the only per-node identity layer
-  below a full PKI.
+  endpoint. These controls isolate traffic; Data Grid does not authenticate
+  individual nodes or encrypt their transport.
 
 Run replication on a VPN-contained network: the isolated network is the only
 traffic boundary for replication frames and reader watermarks.

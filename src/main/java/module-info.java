@@ -28,10 +28,9 @@ import peruncs.cluster.api.*;
 ///
 /// # Trusted network boundary
 ///
-/// Replication data and reader watermarks are not authenticated. Deploy them
-/// only on an isolated, trusted network such as a private VPN. Aeron Archive
-/// control authentication is a separate boundary and does not authenticate
-/// replication frames.
+/// Replication data, reader watermarks, and Aeron Archive control sessions
+/// have no node authentication. Deploy all channels only on an isolated,
+/// trusted network such as a private VPN.
 ///
 /// # Archive-first replication
 ///

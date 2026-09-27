@@ -159,6 +159,19 @@ class BackupArchiveTest {
                 root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults()));
     }
 
+    /// Rejects an entry that ends before its declared size instead of installing a truncated Store file.
+    @Test
+    void rejectsEntryDataShorterThanDeclaredSize(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("underflow.zip");
+        writeRawStoredArchive(archive,
+                new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "tiny", 5L),
+                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", 8L),
+                new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
+
+        assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
+                root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults()));
+    }
+
     /// Verifies extraction enforces the configured byte budget, rejecting a tight limit while the default limit succeeds.
     @Test
     void extractionBudgetComesFromLimits(@TempDir final Path root) throws Exception {

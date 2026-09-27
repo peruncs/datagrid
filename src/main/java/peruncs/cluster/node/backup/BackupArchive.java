@@ -773,15 +773,19 @@ final class BackupArchive {
          * root and `NOFOLLOW_LINKS` create keep the entry from following a
          * link, without re-walking every path component for each entry. */
         final long declared = entry.getSize();
-        final long entryBudget = declared >= 0L ? declared : budget - extractedBytes;
+        final long remainingBudget = budget - extractedBytes;
+        final long entryBudget = declared >= 0L ? Math.min(declared, remainingBudget) : remainingBudget;
         try (FileChannel file = FileChannel.open(target,
                 StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE,
                 LinkOption.NOFOLLOW_LINKS);
              OutputStream output = Channels.newOutputStream(file);
              InputStream data = zip.getInputStream(entry)) {
-            extractedBytes += transferBounded(data, output, 0L, entryBudget, transferBuffer);
-            if (extractedBytes > budget) throw new IOException("Backup archive exceeds extraction limit");
+            final long entryBytes = transferBounded(data, output, 0L, entryBudget, transferBuffer);
+            if (declared >= 0L && entryBytes != declared) {
+                throw new IOException("Backup archive entry size does not match its declaration");
+            }
+            extractedBytes += entryBytes;
             file.force(true);
             return extractedBytes;
         }

@@ -20,7 +20,7 @@ import java.util.UUID;
 /// The header and payload CRC32C checksums detect accidental corruption. The
 /// cluster wire nonce rejects accidental cross-wiring between otherwise valid
 /// replication streams; it is not authentication and must not replace network
-/// isolation or Archive control-session authentication.
+/// isolation.
 public final class AeronReplicationEnvelope {
     public static final int MAGIC = 0x44474152; // DGAR
         /// Wire version with a checksum covering every decision-bearing header field.

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.NodeException;
+import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.node.backup.BackupMetadata;
 import peruncs.cluster.node.backup.FilesystemVolumeBackupBackend;
 import peruncs.cluster.node.replication.ReplicationCursorStore;
@@ -67,9 +68,18 @@ class BackupRestoreCompatibilityTest {
             final ReplicationCursor backupCursor,
             final long timestamp
     ) {
+        publishBackup(volume, noOpStorageConnection(), backupCursor, timestamp);
+    }
+
+    private static void publishBackup(
+            final Path volume,
+            final StorageConnection connection,
+            final ReplicationCursor backupCursor,
+            final long timestamp
+    ) {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(volume);
         backend.createBackup(
-                noOpStorageConnection(), backupCursor, BackupMetadata.create(timestamp, false, backupCursor));
+                connection, backupCursor, BackupMetadata.create(timestamp, false, backupCursor));
     }
 
     private static void writeOffset(final Path storageParent, final ReplicationCursor offset) {
@@ -138,7 +148,7 @@ class BackupRestoreCompatibilityTest {
                 "the unrelated backup must be left alone on the volume");
     }
 
-    /// Verifies a node with no local Store image restores the older compatible backup when the volume's newest backup belongs to another generation.
+    /// Verifies a reader with no local Store image restores the older compatible backup when the newest belongs to another generation.
     @Test
     void mixedGenerationsRestoreTheCompatibleBackup(@TempDir final Path root) {
         final Path home = root.resolve("node-home");
@@ -148,16 +158,35 @@ class BackupRestoreCompatibilityTest {
         /* No local Store image, but a durable boundary from generation one;
          * the volume's newest backup belongs to generation two. */
         writeOffset(home, cursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 3L));
-        publishBackup(volume, generationOne, 100L);
+
+        /* This restore path must carry a real Store image: an empty backup is
+         * correctly rejected later as no usable reader seed. */
+        try (final NodeAssembly writer = NodeAssembly.create()
+                .setNodeSettingsSource(properties(
+                        root.resolve("backup-writer"), root.resolve("writer-volume"), NodeSettingsSource.WRITER_ROLE))
+                .setRootSupplier(ArrayList<String>::new)
+                .build()) {
+            final var manager = writer.startStorageManager();
+            final ArrayList<String> writerRoot = new ArrayList<>();
+            writerRoot.add("compatible-backup-value");
+            manager.setRoot(org.eclipse.serializer.reference.Lazy.Reference(writerRoot));
+            manager.storeRoot();
+            publishBackup(volume, manager, generationOne, 100L);
+        }
         publishBackup(volume, cursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L), 200L);
 
         try (final NodeAssembly node = NodeAssembly.create()
                 .setNodeSettingsSource(properties(
-                        home, volume, NodeSettingsSource.WRITER_ROLE))
+                        home, volume, NodeSettingsSource.READER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
             assertTrue(node.startStorageManager().graphBoundary().read(() -> node.startStorageManager().root() != null),
                     "the node must start from the compatible backup");
+            @SuppressWarnings("unchecked")
+            final ArrayList<String> restoredRoot = node.startStorageManager().graphBoundary().read(
+                    () -> new ArrayList<>((ArrayList<String>) node.startStorageManager().root().get()));
+            assertTrue(restoredRoot.contains("compatible-backup-value"),
+                    "the compatible backup must restore its Store payload");
         }
 
         assertEquals(generationOne, readOffset(home),
@@ -165,7 +194,7 @@ class BackupRestoreCompatibilityTest {
         assertEquals(2, FilesystemVolumeBackupBackend.create(volume).listBackups().size());
     }
 
-    /// Verifies a fresh node with only incompatible backups fails fast with a compatibility error and installs no Store image.
+    /// Verifies a writer with durable recovery state refuses to seed from an incompatible reader backup.
     @Test
     void freshNodeWithOnlyIncompatibleBackupsRefusesToInstall(@TempDir final Path root) {
         final Path home = root.resolve("node-home");
@@ -179,10 +208,10 @@ class BackupRestoreCompatibilityTest {
                         home, volume, NodeSettingsSource.WRITER_ROLE))
                 .setRootSupplier(ArrayList<String>::new)
                 .build()) {
-            final NodeException failure =
-                    assertThrows(NodeException.class, node::startStorageManager);
-            assertTrue(failure.getMessage().contains("compatible"),
-                    "refusal must name the compatibility cause, was: %s".formatted(failure.getMessage()));
+            final ReseedRequiredException failure =
+                    assertThrows(ReseedRequiredException.class, node::startStorageManager);
+            assertTrue(failure.getMessage().startsWith("RESEED_REQUIRED:"),
+                    "refusal must identify the required recovery action, was: %s".formatted(failure.getMessage()));
         }
 
         assertFalse(Files.exists(home.resolve("storage")),

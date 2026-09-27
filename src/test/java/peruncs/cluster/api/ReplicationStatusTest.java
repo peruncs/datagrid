@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReplicationStatusTest {
@@ -32,5 +33,16 @@ class ReplicationStatusTest {
                 OptionalLong.empty());
 
         assertEquals(OptionalLong.of(5L), status.lagTransactions());
+    }
+
+    @Test
+    void rejectsNegativePresentMetrics() {
+        assertThrows(IllegalArgumentException.class, () -> new ReplicationStatus(
+                ReplicationState.LIVE,
+                OptionalLong.of(-1L),
+                OptionalLong.empty(),
+                OptionalLong.empty(),
+                new ReplicationStatus.WriterDurableBoundary(OptionalLong.empty(), OptionalLong.empty()),
+                OptionalLong.empty()));
     }
 }

@@ -5,6 +5,7 @@ import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundati
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.index.ClusterIndexMaintenance;
+import peruncs.cluster.storage.index.ClusterStoreIndexes;
 
 import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
@@ -163,6 +164,7 @@ final class ApplyWorker {
                     TimeUnit.MILLISECONDS);
             try {
                 this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+                        ClusterStoreIndexes.withRegistrationRead(() ->
                 {
                     /* One coordinator write section covers import,
                      * materialization, validation, and index refresh. Application reads joining the read
@@ -246,7 +248,7 @@ final class ApplyWorker {
                             refreshWatchdog.cancel(false);
                         }
                     }
-                });
+                }));
             } catch (final RuntimeException | Error failure) {
                 /* A genuine failure says failed; only an overrun says timed
                  * out. The two are never conflated into one message. */

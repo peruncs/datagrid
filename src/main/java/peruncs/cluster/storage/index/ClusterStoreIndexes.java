@@ -55,11 +55,13 @@ public final class ClusterStoreIndexes {
          * and nothing else honors that monitor. One executor guards both. */
     private static final LockedExecutor REGISTRATION = LockedExecutor.New();
 
-    static void withRegistrationRead(final Runnable validation) {
+    /// Runs a validation while excluding concurrent index registration.
+    public static void withRegistrationRead(final Runnable validation) {
         REGISTRATION.read(Objects.requireNonNull(validation, "validation")::run);
     }
 
-    static <T> T withRegistrationRead(final Supplier<T> validation) {
+    /// Returns a validation result while excluding concurrent index registration.
+    public static <T> T withRegistrationRead(final Supplier<T> validation) {
         return REGISTRATION.read(Objects.requireNonNull(validation, "validation")::get);
     }
 
