@@ -553,7 +553,7 @@ class AeronStoreIntegrationIT {
             assertEquals(
                     ReplicationLogRetention.MaintenanceResult.Status.DELETED,
                     writerTransport.retention().deleteThrough(secondTarget).status(),
-                    "authenticated quorum must permit online purge at a complete segment boundary");
+                    "configured reader quorum must permit online purge at a complete segment boundary");
             final ReplicationCursor postRetentionStart;
             try (DurableCursorFile cursorManager = DurableCursorFile.of(ordinaryCursor)) {
                 postRetentionStart = cursorManager.get();

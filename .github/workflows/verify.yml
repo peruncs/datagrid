@@ -1,0 +1,39 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Maven verification profile
+        type: choice
+        required: true
+        default: verify
+        options:
+          - verify
+          - integration
+          - soak
+          - crashmatrix
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '27'
+          cache: maven
+      - name: Run verification
+        env:
+          PROFILE: ${{ github.event_name == 'schedule' && 'crashmatrix' || inputs.profile || 'verify' }}
+        run: |
+          case "$PROFILE" in
+            verify) mvn --batch-mode --no-transfer-progress verify ;;
+            integration|soak|crashmatrix) mvn --batch-mode --no-transfer-progress -P"$PROFILE" verify ;;
+            *) echo "Unsupported profile: $PROFILE" >&2; exit 1 ;;
+          esac

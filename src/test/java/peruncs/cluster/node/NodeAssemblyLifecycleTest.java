@@ -7,17 +7,55 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.WrongRoleException;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the foundation's single close boundary.
 class NodeAssemblyLifecycleTest {
+    @Test
+    void closeWaitsForFirstLazyResourceConstructionBeforeCheckingInitialization() throws Exception {
+        final CountDownLatch factoryStarted = new CountDownLatch(1);
+        final CountDownLatch finishFactory = new CountDownLatch(1);
+        final CountDownLatch closeCheckStarted = new CountDownLatch(1);
+        final AtomicBoolean closeSawInitialized = new AtomicBoolean();
+        final Object resource = new Object();
+        final NodeCollaborators.LazyHolder<Object> holder = NodeCollaborators.LazyHolder.of(() -> {
+            factoryStarted.countDown();
+            try {
+                assertTrue(finishFactory.await(5, TimeUnit.SECONDS));
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            return resource;
+        });
+        final Thread initializer = Thread.ofVirtual().start(holder::get);
+        assertTrue(factoryStarted.await(5, TimeUnit.SECONDS));
+        final Thread closer = Thread.ofVirtual().start(() -> {
+            closeCheckStarted.countDown();
+            closeSawInitialized.set(holder.isInitialized());
+        });
+        assertTrue(closeCheckStarted.await(5, TimeUnit.SECONDS));
+        finishFactory.countDown();
+        initializer.join(5_000L);
+        closer.join(5_000L);
+
+        assertFalse(initializer.isAlive());
+        assertFalse(closer.isAlive());
+        assertTrue(closeSawInitialized.get(), "close must observe the created resource before skipping its stage");
+        assertSame(resource, holder.get());
+    }
+
     /// Verifies closing an unstarted foundation is idempotent and permanently prevents starting the storage manager.
     @Test
     void closeIsIdempotentAndPreventsRestart() {
@@ -93,10 +131,17 @@ class NodeAssemblyLifecycleTest {
     }
 
     private static NodeSettingsSource unstartable(final String role) {
-        return new NodeSettingsSource.Env(Map.of(
-                "ECLIPSE_DATAGRID_PROD_MODE", "true",
-                "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK", "true",
-                "ECLIPSE_DATAGRID_REPLICATION_ROLE", role)) {
+        return new peruncs.cluster.node.aeron.TestNodeProperties() {
+            @Override
+            public boolean isProdMode() {
+                return true;
+            }
+
+            @Override
+            public String replicationRole() {
+                return role;
+            }
+
             @Override
             public String replicationProperty(final String name) {
                 throw new AssertionError("a wrong-role probe must not start the node: " + name);
@@ -119,6 +164,35 @@ class NodeAssemblyLifecycleTest {
 
             assertThrows(WrongRoleException.class, foundation::storageNodeManager);
             assertThrows(WrongRoleException.class, foundation::backupNodeManager);
+        }
+    }
+
+    @Test
+    void devNodeRejectsAnExplicitReplicationRole() {
+        try (final NodeAssembly foundation = NodeAssembly.create()
+                .setNodeSettingsSource(NodeSettingsSource.env(Map.of(
+                        NodeSettingsSource.EnvKeys.REPLICATION_ROLE, "reader")))
+                .setRootSupplier(Object::new)
+                .build()) {
+            assertThrows(NodeException.class, foundation::startStorageManager);
+        }
+    }
+
+    @Test
+    void devNodeUsesAnExplicitStoragePath(@TempDir final Path storagePath) {
+        final Path configuredPath = storagePath.resolve("configured");
+        try (final NodeAssembly foundation = NodeAssembly.create()
+                .setNodeSettingsSource(NodeSettingsSource.env(Map.of(
+                        NodeSettingsSource.EnvKeys.STORAGE_PATH, configuredPath.toString())))
+                .setEmbeddedStorageFoundation(EmbeddedStorageFoundation.New()
+                        .setConfiguration(StorageConfiguration.Builder()
+                                .setStorageFileProvider(Storage.FileProvider(storagePath.resolve("ignored")))
+                                .createConfiguration()))
+                .setRootSupplier(Object::new)
+                .build()) {
+            foundation.startStorageManager();
+            assertTrue(Files.exists(configuredPath.resolve("storage")));
+            assertFalse(Files.exists(storagePath.resolve("ignored")));
         }
     }
 
@@ -204,8 +278,11 @@ class NodeAssemblyLifecycleTest {
 
         final RuntimeException first = assertThrows(RuntimeException.class, lifecycle::close,
                 "an incomplete Store shutdown must fail the close for retry");
-        assertTrue(String.valueOf(first.getMessage()).contains("did not complete shutdown"),
-                "the failure names the unfinished Store shutdown, not a successor stage");
+        assertTrue(String.valueOf(first.getMessage()).contains("embedded storage"),
+                "the outer failure names the unfinished close stage");
+        assertTrue(first.getCause() != null &&
+                        String.valueOf(first.getCause().getMessage()).contains("did not complete shutdown"),
+                "the stage failure retains the original Store shutdown cause");
         assertDoesNotThrow(lifecycle::close, "the retried close re-runs only the unfinished Store stage");
         assertFalse(delegate.isRunning(), "the raw Store must be down after the retried close");
         assertEquals(2, shutdownCalls.get(), "the Store stage was executed exactly twice, not skipped");
@@ -264,10 +341,9 @@ class NodeAssemblyLifecycleTest {
     /// (the live file provider is always node-derived).
     @Test
     void nodeOptionsHooksReachTheAssembly(@TempDir final Path storagePath) {
-        final NodeSettingsSource settings = new NodeSettingsSource.Env(Map.of(
-                NodeSettingsSource.Env.EnvKeys.STORAGE_PATH, storagePath.toString(),
-                NodeSettingsSource.Env.EnvKeys.BACKUP_PATH, storagePath.resolve("backups").toString())) {
-        };
+        final NodeSettingsSource settings = NodeSettingsSource.env(Map.of(
+                NodeSettingsSource.EnvKeys.STORAGE_PATH, storagePath.toString(),
+                NodeSettingsSource.EnvKeys.BACKUP_PATH, storagePath.resolve("backups").toString()));
         final StorageConfiguration customConfiguration = StorageConfiguration.Builder()
                 .setStorageFileProvider(Storage.FileProvider(storagePath.resolve("ignored-by-node")))
                 .setChannelCountProvider(Storage.ChannelCountProvider(2))

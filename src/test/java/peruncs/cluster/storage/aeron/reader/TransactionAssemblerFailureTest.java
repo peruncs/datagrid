@@ -7,6 +7,8 @@ import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
+import peruncs.cluster.errors.CorruptReplicationDataException;
+import peruncs.cluster.errors.ReseedRequiredException;
 
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -38,6 +40,45 @@ class TransactionAssemblerFailureTest {
         assembler.onFragment(new UnsafeBuffer(bytes), 0, bytes.length, null);
         if (assembler.deliveryBarrierFull()) {
             assembler.flushDeliveries();
+        }
+    }
+
+    private static StorageBinaryDataReceiver emptyReceiver() {
+        return new StorageBinaryDataReceiver() {
+            @Override
+            public void receiveData(final Binary value) {
+            }
+
+            @Override
+            public void receiveTypeDictionary(final String value) {
+            }
+        };
+    }
+
+    @Test
+    void protocolIdentityMismatchIsTypedAsCorruptData() {
+        final TransactionAssembler assembler = assembler(emptyReceiver());
+        try {
+            final byte[] frame = AeronReplicationEnvelopeTestSupport.encode(
+                    UUID.randomUUID(), EPOCH, 1L, 0, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                    1, 0, 1, 0, 0, new byte[]{1});
+            assertThrows(CorruptReplicationDataException.class, () -> accept(assembler, frame));
+        } finally {
+            assembler.dispose();
+        }
+    }
+
+    @Test
+    void staleWriterTokenIsTypedAsReseedRequired() {
+        final TransactionAssembler assembler = assembler(emptyReceiver());
+        assembler.startingFencingToken(2L);
+        try {
+            final byte[] frame = AeronReplicationEnvelopeTestSupport.encode(
+                    CLUSTER, EPOCH, 1L, 0, AeronReplicationEnvelope.Kind.STORE_BINARY,
+                    1, 0, 1, 0, 0, new byte[]{1});
+            assertThrows(ReseedRequiredException.class, () -> accept(assembler, frame));
+        } finally {
+            assembler.dispose();
         }
     }
 

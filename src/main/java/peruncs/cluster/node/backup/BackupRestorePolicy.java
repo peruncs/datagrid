@@ -32,10 +32,7 @@ public final class BackupRestorePolicy {
     private final ClusterReplicationTransport transport;
     private final ReplicationPositionProvider positionProvider;
     private final Supplier<DurableCursorFile> cursorManager;
-    private final Supplier<Path> storageParentPath;
-    private final Consumer<Path> deleteDirectory;
-    private final Runnable closeCursorManager;
-    private final Runnable deleteOffsetFile;
+    private final RestoreActions actions;
     /* The writer's authoritative restart evidence is its durable checkpoint,
      * never the reader cursor: a backup-covered restore must not delete a
      * newer local Store while local files exist. */
@@ -45,20 +42,31 @@ public final class BackupRestorePolicy {
             final ClusterReplicationTransport transport,
             final ReplicationPositionProvider positionProvider,
             final Supplier<DurableCursorFile> cursorManager,
-            final Supplier<Path> storageParentPath,
-            final Consumer<Path> deleteDirectory,
-            final Runnable closeCursorManager,
-            final Runnable deleteOffsetFile,
+            final RestoreActions actions,
             final boolean ownAuthoritativeStore
     ) {
         this.transport = Objects.requireNonNull(transport, "transport");
         this.positionProvider = Objects.requireNonNull(positionProvider, "positionProvider");
         this.cursorManager = Objects.requireNonNull(cursorManager, "cursorManager");
-        this.storageParentPath = Objects.requireNonNull(storageParentPath, "storageParentPath");
-        this.deleteDirectory = Objects.requireNonNull(deleteDirectory, "deleteDirectory");
-        this.closeCursorManager = Objects.requireNonNull(closeCursorManager, "closeCursorManager");
-        this.deleteOffsetFile = Objects.requireNonNull(deleteOffsetFile, "deleteOffsetFile");
+        this.actions = Objects.requireNonNull(actions, "actions");
         this.ownAuthoritativeStore = ownAuthoritativeStore;
+    }
+
+    /// Actions used only while replacing Store files and their cursor.
+    ///
+    /// @param storageParentPath   resolves the Store and cursor parent
+    /// @param deleteDirectory     removes the old Store image
+    /// @param closeCursorManager closes the current cursor file
+    /// @param deleteOffsetFile   removes the old durable cursor
+    public record RestoreActions(Supplier<Path> storageParentPath, Consumer<Path> deleteDirectory,
+                                 Runnable closeCursorManager, Runnable deleteOffsetFile) {
+        /// Validates the restore callbacks.
+        public RestoreActions {
+            Objects.requireNonNull(storageParentPath, "storageParentPath");
+            Objects.requireNonNull(deleteDirectory, "deleteDirectory");
+            Objects.requireNonNull(closeCursorManager, "closeCursorManager");
+            Objects.requireNonNull(deleteOffsetFile, "deleteOffsetFile");
+        }
     }
 
         /// Resolves the backup identity this node restores as.
@@ -161,7 +169,7 @@ public final class BackupRestorePolicy {
                 throw new ReseedRequiredException(
                         "writer Store is absent or empty; a shared reader backup cannot replace the authoritative writer image");
             }
-            this.deleteOffsetFile.run();
+            this.actions.deleteOffsetFile().run();
             this.restoreBackupAndCursor(backend, selected, backup, storageRootPath);
             return true;
         }
@@ -209,9 +217,9 @@ public final class BackupRestorePolicy {
                                 identityMismatch,
                                 localBehind,
                                 equalSequencePositionMismatch));
-        this.closeCursorManager.run();
-        this.deleteDirectory.accept(storageRootPath);
-        this.deleteOffsetFile.run();
+        this.actions.closeCursorManager().run();
+        this.actions.deleteDirectory().accept(storageRootPath);
+        this.actions.deleteOffsetFile().run();
         this.restoreBackupAndCursor(backend, selected, backup, storageRootPath);
         return true;
     }
@@ -229,14 +237,14 @@ public final class BackupRestorePolicy {
             final Path storageRootPath
     ) {
         try {
-            backend.restoreBackup(this.storageParentPath.get(), selected);
+            backend.restoreBackup(this.actions.storageParentPath().get(), selected);
             this.cursorManager.get().set(backup);
         } catch (final RuntimeException | Error failure) {
             /* A downloaded Store without its matching cursor is not a valid
              * restart image. Remove it so a later startup cannot mistake the
              * partial boundary for trusted local state. */
             try {
-                this.deleteDirectory.accept(storageRootPath);
+                this.actions.deleteDirectory().accept(storageRootPath);
             } catch (final RuntimeException cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
             }

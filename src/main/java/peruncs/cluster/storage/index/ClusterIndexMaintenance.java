@@ -291,6 +291,7 @@ public final class ClusterIndexMaintenance {
         scratch.seen.clear();
         scratch.queue.clear();
         scratch.maps.clear();
+        scratch.scanWork = 0;
         try {
             storage.persistenceManager()
                     .viewRoots()
@@ -299,20 +300,13 @@ public final class ClusterIndexMaintenance {
                             scratch.queue.add(value);
                         }
                     });
-            int visited = 0;
             while (!scratch.queue.isEmpty()) {
-                if (++visited > maxValidatedObjects) {
-                    throw new IllegalStateException(
-                            ("index refresh exceeded %s index-relevant objects; raise " +
-                                    "StorageBinaryDataMerger.Configuration.maxValidatedIndexObjects or narrow " +
-                                    "the index-relevant graph so the replication boundary can be proven")
-                                    .formatted(maxValidatedObjects));
-                }
+                ClusterIndexValidation.countScanWork(scratch, maxValidatedObjects);
                 final Object current = scratch.queue.poll();
                 if (current instanceof GigaMap<?> map) {
                     scratch.maps.add(map);
                 } else {
-                    ClusterIndexValidation.enqueueReachable(current, scratch.queue, scratch.seen);
+                    ClusterIndexValidation.enqueueReachable( current, scratch.queue, scratch.seen, scratch, maxValidatedObjects);
                 }
             }
         } finally {

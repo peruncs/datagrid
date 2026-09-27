@@ -125,7 +125,7 @@ class AeronArchiveReplicationIT {
         /// Verifies a stalled recording with live delivery running ahead: the
     /// reader withholds the live COMMIT while the Archive cannot prove
     /// coverage — no staging, no cursor advance — and fails closed once the
-    /// reader stop budget expires.
+    /// live-marker durability budget expires.
     @Test
     void stalledRecordingWithholdsLiveCommits() throws Exception {
         final int controlPort = freePort();
@@ -138,7 +138,7 @@ class AeronArchiveReplicationIT {
                 .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
                 .maxTransactionBytes(256 * 1024).offerTimeoutNanos(2_000_000_000L)
                 .recordedPositionTimeoutNanos(1_000_000_000L)
-                .readerStopTimeoutNanos(stallBudgetNanos)
+                .liveWithholdTimeoutNanos(stallBudgetNanos)
                 .build();
         final UUID clusterId = UUID.randomUUID();
         final RecordingReceiver receiver = new RecordingReceiver();
@@ -694,7 +694,7 @@ class AeronArchiveReplicationIT {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(1024 * 1024).mtuLength(1408).chunkSize(16 * 1024)
                 .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L)
-                .readerStopTimeoutNanos(1_000_000_000L).build();
+                .reconnectTimeoutNanos(1_000_000_000L).build();
         final UUID clusterId = UUID.randomUUID();
         /* Short control timeouts so each reconnect attempt fails fast while
          * the Archive is down and the 1s reconnect budget expires quickly. */

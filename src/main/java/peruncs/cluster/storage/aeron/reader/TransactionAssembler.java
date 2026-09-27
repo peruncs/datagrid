@@ -7,17 +7,21 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import peruncs.cluster.errors.CorruptReplicationDataException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
+import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.zip.CRC32C;
@@ -51,7 +55,7 @@ final class TransactionAssembler {
      * image redelivers it on every poll, so recording progress or the
      * configured stop timeout decides the outcome. Polling-thread confined;
      * guarded reads happen through onFragment's delivery monitor. */
-    private long withholdSinceNanos;
+    private volatile long withholdSinceNanos;
     /* The durable boundary is one immutable snapshot so a concurrent
      * status or cursor reader can never observe a new sequence paired with
      * the previous position (or vice versa). */
@@ -112,15 +116,11 @@ final class TransactionAssembler {
      * materialization only then — abort-only barriers enqueue nothing. */
     private boolean barrierHasData;
     private long barrierBytes;
-    /* Dedicated monitor for the barrier staging queue. The flush parks in the
-     * receiver's awaitApplied() for the whole batch; it must never hold the
-     * delivery monitor across that park, because dispose() is specified to
-     * return while a delivery is parked (see TransactionAssemblerFailureTest).
-     * The staging lock order is therefore: delivery monitor outside, barrier
-     * monitor inside; the flush only parks on the barrier monitor… no — even
-     * the barrier monitor is released during the await. All producers and the
-     * flush run on the polling thread; only dispose() touches this monitor
-     * from another thread, to drop staged entries. */
+    /* Dedicated monitor for the barrier staging queue. The flush releases both
+     * the delivery monitor and barrier monitor before waiting for materialized
+     * data, so dispose() can return and clear staged entries during that wait.
+     * All producers and the flush run on the polling thread; only dispose()
+     * touches the barrier monitor from another thread. */
     private final Object barrierLock = new Object();
 
     /// Creates the one production assembler state machine.
@@ -201,7 +201,7 @@ final class TransactionAssembler {
     /// returns `ABORT` so the fragment is redelivered on the next poll —
     /// holds the transaction buffered until the recording provably covers
     /// the marker's end position ([Header#position] is the position after
-    /// the frame), and a stall beyond the reader stop budget fails closed.
+    /// the frame), and a stall beyond the live-marker durability budget fails closed.
     /// Data chunks are never gated: without the terminal marker they only
     /// occupy the incomplete-transaction buffer.
     ///
@@ -241,7 +241,7 @@ final class TransactionAssembler {
                      * durability position — fail closed rather than silently
                      * bypass the gate. */
                     if (header == null) {
-                        throw new IllegalStateException("live terminal marker without an Aeron header");
+                        throw new CorruptReplicationDataException("live terminal marker without an Aeron header");
                     }
                     final boolean recorded;
                     try {
@@ -266,6 +266,7 @@ final class TransactionAssembler {
                         return false;
                     }
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
+                    if (isTerminalMarker(envelope.kind())) this.withholdSinceNanos = 0L;
                 }
                 if (deliver) {
                     /* Stage only: the blocking materialization wait must run
@@ -293,13 +294,8 @@ final class TransactionAssembler {
         return kind == AeronReplicationEnvelope.Kind.COMMIT || kind == AeronReplicationEnvelope.Kind.ABORT;
     }
 
-        /// Withholds an unrecorded live terminal marker for redelivery, failing
-    /// closed once the recording stays behind past the reader stop budget.
-    ///
-    /// The stall budget is the reader stop timeout: the same bound accepted
-    /// for draining a live tail on shutdown bounds a recording that stops
-    /// confirming, so a wedged writer-side Archive fails the reader instead
-    /// of parking it forever without touching the Store.
+    /// Withholds an unrecorded live terminal marker for redelivery, failing
+    /// closed once the recording stays behind past its configured budget.
     ///
     /// @param sequence withheld transaction sequence, for diagnostics
     /// @return always `true`; the marker must be redelivered once durable
@@ -309,11 +305,11 @@ final class TransactionAssembler {
             this.withholdSinceNanos = now;
             return true;
         }
-        if (now - this.withholdSinceNanos >= this.configuration.readerStopTimeoutNanos()) {
+        if (now - this.withholdSinceNanos >= this.configuration.liveWithholdTimeoutNanos()) {
             final ReplicationUnavailableException failure = new ReplicationUnavailableException(
                     ("Archive recording did not durably cover the live terminal marker at sequence %d " +
                      "within %dns; failing closed instead of applying an unrecorded transaction")
-                            .formatted(sequence, this.configuration.readerStopTimeoutNanos()));
+                            .formatted(sequence, this.configuration.liveWithholdTimeoutNanos()));
             this.failure(failure);
             throw failure;
         }
@@ -341,7 +337,7 @@ final class TransactionAssembler {
 
     private boolean accept(final AeronReplicationEnvelope.EnvelopeView envelope, final long position) {
         if (!envelope.matches(this.clusterId, this.wireNonce) || this.epoch != envelope.epoch()) {
-            throw new IllegalArgumentException("cluster or epoch mismatch");
+            throw new CorruptReplicationDataException("cluster or epoch mismatch");
         }
         /* Reject stale tokens on every frame, but raise the floor only after a
          * frame is fully accepted below. Raising it here would let a poison
@@ -352,12 +348,13 @@ final class TransactionAssembler {
         final long token = envelope.fencingToken();
         final long floor = this.lastAcceptedFencingToken;
         if (token < floor) {
-            throw new IllegalStateException(
+            throw new ReseedRequiredException(
                     "stale writer fencing token %s below accepted %s; the writer lost the lease race".formatted(token, floor));
         }
         final long lastResolvedSequence = this.resolvedBoundary.sequence();
         if (envelope.sequence() < lastResolvedSequence) {
-            throw new IllegalStateException("replication sequence regressed: last resolved %s, received %s".formatted(lastResolvedSequence, envelope.sequence()));
+            throw new ReseedRequiredException("replication sequence regressed: last resolved %s, received %s"
+                    .formatted(lastResolvedSequence, envelope.sequence()));
         }
         if (envelope.sequence() == lastResolvedSequence) {
             if (envelope.kind() != AeronReplicationEnvelope.Kind.COMMIT &&
@@ -369,7 +366,8 @@ final class TransactionAssembler {
                     (envelope.kind() == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY &&
                      (envelope.payloadLength() != this.lastResolutionDictionaryLength ||
                       envelope.chunkCount() != this.lastResolutionDictionaryChunkCount))) {
-                    throw new IllegalStateException("replayed data does not match the resolved transaction %s".formatted(lastResolvedSequence));
+                    throw new CorruptReplicationDataException("replayed data does not match the resolved transaction %s"
+                            .formatted(lastResolvedSequence));
                 }
                 if (this.transaction == null) {
                     this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
@@ -377,7 +375,7 @@ final class TransactionAssembler {
                             this.dataCrc);
                 }
                 if (this.transaction.sequence != envelope.sequence() || !this.transaction.duplicate)
-                    throw new IllegalStateException("interleaved replayed transaction");
+                    throw new CorruptReplicationDataException("interleaved replayed transaction");
                 this.transaction.add(envelope);
                 return false;
             }
@@ -385,21 +383,23 @@ final class TransactionAssembler {
                 /* A resumed reader has only a cursor, not the terminal witness.  It
                  * must not silently accept a contradictory terminal at that cursor;
                  * restart from the persisted position instead. */
-                throw new IllegalStateException("terminal witness is unavailable for resolved sequence %s".formatted(lastResolvedSequence));
+                throw new ReseedRequiredException(
+                        "terminal witness is unavailable for resolved sequence %s".formatted(lastResolvedSequence));
             }
             if (envelope.kind() != this.lastResolutionKind) {
-                throw new IllegalStateException("duplicate terminal has a different kind: expected %s, received %s".formatted(this.lastResolutionKind, envelope.kind()));
+                throw new CorruptReplicationDataException("duplicate terminal has a different kind: expected %s, received %s"
+                        .formatted(this.lastResolutionKind, envelope.kind()));
             }
             if (envelope.payloadLength() != this.lastResolutionDataLength ||
                 envelope.chunkCount() != this.lastResolutionDataChunkCount) {
-                throw new IllegalStateException("duplicate terminal has different transaction metadata");
+                throw new CorruptReplicationDataException("duplicate terminal has different transaction metadata");
             }
             if (envelope.kind() == AeronReplicationEnvelope.Kind.COMMIT &&
                 envelope.commitCrc32c() != this.lastResolutionCrc32c) {
-                throw new IllegalStateException("duplicate commit has a different payload checksum");
+                throw new CorruptReplicationDataException("duplicate commit has a different payload checksum");
             }
             if (this.transaction != null) {
-                if (!this.transaction.duplicate) throw new IllegalStateException("interleaved resolved transaction");
+                if (!this.transaction.duplicate) throw new CorruptReplicationDataException("interleaved resolved transaction");
                 this.validateDuplicateCommit(envelope);
                 this.transaction.dispose();
                 this.transaction = null;
@@ -408,7 +408,7 @@ final class TransactionAssembler {
             return false;
         }
         if (envelope.sequence() != this.nextExpectedSequence) {
-            throw new IllegalStateException(
+            throw new CorruptReplicationDataException(
                     "replication sequence gap: expected %s, received %s".formatted(this.nextExpectedSequence, envelope.sequence()));
         }
         if (envelope.kind() == AeronReplicationEnvelope.Kind.COMMIT) {
@@ -421,8 +421,12 @@ final class TransactionAssembler {
              * adapter must not turn an abort with a commit witness into a valid
              * terminal decision. */
             if (envelope.commitCrc32c() != 0) {
-                throw new IllegalStateException("abort marker carries a non-zero commit checksum");
+                throw new CorruptReplicationDataException("abort marker carries a non-zero commit checksum");
             }
+            /* A newer writer may abort an older writer's incomplete sequence
+             * after takeover. Unlike COMMIT, ABORT carries no old payload to
+             * validate or apply, so it may discard that staged transaction
+             * and advance the token floor after the abort marker is accepted. */
             if (this.transaction != null) {
                 this.transaction.dispose();
                 this.transaction = null;
@@ -435,7 +439,8 @@ final class TransactionAssembler {
         }
         if (envelope.kind() != AeronReplicationEnvelope.Kind.TYPE_DICTIONARY &&
             envelope.kind() != AeronReplicationEnvelope.Kind.STORE_BINARY) {
-            throw new IllegalArgumentException("non-data envelope on replication data stream: %s".formatted(envelope.kind()));
+            throw new CorruptReplicationDataException(
+                    "non-data envelope on replication data stream: %s".formatted(envelope.kind()));
         }
         if (this.transaction == null) {
             this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
@@ -443,7 +448,7 @@ final class TransactionAssembler {
                     this.dataCrc);
         }
         if (this.transaction.sequence != envelope.sequence()) {
-            throw new IllegalStateException("interleaved replication transaction");
+            throw new CorruptReplicationDataException("interleaved replication transaction");
         }
         this.transaction.add(envelope);
         /* Crash-test observation point after a data chunk is buffered: the
@@ -486,7 +491,7 @@ final class TransactionAssembler {
     /// @param action  action to run with the hook bound
     /// @return the action's result
     /// @param <T>    action result type
-    static <T> T runWithChunkObserver(final ChunkObserver observer, final java.util.concurrent.Callable<T> action) {
+    static <T> T runWithChunkObserver(final ChunkObserver observer, final Callable<T> action) {
         try {
             return ScopedValue.where(CHUNK_HOOK, observer).call(action::call);
         } catch (final RuntimeException failure) {
@@ -507,7 +512,7 @@ final class TransactionAssembler {
              (duplicate.dictionaryOffset != duplicate.dictionaryLength ||
               duplicate.dictionaryNextChunk != duplicate.dictionaryChunkCount)) ||
             duplicate.dataCrc32c() != envelope.commitCrc32c()) {
-            throw new IllegalStateException("replayed transaction does not match its resolved commit");
+            throw new CorruptReplicationDataException("replayed transaction does not match its resolved commit");
         }
     }
 
@@ -517,7 +522,7 @@ final class TransactionAssembler {
          * violation rather than an empty transaction. Fail closed instead of
          * inventing data the log never carried. */
         if (this.transaction == null) {
-            throw new IllegalStateException("commit without data chunks");
+            throw new CorruptReplicationDataException("commit without data chunks");
         }
         if (this.transaction.fencingToken != envelope.fencingToken() ||
             this.transaction.dataLength != envelope.payloadLength() ||
@@ -531,7 +536,7 @@ final class TransactionAssembler {
             envelope.commitCrc32c()) {
             this.transaction.dispose();
             this.transaction = null;
-            throw new IllegalStateException("commit does not match assembled Store binary");
+            throw new CorruptReplicationDataException("commit does not match assembled Store binary");
         }
         final Transaction completed = this.transaction;
         final String dictionary;
@@ -542,8 +547,8 @@ final class TransactionAssembler {
             view.position(0).limit(completed.dictionaryLength);
             try {
                 dictionary = this.dictionaryDecoder.reset().decode(view).toString();
-            } catch (final java.nio.charset.CharacterCodingException failure) {
-                throw new IllegalStateException("type dictionary is not valid UTF-8", failure);
+            } catch (final CharacterCodingException failure) {
+                throw new CorruptReplicationDataException("type dictionary is not valid UTF-8", failure);
             }
         }
         /* The frame is fully accepted only now: every length, order, checksum,
@@ -653,6 +658,11 @@ final class TransactionAssembler {
         return this.transaction != null;
     }
 
+    /// Reports whether the reader is withholding a live terminal marker.
+    boolean isWithholdingTerminalMarker() {
+        return this.withholdSinceNanos != 0L;
+    }
+
         /// Returns the latched terminal failure, or `null` while healthy.
     ///
     /// @return terminal failure, or `null`
@@ -681,6 +691,7 @@ final class TransactionAssembler {
     /// covers Store import, so disposal cannot be blocked by a slow receiver.
     /// An in-flight [Delivery] owns its detached transaction and is unaffected.
     void dispose() {
+        this.withholdSinceNanos = 0L;
         this.releaseIncompleteTransaction();
         this.discardPendingDeliveries();
     }
@@ -740,26 +751,32 @@ final class TransactionAssembler {
         /// @throws IllegalArgumentException when bounds or lengths disagree
         void add(final AeronReplicationEnvelope.EnvelopeView envelope) {
             if (envelope.fencingToken() != this.fencingToken) {
-                throw new IllegalStateException("transaction mixes writer fencing tokens");
+                throw new CorruptReplicationDataException("transaction mixes writer fencing tokens");
             }
             final int payloadLength = envelope.payloadLength();
             final int wireLength = envelope.payloadLengthOnWire();
-            if (payloadLength > this.maxBytes) throw new IllegalArgumentException("payload exceeds maxTransactionBytes");
+            if (payloadLength > this.maxBytes) throw new CorruptReplicationDataException("payload exceeds maxTransactionBytes");
             final boolean dictionary = envelope.kind() == AeronReplicationEnvelope.Kind.TYPE_DICTIONARY;
-            if (dictionary && this.dataNextChunk != 0) throw new IllegalStateException("type dictionary follows Store binary chunks");
+            if (dictionary && this.dataNextChunk != 0) {
+                throw new CorruptReplicationDataException("type dictionary follows Store binary chunks");
+            }
             if (!dictionary && this.dictionary != null && this.dictionaryNextChunk != this.dictionaryChunkCount) {
-                throw new IllegalStateException("Store binary chunk arrived before type dictionary completed");
+                throw new CorruptReplicationDataException("Store binary chunk arrived before type dictionary completed");
             }
             if (dictionary && (long) payloadLength + this.dataLength > this.maxBytes ||
                 !dictionary && this.dictionary != null && (long) payloadLength + this.dictionaryLength > this.maxBytes) {
-                throw new IllegalArgumentException("dictionary and Store payload exceed maxTransactionBytes");
+                throw new CorruptReplicationDataException("dictionary and Store payload exceed maxTransactionBytes");
             }
             final int expectedCount = dictionary ? this.dictionaryChunkCount : this.dataChunkCount;
-            if (expectedCount != -1 && expectedCount != envelope.chunkCount()) throw new IllegalArgumentException("chunk count changed within transaction");
-            if (envelope.chunkIndex() != (dictionary ? this.dictionaryNextChunk : this.dataNextChunk)) throw new IllegalStateException("unexpected chunk index");
+            if (expectedCount != -1 && expectedCount != envelope.chunkCount()) {
+                throw new CorruptReplicationDataException("chunk count changed within transaction");
+            }
+            if (envelope.chunkIndex() != (dictionary ? this.dictionaryNextChunk : this.dataNextChunk)) {
+                throw new CorruptReplicationDataException("unexpected chunk index");
+            }
             final int offset = dictionary ? this.dictionaryOffset : this.dataOffset;
             if (envelope.chunkOffset() != offset || (long) envelope.chunkOffset() + wireLength > payloadLength) {
-                throw new IllegalArgumentException("non-contiguous or oversized chunk");
+                throw new CorruptReplicationDataException("non-contiguous or oversized chunk");
             }
             if (dictionary) {
                 if (this.dictionary == null) {
@@ -768,7 +785,9 @@ final class TransactionAssembler {
                         this.ensureCapacity(true, payloadLength);
                     }
                 }
-                if (this.dictionaryLength != payloadLength) throw new IllegalArgumentException("dictionary length changed within transaction");
+                if (this.dictionaryLength != payloadLength) {
+                    throw new CorruptReplicationDataException("dictionary length changed within transaction");
+                }
                 if (wireLength != 0) {
                     if (this.dictionary == null) throw new IllegalStateException("dictionary storage is unavailable");
                     this.ensureCapacity(true, this.dictionaryOffset + wireLength);
@@ -781,7 +800,9 @@ final class TransactionAssembler {
                 if (this.data == null && payloadLength != 0) {
                     this.ensureCapacity(false, payloadLength);
                 }
-                if (this.dataLength != 0 && this.dataLength != payloadLength) throw new IllegalArgumentException("Store binary length changed within transaction");
+                if (this.dataLength != 0 && this.dataLength != payloadLength) {
+                    throw new CorruptReplicationDataException("Store binary length changed within transaction");
+                }
                 this.dataLength = payloadLength;
                 if (wireLength != 0) {
                     if (this.data == null) throw new IllegalStateException("Store data storage is unavailable");

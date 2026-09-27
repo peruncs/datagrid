@@ -10,7 +10,7 @@ import org.eclipse.store.storage.exceptions.StorageException;
 import org.eclipse.store.storage.types.*;
 import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.api.NodeSettingsSource;
-import peruncs.cluster.api.NodeSettingsSource.Env.EnvKeys;
+import peruncs.cluster.api.NodeSettingsSource.EnvKeys;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
@@ -379,11 +379,13 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * the node serves or publishes anything. */
         ClusterStoreIndexes.validateStorageRoots(embeddedStorageManager);
 
+        final var limitGate = this.assembly.getStorageLimitGate();
+        limitGate.updateUsage(this.assembly.getStorageUsageGauge().measureNow());
+
         this.assembly.getReplicationPublisher().ignoreDistribution(false);
         this.queueWriterDictionary(embeddedStorageManager);
 
         final var maintenance = this.assembly.getNodeMaintenanceScheduler();
-        final var limitGate = this.assembly.getStorageLimitGate();
 
         /* Reader roles reproduce the writer's history through the internal
          * raw Store import path and must never persist a locally originated
@@ -534,7 +536,12 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// @throws NodeException if startup fails
     private void startDevNode() throws NodeException {
         LOGGER.log(INFO, "Starting dev cluster node");
-        final var storage = this.assembly.getEmbeddedStorageFoundation().start();
+        this.rejectProductionSettingsInDevMode();
+        final var properties = this.assembly.getNodeSettingsSource();
+        final String configuredStoragePath = properties.replicationProperty(  NodeSettingsSource.EnvKeys.STORAGE_PATH);
+        final var storage = configuredStoragePath == null || configuredStoragePath.isBlank()
+                ? this.assembly.getEmbeddedStorageFoundation().start()
+                : this.prepareEmbeddedStorage(this.assembly.storageParentPath().resolve("storage")).start();
         this.assembly.embeddedStorageManager = storage;
         this.initializeRoot(storage, true);
 
@@ -544,6 +551,20 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 this.nodeCloseTrigger,
                 this.assembly.graphCoordinator
         );
+    }
+
+    private void rejectProductionSettingsInDevMode() {
+        final var properties = this.assembly.getNodeSettingsSource();
+        final String configuredTransport = properties.replicationProperty( NodeSettingsSource.EnvKeys.REPLICATION_TRANSPORT);
+        final String selectedTransport = properties.replicationTransport();
+        final String configuredRole = properties.replicationRole();
+        final boolean transportConfigured = configuredTransport != null && !configuredTransport.isBlank()
+                || !"none".equalsIgnoreCase(selectedTransport);
+        if ((configuredRole != null && !configuredRole.isBlank())
+                || transportConfigured) {
+            throw new NodeException("replication role or transport requires " +
+                    "ECLIPSE_DATAGRID_PROD_MODE=true");
+        }
     }
 
 

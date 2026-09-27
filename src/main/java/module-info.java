@@ -1,4 +1,8 @@
-import peruncs.cluster.api.*;
+import peruncs.cluster.api.ClusterNode;
+import peruncs.cluster.api.ClusterStorageManager;
+import peruncs.cluster.api.GraphBoundary;
+import peruncs.cluster.api.NodeOptions;
+import peruncs.cluster.api.NodeSettingsSource;
 
 /// Cluster node with Aeron replication.
 ///
@@ -26,11 +30,13 @@ import peruncs.cluster.api.*;
 /// Aeron is the only transport. Each transport owns its embedded MediaDriver
 /// and Archive lifecycle, closed by the node lifecycle after maintenance stops.
 ///
-/// # Trusted network boundary
+/// # Deliberate absence of authentication and encryption
 ///
+/// PerunCS Cluster does not implement or require node authentication or
+/// transport encryption. Do not add either feature to the cluster protocol.
 /// Replication data, reader watermarks, and Aeron Archive control sessions
-/// have no node authentication. Deploy all channels only on an isolated,
-/// trusted network such as a private VPN.
+/// carry no node credentials and are not encrypted. The wire nonce and
+/// checksums are correctness checks, not substitutes for either feature.
 ///
 /// # Archive-first replication
 ///
@@ -134,10 +140,10 @@ import peruncs.cluster.api.*;
 /// and watermarks; it does not prevent a subscriber from receiving another
 /// cluster's frame. Accidentally sharing a channel and stream therefore causes
 /// a mismatch and fail-closed subscriber, while separate channels and streams
-/// prevent cross-talk. CRC32C, cluster IDs, and the wire nonce do not
-/// authenticate publishers;
-/// firewall, VPN, or network-policy rules remain the live-channel trust
-/// boundary.
+/// prevent cross-talk. PerunCS Cluster does not authenticate publishers or
+/// encrypt traffic. CRC32C, cluster IDs, and the wire nonce only detect
+/// cross-wiring and data corruption; firewall, VPN, or network-policy rules
+/// remain the live-channel trust boundary.
 ///
 /// # Filesystem backups
 ///
@@ -159,13 +165,14 @@ import peruncs.cluster.api.*;
 /// # Boundary, control, and entity
 ///
 /// The node ships no HTTP server and no HTTP types. The embedding application
-/// owns the entire boundary — HTTP and OpenAPI routes, MCP tools, a web UI,
-/// Prometheus rendering, authentication, and authorization — and drives the
-/// node through the exported [ClusterNode] and
-/// its [ClusterStorageManager] view; the Store object
+/// owns the outer boundary — HTTP and OpenAPI routes, MCP tools, a web UI,
+/// and Prometheus rendering — and drives the node through the exported
+/// [ClusterNode] and its [ClusterStorageManager] view; the Store object
 /// graph beneath them is coordinated through [GraphBoundary]. The assembly
 /// owns both role managers and closes them exactly once, and both closes are
-/// idempotent.
+/// idempotent. Application authentication is optional and is not a
+/// PerunCS Cluster requirement; the cluster itself does not authenticate
+/// nodes or encrypt transport traffic.
 /// Roles stay fixed at startup
 /// as described above, so there is deliberately no reader-to-writer
 /// promotion: a role change is a restart with a new role, never a runtime

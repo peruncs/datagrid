@@ -286,6 +286,26 @@ public final class ClusterStoreIndexes {
                 storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null));
     }
 
+    /// Creates a serialized writer validation callback with reusable scan state.
+    ///
+    /// The callback is intended for the writer's exclusive persistence path;
+    /// it reads the current connection for every write and keeps only scratch
+    /// collections between scans.
+    ///
+    /// @param storage current writer connection supplier
+    /// @return validation callback
+    public static Runnable writerValidator(final Supplier<StorageConnection> storage) {
+        Objects.requireNonNull(storage, "storage");
+        final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
+        return () -> {
+            final StorageConnection connection = storage.get();
+            if (connection != null) {
+                withRegistrationRead(() -> ClusterIndexValidation.validateStorageRoots(
+                        connection, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null, null, scratch));
+            }
+        };
+    }
+
         /// Reader-side maintenance: retires cached search views before an import
     /// batch is materialized.
     ///

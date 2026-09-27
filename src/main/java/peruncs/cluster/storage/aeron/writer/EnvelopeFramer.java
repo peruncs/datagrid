@@ -1,6 +1,5 @@
 package peruncs.cluster.storage.aeron.writer;
 
-import org.agrona.BufferUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -13,15 +12,12 @@ import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.zip.CRC32C;
 
-/// Encodes one transaction's replication frames into its own staging buffer
-/// and offers each frame once through the publisher's retryer.
+/// Encodes one transaction's frames in the publisher's reusable staging buffer.
 ///
-/// A framer is created when its transaction is prepared and freed when the
-/// transaction becomes terminal. No buffer is shared across transactions, so
-/// a prepared transaction keeps its frame bytes until commit or abort without
-/// blocking the next prepare. Retry, deadline, and lease-gate policy stays in
-/// the retryer and the gate; this type only encodes, accumulates CRCs, and
-/// performs the single non-blocking offer attempt per frame.
+/// The publisher admits only one prepared transaction at a time, so the buffer
+/// stays owned by this framer until its transaction becomes terminal. Retry,
+/// deadline, and lease-gate policy stays in the retryer and the gate; this type
+/// only encodes, accumulates CRCs, and offers frames.
 final class EnvelopeFramer implements AutoCloseable {
     private static final LazyConstant<UnsafeBuffer> EMPTY_BUFFER = LazyConstant.of(UnsafeBuffer::new);
 
@@ -47,13 +43,13 @@ final class EnvelopeFramer implements AutoCloseable {
             new AeronReplicationEnvelope.ChecksumContext();
     private final CRC32C dataCrc = new CRC32C();
     private final CRC32C chunkCrc = new CRC32C();
-    private final AtomicBoolean freed = new AtomicBoolean();
+    private final AtomicBoolean closed = new AtomicBoolean();
 
-    /// Creates a framer owning one direct staging buffer for one transaction.
+    /// Creates a framer over the publisher's reusable direct staging buffer.
     EnvelopeFramer(final long sequence, final UUID clusterId, final long epoch, final long wireNonce,
                    final int chunkSize, final int maxMessageLength, final long offerTimeoutNanos,
                    final AeronOfferRetryer offerer, final LongSupplier fencingToken,
-                   final Supplier<WriterLeaseGate> leaseGate) {
+                   final Supplier<WriterLeaseGate> leaseGate, final ByteBuffer storage) {
         this.sequence = sequence;
         this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
         this.epoch = epoch;
@@ -65,7 +61,7 @@ final class EnvelopeFramer implements AutoCloseable {
         Objects.requireNonNull(fencingToken, "fencingToken");
         this.fencingToken = fencingToken.getAsLong();
         this.leaseGate = Objects.requireNonNull(leaseGate, "leaseGate");
-        this.storage = ByteBuffer.allocateDirect(chunkSize + AeronReplicationEnvelope.HEADER_LENGTH);
+        this.storage = Objects.requireNonNull(storage, "storage");
         this.buffer = new UnsafeBuffer(this.storage);
     }
 
@@ -91,6 +87,7 @@ final class EnvelopeFramer implements AutoCloseable {
     /// fence CRC remains a separate pass because it is the recovery evidence
     /// written before local Store acceptance.
     int offerDataChunks(final ByteBuffer[] sources, final int sourceCount, final int length) {
+        if (this.closed.get()) throw new IllegalStateException("Aeron envelope framer is closed");
         final CRC32C crc = this.dataCrc;
         crc.reset();
         if (length == 0) {
@@ -193,6 +190,7 @@ final class EnvelopeFramer implements AutoCloseable {
                               final int chunkOffset, final int commitCrc32c,
                               final DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
+        if (this.closed.get()) throw new IllegalStateException("Aeron envelope framer is closed");
         final int encodedLength = AeronReplicationEnvelope.encode(this.buffer, 0, this.clusterId,
                 this.epoch, this.fencingToken, this.wireNonce, this.sequence, kind,
                 payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
@@ -223,9 +221,9 @@ final class EnvelopeFramer implements AutoCloseable {
         this.offerer.offerGated(this.buffer, encodedLength, this.leaseGate.get(), this.offerTimeoutNanos);
     }
 
-    /// Frees the direct staging buffer; the framer is single-use after close.
+    /// Marks this transaction framer complete; the publisher owns and reuses the buffer.
     @Override
     public void close() {
-        if (this.freed.compareAndSet(false, true)) BufferUtil.free(this.storage);
+        this.closed.set(true);
     }
 }

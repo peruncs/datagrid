@@ -1,6 +1,7 @@
 package peruncs.cluster.storage;
 
 import peruncs.cluster.errors.GraphInvalidatedException;
+import peruncs.cluster.errors.GraphDrainTimeoutException;
 import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
@@ -82,6 +83,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// deadlock against the fair write lock otherwise.
 public final class StorageGraphCoordinator {
     private static final long DEFAULT_DRAIN_TIMEOUT_MILLIS = 5_000L;
+    private final long drainTimeoutMillis;
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
     /* Latched while a failed write section still holds the write lock: after
      * release, every coordinated access must fail closed instead of serving a
@@ -95,6 +97,15 @@ public final class StorageGraphCoordinator {
 
     /// Creates a fair coordinator for one Store object graph.
     public StorageGraphCoordinator() {
+        this(DEFAULT_DRAIN_TIMEOUT_MILLIS);
+    }
+
+    /// Creates a fair coordinator with a configured drain deadline.
+    ///
+    /// @param drainTimeoutMillis maximum close wait for active graph sections
+    public StorageGraphCoordinator(final long drainTimeoutMillis) {
+        if (drainTimeoutMillis <= 0L) throw new IllegalArgumentException("drainTimeoutMillis must be positive");
+        this.drainTimeoutMillis = drainTimeoutMillis;
     }
 
         /// Runs application graph access under the shared read side.
@@ -151,12 +162,14 @@ public final class StorageGraphCoordinator {
         try {
             this.ensureAdmission();
             this.ensureValid();
-            update.run();
-        } catch (final RuntimeException | Error failure) {
-            /* Latch before the finally releases the write lock: no coordinated
-             * read may ever observe the graph this failed section left. */
-            this.invalidate(failure);
-            throw failure;
+            try {
+                update.run();
+            } catch (final RuntimeException | Error failure) {
+                /* Latch before the finally releases the write lock: no coordinated
+                 * read may ever observe the graph this failed section left. */
+                this.invalidate(failure);
+                throw failure;
+            }
         } finally {
             this.lock.writeLock().unlock();
         }
@@ -177,12 +190,14 @@ public final class StorageGraphCoordinator {
         try {
             this.ensureAdmission();
             this.ensureValid();
-            return update.get();
-        } catch (final RuntimeException | Error failure) {
-            /* Latch before the finally releases the write lock: no coordinated
-             * read may ever observe the graph this failed section left. */
-            this.invalidate(failure);
-            throw failure;
+            try {
+                return update.get();
+            } catch (final RuntimeException | Error failure) {
+                /* Latch before the finally releases the write lock: no coordinated
+                 * read may ever observe the graph this failed section left. */
+                this.invalidate(failure);
+                throw failure;
+            }
         } finally {
             this.lock.writeLock().unlock();
         }
@@ -279,7 +294,7 @@ public final class StorageGraphCoordinator {
     /// rejected by the closed check in their own entry points; writers must
     /// not hold this lock themselves while draining.
     public void drain() {
-        this.drain(DEFAULT_DRAIN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        this.drain(this.drainTimeoutMillis, TimeUnit.MILLISECONDS);
     }
 
     void drain(final long timeout, final TimeUnit unit) {
@@ -290,7 +305,8 @@ public final class StorageGraphCoordinator {
         this.admissionClosed.set(true);
         try {
             if (!this.lock.writeLock().tryLock(timeout, unit)) {
-                throw new IllegalStateException("Timed out while draining active graph sections");
+                throw new GraphDrainTimeoutException(
+                        "Timed out while draining active graph sections after " + timeout + " " + unit.name().toLowerCase());
             }
             try {
                 this.drained.set(true);

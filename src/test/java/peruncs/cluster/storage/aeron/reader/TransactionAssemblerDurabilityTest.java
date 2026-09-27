@@ -5,6 +5,7 @@ import io.aeron.protocol.DataHeaderFlyweight;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.errors.CorruptReplicationDataException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -20,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// publication runs ahead of the Archive recording, so the assembler must
 /// withhold it — never stage, never advance the cursor — until the recorded
 /// position covers the marker, and must fail closed when the recording stalls
-/// beyond the reader stop budget.
+/// beyond the live-marker durability budget.
 class TransactionAssemblerDurabilityTest {
     private static final UUID CLUSTER = UUID.randomUUID();
     private static final long EPOCH = 17;
@@ -49,12 +50,12 @@ class TransactionAssemblerDurabilityTest {
     }
 
     private static TransactionAssembler assembler(final AtomicLong recordedPosition,
-                                                  final long readerStopTimeoutNanos) {
+                                                  final long liveWithholdTimeoutNanos) {
         return TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder()
                         .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024)
                         .readerBarrierMaxTransactions(1)
-                        .readerStopTimeoutNanos(readerStopTimeoutNanos)
+                        .liveWithholdTimeoutNanos(liveWithholdTimeoutNanos)
                         .build(),
                 CLUSTER, EPOCH, -1L, new RecordingReceiver(), () -> {
                 }, null, required -> recordedPosition.get() >= required);
@@ -131,7 +132,7 @@ class TransactionAssemblerDurabilityTest {
     }
 
     /// A recording that never covers the live COMMIT fails the assembler
-    /// closed within the reader stop budget instead of applying or parking.
+    /// closed within the live-marker durability budget instead of applying or parking.
     @Test
     void stalledRecordingFailsClosedInsteadOfApplying() throws Exception {
         final AtomicLong recorded = new AtomicLong(60L);
@@ -190,7 +191,7 @@ class TransactionAssemblerDurabilityTest {
                 AeronReplicationConfiguration.builder()
                         .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024)
                         .readerBarrierMaxTransactions(1)
-                        .readerStopTimeoutNanos(5_000_000_000L)
+                        .liveWithholdTimeoutNanos(5_000_000_000L)
                         .build(),
                 CLUSTER, EPOCH, -1L, new RecordingReceiver(), () -> {
                 }, null, required ->
@@ -234,7 +235,7 @@ class TransactionAssemblerDurabilityTest {
         try {
             assertFalse(assembler.onFragment(new UnsafeBuffer(dataFrame(0L, 4)), 0,
                     dataFrame(0L, 4).length, liveHeader(64L), true));
-            assertThrows(IllegalStateException.class,
+            assertThrows(CorruptReplicationDataException.class,
                     () -> assembler.onFragment(new UnsafeBuffer(commitFrame(0L, 4)), 0,
                             commitFrame(0L, 4).length, null, true),
                     "a headerless live COMMIT must not slip past the gate");

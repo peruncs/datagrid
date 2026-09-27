@@ -44,7 +44,8 @@ class CloseSequencerTest {
                 })));
         final Throwable firstFailure = sequencer.close();
         assertNotNull(firstFailure);
-        assertEquals("first attempt fails", firstFailure.getMessage());
+        assertEquals("Close stage 'flaky' failed", firstFailure.getMessage());
+        assertEquals("first attempt fails", firstFailure.getCause().getMessage());
         assertNull(sequencer.close(), "a retry must finish the failed stage");
         assertEquals(2, attempts.get());
     }
@@ -61,9 +62,11 @@ class CloseSequencerTest {
                 })));
         final Throwable failure = sequencer.close();
         assertNotNull(failure);
-        assertEquals("one failed", failure.getMessage());
+        assertEquals("Close stage 'one' failed", failure.getMessage());
+        assertEquals("one failed", failure.getCause().getMessage());
         assertEquals(1, failure.getSuppressed().length);
-        assertEquals("two failed", failure.getSuppressed()[0].getMessage());
+        assertEquals("Close stage 'two' failed", failure.getSuppressed()[0].getMessage());
+        assertEquals("two failed", failure.getSuppressed()[0].getCause().getMessage());
     }
 
         /// Verifies a checked failure is reported rather than swallowed.
@@ -74,7 +77,8 @@ class CloseSequencerTest {
                     throw new java.io.IOException("checked failure");
                 })));
         final Throwable failure = sequencer.close();
-        assertInstanceOf(java.io.IOException.class, failure);
+        assertInstanceOf(peruncs.cluster.errors.NodeException.class, failure);
+        assertInstanceOf(java.io.IOException.class, failure.getCause());
     }
 
         /// An Error thrown by a later stage must win over a RuntimeException
@@ -93,9 +97,11 @@ class CloseSequencerTest {
         final Throwable failure = sequencer.close();
         assertSame(fatal, failure, "the Error must win over the earlier RuntimeException");
         assertSame(fatal, failure);
-        assertEquals(1, failure.getSuppressed().length);
-        assertInstanceOf(IllegalStateException.class, failure.getSuppressed()[0]);
-        assertEquals("stage one failed", failure.getSuppressed()[0].getMessage());
+        assertEquals(2, failure.getSuppressed().length);
+        assertInstanceOf(peruncs.cluster.errors.NodeException.class, failure.getSuppressed()[0]);
+        assertEquals("Close stage 'fatal' failed", failure.getSuppressed()[0].getMessage());
+        assertEquals("Close stage 'runtime' failed", failure.getSuppressed()[1].getMessage());
+        assertEquals("stage one failed", failure.getSuppressed()[1].getCause().getMessage());
     }
 
         /// The [CloseSequencer#append] helper keeps the same Error-priority

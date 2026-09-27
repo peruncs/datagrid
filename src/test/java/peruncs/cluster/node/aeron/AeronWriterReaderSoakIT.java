@@ -269,8 +269,8 @@ class AeronWriterReaderSoakIT {
             readerIds[i] = UUID.randomUUID();
         }
         final UUID writerNodeId = UUID.randomUUID();
-        /* Watermark quorum for the retention chaos op: the writer authenticates
-         * every soak reader, so deleteThrough is gated on all of them. */
+        /* Watermark quorum for the retention chaos op: deleteThrough is gated
+         * on every configured soak reader. */
         final Set<UUID> retentionReaders = this.retentionEnabled ? Set.of(readerIds) : Set.of();
         try (WriterHandle writerHandle = new WriterHandle(writerStore, root.resolve("writer"),
                 clusterId, writerNodeId, generation, controlPort, livePort, watermarkPort,

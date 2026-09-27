@@ -21,10 +21,14 @@ class StorageLimitGateTest {
         assertFalse(gate.limitReached());
     }
 
-        /// A fresh gate accepts writes.
+    /// An unknown first measurement fails closed, then a real low measurement opens the gate.
     @Test
-    void startsBelowLimit() {
-        assertFalse(StorageLimitGate.create(10).limitReached());
+    void startsClosedUntilFirstMeasurement() {
+        final StorageLimitGate gate = StorageLimitGate.create(10);
+        assertTrue(gate.limitReached());
+
+        gate.updateUsage(0L);
+        assertFalse(gate.limitReached());
     }
 
         /// Usage below the limit never trips the gate.
@@ -34,6 +38,16 @@ class StorageLimitGateTest {
 
         gate.updateUsage(9_999_999_999L);
 
+        assertFalse(gate.limitReached());
+    }
+
+    @Test
+    void unknownUsageStaysClosedUntilARealMeasurementArrives() {
+        final StorageLimitGate gate = StorageLimitGate.create(10);
+        gate.updateUsage(-1L);
+        assertTrue(gate.limitReached());
+
+        gate.updateUsage(1L);
         assertFalse(gate.limitReached());
     }
 

@@ -13,11 +13,18 @@ documented in the cluster section below.
 
 ## Build
 
-Requires an exact Java 27 runtime and Maven 3.9+. This artifact uses Java 27
-preview APIs, so both compilation and every consumer JVM must enable preview:
-`--enable-preview`. It is intentionally a pre-release build and is not ready
-for Maven Central publication until the preview dependency is removed or the
-release policy explicitly supports it.
+Requires an exact Java 27 runtime and Maven 3.9+. Every consumer JVM must enable
+the preview and vector modules and export Serializer's required JDK package.
+For a classpath launch, use:
+
+```text
+--enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED
+```
+
+For a named-module launch, target the export at `org.eclipse.serializer.base`
+instead of `ALL-UNNAMED`. This artifact is intentionally a pre-release build
+and is not ready for Maven Central publication until the preview dependency is
+removed or the release policy explicitly supports it.
 
 ```bash
 mvn test
@@ -66,6 +73,14 @@ try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
     NodeStatus status = node.status();
 }
 ```
+
+`GraphBoundary.write` holds the exclusive graph lock but does not roll back
+mutations or persist automatically. If a callback fails before changing the
+graph, the failure can propagate normally. If it may have changed graph state
+or written uncertain bytes, call `invalidate(cause)` before leaving the write
+section; later reads and writes then fail closed until the node reloads or is
+reseeded. Node close waits up to `ECLIPSE_DATAGRID_GRAPH_DRAIN_TIMEOUT_MILLIS`
+(5 seconds by default) for active graph sections.
 
 `ClusterStorageManager` is the drop-in `StorageManager` facade of a node:
 application writes on a reader are rejected with `ReaderWriteRejectedException`,
@@ -154,7 +169,11 @@ recorded-position, and stop waits are independently configurable with
 `ECLIPSE_DATAGRID_AERON_RECORDING_START_TIMEOUT_NANOS`,
 `ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS`, and
 `ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS`; reader shutdown uses
-`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
+`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`. Waiting for Archive
+durability of a live terminal marker and reconnecting after an Archive outage
+have independent 30-second budgets, configurable with
+`ECLIPSE_DATAGRID_AERON_LIVE_WITHHOLD_TIMEOUT_NANOS` and
+`ECLIPSE_DATAGRID_AERON_RECONNECT_TIMEOUT_NANOS`.
 Archive control calls have their own
 `ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS` (5 s default, matching
 Aeron), the watermark channel flushes on close within
@@ -223,6 +242,11 @@ deletion on an untrusted network.
 
 ## Network boundary
 
+PerunCS Cluster intentionally provides and requires neither node
+authentication nor transport encryption. Do not add either feature to the
+cluster protocol. The wire nonce and CRC32C detect accidental cross-wiring and
+corruption; they are not credentials or encryption.
+
 Fencing tokens and CRC32C are correctness checks, not security: what each
 control does and does not prove is a design decision recorded in the module
 documentation. Operationally, none of them replaces the network boundary:
@@ -258,7 +282,10 @@ fencing lease. Each generated backup is a single compressed archive named
 `manifest`, and `ready`. The complete archive is atomically moved into the
 volume, so readers never select an in-progress export. Operator-provided
 storage is kept as `user-uploaded-storage.zip` and is restored through its
-separate API.
+separate API. Node close allows an active export up to
+`ECLIPSE_DATAGRID_BACKUP_CLOSE_TIMEOUT_MILLIS` (60 seconds by default); if it
+is still running, Store shutdown stays deferred and a later close retries the
+drain.
 
 Archive extraction rejects traversal, symbolic-link paths, duplicate entries,
 oversized content, missing storage, and incomplete generated metadata. The
@@ -275,8 +302,8 @@ contract for driving the node, exposed through `ClusterNode`:
   (`ready`), liveness (`healthy`), whether storage checks are running,
   storage size (`storageBytes`), and `ReplicationStatus` with replay/live
   state, current/latest sequence, and derived lag (`lagTransactions()`).
-  `replication()` is `null` on an unreplicated node. See the `NodeStatus`
-  Javadoc for the operator action of each `ReplicationState` (`FAILED`,
+  Unreplicated nodes report `NOT_CONFIGURED` with empty metric boundaries.
+  See the `NodeStatus` Javadoc for the operator action of each `ReplicationState` (`FAILED`,
   `DEGRADED`, `RESEED_REQUIRED`). The embedder renders these typed values
   as JSON or Prometheus text itself.
 - `startStorageChecks()` starts periodic storage checks (writer and reader
@@ -288,12 +315,11 @@ contract for driving the node, exposed through `ClusterNode`:
 The role is validated before anything starts, so probing the wrong role never
 starts Store, Aeron, recovery, or background threads.
 The mutating operations (backups, storage checks, pausing and resuming
-replication) carry no authentication of their own: the embedding application
-MUST authenticate and authorize them before delegating. Only the health,
-readiness, and read-only metric reads are safe to expose to an
-unauthenticated probe endpoint. Map `BackupBusyException` to a conflict
-response, unhealthy/not-ready to a retryable unavailable response, and any
-other failure to an internal error.
+replication) are in-process APIs and carry no authentication. If an embedding
+application chooses to expose them through a network endpoint, that endpoint's
+access policy belongs to the application. Map `BackupBusyException` to a
+conflict response, unhealthy/not-ready to a retryable unavailable response,
+and any other failure to an internal error.
 
 ## Store binary transport
 
@@ -397,7 +423,7 @@ artifacts):
   mid-replay is absorbed by the reader's bounded reconnect. An Archive loss
   reported by the subscription (escaped `ArchiveException` or the
   client-side self-heal loop surfacing through the persistent subscription
-  listener) opens a reconnect incident bounded by the reader stop timeout;
+  listener) opens a reconnect incident bounded by the reconnect timeout;
   resolved progress or reaching the live stream closes it, and a channel
   that stays down past the budget latches a typed `ReseedRequiredException`
   (health reports `RESEED_REQUIRED`) instead of dying on a raw transport
@@ -454,8 +480,8 @@ Soak controls are:
 | `soak.jfr.fail` | `false` | Turn calibrated JFR budget warnings into failures |
 
 At the small default, `soak.pollStallMs` is primarily a backlog widener. The
-sliding reader-stop deadline is probed only when it is configured near
-`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`.
+sliding live-marker deadline is probed only when it is configured near
+`ECLIPSE_DATAGRID_AERON_LIVE_WITHHOLD_TIMEOUT_NANOS`.
 
 `-Dsoak.corrupt=false` removes cursor, rollback, and Archive-tail corruption
 from the rotation; it does not turn off restart or load chaos. The per-op
@@ -536,7 +562,7 @@ mvn -q -Pcrashmatrix -DskipTests \
 ```
 
 The crash matrix intentionally does not claim to model arbitrary UDP loss or
-duplication, disk-full ENOSPC, SIGSTOP, or network authentication. Those need
+duplication, disk-full ENOSPC, SIGSTOP, or hostile network traffic. Those need
 separate fault-injection mechanisms; these tests focus on durable ordering,
 checkpoint truth, process death, and fail-closed recovery.
 

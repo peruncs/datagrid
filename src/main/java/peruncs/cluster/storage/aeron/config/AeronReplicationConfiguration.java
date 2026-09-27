@@ -23,9 +23,9 @@ import java.util.Objects;
 /// @param recordingStartTimeoutNanos bounded wait for an Archive recording to become active
 /// @param recordedPositionTimeoutNanos bounded wait for the Archive to report a recorded position
 /// @param recordingStopTimeoutNanos  bounded wait for an Archive recording to stop
-/// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary;
-///                                   also the endurance of a live terminal marker withheld
-///                                   while the Archive recording has not durably covered it
+/// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary
+/// @param liveWithholdTimeoutNanos   maximum time a live terminal marker may wait for Archive durability
+/// @param reconnectTimeoutNanos      maximum duration of one Archive reconnect incident
 /// @param readerFragmentsPerPoll     fragments a reader consumes per poll call while replaying
 /// @param readerBarrierMaxTransactions maximum resolved transactions the reader may stage into one
 ///                                     durability barrier before it is flushed
@@ -42,6 +42,8 @@ public record AeronReplicationConfiguration(
         long recordedPositionTimeoutNanos,
         long recordingStopTimeoutNanos,
         long readerStopTimeoutNanos,
+        long liveWithholdTimeoutNanos,
+        long reconnectTimeoutNanos,
         int readerFragmentsPerPoll,
         int readerBarrierMaxTransactions,
         long readerBarrierIdleFlushNanos,
@@ -84,6 +86,8 @@ public record AeronReplicationConfiguration(
     private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_STOP_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_READER_STOP_TIMEOUT_NANOS = 30_000_000_000L;
+    private static final long DEFAULT_LIVE_WITHHOLD_TIMEOUT_NANOS = 30_000_000_000L;
+    private static final long DEFAULT_RECONNECT_TIMEOUT_NANOS = 30_000_000_000L;
 
         /// Validates every framing, timeout, and delivery limit.
     ///
@@ -115,7 +119,7 @@ public record AeronReplicationConfiguration(
         }
         if (offerTimeoutNanos <= 0 || recordingStartTimeoutNanos <= 0 ||
             recordedPositionTimeoutNanos <= 0 || recordingStopTimeoutNanos <= 0 ||
-            readerStopTimeoutNanos <= 0) {
+            readerStopTimeoutNanos <= 0 || liveWithholdTimeoutNanos <= 0 || reconnectTimeoutNanos <= 0) {
             throw new IllegalArgumentException("all Aeron timeouts must be positive");
         }
         if (readerFragmentsPerPoll <= 0) {
@@ -173,6 +177,8 @@ public record AeronReplicationConfiguration(
         private long recordedPositionTimeoutNanos = DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS;
         private long recordingStopTimeoutNanos = DEFAULT_RECORDING_STOP_TIMEOUT_NANOS;
         private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
+        private long liveWithholdTimeoutNanos = DEFAULT_LIVE_WITHHOLD_TIMEOUT_NANOS;
+        private long reconnectTimeoutNanos = DEFAULT_RECONNECT_TIMEOUT_NANOS;
         private int readerFragmentsPerPoll = DEFAULT_READER_FRAGMENTS_PER_POLL;
         private int readerBarrierMaxTransactions = DEFAULT_READER_BARRIER_MAX_TRANSACTIONS;
         private long readerBarrierIdleFlushNanos = DEFAULT_READER_BARRIER_IDLE_FLUSH_NANOS;
@@ -263,6 +269,24 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
+        /// Sets the maximum time a live terminal marker may wait for Archive durability.
+        ///
+        /// @param value wait in nanoseconds
+        /// @return this builder
+        public Builder liveWithholdTimeoutNanos(final long value) {
+            this.liveWithholdTimeoutNanos = value;
+            return this;
+        }
+
+        /// Sets the maximum duration of one Archive reconnect incident.
+        ///
+        /// @param value wait in nanoseconds
+        /// @return this builder
+        public Builder reconnectTimeoutNanos(final long value) {
+            this.reconnectTimeoutNanos = value;
+            return this;
+        }
+
                 /// Sets the fragments a reader consumes per poll call.
         ///
         /// A larger value drains a replay backlog in fewer polls; the default
@@ -333,6 +357,8 @@ public record AeronReplicationConfiguration(
                     this.recordedPositionTimeoutNanos,
                     this.recordingStopTimeoutNanos,
                     this.readerStopTimeoutNanos,
+                    this.liveWithholdTimeoutNanos,
+                    this.reconnectTimeoutNanos,
                     this.readerFragmentsPerPoll,
                     this.readerBarrierMaxTransactions,
                     this.readerBarrierIdleFlushNanos,

@@ -3,6 +3,8 @@ package peruncs.cluster.storage.aeron.reader;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.errors.CorruptReplicationDataException;
+import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
@@ -61,7 +63,7 @@ class TransactionAssemblerFencingTest {
             final byte[] data = {1, 2};
             final byte[] poison = frame(AeronReplicationEnvelope.Kind.STORE_BINARY, 9L, 5L,
                     data, data.length, 0);
-            assertThrows(IllegalStateException.class, () -> accept(assembler, poison));
+            assertThrows(CorruptReplicationDataException.class, () -> accept(assembler, poison));
             assertNotNull(assembler.failure(), "poison frame must latch the terminal failure");
             assertEquals(5L, assembler.fencingToken(),
                     "a rejected frame must not lift the persisted token floor");
@@ -89,9 +91,31 @@ class TransactionAssemblerFencingTest {
             assertEquals(1, receiver.dataCalls);
             final byte[] stale = frame(AeronReplicationEnvelope.Kind.STORE_BINARY, 5L, 1L,
                     data, data.length, 0);
-            final var failure = assertThrows(IllegalStateException.class, () -> accept(assembler, stale));
+            final var failure = assertThrows(ReseedRequiredException.class, () -> accept(assembler, stale));
             assertTrue(failure.getMessage().contains("stale writer fencing token"),
                     "stale token must fail closed, was: %s".formatted(failure.getMessage()));
+        } finally {
+            assembler.dispose();
+        }
+    }
+
+    @Test
+    void takeoverAbortDiscardsOlderPartialTransactionAndAdvancesToken() {
+        final CountingReceiver receiver = new CountingReceiver();
+        final TransactionAssembler assembler = assembler(receiver);
+        try {
+            assembler.startingFencingToken(5L);
+            final byte[] data = {1, 2};
+            accept(assembler, frame(AeronReplicationEnvelope.Kind.STORE_BINARY, 5L, 0L,
+                    data, data.length, 0));
+            accept(assembler, frame(AeronReplicationEnvelope.Kind.ABORT, 6L, 0L,
+                    new byte[0], data.length, 0));
+
+            assertEquals(6L, assembler.fencingToken());
+            assertEquals(0, receiver.dataCalls, "an abort from the new writer must not apply old staged bytes");
+            final byte[] stale = frame(AeronReplicationEnvelope.Kind.STORE_BINARY, 5L, 1L,
+                    data, data.length, 0);
+            assertThrows(ReseedRequiredException.class, () -> accept(assembler, stale));
         } finally {
             assembler.dispose();
         }

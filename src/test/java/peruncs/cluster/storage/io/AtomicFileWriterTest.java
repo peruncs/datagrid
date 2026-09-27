@@ -181,4 +181,28 @@ class AtomicFileWriterTest {
             delete(target);
         }
     }
+
+    @Test
+    void deleteAllowsAReplacementWithANewIdentity() throws Exception {
+        final Path directory = Files.createTempDirectory("atomic-file-delete-race-");
+        final Path file = directory.resolve("checkpoint");
+        final Path replacement = directory.resolve("replacement");
+        try {
+            Files.writeString(file, "old");
+            Files.writeString(replacement, "new");
+            final boolean deleted = AtomicFileWriter.callWithTestHook((phase, ignored) -> {
+                if ("AFTER_REGULAR_DELETE".equals(phase)) {
+                    try {
+                        Files.move(replacement, file);
+                    } catch (final java.io.IOException failure) {
+                        throw new java.io.UncheckedIOException(failure);
+                    }
+                }
+            }, () -> AtomicFileWriter.deleteRegularFile(file));
+            assertTrue(deleted);
+            assertEquals("new", Files.readString(file));
+        } finally {
+            delete(directory);
+        }
+    }
 }

@@ -7,6 +7,7 @@ import org.eclipse.store.gigamap.lucene.LuceneContext;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -134,7 +135,7 @@ final class StoreIndexReflection {
     private static final ClassValue<List<Field>> REACHABLE_FIELDS = new ClassValue<>() {
         @Override
         protected List<Field> computeValue(final Class<?> type) {
-            final java.util.ArrayList<Field> fields = new java.util.ArrayList<>();
+            final ArrayList<Field> fields = new ArrayList<>();
             for (Class<?> cursor = type; cursor != null && cursor != Object.class;
                  cursor = cursor.getSuperclass()) {
                 for (final Field field : cursor.getDeclaredFields()) {
@@ -229,6 +230,12 @@ final class StoreIndexReflection {
     }
 
     /// Writes one boolean field through Store's offset-based accessor.
+    ///
+    /// The upstream field is volatile, but this accessor is a plain byte write.
+    /// Index reset runs inside the cluster graph write section, and every
+    /// supported search path enters the matching graph read section; that
+    /// lock handoff supplies visibility without allocating a per-call handle.
+    /// Searches outside the coordinated graph boundary are unsupported.
     ///
     /// @param target object to mutate
     /// @param field  resolved field

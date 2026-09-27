@@ -49,7 +49,7 @@ final class ClusterIndexValidation {
          * set: only index-relevant objects are visited (ordinary entity graphs
          * are pruned by class before they are enqueued), and the scan stops
          * here. The merger overrides this through its configuration. */
-    static final int DEFAULT_MAX_VALIDATED_OBJECTS = 4096;
+    static final int DEFAULT_MAX_VALIDATED_OBJECTS = 65_536;
 
         /* Per-class index-relevance cache backing the traversal prune. A class
          * is relevant when its instances could reach index metadata; anything
@@ -75,6 +75,7 @@ final class ClusterIndexValidation {
         final IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
         final ArrayDeque<Object> queue = new ArrayDeque<>();
         final ArrayList<IndexGroup<?>> groups = new ArrayList<>();
+        int scanWork;
         final ArrayList<GigaMap<?>> maps = new ArrayList<>();
         /* Rebuild plan for the merged validate-and-rebuild pass. Entries carry
          * the owning map so the rebuild can hold the same monitor queries use. */
@@ -270,18 +271,12 @@ final class ClusterIndexValidation {
         if (root == null) return;
         scratch.seen.clear();
         scratch.queue.clear();
+        scratch.scanWork = 0;
         try {
             scratch.seen.put(root, Boolean.TRUE);
             scratch.queue.add(root);
-            int visited = 0;
             while (!scratch.queue.isEmpty()) {
-                if (++visited > maxValidatedObjects) {
-                    throw new IllegalStateException(
-                            ("index validation exceeded %s index-relevant objects; raise " +
-                                    "StorageBinaryDataMerger.Configuration.maxValidatedIndexObjects or narrow " +
-                                    "the index-relevant graph so the replication boundary can be proven")
-                                    .formatted(maxValidatedObjects));
-                }
+                countScanWork(scratch, maxValidatedObjects);
                 final Object current = scratch.queue.poll();
                 if (visitedSink != null) visitedSink.accept(current);
                 switch (current) {
@@ -296,7 +291,8 @@ final class ClusterIndexValidation {
                     case VectorIndices<?> group -> validateVectorIndicesGroup(group);
                     case VectorIndex<?> index -> validateVectorConfiguration(index.configuration());
                     case VectorIndexConfiguration configuration -> validateVectorConfiguration(configuration);
-                    case null, default -> enqueueReachable(current, scratch.queue, scratch.seen);
+                case null, default -> enqueueReachable(current, scratch.queue, scratch.seen,
+                        scratch, maxValidatedObjects);
                 }
             }
         } finally {
@@ -377,29 +373,40 @@ final class ClusterIndexValidation {
     }
 
     static void enqueueReachable(final Object current, final ArrayDeque<Object> queue,
-                                 final IdentityHashMap<Object, Boolean> seen) {
+                                 final IdentityHashMap<Object, Boolean> seen,
+                                 final ValidationScratch scratch, final int maxValidatedObjects) {
         if (current == null) return;
         if (isLeaf(current)) return;
         final Class<?> type = current.getClass();
         if (type.isArray()) {
             if (!type.componentType().isPrimitive()) {
-                for (final Object element : (Object[]) current) offer(element, queue, seen);
+                for (final Object element : (Object[]) current) {
+                    countScanWork(scratch, maxValidatedObjects);
+                    offer(element, queue, seen);
+                }
             }
             return;
         }
         switch (current) {
             case Iterable<?> iterable -> {
-                for (final Object element : iterable) offer(element, queue, seen);
+                for (final Object element : iterable) {
+                    countScanWork(scratch, maxValidatedObjects);
+                    offer(element, queue, seen);
+                }
                 return;
             }
             case Map<?, ?> map -> {
                 for (final Map.Entry<?, ?> entry : map.entrySet()) {
+                    countScanWork(scratch, maxValidatedObjects);
+                    countScanWork(scratch, maxValidatedObjects);
                     offer(entry.getKey(), queue, seen);
                     offer(entry.getValue(), queue, seen);
                 }
                 return;
             }
             case Map.Entry<?, ?> entry -> {
+                countScanWork(scratch, maxValidatedObjects);
+                countScanWork(scratch, maxValidatedObjects);
                 offer(entry.getKey(), queue, seen);
                 offer(entry.getValue(), queue, seen);
                 return;
@@ -457,6 +464,16 @@ final class ClusterIndexValidation {
                         "cannot inspect reachable field %s.%s during index validation"
                                 .formatted(field.getDeclaringClass().getName(), field.getName()), denied);
             }
+        }
+    }
+
+    static void countScanWork(final ValidationScratch scratch, final int maximum) {
+        if (++scratch.scanWork > maximum) {
+            throw new IllegalStateException(
+                    ("index validation exceeded %s objects and collection elements; raise " +
+                            "StorageBinaryDataMerger.Configuration.maxValidatedIndexObjects or narrow " +
+                            "the index-relevant graph")
+                            .formatted(maximum));
         }
     }
 

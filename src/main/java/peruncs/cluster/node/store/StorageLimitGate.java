@@ -20,7 +20,9 @@ public final class StorageLimitGate {
     private static final long BYTES_PER_GIGABYTE = 1_000_000_000L;
     private static final int DEFAULT_RELEASE_PERMILLE = 100;
 
-    private final AtomicBoolean limitReached = new AtomicBoolean(false);
+    private final AtomicBoolean limitReached = new AtomicBoolean();
+    private final AtomicBoolean measurementKnown = new AtomicBoolean();
+    private final AtomicBoolean unknownWarningLogged = new AtomicBoolean();
     private final int limitGb;
     private final long limitBytes;
     private final long releaseBytes;
@@ -37,7 +39,7 @@ public final class StorageLimitGate {
         /// Creates a gate for the given limit with the default hysteresis.
     ///
     /// @param limitGb the limit in decimal gigabytes
-    /// @return a gate that has not reached its limit yet
+    /// @return a gate that fails closed until its first measurement
     public static StorageLimitGate create(final int limitGb) {
         return create(limitGb, DEFAULT_RELEASE_PERMILLE);
     }
@@ -58,7 +60,14 @@ public final class StorageLimitGate {
         /// Records one storage measurement.
     ///
     /// @param usedBytes measured used bytes
-    public void updateUsage(final long usedBytes) {
+    public synchronized void updateUsage(final long usedBytes) {
+        if (usedBytes < 0L) return;
+        this.unknownWarningLogged.set(false);
+        if (!this.measurementKnown.get()) {
+            this.limitReached.set(usedBytes >= this.limitBytes);
+            this.measurementKnown.set(true);
+            return;
+        }
         if (this.limitReached.get()) {
             if (usedBytes <= this.releaseBytes) {
                 this.limitReached.set(false);
@@ -72,7 +81,7 @@ public final class StorageLimitGate {
     ///
     /// @return `true` after a measurement reaches the limit
     public boolean limitReached() {
-        return this.limitReached.get();
+        return !this.measurementKnown.get() || this.limitReached.get();
     }
 
         /// Returns the limit in decimal gigabytes.
@@ -105,6 +114,12 @@ public final class StorageLimitGate {
             }
             final long nowMillis = System.currentTimeMillis();
             final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
+            if (usedBytes < 0L) {
+                if (this.unknownWarningLogged.compareAndSet(false, true)) {
+                    LOGGER.log(WARNING, "Storage usage is unknown; writes are disabled until a measurement succeeds");
+                }
+                return;
+            }
             final long usedGb = usedBytes / BYTES_PER_GIGABYTE;
             if (LOGGER.isLoggable(DEBUG)) {
                 LOGGER.log(DEBUG,

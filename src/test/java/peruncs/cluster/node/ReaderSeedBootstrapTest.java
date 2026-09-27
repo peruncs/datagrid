@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// seeded with the writer's Store image starts normally.
 class ReaderSeedBootstrapTest {
     /// Environment-backed properties with an explicit role and directories.
-    static class TestProperties extends NodeSettingsSource.Env {
+    static class TestProperties extends peruncs.cluster.node.aeron.TestNodeProperties {
         private final Path storagePath;
         private final Path backupPath;
         private final String role;
@@ -56,10 +56,10 @@ class ReaderSeedBootstrapTest {
 
         @Override
         public String replicationProperty(final String name) {
-            if (NodeSettingsSource.Env.EnvKeys.STORAGE_PATH.equals(name)) {
+            if (NodeSettingsSource.EnvKeys.STORAGE_PATH.equals(name)) {
                 return this.storagePath.toString();
             }
-            if (NodeSettingsSource.Env.EnvKeys.BACKUP_PATH.equals(name)) {
+            if (NodeSettingsSource.EnvKeys.BACKUP_PATH.equals(name)) {
                 return this.backupPath.toString();
             }
             return null;

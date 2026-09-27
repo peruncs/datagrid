@@ -147,13 +147,8 @@ class BackupRestorePolicyTest {
                 transport,
                 positionProvider,
                 () -> cursorManager,
-                () -> Path.of("build", "test-storage"),
-                path -> {
-                },
-                () -> {
-                },
-                () -> {
-                },
+                new BackupRestorePolicy.RestoreActions(() -> Path.of("build", "test-storage"),
+                        path -> { }, () -> { }, () -> { }),
                 ownAuthoritativeStore);
     }
 

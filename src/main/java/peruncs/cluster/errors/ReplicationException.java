@@ -2,10 +2,9 @@ package peruncs.cluster.errors;
 
 /// Signals a replication operation failure; catch the typed subclasses to choose the recovery action.
 ///
-/// Extends [RuntimeException], not [IllegalStateException]: callers that
-/// catch `IllegalStateException` to find genuine programming errors must not
-/// swallow typed replication failures, and vice versa.
-public class ReplicationException extends RuntimeException {
+/// Extends [NodeException] so every typed replication failure reaches the
+/// same application-facing failure boundary as startup and storage errors.
+public class ReplicationException extends NodeException {
     /// Creates an exception with a message.
     ///
     /// @param message diagnostic message

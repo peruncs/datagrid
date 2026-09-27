@@ -460,7 +460,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     public long withWritesPaused(final LongSupplier maintenance) {
         Objects.requireNonNull(maintenance, "maintenance");
         if (!this.maintenance.compareAndSet(false, true)) {
-            throw new IllegalStateException("Aeron Archive maintenance is already in progress");
+            throw new ReplicationUnavailableException("Aeron Archive maintenance is already in progress");
         }
         try {
             this.ensureMaintenanceAdmitted();
@@ -515,7 +515,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     throw new IllegalStateException("cannot re-enter an active Aeron write");
                 }
                 if (this.maintenance.get()) {
-                    throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+                    throw new ReplicationUnavailableException("Aeron Archive maintenance is in progress; write admission is closed");
                 }
                 final long remaining = ReplicationRetry.remainingNanos(deadline);
                 if (remaining == 0L) {
@@ -530,7 +530,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                 }
             }
             if (this.maintenance.get()) {
-                throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+                throw new ReplicationUnavailableException("Aeron Archive maintenance is in progress; write admission is closed");
             }
             admitted = true;
         } finally {

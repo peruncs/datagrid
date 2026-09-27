@@ -14,8 +14,10 @@ import org.junit.jupiter.api.io.TempDir;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the maintenance scratch never retains a vector index — or the
 /// graph reachable through it — once a rebuild pass ends. Rebuild probes are
@@ -36,6 +38,16 @@ class ClusterIndexProbeScratchTest {
 
     static final class Root {
         GigaMap<Article> articles;
+    }
+
+    static final class CollectionRoot {
+        final List<String> values;
+        final Object possibleIndex;
+
+        CollectionRoot(final List<String> values) {
+            this.values = values;
+            this.possibleIndex = null;
+        }
     }
 
     private static final class ArticleVectorizer extends Vectorizer<Article> {
@@ -117,6 +129,14 @@ class ClusterIndexProbeScratchTest {
                             .noneMatch(key -> key == retired),
                     "the retired index must not stay reachable through probe scratch");
         }
+    }
+
+    @Test
+    void scanBudgetIncludesCollectionElementsThatArePrunedAsLeaves() {
+        final CollectionRoot root = new CollectionRoot(new ArrayList<>(List.of(
+                "a", "b", "c", "d", "e", "f")));
+        assertThrows(IllegalStateException.class, () -> ClusterIndexValidation.validateGraph(
+                root, 3, new ArrayList<>(), null));
     }
 
     private static ClusterIndexValidation.ValidationScratch scratchOf(final ClusterIndexMaintenance maintenance)

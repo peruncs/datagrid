@@ -5,7 +5,6 @@ import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.errors.WriterFencedException;
 import peruncs.cluster.storage.Crc32C;
 import peruncs.cluster.storage.aeron.writer.CrashHook;
-import peruncs.cluster.storage.io.AtomicFileWriter;
 import peruncs.cluster.test.ChildJava;
 
 import java.nio.ByteBuffer;
@@ -13,6 +12,7 @@ import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CountDownLatch;
@@ -32,9 +32,10 @@ class WriterFencingLeaseTest {
     @Test
     void pathAliasesShareOneLeaseIdentity(@TempDir final Path volume) throws Exception {
         final Path alias;
-        if (AtomicFileWriter.isMacOs() && volume.toAbsolutePath().toString().startsWith("/var")) {
+        final boolean macOs = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac");
+        if (macOs && volume.toAbsolutePath().toString().startsWith("/var")) {
             alias = Path.of("/private" + volume.toAbsolutePath());
-        } else if (AtomicFileWriter.isMacOs() && volume.toAbsolutePath().toString().contains("/var/folders")) {
+        } else if (macOs && volume.toAbsolutePath().toString().contains("/var/folders")) {
             alias = volume.toRealPath();
         } else {
             /* Not a symlinked temp root: the canonical and the normalized

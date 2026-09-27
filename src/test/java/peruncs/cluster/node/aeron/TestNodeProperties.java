@@ -4,9 +4,8 @@ import peruncs.cluster.api.NodeSettingsSource;
 
 /// Neutral node-properties fixture for Aeron tests.
 ///
-/// The environment-backed [NodeSettingsSource.Env] is final, so
-/// tests that need per-test values subclass this fixture instead. Every method
-/// has a benign default and tests override only the settings they exercise.
+/// Tests that need per-test values subclass this fixture and override only the
+/// settings they exercise.
 /// Public only so forked crash-test children in subpackages can extend it.
 public abstract class TestNodeProperties implements NodeSettingsSource {
     @Override

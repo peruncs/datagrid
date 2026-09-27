@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.api.ReplicationState;
+import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.replication.ReplicationHealth;
@@ -169,7 +170,7 @@ class AeronReplicationMonitoringTest {
         assertEquals(-1L, distributor.messageIndex());
     }
 
-        /// Retention must fail explicitly while authenticated watermarks are absent.
+    /// Retention stays unsupported until the configured reader quorum is present.
     @Test
     void retentionRejectsDeletionUntilWatermarksAreConfigured() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
@@ -298,7 +299,7 @@ class AeronReplicationMonitoringTest {
         try (ClusterReplicationTransport transport = new AeronTransport(properties)) {
             final ReplicationPublisher distributor = transport.distributor("stream");
 
-            final IllegalStateException failure = assertThrows(IllegalStateException.class,
+            final NodeException failure = assertThrows(NodeException.class,
                     () -> transport.persistenceTargetFactory("stream", distributor));
             assertTrue(failure.getMessage().contains("shared lease directory"), failure.getMessage());
         }

@@ -3,9 +3,9 @@ package peruncs.cluster.api;
 /// Tells an operator whether this node can serve traffic and keep up with replication.
 ///
 /// The snapshot separates node role and readiness from replication
-/// observability: [#replication()] is `null` when this node has no
-/// replication configured, because no replication metric exists for such a
-/// node and a placeholder value would render as a healthy zero.
+/// observability: [#replication()] reports `NOT_CONFIGURED` when this node
+/// has no replication transport. Its metric boundaries stay empty instead
+/// of rendering as healthy zero values.
 ///
 /// `FAILED` means stop serving, keep the node down, and inspect the terminal
 /// cause before restarting. `DEGRADED` means the node may still serve reads,
@@ -24,8 +24,8 @@ package peruncs.cluster.api;
 /// the node unhealthy and not ready until it reloads or reseeds
 /// @param storageChecksRunning whether periodic storage checks are active
 /// @param storageBytes current Store size
-/// @param replication replication observability, or `null` when this node
-/// has no replication configured
+/// @param replication replication observability, including an explicit
+///                    `NOT_CONFIGURED` state
 public record NodeStatus(
         boolean writer,
         boolean ready,

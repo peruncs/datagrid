@@ -211,6 +211,10 @@ class AeronSettingsTest {
                 "the writer lease lock wait must have its own bounded default");
         assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().offerTimeoutNanos(),
                 "offerTimeoutNanos must stay the publication-offer budget");
+        assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().readerStopTimeoutNanos(),
+                "readerStopTimeoutNanos must stay the shutdown budget");
+        assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().liveWithholdTimeoutNanos());
+        assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().reconnectTimeoutNanos());
     }
 
         /// Verifies each per-concern timeout can be overridden independently.
@@ -219,11 +223,16 @@ class AeronSettingsTest {
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
                 "ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS", "123456",
                 "ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS", "654321",
-                "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS", "42"
+                "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS", "42",
+                "ECLIPSE_DATAGRID_AERON_LIVE_WITHHOLD_TIMEOUT_NANOS", "234567",
+                "ECLIPSE_DATAGRID_AERON_RECONNECT_TIMEOUT_NANOS", "345678"
         )));
         assertEquals(123456L, settings.timeouts().archiveControlTimeoutNanos());
         assertEquals(654321L, settings.timeouts().watermarkCloseTimeoutNanos());
         assertEquals(42L, settings.timeouts().leaseAcquireLockTimeoutMillis());
+        assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().readerStopTimeoutNanos());
+        assertEquals(234567L, settings.replication().liveWithholdTimeoutNanos());
+        assertEquals(345678L, settings.replication().reconnectTimeoutNanos());
     }
 
         /// Verifies non-positive per-concern budgets fail configuration validation.
@@ -232,7 +241,9 @@ class AeronSettingsTest {
         for (final String key : List.of(
                 "ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS",
                 "ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS",
-                "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS")) {
+                "ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS",
+                "ECLIPSE_DATAGRID_AERON_LIVE_WITHHOLD_TIMEOUT_NANOS",
+                "ECLIPSE_DATAGRID_AERON_RECONNECT_TIMEOUT_NANOS")) {
             assertThrows(IllegalArgumentException.class, () ->
                     AeronSettings.fromEnvironment(properties(Map.of(key, "0"))), key);
         }

@@ -74,10 +74,12 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
                     "Aeron writer fencing lease is not held; no writer position can be established");
         }
         final AeronWriterRecoveryBoundary boundary = this.writerBoundary.get();
+        if (boundary.recordingId() < 0 || boundary.position() < 0) {
+            throw new ReplicationPositionUnavailableException(
+                    "Aeron writer has no resolved Archive position to report");
+        }
         final UUID generation = this.storeGeneration.get();
-        final byte[] encoded = boundary.recordingId() < 0 || boundary.position() < 0
-                ? new byte[0]
-                : new AeronReplicationCursor(this.clusterId.get(), this.nodeId.get(), generation,
+        final byte[] encoded = new AeronReplicationCursor(this.clusterId.get(), this.nodeId.get(), generation,
                 this.epoch.getAsLong(), fencingToken, boundary.recordingId(), boundary.position(),
                 boundary.sequence()).encode();
         return ReplicationCursor.of("aeron", generation, boundary.sequence(), encoded);

@@ -124,9 +124,9 @@ public final class AtomicFileWriter {
         }
         Path temporary;
         try {
-            temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null, OWNER_ONLY);
+            temporary = Files.createTempFile(parent, "%s.tmp-".formatted(absolute.getFileName()), null, privateFileAttributes(parent));
         } catch (final UnsupportedOperationException failure) {
-            throw new IOException("Owner-only permissions are unavailable for replication metadata " + absolute, failure);
+            throw new IOException("Failed to create replication metadata temp file " + absolute, failure);
         }
         try {
             testPoint(beforePhase, absolute);
@@ -151,6 +151,11 @@ public final class AtomicFileWriter {
                         "Unable to remove temporary replication metadata file %s".formatted(temporary), cleanupFailure);
             }
         }
+    }
+
+    private static FileAttribute<?>[] privateFileAttributes(final Path parent) {
+        return parent.getFileSystem().supportedFileAttributeViews().contains("posix")
+                ? new FileAttribute<?>[]{OWNER_ONLY} : new FileAttribute<?>[0];
     }
 
         /// Writes a file through a forced sibling temporary file and replacement.
@@ -308,7 +313,7 @@ public final class AtomicFileWriter {
     ///
     /// @param path link to inspect
     /// @return `true` for a macOS system `/private` alias
-    public static boolean isSystemPrivateAlias(final Path path) {
+    private static boolean isSystemPrivateAlias(final Path path) {
         if (!isMacOs()) return false;
         final Path root = path.getRoot();
         if (root == null || !root.equals(path.getParent())) return false;
@@ -326,7 +331,7 @@ public final class AtomicFileWriter {
     /// Reports whether the current operating system is macOS.
     ///
     /// @return `true` on macOS
-    public static boolean isMacOs() {
+    private static boolean isMacOs() {
         return MAC_OS;
     }
 
@@ -488,21 +493,34 @@ public final class AtomicFileWriter {
     public static boolean deleteRegularFile(final Path path) throws IOException {
         Objects.requireNonNull(path, "path is required");
         ensureNoSymbolicLinks(path);
+        final BasicFileAttributes original;
         try {
             /* Validates the path is a regular file with a stable identity; the
              * attributes themselves are not needed, only the parent re-check below. */
-            regularAttributes(path);
+            original = regularAttributes(path);
         } catch (final NoSuchFileException missing) {
             return false;
         }
         final Path parent = path.getParent();
         final Object parentKey = parent == null ? null : stableFileKey(parent);
         final boolean deleted = Files.deleteIfExists(path);
+        if (deleted) testPoint("AFTER_REGULAR_DELETE", path);
         if (parentKey != null && !parentKey.equals(stableFileKey(parent))) {
             throw new IOException("Parent directory changed while deleting %s".formatted(path));
         }
         if (deleted && Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("File reappeared while deleting %s".formatted(path));
+            try {
+                final BasicFileAttributes replacement = Files.readAttributes(
+                        path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                /* A checkpoint rewrite may legitimately create a new file at
+                 * this path while cleanup races it. Only the same file identity
+                 * proves the original entry survived the delete. */
+                if (original.fileKey().equals(replacement.fileKey())) {
+                    throw new IOException("File identity survived deletion at %s".formatted(path));
+                }
+            } catch (final NoSuchFileException replacedAgain) {
+                // The racing replacement was itself removed; cleanup is complete.
+            }
         }
         return deleted;
     }

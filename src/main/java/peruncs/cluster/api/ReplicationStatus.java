@@ -74,7 +74,9 @@ public record ReplicationStatus(
     /// or empty when either boundary is unknown
     public OptionalLong lagTransactions() {
         if (this.currentSequence.isEmpty() || this.latestSequence.isEmpty()) return OptionalLong.empty();
-        return OptionalLong.of(Math.max(0L, this.latestSequence.getAsLong() - this.currentSequence.getAsLong()));
+        final long current = this.currentSequence.getAsLong();
+        final long latest = this.latestSequence.getAsLong();
+        return OptionalLong.of(latest <= current ? 0L : latest - current);
     }
 
     private static void requireNonNegative(final String name, final OptionalLong value) {

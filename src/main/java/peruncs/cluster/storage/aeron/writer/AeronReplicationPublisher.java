@@ -2,6 +2,7 @@ package peruncs.cluster.storage.aeron.writer;
 
 import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
+import org.agrona.BufferUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.cluster.errors.WriterFencedException;
@@ -11,6 +12,7 @@ import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.LongUnaryOperator;
@@ -20,7 +22,8 @@ import java.util.function.Supplier;
 ///
 /// Data chunks are prepared first. A commit marker makes the complete
 /// transaction visible; an abort marker closes a rejected or abandoned one.
-/// Each prepared transaction stages one frame at a time in its own direct buffer.
+/// Every transaction reuses the same direct staging buffer; publication ownership
+/// prevents a second transaction from writing it while one is pending.
 final class AeronReplicationPublisher implements AutoCloseable {
     private final AeronOfferRetryer offerer;
     private final int maxMessageLength;
@@ -35,6 +38,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private boolean fencingTokenClaimed;
     private final AutoCloseable closeAction;
     private final LongUnaryOperator commitPositionAwaiter;
+    private final ByteBuffer framingStorage;
+    private final AtomicBoolean framingStorageFreed = new AtomicBoolean();
     /* All sequence operations are protected by this publisher's monitor. Keeping
      * the value primitive avoids an allocation and makes the ownership rule
      * explicit instead of implying lock-free access. */
@@ -145,6 +150,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
         this.nextSequence = initialSequence;
         this.closeAction = closeAction;
         this.commitPositionAwaiter = commitPositionAwaiter;
+        this.framingStorage = ByteBuffer.allocateDirect(
+                configuration.chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH);
     }
 
     private static AeronOfferRetryer.Offerer offerer(final ExclusivePublication publication) {
@@ -291,7 +298,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
             framer = new EnvelopeFramer(sequence, this.clusterId, this.epoch, this.wireNonce,
                     this.configuration.chunkSize(), this.maxMessageLength,
                     this.configuration.offerTimeoutNanos(), this.offerer,
-                    this.fencingTokenSupplier, this.leaseGateSupplier);
+                    this.fencingTokenSupplier, this.leaseGateSupplier, this.framingStorage);
             final PreparedTransaction prepared = this.prepareReserved(dictionary, dataBuffers, bufferCount, sequence,
                     dataLength, dataChunks, expectedCrc32c, verifyExpectedCrc, framer);
             synchronized (this) {
@@ -825,6 +832,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 if (fatalFailure == null) fatalFailure = closeFailure;
                 else fatalFailure.addSuppressed(closeFailure);
             } finally {
+                this.releaseFramingStorage();
                 if (pending != null) pending.framer.close();
             }
         }
@@ -844,6 +852,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 this.closeInProgress = false;
             }
         }
+    }
+
+    private void releaseFramingStorage() {
+        if (this.framingStorageFreed.compareAndSet(false, true)) BufferUtil.free(this.framingStorage);
     }
 
         /// Metadata retained while a transaction moves through writer states.

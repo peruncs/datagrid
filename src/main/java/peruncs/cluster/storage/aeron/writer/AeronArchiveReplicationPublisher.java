@@ -26,12 +26,9 @@ import java.util.function.LongPredicate;
 /// is reported only after the Archive's recorded position reaches that marker.
 /// The Archive and Aeron client are borrowed from the transport; this class
 /// closes only the publication and its recording.
-@SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter") // shared AeronArchive client is the lock domain, see field comment
 public final class AeronArchiveReplicationPublisher implements AutoCloseable {
-    /* The Archive control channel is not thread-safe, so every control
-     * operation synchronizes on this shared client: the lock domain follows
-     * the resource, which also keeps co-users of the same client mutually
-     * excluded. Never synchronize these paths on any other monitor. */
+    /* The default AeronArchive Context uses a ReentrantLock and the client is
+     * thread-safe; do not add a second intrinsic lock around its operations. */
     private final AeronArchive archive;
     private final ExclusivePublication publication;
     private final AeronReplicationPublisher publisher;
@@ -107,13 +104,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     ) {
         ExclusivePublication publication = null;
         try {
-            synchronized (archive) {
-                if (sourceLocation == SourceLocation.LOCAL) {
-                    publication = archive.addRecordedExclusivePublication(channel, streamId);
-                } else {
-                    publication = archive.context().aeron().addExclusivePublication(channel, streamId);
-                    archive.startRecording(ChannelUri.addSessionId(channel, publication.sessionId()), streamId, sourceLocation);
-                }
+            if (sourceLocation == SourceLocation.LOCAL) {
+                publication = archive.addRecordedExclusivePublication(channel, streamId);
+            } else {
+                publication = archive.context().aeron().addExclusivePublication(channel, streamId);
+                archive.startRecording(ChannelUri.addSessionId(channel, publication.sessionId()), streamId, sourceLocation);
             }
             final long recordingId = awaitRecordingStarted(archive, publication, Aeron.NULL_VALUE, configuration);
             final ExclusivePublication ownedPublication = publication;
@@ -200,19 +195,16 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         final int[] termLength = new int[1];
         final int[] mtuLength = new int[1];
         final int[] recordedStream = new int[1];
-        synchronized (archive) {
-            if (archive.listRecording(recordingId, (a, b, id, c, d, start, stop, termId, segment, term, mtu, session,
-                                                    stream, stripped, original, source) ->
-            {
-                channel[0] = stripped;
-                position[0] = stop;
-                initialTermId[0] = termId;
-                termLength[0] = term;
-                mtuLength[0] = mtu;
-                recordedStream[0] = stream;
-            }) == 0 || channel[0] == null) {
-                throw new IllegalArgumentException("Unknown Aeron recording: %s".formatted(recordingId));
-            }
+        if (archive.listRecording(recordingId, (a, b, id, c, d, start, stop, termId, segment, term, mtu, session,
+                                                stream, stripped, original, source) -> {
+            channel[0] = stripped;
+            position[0] = stop;
+            initialTermId[0] = termId;
+            termLength[0] = term;
+            mtuLength[0] = mtu;
+            recordedStream[0] = stream;
+        }) == 0 || channel[0] == null) {
+            throw new IllegalArgumentException("Unknown Aeron recording: %s".formatted(recordingId));
         }
         if (position[0] < 0) {
             throw new IllegalStateException("Aeron recording is still active: %s".formatted(recordingId));
@@ -228,9 +220,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                 .initialPosition(position[0], initialTermId[0], termLength[0]).build();
         final ExclusivePublication publication = archive.context().aeron().addExclusivePublication(extendedChannel, streamId);
         try {
-            synchronized (archive) {
-                archive.extendRecording(recordingId, extendedChannel, streamId, sourceLocation);
-            }
+            archive.extendRecording(recordingId, extendedChannel, streamId, sourceLocation);
             awaitRecordingStarted(archive, publication, recordingId, configuration);
             return new AeronArchiveReplicationPublisher(archive, publication,
                     AeronReplicationPublisher.onPublication(publication, configuration, clusterId, epoch, initialSequence,
@@ -261,19 +251,15 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         final int pageSize = 128;
         while (recordingId[0] < 0) {
             final long[] last = {from - 1L};
-            final int count;
-            synchronized (archive) {
-                count = archive.listRecordings(from, pageSize, (controlSessionId, correlationId, id,
-                                                                startTimestamp, stopTimestamp, startPosition, stopPosition, initialTermId,
-                                                                segmentFileLength, termBufferLength, mtuLength, sessionId, streamId,
-                                                                strippedChannel, originalChannel, sourceIdentity) ->
-                {
-                    last[0] = id;
-                    if (sessionId == publication.sessionId() && streamId == publication.streamId()) {
-                        recordingId[0] = id;
-                    }
-                });
-            }
+            final int count = archive.listRecordings(from, pageSize, (controlSessionId, correlationId, id,
+                    startTimestamp, stopTimestamp, startPosition, stopPosition, initialTermId,
+                    segmentFileLength, termBufferLength, mtuLength, sessionId, streamId,
+                    strippedChannel, originalChannel, sourceIdentity) -> {
+                last[0] = id;
+                if (sessionId == publication.sessionId() && streamId == publication.streamId()) {
+                    recordingId[0] = id;
+                }
+            });
             if (count < pageSize || last[0] < from || last[0] == Long.MAX_VALUE) break;
             from = last[0] + 1L;
         }
@@ -401,8 +387,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                             throw failure;
                         }
                         /* The catalog may lag the publication. Retry only the explicit
-                         * unknown-recording race; authentication, storage, and protocol
-                         * failures must surface immediately. */
+                         * unknown-recording race; unrelated Archive/control failures
+                         * must surface immediately. */
                     }
                 }
                 if (recordingIdHint < 0) {
@@ -464,31 +450,22 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         return failure;
     }
 
-    /* AeronArchive's control client is not a concurrent API.  Keep each control
-     * request atomic with respect to close/retention/replay probes without holding
-     * the lock across the retry loops above. */
+    /* AeronArchive's default Context lock serializes concurrent client calls.
+     * Do not wrap each operation in an additional intrinsic lock. */
     private static long getStopPosition(final AeronArchive archive, final long recordingId) {
-        synchronized (archive) {
-            return archive.getStopPosition(recordingId);
-        }
+        return archive.getStopPosition(recordingId);
     }
 
     private static long getRecordingPosition(final AeronArchive archive, final long recordingId) {
-        synchronized (archive) {
-            return archive.getRecordingPosition(recordingId);
-        }
+        return archive.getRecordingPosition(recordingId);
     }
 
     private static String pollForErrorResponse(final AeronArchive archive) {
-        synchronized (archive) {
-            return archive.pollForErrorResponse();
-        }
+        return archive.pollForErrorResponse();
     }
 
     private static void tryStopRecordingByIdentity(final AeronArchive archive, final long recordingId) {
-        synchronized (archive) {
-            archive.tryStopRecordingByIdentity(recordingId);
-        }
+        archive.tryStopRecordingByIdentity(recordingId);
     }
 
     private static long purgeSegments(
@@ -496,9 +473,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final long recordingId,
             final long newStartPosition
     ) {
-        synchronized (archive) {
-            return archive.purgeSegments(recordingId, newStartPosition);
-        }
+        return archive.purgeSegments(recordingId, newStartPosition);
     }
 
     private static void extendRecording(
@@ -508,9 +483,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final int streamId,
             final SourceLocation sourceLocation
     ) {
-        synchronized (archive) {
-            archive.extendRecording(recordingId, channel, streamId, sourceLocation);
-        }
+        archive.extendRecording(recordingId, channel, streamId, sourceLocation);
     }
 
     private static void awaitStopped(

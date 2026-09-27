@@ -1,6 +1,7 @@
 package peruncs.cluster.storage.index;
 
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
+import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.jvector.VectorSimilarityFunction;
 import org.eclipse.store.gigamap.jvector.Vectorizer;
 import org.eclipse.store.gigamap.types.GigaMap;
@@ -11,6 +12,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /// Scratch probe: repeated remove+add churn on one entity.
 class ColdVectorUpdateProbeTest {
@@ -67,6 +70,10 @@ class ColdVectorUpdateProbeTest {
                 entity.vector = new float[]{round + 0.5f, 1.0f, 0.0f};
                 ClusterStoreIndexes.refreshImportedIndexes(connection);
             }
+            final VectorIndices<Article> vectors = cold.articles.index().get(VectorIndices.Category());
+            assertFalse(vectors.get("probe-vectors")
+                    .search(new float[]{30.0f, 1.0f, 0.0f}, 5).toList().isEmpty(),
+                    "a cold-reopened vector index must remain searchable after repeated refreshes");
             System.out.println("CHURN-SURVIVED vectorize=" + vectorizer.calls);
         }
     }

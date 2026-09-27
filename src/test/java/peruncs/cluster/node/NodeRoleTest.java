@@ -52,7 +52,7 @@ class NodeRoleTest {
     /// storage path while its transport configured a backup reader.
     @Test
     void backupReaderNeedsNoLegacyFlag() {
-        final var properties = new NodeSettingsSource.Env(Map.of(
+        final var properties = NodeSettingsSource.env(Map.of(
                 "ECLIPSE_DATAGRID_REPLICATION_ROLE", "backup-reader"));
 
         assertEquals(NodeRole.BACKUP_READER, NodeRole.of(properties));
@@ -61,7 +61,7 @@ class NodeRoleTest {
     /// Verifies the legacy backup-node flag alone still resolves to the backup-reader role without the new setting.
     @Test
     void legacyBackupNodeStillResolvesWithoutTheNewSetting() {
-        final var properties = new NodeSettingsSource.Env(Map.of(
+        final var properties = NodeSettingsSource.env(Map.of(
                 "ECLIPSE_DATAGRID_IS_BACKUP_NODE", "true"));
 
         assertEquals(NodeRole.BACKUP_READER, NodeRole.of(properties));

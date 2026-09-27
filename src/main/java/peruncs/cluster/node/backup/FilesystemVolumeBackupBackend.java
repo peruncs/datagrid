@@ -56,6 +56,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     }
 
     static final String EXPORT_WORKSPACE_PREFIX = ".backup-export-";
+    private static final String RESTORE_WORKSPACE_PREFIX = ".backup-restore-";
     /// Age after which an abandoned export workspace is reaped on first use.
     /// A crash can leave a `.backup-export-*` directory behind; anything
     /// older than this bound cannot belong to a live publication on any
@@ -339,7 +340,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     @Override
     public void createBackup(final StorageConnection connection, final ReplicationCursor cursor, final BackupMetadata backup)
             throws NodeException {
-        final ExportWorkspace workspace = this.createExportWorkspace();
+        final Workspace workspace = this.createExportWorkspace();
         final Path exportDirectory = workspace.path();
         Throwable primaryFailure = null;
         try (workspace) {
@@ -443,9 +444,11 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             final boolean replaceExisting
     ) throws NodeException {
         this.createDestinationDirectory(storageDestinationParentPath);
-        final Path workingDirectory = this.createTemporaryDirectory(storageDestinationParentPath, ".backup-restore-");
+        this.reapOrphanRestoreWorkspaces(storageDestinationParentPath);
+        final Workspace workspace = this.createRestoreWorkspace(storageDestinationParentPath);
+        final Path workingDirectory = workspace.path();
         Throwable primaryFailure = null;
-        try {
+        try (workspace) {
             final Path pinnedArchive = replaceExisting ? workingDirectory.resolve("upload.zip") : archive;
             if (replaceExisting) {
                 copyArchive(archive, pinnedArchive, this.limits);
@@ -791,14 +794,23 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         return createTemporaryDirectory(this.backupVolumePath, prefix);
     }
 
-    private ExportWorkspace createExportWorkspace() throws NodeException {
+    private Workspace createExportWorkspace() throws NodeException {
         final Path path = this.createTemporaryDirectory(EXPORT_WORKSPACE_PREFIX);
+        return this.leaseWorkspace(path, "backup export");
+    }
+
+    private Workspace createRestoreWorkspace(final Path parent) throws NodeException {
+        final Path path = this.createTemporaryDirectory(parent, RESTORE_WORKSPACE_PREFIX);
+        return this.leaseWorkspace(path, "backup restore");
+    }
+
+    private Workspace leaseWorkspace(final Path path, final String description) throws NodeException {
         final Path leasePath = workspaceLeasePath(path);
         try {
             final FileChannel channel = FileChannel.open(leasePath,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             try {
-                return new ExportWorkspace(path, leasePath, channel, channel.lock());
+                return new Workspace(path, leasePath, channel, channel.lock());
             } catch (final IOException | RuntimeException | Error failure) {
                 try {
                     channel.close();
@@ -809,7 +821,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             }
         } catch (final IOException | RuntimeException failure) {
             AtomicFileWriter.cleanup(path, failure);
-            throw new NodeException("Failed to lease backup export workspace %s".formatted(path), failure);
+            throw new NodeException("Failed to lease %s workspace %s".formatted(description, path), failure);
         }
     }
 
@@ -867,10 +879,26 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             entries.filter(path -> path.getFileName().toString().startsWith(EXPORT_WORKSPACE_PREFIX))
                     .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
                     .filter(path -> isOlderThan(path, cutoffMillis))
-                    .forEach(this::deleteOrphanWorkspace);
+                    .forEach(path -> this.deleteOrphanWorkspace(path, "backup export"));
         } catch (final IOException failure) {
             LOGGER.log(System.Logger.Level.WARNING,
                     "Failed to scan %s for orphaned backup workspaces".formatted(this.backupVolumePath), failure);
+        }
+    }
+
+    private void reapOrphanRestoreWorkspaces(final Path parent) {
+        final long cutoffMillis = System.currentTimeMillis() - ORPHAN_WORKSPACE_MAX_AGE.toMillis();
+        try {
+            AtomicFileWriter.ensureNoSymbolicLinks(parent);
+            try (final var entries = Files.list(parent)) {
+                entries.filter(path -> path.getFileName().toString().startsWith(RESTORE_WORKSPACE_PREFIX))
+                        .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+                        .filter(path -> isOlderThan(path, cutoffMillis))
+                        .forEach(path -> this.deleteOrphanWorkspace(path, "backup restore"));
+            }
+        } catch (final IOException failure) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Failed to scan %s for orphaned backup restore workspaces".formatted(parent), failure);
         }
     }
 
@@ -884,7 +912,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         }
     }
 
-    private void deleteOrphanWorkspace(final Path workspace) {
+    private void deleteOrphanWorkspace(final Path workspace, final String description) {
         final Path leasePath = workspaceLeasePath(workspace);
         boolean deleted = false;
         try (FileChannel channel = FileChannel.open(leasePath,
@@ -899,20 +927,20 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             try (lock) {
                 AtomicFileWriter.deleteDirectory(workspace);
                 LOGGER.log(System.Logger.Level.INFO,
-                        "Deleted backup workspace %s abandoned for more than %s"
-                                .formatted(workspace, ORPHAN_WORKSPACE_MAX_AGE));
+                        "Deleted %s workspace %s abandoned for more than %s"
+                                .formatted(description, workspace, ORPHAN_WORKSPACE_MAX_AGE));
                 deleted = true;
             }
         } catch (final IOException | NodeException failure) {
             LOGGER.log(System.Logger.Level.WARNING,
-                    "Failed to delete orphaned backup workspace %s".formatted(workspace), failure);
+                    "Failed to delete orphaned %s workspace %s".formatted(description, workspace), failure);
         }
         if (deleted) {
             try {
                 Files.deleteIfExists(leasePath);
             } catch (final IOException failure) {
                 LOGGER.log(System.Logger.Level.WARNING,
-                        "Failed to delete orphaned backup workspace lease %s".formatted(leasePath), failure);
+                        "Failed to delete orphaned %s workspace lease %s".formatted(description, leasePath), failure);
             }
         }
     }
@@ -943,7 +971,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         }
     }
 
-    private record ExportWorkspace(Path path, Path leasePath, FileChannel channel, FileLock lock)
+    private record Workspace(Path path, Path leasePath, FileChannel channel, FileLock lock)
             implements AutoCloseable {
         @Override
         public void close() {
@@ -966,7 +994,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
                 else failure.addSuppressed(closeFailure);
             }
             if (failure != null) throw new NodeException(
-                    "Failed to release backup export workspace lease %s".formatted(this.leasePath), failure);
+                    "Failed to release backup workspace lease %s".formatted(this.leasePath), failure);
         }
     }
 

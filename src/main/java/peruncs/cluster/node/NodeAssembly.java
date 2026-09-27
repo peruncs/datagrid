@@ -6,7 +6,7 @@ import org.eclipse.store.storage.types.StorageConnection;
 import org.eclipse.store.storage.types.StorageManager;
 import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.api.NodeSettingsSource;
-import peruncs.cluster.api.NodeSettingsSource.Env.EnvKeys;
+import peruncs.cluster.api.NodeSettingsSource.EnvKeys;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.node.aeron.AeronTransport;
@@ -193,7 +193,7 @@ final class NodeCollaborators {
     final LazyHolder<StorageBackupManager> storageBackupManager;
     final LazyHolder<CommitAppliedListener> commitAppliedListener;
     final LazyHolder<StorageBinaryDataMerger> dataMerger;
-    final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
+    final StorageGraphCoordinator graphCoordinator;
     /* Intentionally not a LazyHolder: a backup restore closes and replaces
      * this manager, which a one-shot memoized holder cannot express. The
      * volatile field with double-checked locking gives the same safe
@@ -235,6 +235,7 @@ final class NodeCollaborators {
         this.dataDistributor = LazyHolder.of(this::ensureDataDistributor);
         this.healthCheck = LazyHolder.of(this::ensureStorageNodeHealthCheck);
         this.propertiesProvider = lazy(configuredProperties, this::ensureNodeSettingsSource);
+        this.graphCoordinator = new StorageGraphCoordinator(this.propertiesProvider.get().graphDrainTimeoutMillis());
         this.storageUsageGauge = LazyHolder.of(this::ensureStorageUsageGauge);
         this.storageNodeManager = LazyHolder.of(this::ensureStorageNodeManager);
         this.positionProvider = LazyHolder.of(this::ensureReplicationPositionProvider);
@@ -254,24 +255,24 @@ final class NodeCollaborators {
     /// them, so this holder records successful computation around the constant.
     static final class LazyHolder<T> implements Supplier<T> {
         private final LazyConstant<T> constant;
-        private volatile boolean initialized;
+        private boolean initialized;
 
         private LazyHolder(final Supplier<? extends T> computingFunction) {
             this.constant = LazyConstant.of(computingFunction);
         }
 
-        private static <T> LazyHolder<T> of(final Supplier<? extends T> computingFunction) {
+        static <T> LazyHolder<T> of(final Supplier<? extends T> computingFunction) {
             return new LazyHolder<>(computingFunction);
         }
 
         @Override
-        public T get() {
+        public synchronized T get() {
             final T value = this.constant.get();
             this.initialized = true;
             return value;
         }
 
-        boolean isInitialized() {
+        synchronized boolean isInitialized() {
             return this.initialized;
         }
     }
@@ -347,7 +348,8 @@ final class NodeCollaborators {
     ///
     /// @return backup task executor
     private StorageBackupTaskExecutor ensureStorageBackupTaskExecutor() {
-        return StorageBackupTaskExecutor.create(this.clusterStorageManager, this.getStorageBackupManager());
+        return StorageBackupTaskExecutor.create(this.clusterStorageManager, this.getStorageBackupManager(),
+                this.getNodeSettingsSource().backupCloseTimeoutMillis());
     }
 
     /// Creates the node maintenance scheduler.
@@ -638,10 +640,8 @@ final class NodeCollaborators {
                 this.getClusterReplicationTransport(),
                 this.getReplicationPositionProvider(),
                 this::getDurableCursorFile,
-                this::storageParentPath,
-                this::deleteDirectory,
-                this::closeDurableCursorFile,
-                this::deleteOffsetFile,
+                new BackupRestorePolicy.RestoreActions(this::storageParentPath, this::deleteDirectory,
+                        this::closeDurableCursorFile, this::deleteOffsetFile),
                 this.nodeRole.isWriter());
     }
 

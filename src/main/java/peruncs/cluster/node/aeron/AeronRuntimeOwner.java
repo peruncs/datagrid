@@ -188,30 +188,21 @@ final class AeronRuntimeOwner {
         return this.runtime.archiveContext();
     }
 
-    /* AeronArchive's synchronous control client is not thread-safe.  Retention,
-     * writer recovery, and reader discovery can run on different worker threads,
-     * so every provider-owned request is serialized on the client itself.  The
-     * lock covers only the request; callers retain their own retry/deadline logic
-     * outside this helper. */
+    /* AeronArchive's default Context uses a ReentrantLock and the client is
+     * thread-safe. Avoid a second intrinsic lock around every request. */
     long getStartPosition(final long recordingId) {
         final AeronArchive archive = this.archive();
-        synchronized (archive) {
-            return archive.getStartPosition(recordingId);
-        }
+        return archive.getStartPosition(recordingId);
     }
 
     long getStopPosition(final long recordingId) {
         final AeronArchive archive = this.archive();
-        synchronized (archive) {
-            return archive.getStopPosition(recordingId);
-        }
+        return archive.getStopPosition(recordingId);
     }
 
     long getRecordingPosition(final long recordingId) {
         final AeronArchive archive = this.archive();
-        synchronized (archive) {
-            return archive.getRecordingPosition(recordingId);
-        }
+        return archive.getRecordingPosition(recordingId);
     }
 
     /// Reports the Archive's maximum recorded position for the recording.
@@ -225,17 +216,12 @@ final class AeronRuntimeOwner {
     /// @return maximum recorded position
     long getMaxRecordedPosition(final long recordingId) {
         final AeronArchive archive = this.archive();
-        synchronized (archive) {
-            return archive.getMaxRecordedPosition(recordingId);
-        }
+        return archive.getMaxRecordedPosition(recordingId);
     }
 
     int listRecordingsForUri(final String channelFragment, final int streamId,
                              final RecordingDescriptorConsumer consumer) {
         final AeronArchive archive = this.archive();
-        synchronized (archive) {
-            return archive.listRecordingsForUri(0L, 2, channelFragment,
-                    streamId, consumer);
-        }
+        return archive.listRecordingsForUri(0L, 2, channelFragment, streamId, consumer);
     }
 }

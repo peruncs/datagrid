@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -191,9 +192,16 @@ final class WriterFencingLease implements AutoCloseable {
                     throw new IllegalStateException(
                             "a writer lease release is unresolved in this JVM; retry after its cool-down");
                 }
+            }
+            if (active != null) {
+                /* A lease that failed its freshness check still owns a
+                 * scheduled heartbeat task. Fence it before replacing the
+                 * registry entry so that task cannot keep waking forever or
+                 * refresh the old heartbeat after a successor is acquired. */
                 synchronized (active.stateLock) {
                     active.closed = true;
                 }
+                active.heartbeat.shutdownNow();
                 ACTIVE.remove(path, active);
             }
             return acquireLocked(canonicalVolume, clusterId, storeGeneration, nodeId, maxStaleness, lockTimeout);
@@ -379,8 +387,7 @@ final class WriterFencingLease implements AutoCloseable {
      * ScheduledExecutorService periodic task: the lease must fail closed
      * with that cause recorded until an operator restarts it, instead of
      * merely going stale. */
-    private final java.util.concurrent.atomic.AtomicReference<RuntimeException> heartbeatFailure =
-            new java.util.concurrent.atomic.AtomicReference<>();
+    private final AtomicReference<RuntimeException> heartbeatFailure = new AtomicReference<>();
 
     private WriterFencingLease(
             final Path path, final Path lockPath, final long token, final UUID nodeId, final Duration maxStaleness,
@@ -414,7 +421,7 @@ final class WriterFencingLease implements AutoCloseable {
                 /* An Error escaping a periodic task cancels it silently on the
                  * executor: record the cause so write admission fails closed
                  * with a named terminal failure, then let the throw end the
-                 * heartbeat. A permanent fix is a restart, not supression. */
+                 * heartbeat. A permanent fix is a restart, not suppression. */
                 this.heartbeatFailure.compareAndSet(null,
                         new IllegalStateException("writer lease heartbeat worker died; this writer is fenced", failure));
                 throw failure;

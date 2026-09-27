@@ -35,10 +35,17 @@ public interface StorageUsageGauge {
         return new Default(notNull(storageDir), notNull(cacheTtl));
     }
 
-        /// Reads used bytes in the storage directory.
+    /// Reads used bytes in the storage directory.
     ///
-    /// @return used bytes
+    /// @return used bytes, or `-1` until the first asynchronous measurement finishes
     long readUsedDiskSpaceBytes();
+
+    /// Measures used bytes synchronously during startup before the writer gate opens.
+    ///
+    /// @return measured bytes
+    default long measureNow() {
+        return this.readUsedDiskSpaceBytes();
+    }
 
         /// Recursively measures the configured Store directory.
     class Default implements StorageUsageGauge {
@@ -47,7 +54,7 @@ public interface StorageUsageGauge {
         private final long cacheNanos;
         private final AtomicLong lastLog = new AtomicLong(System.currentTimeMillis());
         private final AtomicBoolean refreshRunning = new AtomicBoolean();
-        private volatile long cachedBytes;
+        private volatile long cachedBytes = -1L;
         private volatile long measuredAtNanos;
 
         private Default(final ADirectory storageDir, final Duration cacheTtl) {
@@ -68,7 +75,7 @@ public interface StorageUsageGauge {
             /* Single-flight refresh for the stale and the cold case alike: the
              * first measurement never walks the directory on the caller's
              * thread, so a slow volume cannot block health or limit checks.
-             * A cold gauge reports zero until the first refresh lands. */
+             * A cold gauge reports unknown until the first refresh lands. */
             if (this.refreshRunning.compareAndSet(false, true)) {
                 Thread.startVirtualThread(() -> {
                     try {
@@ -78,6 +85,12 @@ public interface StorageUsageGauge {
                     }
                 });
             }
+            return this.cachedBytes;
+        }
+
+        @Override
+        public long measureNow() {
+            this.measure();
             return this.cachedBytes;
         }
 

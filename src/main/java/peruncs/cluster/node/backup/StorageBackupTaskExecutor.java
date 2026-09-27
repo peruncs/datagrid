@@ -29,6 +29,13 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         return new Default(notNull(connection), notNull(backupManager));
     }
 
+    /// Creates a backup task executor with a bounded close wait.
+    static StorageBackupTaskExecutor create(final StorageConnection connection,
+                                            final StorageBackupManager backupManager,
+                                            final long closeTimeoutMillis) {
+        return new Default(notNull(connection), notNull(backupManager), closeTimeoutMillis);
+    }
+
     /// Starts a backup if no backup is currently active.
     ///
     /// @param useManualSlot whether to use the manual slot
@@ -94,10 +101,10 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     /// Provides one virtual backup executor and the inherited storage-check executor.
     final class Default implements StorageBackupTaskExecutor {
         private static final System.Logger LOGGER = System.getLogger(StorageBackupTaskExecutor.class.getName());
-        private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
         private final StorageTaskExecutor storageChecks;
         private final StorageBackupManager backupManager;
         private final ExecutorService backupExecutor;
+        private final long closeTimeoutMillis;
 
         private Future<?> backupTask;
         private final AtomicReference<Throwable> backupFailure = new AtomicReference<>();
@@ -105,8 +112,14 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         private boolean backupClosed;
 
         private Default(final StorageConnection connection, final StorageBackupManager backupManager) {
+            this(connection, backupManager, 60_000L);
+        }
+
+        private Default(final StorageConnection connection, final StorageBackupManager backupManager, final long closeTimeoutMillis) {
+            if (closeTimeoutMillis <= 0L) throw new IllegalArgumentException("closeTimeoutMillis must be positive");
             this.storageChecks = StorageTaskExecutor.create(connection);
             this.backupManager = backupManager;
+            this.closeTimeoutMillis = closeTimeoutMillis;
             this.backupExecutor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
                     .name("EclipseStore-StorageBackup", 0L)
                     .factory());
@@ -204,8 +217,9 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                 if (task != null) task.cancel(false);
                 this.backupExecutor.shutdown();
                 try {
-                    if (!this.backupExecutor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                        failure = new IllegalStateException("Storage backup did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                    if (!this.backupExecutor.awaitTermination(this.closeTimeoutMillis, TimeUnit.MILLISECONDS)) {
+                        failure = new IllegalStateException(
+                                "Storage backup did not stop within %s ms".formatted(this.closeTimeoutMillis));
                     }
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();

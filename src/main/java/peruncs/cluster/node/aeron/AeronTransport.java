@@ -170,7 +170,7 @@ public final class AeronTransport implements ClusterReplicationTransport {
     /// @return lease directory, or `null` when no shared backup volume is configured
     private static Path leaseDirectory(final NodeSettingsSource properties) {
         final String configured = properties.replicationProperty(
-                NodeSettingsSource.Env.EnvKeys.BACKUP_PATH);
+                NodeSettingsSource.EnvKeys.BACKUP_PATH);
         return configured == null || configured.isBlank()
                 ? null
                 : Paths.get(configured).toAbsolutePath().normalize();

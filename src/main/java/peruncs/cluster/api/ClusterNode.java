@@ -1,6 +1,7 @@
 package peruncs.cluster.api;
 
 import peruncs.cluster.errors.NodeException;
+import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.errors.WrongRoleException;
 import peruncs.cluster.node.NodeAssembly;
 import peruncs.cluster.node.NodeRole;
@@ -46,6 +47,8 @@ public final class ClusterNode<T> implements AutoCloseable {
     /// @param <T> root type
     /// @param options immutable node options
     /// @return the started node and its owned Store view
+    /// @throws NodeException if settings, filesystem state, or a node resource prevents startup
+    /// @throws ReseedRequiredException if local data cannot be reconciled with the writer history
     public static <T> ClusterNode<T> open(final NodeOptions<T> options) {
         Objects.requireNonNull(options, "options");
         final NodeAssembly.Builder builder = NodeAssembly.create()
@@ -157,15 +160,15 @@ public final class ClusterNode<T> implements AutoCloseable {
 
     /// Translates the internal raw metrics into the exported status view.
     ///
-    /// A node configured without replication reports no metrics at all: the
-    /// internal `none` transport marker becomes an absent [ReplicationStatus]
-    /// instead of a record full of placeholder values.
+    /// A node configured without replication reports an explicit
+    /// `NOT_CONFIGURED` state with empty metric boundaries.
     private static ReplicationStatus replication(final StorageNodeControl control) {
         final ReplicationMetrics metrics = control.replicationMetrics();
         if (metrics == null) {
-            /* A node configured without replication reports no metrics at
-             * all instead of a record full of placeholder values. */
-            return null;
+            return new ReplicationStatus(ReplicationState.NOT_CONFIGURED,
+                    OptionalLong.empty(), OptionalLong.empty(), OptionalLong.empty(),
+                    new ReplicationStatus.WriterDurableBoundary(OptionalLong.empty(), OptionalLong.empty()),
+                    OptionalLong.empty());
         }
         return new ReplicationStatus(metrics.state(), present(metrics.currentSequence()), present(metrics.latestSequence()),
                 present(metrics.archiveUsableSpaceBytes()),

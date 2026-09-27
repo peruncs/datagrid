@@ -237,6 +237,10 @@ record AeronSettings(
                 builder::recordingStopTimeoutNanos);
         longSetting(properties, "ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS",
                 builder::readerStopTimeoutNanos);
+        longSetting(properties, "ECLIPSE_DATAGRID_AERON_LIVE_WITHHOLD_TIMEOUT_NANOS",
+                builder::liveWithholdTimeoutNanos);
+        longSetting(properties, "ECLIPSE_DATAGRID_AERON_RECONNECT_TIMEOUT_NANOS",
+                builder::reconnectTimeoutNanos);
         requireSupportedDurabilityMode(properties);
         return builder.build();
     }

@@ -105,7 +105,6 @@ final class AeronReaderTransport {
         this.runtime().ensure();
         final long recordingId = settings().topology().recordingId() >= 0
                 ? settings().topology().recordingId() : this.discoverReaderRecordingId();
-        this.rejectUncertainReaderImport(recordingId);
         final ReplicationCursor cursor = startingCursor == null
                 ? new ReplicationCursor("aeron", null, -1, "") : startingCursor;
         final boolean aeronCursor = "aeron".equalsIgnoreCase(cursor.transport());
@@ -147,6 +146,11 @@ final class AeronReaderTransport {
             /* Re-check under the slot lock: close() may have started after
              * the lock-free prologue above. */
             shared.ensureOpen();
+            /* Dispose the current reader first. Its in-flight Store import may
+             * own the uncertainty marker and clear it only after the durable
+             * cursor advances; checking before replacement would reject a
+             * healthy reader in that normal window. */
+            this.rejectUncertainReaderImport(recordingId);
             final AeronArchiveReader created = AeronArchiveReader.create(
                     AeronArchiveReader.Configuration.builder()
                     .aeron(this.runtime().aeron())

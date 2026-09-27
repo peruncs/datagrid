@@ -7,6 +7,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.api.ReplicationState;
+import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
@@ -206,6 +207,10 @@ final class AeronWriterTransport {
             }
         }
         final AeronReplicationWriteCoordinator coordinator = this.ensureCoordinator();
+        final Runnable writerIndexValidation = writerStorage == null
+                ? () -> {
+                }
+                : ClusterStoreIndexes.writerValidator(writerStorage);
         return delegate -> new AeronStorageBinaryReplicationTarget(
                 delegate,
                 coordinator,
@@ -217,17 +222,10 @@ final class AeronWriterTransport {
                     }
                 },
                 () -> !(distributor instanceof ReplicationPublisher cluster) || !cluster.ignoreDistribution(),
-                /* The reachable index topology can change without replacing
-                 * a Store root, so every distributed write validates the
-                 * live graph. The storage connection does not exist during
-                 * wiring; a null connection during root creation skips it. */
-                () ->
-                {
-                    final StorageConnection connection = writerStorage == null ? null : writerStorage.get();
-                    if (connection != null) {
-                        ClusterStoreIndexes.validateStorageRoots(connection);
-                    }
-                }
+                /* The topology can change without replacing a Store root,
+                 * so every write validates live state using writer-confined
+                 * reusable traversal scratch. */
+                writerIndexValidation
         );
     }
 
@@ -459,15 +457,21 @@ final class AeronWriterTransport {
     private void ensureWriterLease() {
         if (this.writerLease == null) {
             if (this.leaseDirectory == null) {
-                throw new IllegalStateException(
+                throw new NodeException(
                         "a writer requires a shared lease directory (%s) so it can fence against another writer for the same cluster/generation".formatted(
-                                NodeSettingsSource.Env.EnvKeys.BACKUP_PATH));
+                                NodeSettingsSource.EnvKeys.BACKUP_PATH));
             }
             final Duration staleness = Duration.ofMillis(this.leaseStalenessMillis);
-            final WriterFencingLease acquired = WriterFencingLease.acquire(
-                    this.leaseDirectory, settings().topology().clusterId(), settings().topology().identity().storeGeneration(),
-                    settings().topology().identity().nodeId(), staleness,
-                    Duration.ofMillis(settings().timeouts().leaseAcquireLockTimeoutMillis()));
+            final WriterFencingLease acquired;
+            try {
+                acquired = WriterFencingLease.acquire(
+                        this.leaseDirectory, settings().topology().clusterId(),
+                        settings().topology().identity().storeGeneration(),
+                        settings().topology().identity().nodeId(), staleness,
+                        Duration.ofMillis(settings().timeouts().leaseAcquireLockTimeoutMillis()));
+            } catch (final IllegalStateException failure) {
+                throw new NodeException("writer fencing lease acquisition failed", failure);
+            }
             this.writerLease = acquired;
             /* Capture the token once, while the lease is known held. Every
              * later checkpoint and cursor reuses this snapshot instead of a

@@ -23,7 +23,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// failure after it recovers. A fatal [Error] never clears.
 final class NodeMaintenanceScheduler implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(NodeMaintenanceScheduler.class.getName());
-    /// Runs a task must fail consecutively before health degrades.
+    /// Consecutive task failures before health degrades.
     static final int FAILURE_THRESHOLD = 3;
     private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
 

@@ -1,6 +1,7 @@
 package peruncs.cluster.storage;
 
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.errors.GraphDrainTimeoutException;
 import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
 
 import java.time.Duration;
@@ -293,6 +294,10 @@ class StorageGraphCoordinatorTest {
         assertTrue(coordinator.admissionClosed());
         assertThrows(IllegalStateException.class, () -> coordinator.write(() -> {
         }), "a write admitted after drain must fail closed");
+        assertNull(coordinator.graphFailure(), "closed admission must not poison an unchanged graph");
+        assertThrows(IllegalStateException.class, () -> coordinator.write(() -> 1),
+                "the value write overload must reject closed admission");
+        assertNull(coordinator.graphFailure(), "rejected write overloads must leave graph health unchanged");
         assertThrows(IllegalStateException.class, () -> coordinator.read(() -> {
         }), "a read admitted after drain must fail closed");
         assertThrows(IllegalStateException.class, () -> coordinator.read(() -> 1),
@@ -375,7 +380,7 @@ class StorageGraphCoordinatorTest {
         }));
         try {
             assertTrue(inside.await(TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
-            assertThrows(IllegalStateException.class,
+            assertThrows(GraphDrainTimeoutException.class,
                     () -> coordinator.drain(1L, java.util.concurrent.TimeUnit.MILLISECONDS));
             assertTrue(coordinator.admissionClosed());
             assertFalse(coordinator.isDrained());

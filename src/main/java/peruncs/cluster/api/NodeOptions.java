@@ -7,7 +7,7 @@ import java.util.function.Supplier;
 
 /// Immutable application-owned inputs for opening one cluster node.
 ///
-/// Transport, role, paths, security, retention, and operational limits are
+/// Transport, role, paths, retention, and operational limits are
 /// read from the node settings source — environment-backed by default —
 /// and validated before startup.
 ///

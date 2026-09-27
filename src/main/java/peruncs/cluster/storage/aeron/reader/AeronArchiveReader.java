@@ -272,6 +272,7 @@ public final class AeronArchiveReader implements Disposable {
     private final TransactionAssembler assembler;
     private final ControlledFragmentHandler fragmentHandler;
     private final long stopTimeoutNanos;
+    private final long reconnectTimeoutNanos;
     private final int fragmentsPerPoll;
     private final IdleStrategy idleStrategy;
     /* Poller-thread barrier coalescing state: when the first idle poll stamps
@@ -286,7 +287,7 @@ public final class AeronArchiveReader implements Disposable {
      * by another stop timeout, so a slow-but-advancing reader is never timed
      * out. The overall cap still bounds a stop whose live tail perpetually
      * outruns replay. */
-    private final AtomicLong stopRequestedNanos = new AtomicLong();
+    private final AtomicLong stopOverallDeadlineNanos = new AtomicLong();
     private final AtomicLong stopProgressSequence = new AtomicLong(-1L);
     private final AtomicLong stopProgressApplied = new AtomicLong(-1L);
     private static final long STOP_OVERALL_TIMEOUT_MULTIPLIER = 10L;
@@ -338,8 +339,10 @@ public final class AeronArchiveReader implements Disposable {
     private final AtomicBoolean positionRefreshActive = new AtomicBoolean();
     /* Cadence of the background recorded-position refresh while the reader
      * runs. */
-    private static final long RECORDED_POSITION_REFRESH_MILLIS = 1L;
+    private static final long RECORDED_POSITION_REFRESH_MILLIS = 25L;
+    private static final int MAX_RECONNECT_SUPPRESSED_FAILURES = 4;
     private volatile Thread positionRefresher;
+    private final AtomicReference<RuntimeException> positionRefreshFailure = new AtomicReference<>();
 
 
     AeronArchiveReader(
@@ -353,6 +356,7 @@ public final class AeronArchiveReader implements Disposable {
             this.archiveIncidentSignal = Objects.requireNonNull(incidentSignal, "incidentSignal");
             final AeronReplicationConfiguration requiredConfiguration = required.replicationConfiguration();
             this.stopTimeoutNanos = requiredConfiguration.readerStopTimeoutNanos();
+            this.reconnectTimeoutNanos = requiredConfiguration.reconnectTimeoutNanos();
             this.fragmentsPerPoll = requiredConfiguration.readerFragmentsPerPoll();
             this.barrierIdleFlushNanos = requiredConfiguration.readerBarrierIdleFlushNanos();
             this.idleStrategy = requiredConfiguration.retryPolicy().idleStrategy();
@@ -510,7 +514,7 @@ public final class AeronArchiveReader implements Disposable {
         }
         this.stopAtLatest = false;
         this.stopDeadlineNanos.set(0L);
-        this.stopRequestedNanos.set(0L);
+        this.stopOverallDeadlineNanos.set(0L);
         this.stopProgressSequence.set(-1L);
         this.stopProgressApplied.set(-1L);
         this.live = false;
@@ -555,12 +559,18 @@ public final class AeronArchiveReader implements Disposable {
     private void refreshRecordedPositions() {
         final LongSupplier recordedPosition = this.configuration.recordedPosition();
         while (this.positionRefreshActive.get() && !this.disposeRequested) {
-            try {
-                this.recordedPositionCache.set(recordedPosition.getAsLong());
-            } catch (final RuntimeException ignored) {
-                /* Stale is safe: never leads the recording, only delays. */
+            if (this.assembler.isWithholdingTerminalMarker()) {
+                try {
+                    this.recordedPositionCache.set(recordedPosition.getAsLong());
+                    this.positionRefreshFailure.set(null);
+                } catch (final RuntimeException failure) {
+                    /* A stale position is safe; retain only the latest cause so
+                     * a terminal reader failure can explain why the gate stalled. */
+                    this.positionRefreshFailure.set(failure);
+                }
             }
-            /* Paced refresh: park between queries; return when disposing. */
+            /* Query only during a real withheld marker and keep stalled Archive
+             * control traffic below 40 requests per second. */
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(RECORDED_POSITION_REFRESH_MILLIS));
             if (Thread.currentThread().isInterrupted()) {
                 return;
@@ -576,6 +586,12 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
+    private RuntimeException includePositionRefreshFailure(final RuntimeException failure) {
+        final RuntimeException refreshFailure = this.positionRefreshFailure.getAndSet(null);
+        if (refreshFailure != null && refreshFailure != failure) failure.addSuppressed(refreshFailure);
+        return failure;
+    }
+
     private void run() {
         final CountDownLatch lifecycleStopped = this.stopped;
         try {
@@ -588,12 +604,12 @@ public final class AeronArchiveReader implements Disposable {
                     },
                     this::pollSubscription,
                     () -> this.stopAtLatest && this.live && !this.assembler.hasIncompleteTransaction(),
-                    () -> this.stopAtLatest && ReplicationRetry.expired(this.stopDeadlineNanos.get()),
+                    this::stopTimedOut,
                     () ->
                     {
                         this.updateOutcome(ReplicationApplier.StopOutcome.TIMED_OUT);
-                        this.assembler.failure(new IllegalStateException(
-                                "Timed out waiting for Aeron Archive replay to reach the live tail"));
+                        this.assembler.failure(this.includePositionRefreshFailure(new IllegalStateException(
+                                "Timed out waiting for Aeron Archive replay to reach the live tail")));
                     },
                     this.idleStrategy
             );
@@ -602,9 +618,10 @@ public final class AeronArchiveReader implements Disposable {
             this.assembler.flushDeliveries();
             this.completeRun();
         } catch (final RuntimeException e) {
-            this.assembler.failure(e);
+            this.assembler.failure(this.includePositionRefreshFailure(e));
         } catch (final Error e) {
-            this.assembler.failure(new IllegalStateException("Aeron Archive reader polling failed", e));
+            this.assembler.failure(this.includePositionRefreshFailure(
+                    new IllegalStateException("Aeron Archive reader polling failed", e)));
             throw e;
         } finally {
             this.finishRun(lifecycleStopped);
@@ -692,7 +709,7 @@ public final class AeronArchiveReader implements Disposable {
         final Exception signalled = this.archiveIncidentSignal.getAndSet(null);
         if (this.reconnectDeadlineNanos == 0L) {
             if (signalled != null && !this.live) {
-                this.reconnectDeadlineNanos = ReplicationRetry.deadlineNanos(this.stopTimeoutNanos);
+                this.reconnectDeadlineNanos = ReplicationRetry.deadlineNanos(this.reconnectTimeoutNanos);
                 this.incidentBaselineSequence = this.assembler.lastResolvedSequence();
                 this.reconnectCause = signalled;
             }
@@ -713,7 +730,7 @@ public final class AeronArchiveReader implements Disposable {
             throw new ReseedRequiredException(
                     ("Aeron Archive response channel stayed disconnected past the %dns reconnect budget " +
                      "after %d attempts; recording %d cannot be replayed further from position %d without a reseed")
-                            .formatted(this.stopTimeoutNanos, this.reconnectAttempts,
+                            .formatted(this.reconnectTimeoutNanos, this.reconnectAttempts,
                                     this.configuration.recordingId(), this.assembler.lastResolvedPosition()),
                     this.reconnectCause);
         }
@@ -756,7 +773,7 @@ public final class AeronArchiveReader implements Disposable {
     /// stack.
     private void reconnectAfterArchiveLoss() {
         if (this.reconnectDeadlineNanos == 0L) {
-            this.reconnectDeadlineNanos = ReplicationRetry.deadlineNanos(this.stopTimeoutNanos);
+            this.reconnectDeadlineNanos = ReplicationRetry.deadlineNanos(this.reconnectTimeoutNanos);
             this.incidentBaselineSequence = this.assembler.lastResolvedSequence();
         }
         this.failIfReconnectBudgetExpired();
@@ -775,7 +792,9 @@ public final class AeronArchiveReader implements Disposable {
             if (this.reconnectCause == null) {
                 this.reconnectCause = createFailure;
             } else if (this.reconnectCause != createFailure) {
-                this.reconnectCause.addSuppressed(createFailure);
+                if (this.reconnectCause.getSuppressed().length < MAX_RECONNECT_SUPPRESSED_FAILURES) {
+                    this.reconnectCause.addSuppressed(createFailure);
+                }
             }
         }
         this.reconnectAttempts++;
@@ -824,6 +843,7 @@ public final class AeronArchiveReader implements Disposable {
     }
 
     private synchronized void finishRun(final CountDownLatch lifecycleStopped) {
+        this.stopPositionRefresher();
         if (this.assembler.failure() != null) {
             this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
         }
@@ -856,14 +876,18 @@ public final class AeronArchiveReader implements Disposable {
         if (this.stopOutcome.get() == ReplicationApplier.StopOutcome.FAILED || this.failure() != null) {
             return;
         }
+        if (this.stopAtLatest) return;
         /* The deadline precedes the flag: the polling thread tests the flag
          * first and the deadline second, so publishing the flag first would
          * let one iteration observe a live stop request against the reset
          * (already-expired) deadline and time out instantly. A reader that
          * observes the flag also observes this write: both sit in one
          * synchronized block ahead of the volatile flag publication. */
-        this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos));
-        this.stopRequestedNanos.set(System.nanoTime());
+        final long requestedAt = System.nanoTime();
+        this.stopDeadlineNanos.set(ReplicationRetry.deadlineNanos(this.stopTimeoutNanos, () -> requestedAt));
+        final long overallTimeout = this.stopTimeoutNanos > Long.MAX_VALUE / STOP_OVERALL_TIMEOUT_MULTIPLIER
+                ? Long.MAX_VALUE : this.stopTimeoutNanos * STOP_OVERALL_TIMEOUT_MULTIPLIER;
+        this.stopOverallDeadlineNanos.set(ReplicationRetry.deadlineNanos(overallTimeout, () -> requestedAt));
         this.stopProgressSequence.set(this.assembler.lastResolvedSequence());
         this.stopProgressApplied.set(this.assembler.lastAppliedSequence());
         this.stopAtLatest = true;
@@ -886,9 +910,20 @@ public final class AeronArchiveReader implements Disposable {
         final boolean applying = applied != this.stopProgressApplied.getAndSet(applied);
         if (!resolving && !applying) return;
         final long extended = ReplicationRetry.deadlineNanos(this.stopTimeoutNanos);
-        final long overall =
-                this.stopRequestedNanos.get() + this.stopTimeoutNanos * STOP_OVERALL_TIMEOUT_MULTIPLIER;
+        final long overall = this.stopOverallDeadlineNanos.get();
         this.stopDeadlineNanos.set(Math.min(extended, overall));
+    }
+
+    /// Flushes a staged final barrier before declaring stop-at-latest timed out.
+    private boolean stopTimedOut() {
+        if (!this.stopAtLatest || !ReplicationRetry.expired(this.stopDeadlineNanos.get())) return false;
+        if (this.live && !this.assembler.hasIncompleteTransaction() &&
+            this.assembler.unflushedDeliveryCount() > 0) {
+            this.assembler.flushDeliveries();
+            this.extendStopDeadline();
+            return ReplicationRetry.expired(this.stopDeadlineNanos.get());
+        }
+        return true;
     }
 
         /// Returns the last sequence delivered after commit and checksum validation.
@@ -997,9 +1032,10 @@ public final class AeronArchiveReader implements Disposable {
     ///
     /// @param failure terminal failure
     public synchronized void fail(final RuntimeException failure) {
-        this.assembler.failure(Objects.requireNonNull(failure, "failure"));
+        this.assembler.failure(this.includePositionRefreshFailure(Objects.requireNonNull(failure, "failure")));
         this.active.set(false);
         this.live = false;
+        this.stopPositionRefresher();
         this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
     }
 

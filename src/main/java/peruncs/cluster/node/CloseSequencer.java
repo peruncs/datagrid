@@ -92,10 +92,11 @@ public final class CloseSequencer {
                 if (stageFailure instanceof Error error) {
                     if (fatal == null) fatal = error;
                     else if (fatal != error) fatal.addSuppressed(error);
+                    error.addSuppressed(new NodeException("Close stage '%s' failed".formatted(stage.name())));
                 } else if (failure == null) {
-                    failure = stageFailure;
+                    failure = new NodeException("Close stage '%s' failed".formatted(stage.name()), stageFailure);
                 } else if (failure != stageFailure) {
-                    failure.addSuppressed(stageFailure);
+                    failure.addSuppressed(new NodeException("Close stage '%s' failed".formatted(stage.name()), stageFailure));
                 }
                 LOGGER.log(DEBUG,
                         "Close stage '%s' failed".formatted(stage.name()), stageFailure);

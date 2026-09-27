@@ -13,6 +13,7 @@ import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.errors.CorruptReplicationDataException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
+import peruncs.cluster.storage.ReplicationRetry;
 
 import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
@@ -171,7 +172,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     /// Default interrupt-based worker termination window during disposal, in milliseconds.
     static final long DISPOSE_INTERRUPT_TIMEOUT_MS = 5_000L;
     /// Default bound on index-relevant objects visited by one root scan.
-    static final int MAX_VALIDATED_INDEX_OBJECTS = 4096;
+    static final int MAX_VALIDATED_INDEX_OBJECTS = 65_536;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
             .name("eclipse-datagrid-store-materializer", 0L)
             .factory());
@@ -197,6 +198,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
      * caller's retries instead of being declared terminal by the worker on
      * the first per-attempt expiry. */
     private final long materializationBudgetMs;
+    private final long awaitAppliedBudgetMs;
     private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
     private final ApplyQueue queue;
     private final ApplyWorker worker;
@@ -226,8 +228,10 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         this.disposeInterruptTimeoutMs = configuration.disposeInterruptTimeoutMs();
         try {
             this.materializationBudgetMs = Math.multiplyExact(applyTimeoutMs, APPLY_TIMEOUT_RETRIES + 1L);
+            this.awaitAppliedBudgetMs = Math.multiplyExact(this.materializationBudgetMs, 1L + ApplyWorker.INDEX_REFRESH_BUDGET_MULTIPLIER);
         } catch (final ArithmeticException overflow) {
-            throw new IllegalArgumentException("applyTimeoutMs is too large: %s".formatted(applyTimeoutMs), overflow);
+            throw new IllegalArgumentException("applyTimeoutMs is too large for the full materialization and index-refresh wait: %s"
+                    .formatted(applyTimeoutMs), overflow);
         }
         this.queue = new ApplyQueue(this, cacheBytesLimit, this.maxCachedBytes, this.applyTimeoutMs);
         this.worker = new ApplyWorker(
@@ -761,20 +765,24 @@ private StorageBinaryDataMerger(final Configuration configuration) {
     /// @throws TimeoutException     if the retry budget expired
     private void awaitMaterialization(final Future<?> pending, final String operation)
             throws InterruptedException, ExecutionException, TimeoutException {
-        int retries = APPLY_TIMEOUT_RETRIES;
+        final long deadline = ReplicationRetry.deadlineNanos(TimeUnit.MILLISECONDS.toNanos(this.awaitAppliedBudgetMs));
+        final long retryNanos = TimeUnit.MILLISECONDS.toNanos(this.applyTimeoutMs);
         while (true) {
+            final long remainingNanos = ReplicationRetry.remainingNanos(deadline);
+            if (remainingNanos <= 0L) throw new TimeoutException(operation + " exceeded its total wait budget");
             try {
-                pending.get(this.applyTimeoutMs, TimeUnit.MILLISECONDS);
+                pending.get(Math.min(retryNanos, remainingNanos), TimeUnit.NANOSECONDS);
                 return;
             } catch (final TimeoutException timeout) {
                 final RuntimeException terminal = this.failure.get();
                 if (terminal != null) {
                     throw new ExecutionException(terminal);
                 }
-                if (retries-- <= 0) {
+                if (ReplicationRetry.expired(deadline)) {
                     throw timeout;
                 }
-                LOGGER.log(Level.WARNING, "%s did not finish within %s ms; retrying (%s retries left)".formatted(operation, this.applyTimeoutMs, retries + 1));
+                LOGGER.log(Level.WARNING, "%s did not finish within %s ms; continuing within its %s ms phase budget"
+                        .formatted(operation, this.applyTimeoutMs, this.awaitAppliedBudgetMs));
             }
         }
     }
