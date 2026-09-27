@@ -4,7 +4,6 @@ import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
-import io.aeron.archive.codecs.*;
 import io.aeron.driver.ThreadingMode;
 import org.agrona.SystemUtil;
 import peruncs.cluster.api.NodeSettingsSource;
@@ -47,48 +46,9 @@ record AeronSettings(
         ArchiveThreadingMode archiveThreadingMode,
         boolean productionMode
 ) {
-    private static final int MAX_SECRET_FILE_BYTES = 4096;
-    private static final int ARCHIVE_PROTOCOL_ID = MessageHeaderDecoder.SCHEMA_ID;
     private static final long DEFAULT_ARCHIVE_CONTROL_TIMEOUT_NANOS = 5_000_000_000L;
     private static final long DEFAULT_WATERMARK_CLOSE_TIMEOUT_NANOS = 5_000_000_000L;
     private static final long DEFAULT_LEASE_LOCK_TIMEOUT_MILLIS = 5_000L;
-    /* Reader clients only need discovery, position queries, and replay. Keep
-     * every mutating Archive command out of this allow-list. */
-    private static final int[] READER_ARCHIVE_ACTIONS = {
-            ArchiveIdRequestDecoder.TEMPLATE_ID,
-            ReplayRequestDecoder.TEMPLATE_ID,
-            BoundedReplayRequestDecoder.TEMPLATE_ID,
-            StopReplayRequestDecoder.TEMPLATE_ID,
-            ListRecordingsRequestDecoder.TEMPLATE_ID,
-            ListRecordingsForUriRequestDecoder.TEMPLATE_ID,
-            ListRecordingRequestDecoder.TEMPLATE_ID,
-            StartPositionRequestDecoder.TEMPLATE_ID,
-            StopPositionRequestDecoder.TEMPLATE_ID,
-            RecordingPositionRequestDecoder.TEMPLATE_ID,
-            MaxRecordedPositionRequestDecoder.TEMPLATE_ID,
-            KeepAliveRequestDecoder.TEMPLATE_ID,
-            CloseSessionRequestDecoder.TEMPLATE_ID
-    };
-    /* The writer owns the recording lifecycle and retention cleanup. It still
-     * receives an explicit list so adding a new Archive command does not
-     * silently widen either role's authority. */
-    private static final int[] WRITER_ARCHIVE_ACTIONS = {
-            ArchiveIdRequestDecoder.TEMPLATE_ID,
-            StartRecordingRequestDecoder.TEMPLATE_ID,
-            StopRecordingRequestDecoder.TEMPLATE_ID,
-            ExtendRecordingRequestDecoder.TEMPLATE_ID,
-            StopRecordingByIdentityRequestDecoder.TEMPLATE_ID,
-            PurgeSegmentsRequestDecoder.TEMPLATE_ID,
-            ListRecordingsRequestDecoder.TEMPLATE_ID,
-            ListRecordingsForUriRequestDecoder.TEMPLATE_ID,
-            ListRecordingRequestDecoder.TEMPLATE_ID,
-            StartPositionRequestDecoder.TEMPLATE_ID,
-            StopPositionRequestDecoder.TEMPLATE_ID,
-            RecordingPositionRequestDecoder.TEMPLATE_ID,
-            MaxRecordedPositionRequestDecoder.TEMPLATE_ID,
-            KeepAliveRequestDecoder.TEMPLATE_ID,
-            CloseSessionRequestDecoder.TEMPLATE_ID
-    };
 
     /// The cluster-wide and per-node wiring one node joins and publishes on.
     ///
@@ -503,16 +463,6 @@ record AeronSettings(
                 throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_RETENTION_READERS contains a duplicate reader id");
         }
         return Set.copyOf(readers);
-    }
-
-
-    private static boolean booleanSetting(final NodeSettingsSource properties,
-                                          final String name, final boolean fallback) {
-        final String configured = value(properties, name, null);
-        if (configured == null || configured.isBlank()) return fallback;
-        if ("true".equalsIgnoreCase(configured.trim())) return true;
-        if ("false".equalsIgnoreCase(configured.trim())) return false;
-        throw new IllegalArgumentException("%s must be true or false".formatted(name));
     }
 
 

@@ -57,14 +57,14 @@ public interface StorageNodeControl {
     ///
     /// @return current applied sequence
     default long currentSequence() {
-        return -1;
+        return MISSING;
     }
 
         /// Monitoring hook; nodes without a replication stream return `-1`.
     ///
     /// @return latest writer sequence
     default long latestSequence() {
-        return -1;
+        return MISSING;
     }
 
         /// Assembles the point-in-time replication observability values.
@@ -103,27 +103,27 @@ public interface StorageNodeControl {
     ///
     /// @return usable archive space in bytes
     default long archiveUsableSpaceBytes() {
-        return -1L;
+        return MISSING;
     }
 
         /// Monitoring hook for the writer's last durable recording position.
     ///
     /// @return durable recording position
     default long writerDurablePosition() {
-        return -1L;
+        return MISSING;
     }
 
         /// Monitoring hook for the writer's last durable sequence.
     ///
     /// @return durable sequence
     default long writerDurableSequence() {
-        return -1L;
+        return MISSING;
     }
 
         /// Monitoring hook for the reader's last applied sequence.
     ///
     /// @return applied sequence
     default long appliedSequence() {
-        return -1L;
+        return MISSING;
     }
 }

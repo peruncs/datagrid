@@ -520,10 +520,6 @@ public final class AeronReplicationEnvelope {
             return matches(clusterId) && this.wireNonce == wireNonce;
         }
 
-        public long wireNonce() {
-            return this.wireNonce;
-        }
-
         public long epoch() {
             return this.epoch;
         }

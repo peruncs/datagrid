@@ -191,12 +191,6 @@ final class AeronCheckpointCodec {
             return new SerializedNodeIdentity(readUuid(), readUuid(), readUuid());
         }
 
-        /// Returns the offset of the next unread byte.
-        ///
-        /// @return current offset
-        int offset() {
-            return offset;
-        }
     }
 
     /// The `(clusterId, nodeId, storeGeneration)` triplet read by every

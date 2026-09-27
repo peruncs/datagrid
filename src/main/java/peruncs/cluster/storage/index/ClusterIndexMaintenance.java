@@ -229,27 +229,19 @@ public final class ClusterIndexMaintenance {
         }
     }
 
-        /// Validates this Store's index boundary and rebuilds changed vector graphs.
+    /// Validates imported index metadata and eagerly rebuilds changed vector graphs.
     ///
-    /// The rebuild runs here — inside the merger's coordinator write
-    /// section, with no map monitor held — instead of lazily on the next
-    /// query. A
-    /// lazy rebuild scans the whole store while holding the map monitor and
-    /// performs storage reads; racing it with the next batch's bulk
-    /// materialization deadlocks the two (map monitor against the object
-    /// registry) and reads torn entities (zeroed vectors, duplicated nodes).
-    /// Rebuilding eagerly over the just-materialized boundary keeps every
-    /// query on an already-built graph, so queries never rebuild and observe
-    /// at most ordinary torn reads, never wedge the reader.
+    /// The merger calls this in its coordinator write section, outside the Store
+    /// map monitor. Deferring graph rebuilds to a query would scan the Store while
+    /// holding that monitor and can deadlock with concurrent materialization or
+    /// expose partially imported vectors. The scan is bounded and visits index
+    /// metadata only; tests also exercise it independently of the merger worker.
     ///
-    /// The scan visits index metadata only, never entity payload. The rebuild
-    /// is skipped entirely when no vector index was discovered, so a
-    /// Lucene-only or bitmap-only store pays nothing for vectors.
-    ///
-    /// @param storage             storage connection owning the materialized graph
-    /// @param maxValidatedObjects object bound for the scan
-    /// @throws IllegalArgumentException if a root violates the index policy
-    /// @throws IllegalStateException    if the scan cannot complete or the rebuild fails
+    /// @param storage             connection owning the imported Store
+    /// @param maxValidatedObjects maximum roots to inspect
+    /// @param scratch             reusable scan state
+    /// @throws IllegalArgumentException if an imported root violates index policy
+    /// @throws IllegalStateException if validation or graph rebuilding cannot complete
     static void validateAndRebuildImportedIndexes(final StorageConnection storage, final int maxValidatedObjects,
                                                   final ClusterIndexValidation.ValidationScratch scratch) {
         Objects.requireNonNull(storage, "storage");

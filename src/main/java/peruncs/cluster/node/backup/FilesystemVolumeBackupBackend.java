@@ -657,8 +657,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     ///
     /// @param temporaryArchive new publication in the export workspace
     /// @param destination      occupied archive path
-    /// @param manifestBytes    manifest of the new publication
-    /// @param digest           content digest of the new publication
+    /// @param inspection       inspection of the existing archive
     /// @throws NodeException on a conflicting publication or read failure
     private void resolveSameNamePublication(
             final Path temporaryArchive,

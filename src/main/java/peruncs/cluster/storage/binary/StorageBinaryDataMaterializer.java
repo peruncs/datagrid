@@ -28,20 +28,6 @@ final class StorageBinaryDataMaterializer {
     StorageBinaryDataMaterializer() {
     }
 
-        /// Materializes all entities in the populated prefix of a scratch array.
-    ///
-    /// The merger drains each batch into a reused scratch array that is
-    /// usually larger than the batch; only the first `length` slots hold the
-    /// batch, so only that prefix is read. Slots past `length` are ignored.
-    ///
-    /// @param storage Store connection owning the persistence manager
-    /// @param buffers scratch array with the batch in its prefix
-    /// @param length  number of populated prefix slots
-    void materialize(final BinaryPersistenceFoundation<?> foundation,
-                            final StorageConnection storage, final ByteBuffer[] buffers, final int length) {
-        materialize(foundation, storage, buffers, 0, length);
-    }
-
     /// Materializes one transaction slice from a reusable batch array.
     void materialize(final BinaryPersistenceFoundation<?> foundation,
                             final StorageConnection storage, final ByteBuffer[] buffers,

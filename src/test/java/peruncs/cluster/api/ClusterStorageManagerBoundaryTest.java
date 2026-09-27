@@ -240,6 +240,15 @@ class ClusterStorageManagerBoundaryTest {
                 (proxy, method, args) ->
                 {
                     switch (method.getName()) {
+                        case "equals" -> {
+                            return proxy == args[0];
+                        }
+                        case "hashCode" -> {
+                            return System.identityHashCode(proxy);
+                        }
+                        case "toString" -> {
+                            return "StorageManager test proxy";
+                        }
                         case "isRunning", "isActive" -> {
                             return true;
                         }

@@ -584,17 +584,6 @@ final class AeronWriterTransport {
                                                 final int dataLength, final int dataChunkCount, final int dataCrc32c, final long position) {
                                 persistWriterCheckpoint(state, sequence, dataLength, dataChunkCount, dataCrc32c, position);
                             }
-
-                            @Override
-                            public void clearInFlightFence() {
-                                try {
-                                    AtomicFileWriter.delete(inFlightCheckpointPath());
-                                } catch (final IOException failure) {
-                                    throw new ReseedRequiredException(
-                                            "cannot clear in-flight writer checkpoint %s".formatted(inFlightCheckpointPath()),
-                                            failure);
-                                }
-                            }
                         };
                 final AeronArchiveReplicationPublisher writer = this.ensureWriterLocked();
                 /* ensureWriterLocked claimed the lease token before the writer

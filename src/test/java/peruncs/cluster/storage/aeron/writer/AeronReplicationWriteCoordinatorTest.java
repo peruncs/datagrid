@@ -323,7 +323,6 @@ class AeronReplicationWriteCoordinatorTest {
     @Test
     void enqueueLocalRejectionDoesNotCreateSyntheticTerminalSequence() {
         final List<String> events = new ArrayList<>();
-        final AtomicBoolean fenceCleared = new AtomicBoolean();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .build();
@@ -336,11 +335,6 @@ class AeronReplicationWriteCoordinatorTest {
             public void onState(final AeronReplicationCheckpoint.State state, final long sequence,
                                 final int length, final int chunks, final int crc, final long position) {
                 events.add("%s:%s".formatted(state, sequence));
-            }
-
-            @Override
-            public void clearInFlightFence() {
-                fenceCleared.set(true);
             }
         });
         final PersistenceTarget<Binary> failing = new PersistenceTarget<>() {
@@ -358,7 +352,6 @@ class AeronReplicationWriteCoordinatorTest {
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(List.of("PREPARING:0", "COMMITTING_UNCERTAIN:0"), events,
                 "a delegate write failure after entering local persistence records uncertainty, not rejection");
-        assertFalse(fenceCleared.get());
         assertEquals(1L, coordinator.nextSequence());
         coordinator.dispose();
     }
@@ -913,7 +906,9 @@ class AeronReplicationWriteCoordinatorTest {
                     if (awaits.incrementAndGet() == 1) {
                         commitWaitEntered.countDown();
                         try {
-                            releaseCommit.await(30, TimeUnit.SECONDS);
+                            if (!releaseCommit.await(30, TimeUnit.SECONDS)) {
+                                throw new AssertionError("timed out waiting for commit release");
+                            }
                         } catch (final InterruptedException interrupted) {
                             Thread.currentThread().interrupt();
                         }
@@ -992,7 +987,9 @@ class AeronReplicationWriteCoordinatorTest {
                 {
                     commitWaitEntered.countDown();
                     try {
-                        releaseCommit.await(30, TimeUnit.SECONDS);
+                        if (!releaseCommit.await(30, TimeUnit.SECONDS)) {
+                            throw new AssertionError("timed out waiting for commit release");
+                        }
                     } catch (final InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
                     }

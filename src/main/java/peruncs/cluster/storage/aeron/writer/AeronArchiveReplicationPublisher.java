@@ -732,13 +732,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         this.publisher.claimFencingToken(fencingToken);
     }
 
-        /// Returns the fencing token carried by offered envelopes.
-    ///
-    /// @return current fencing token
-    public long fencingToken() {
-        return this.publisher.fencingToken();
-    }
-
         /// Stops the recording, aborts any pending transaction, and closes the publication.
     @Override
     public synchronized void close() {
@@ -872,9 +865,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         void onState(AeronReplicationCheckpoint.State state, long sequence, int dataLength,
                      int dataChunkCount, int dataCrc32c, long position);
 
-                /// Removes the in-flight checkpoint fence for a Store write that was rejected.
-        default void clearInFlightFence() {
-        }
     }
 
 }

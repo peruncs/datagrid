@@ -345,7 +345,9 @@ class FilesystemVolumeBackupBackendTest {
                     final BackupMetadata shared = new BackupMetadata(
                             100L, false, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, BackupMetadata.UNKNOWN,
                             NODE_ONE, sharedBackupId, BackupMetadata.UNKNOWN);
-                    gate.await(1, TimeUnit.MINUTES);
+                    if (!gate.await(1, TimeUnit.MINUTES)) {
+                        throw new AssertionError("timed out waiting for concurrent publication gate");
+                    }
                     try {
                         backend.createBackup(noOpStorageConnection(), cursor, shared);
                         published.incrementAndGet();

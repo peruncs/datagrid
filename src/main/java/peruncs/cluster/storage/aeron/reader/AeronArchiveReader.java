@@ -7,7 +7,6 @@ import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.ReplicationRetry;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
@@ -947,30 +946,6 @@ public final class AeronArchiveReader implements Disposable {
     /// @return current cursor snapshot
     public CursorSnapshot cursorSnapshot() {
         return this.assembler.cursorSnapshot();
-    }
-
-        /// Builds a cursor that can resume this reader from the same recording.
-    ///
-    /// @param nodeId          node that will own the resumed cursor
-    /// @param storeGeneration Store image identity
-    /// @param recordingId     Aeron Archive recording identity
-    /// @return durable cursor for the current reader boundary
-    public AeronReplicationCursor cursor(
-            final UUID nodeId,
-            final UUID storeGeneration,
-            final long recordingId
-    ) {
-        final CursorSnapshot snapshot = this.assembler.cursorSnapshot();
-        return new AeronReplicationCursor(
-                this.assembler.clusterId(),
-                nodeId,
-                storeGeneration,
-                this.assembler.epoch(),
-                this.assembler.fencingToken(),
-                recordingId,
-                snapshot.position(),
-                snapshot.sequence()
-        );
     }
 
         /// Seeds the assembler's stale-token floor from the durable cursor.

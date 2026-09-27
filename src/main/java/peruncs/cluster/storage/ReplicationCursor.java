@@ -108,10 +108,4 @@ public record ReplicationCursor(
                 : HEX.parseHex(this.providerPosition);
     }
 
-        /// Returns the provider position size in bytes without decoding it.
-    ///
-    /// @return provider position byte length
-    public int providerPositionByteLength() {
-        return this.providerPosition.length() / 2;
-    }
 }

@@ -11,18 +11,6 @@ import static org.eclipse.serializer.util.X.notNull;
 
 /// Reports whether the Store and replication can serve requests.
 public interface StorageNodeHealthCheck extends AutoCloseable {
-        /// Creates a health check.
-    ///
-    /// @param storageController Store controller
-    /// @param replicationHealth replication health
-    /// @return health check
-    static StorageNodeHealthCheck create(
-            final StorageController storageController,
-            final ReplicationHealth replicationHealth
-    ) {
-        return create(storageController, replicationHealth, () -> true);
-    }
-
         /// Creates a health check that also observes node maintenance health.
     ///
     /// @param storageController Store controller

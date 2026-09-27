@@ -30,13 +30,6 @@ public enum NodeRole {
         return this == WRITER;
     }
 
-        /// Reports whether this role serves backups.
-    ///
-    /// @return `true` for [NodeRole#BACKUP_READER]
-    public boolean isBackupReader() {
-        return this == BACKUP_READER;
-    }
-
         /// Returns the configuration spelling of this role.
     ///
     /// @return `writer`, `reader`, or `backup-reader`

@@ -313,18 +313,4 @@ public final class ClusterStoreIndexes {
         ClusterIndexMaintenance.refreshImportedIndexes(storage, maxValidatedObjects);
     }
 
-        /// Validates this Store's replicated index boundary after an import batch
-        /// and eagerly rebuilds any vector search graph the refresh cleared.
-    ///
-    /// Package-private because only [StorageBinaryDataMerger] runs it, inside
-    /// the merger's coordinator write section. See
-    /// [ClusterIndexMaintenance#validateAndRebuildImportedIndexes] for the
-    /// deadlock-avoidance invariant that requires the eager rebuild.
-    ///
-    /// @param storage             storage connection owning the materialized graph
-    /// @param maxValidatedObjects object bound for the scan
-    static void validateAndRebuildImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
-        ClusterIndexMaintenance.validateAndRebuildImportedIndexes(
-                storage, maxValidatedObjects, new ClusterIndexValidation.ValidationScratch());
-    }
 }

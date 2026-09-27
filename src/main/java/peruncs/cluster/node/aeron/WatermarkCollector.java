@@ -111,7 +111,6 @@ final class WatermarkCollector {
         if (this.channel != null) return;
         if (this.settings.topology().role().isWriter()) {
             if (!this.retentionSupported.getAsBoolean()) return;
-            final AeronArchiveRetention controller = this.retention.get();
             this.channel = AeronWatermarkChannel.writer(this.aeron.get(),
                     this.settings.topology().channels().watermark(), this.settings.topology().watermarkStreamId(),
                     (encoded, offset, length) ->

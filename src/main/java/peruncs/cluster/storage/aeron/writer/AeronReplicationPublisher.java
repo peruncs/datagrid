@@ -43,7 +43,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
      * nextSequence. Keeping it explicitly prevents an unrelated caller from
      * bypassing the durable fence by reusing the incremented value. */
     private long reservedSequence = -1L;
-    private FailedPrepare failedPrepare;
     private PreparedTransaction pendingTransaction;
     private Object coordinatorOwner;
     private volatile WriterLeaseGate leaseGate = WriterLeaseGate.alwaysValid();
@@ -219,7 +218,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 throw new IllegalStateException(
                         "coordinator-owned publisher requires the explicit reserved-sequence preparation path");
             }
-            this.failedPrepare = null;
             this.ensureNoPendingTransaction();
             CrashHook.invoke("BEFORE_PREPARE", this.nextSequence);
             final int dictionaryLength = dictionary == null ? 0 : dictionary.length;
@@ -265,7 +263,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
                                             final int bufferCount, final long reservedSequence, final TransactionMetadata metadata) {
         synchronized (this) {
             this.ensureOpen();
-            this.failedPrepare = null;
             this.ensureNoPendingTransaction();
             if (metadata == null || reservedSequence < 0 || reservedSequence == Long.MAX_VALUE ||
                 this.reservedSequence != reservedSequence || this.nextSequence != reservedSequence + 1) {
@@ -323,15 +320,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
              * that token; clear the owner reference even when the abort offer fails
              * so close() cannot emit a second terminal marker. */
             final PreparedTransaction pending;
-            int failedCrc32c = 0;
-            try {
-                failedCrc32c = EnvelopeFramer.computeDataCrc(dataBuffers, bufferCount, dataLength);
-            } catch (final RuntimeException crcFailure) {
-                failure.addSuppressed(crcFailure);
-            }
             synchronized (this) {
                 pending = this.pendingTransaction;
-                this.failedPrepare = new FailedPrepare(sequence, dataLength, dataChunks, failedCrc32c);
             }
             if (failure instanceof WriterFencedException) {
                 /* Fencing loss must never be followed by an old-token terminal
@@ -397,11 +387,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
         CrashHook.invoke("AFTER_PREPARE", sequence);
         return prepared;
-    }
-
-        /// Returns metadata for the most recent failed prepare, if any.
-    synchronized FailedPrepare failedPrepare() {
-        return this.failedPrepare;
     }
 
         /// Returns the next unreserved sequence for diagnostics and recovery checks.
@@ -493,19 +478,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
         }
         this.nextSequence = sequence;
         this.reservedSequence = -1L;
-    }
-
-        /// Abandons a reservation after local Store acceptance when publication cannot
-    /// even be prepared. The sequence remains consumed and the caller must have
-    /// persisted an in-flight uncertainty marker; rewinding it would let a later
-    /// write reuse a sequence whose local bytes already exist.
-    synchronized void abandonReservedSequence(final long sequence) {
-        if (sequence < 0 || sequence == Long.MAX_VALUE || this.reservedSequence != sequence ||
-            this.nextSequence != sequence + 1) {
-            throw new IllegalStateException("replication sequence reservation is no longer current");
-        }
-        this.reservedSequence = -1L;
-        this.failed = true;
     }
 
         /// Returns whether a durable fence currently owns the next sequence.
@@ -743,18 +715,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
         /// Aborts a pending transaction when possible and releases the publication.
     @Override
     public void close() {
-        this.closeInternal(true);
+        this.closeInternal();
     }
 
-        /// Releases the publication without manufacturing an ABORT marker. This is
-    /// used only when the Store has already accepted the transaction: the durable
-    /// in-flight fence must remain unresolved so restart fails closed instead of
-    /// pretending that a local acceptance was rejected.
-    void closeWithoutAbort() {
-        this.closeInternal(false);
-    }
-
-    private void closeInternal(final boolean abortPendingOnClose) {
+    private void closeInternal() {
         final PreparedTransaction pending;
         final boolean abortPending;
         synchronized (this) {
@@ -769,14 +733,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 throw new IllegalStateException("Aeron publisher close is already in progress");
             }
             pending = this.pendingTransaction;
-            abortPending = abortPendingOnClose && pending != null && !pending.terminal
-                    && this.leaseGate.isValid();
+            abortPending = pending != null && !pending.terminal && this.leaseGate.isValid();
             this.closeInProgress = true;
             this.closeRequested = true;
             if (!abortPending && pending != null && !pending.terminal) {
-                /* The caller explicitly chose the fail-closed shutdown path.  Detach the
-                 * token before closing the publication, but leave any coordinator fence on
-                 * disk to force reseed on the next writer process. */
+                /* Without a valid lease no abort marker can be trusted. Detach the token
+                 * but leave any coordinator fence on disk to force reseed on restart. */
                 pending.terminal = true;
                 this.pendingTransaction = null;
                 this.failed = true;
@@ -886,10 +848,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
 
         /// Metadata retained while a transaction moves through writer states.
     record TransactionMetadata(int dataLength, int dataChunkCount, int crc32c) {
-    }
-
-        /// Source metadata retained when preparing a transaction fails.
-    record FailedPrepare(long sequence, int dataLength, int dataChunkCount, int crc32c) {
     }
 
         /// Closeable handle that aborts an unfinished prepared transaction.
