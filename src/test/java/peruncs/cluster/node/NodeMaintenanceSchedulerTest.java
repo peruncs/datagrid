@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -149,6 +150,44 @@ class NodeMaintenanceSchedulerTest {
         final int stopped = runs.get();
         Thread.sleep(200L);
         assertEquals(stopped, runs.get());
+    }
+
+    /// A timed-out close keeps the Store-safety proof incomplete until the worker exits.
+    @Test
+    void closeCanRetryAfterAnUninterruptibleWorkerStops() throws Exception {
+        final NodeMaintenanceScheduler scheduler = NodeMaintenanceScheduler.create();
+        final CountDownLatch started = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        scheduler.schedule("blocked", () -> {
+            started.countDown();
+            while (release.getCount() != 0L) {
+                try {
+                    release.await();
+                } catch (final InterruptedException ignored) {
+                    // Model maintenance code that does not stop when interrupted.
+                }
+            }
+        }, Duration.ofMillis(20));
+        scheduler.start();
+        assertTrue(started.await(2, java.util.concurrent.TimeUnit.SECONDS));
+        final AtomicReference<Throwable> firstCloseFailure = new AtomicReference<>();
+        final Thread closer = Thread.ofVirtual().start(() -> {
+            try {
+                scheduler.close();
+            } catch (final Throwable failure) {
+                firstCloseFailure.set(failure);
+            }
+        });
+        try {
+            closer.join(7_000L);
+            assertFalse(closer.isAlive(), "bounded close must return after its budget");
+            assertInstanceOf(IllegalStateException.class, firstCloseFailure.get());
+            assertFalse(scheduler.isStopped(), "a live worker must not be reported stopped");
+        } finally {
+            release.countDown();
+        }
+        scheduler.close();
+        assertTrue(scheduler.isStopped());
     }
 
         /// A failing task is logged while the remaining tasks keep running.

@@ -14,7 +14,8 @@ package peruncs.cluster.api;
 /// Store image plus its durable cursor, and only then restart; the node
 /// will not recover on its own. Replication lag is reported as
 /// [ReplicationStatus#lagTransactions()], the gap between the latest writer
-/// sequence this node observed and the sequence it has durably applied.
+/// sequence this node observed and the sequence it has durably applied. It
+/// is empty when either sequence boundary is unknown.
 ///
 /// @param writer whether this node owns the writer role
 /// @param ready whether it may serve requests

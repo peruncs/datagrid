@@ -167,7 +167,7 @@ public final class ClusterNode<T> implements AutoCloseable {
              * all instead of a record full of placeholder values. */
             return null;
         }
-        return new ReplicationStatus(metrics.state(), metrics.currentSequence(), metrics.latestSequence(),
+        return new ReplicationStatus(metrics.state(), present(metrics.currentSequence()), present(metrics.latestSequence()),
                 present(metrics.archiveUsableSpaceBytes()),
                 new ReplicationStatus.WriterDurableBoundary(
                         present(metrics.writerDurablePosition()), present(metrics.writerDurableSequence())),

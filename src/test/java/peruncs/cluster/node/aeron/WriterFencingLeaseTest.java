@@ -15,6 +15,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -577,6 +579,46 @@ class WriterFencingLeaseTest {
         Thread.sleep(STALENESS.toMillis() + 50L);
         assertEquals(afterClose, heartbeatAt(volume, cluster, generation),
                 "a closed lease must never refresh its heartbeat again");
+    }
+
+    /// A renewal already inside the lease lock must observe close before it writes its heartbeat.
+    @Test
+    void closeDisablesRenewalBeforeWaitingForItsLock(@TempDir final Path volume) throws Exception {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final CountDownLatch renewalParked = new CountDownLatch(1);
+        final CountDownLatch releaseRenewal = new CountDownLatch(1);
+        final WriterFencingLease[] holder = {null};
+        CrashHook.runWithHook((name, ignored) -> {
+            if (name.equals("BEFORE_LEASE_RENEWAL_HEARTBEAT")) {
+                renewalParked.countDown();
+                boolean released = false;
+                while (!released) {
+                    try {
+                        releaseRenewal.await();
+                        released = true;
+                    } catch (final InterruptedException ignoredInterrupt) {
+                        // Keep the deterministic renewal parked until close has published its state.
+                    }
+                }
+            }
+        }, () -> holder[0] = WriterFencingLease.acquire(
+                volume, cluster, generation, UUID.randomUUID(), STALENESS));
+        try {
+            assertTrue(renewalParked.await(2, TimeUnit.SECONDS), "heartbeat did not reach the lock boundary");
+            final Thread closer = Thread.ofVirtual().start(holder[0]::close);
+            closer.join(7_000L);
+            assertFalse(closer.isAlive(), "close must keep its bounded release wait");
+            assertFalse(holder[0].isCurrent(), "closing must immediately disable ownership admission");
+            final long heartbeatAfterClose = heartbeatAt(volume, cluster, generation);
+            releaseRenewal.countDown();
+            Thread.sleep(150L);
+            assertEquals(heartbeatAfterClose, heartbeatAt(volume, cluster, generation),
+                    "a renewal released after close must not refresh the lease file");
+        } finally {
+            releaseRenewal.countDown();
+            holder[0].close();
+        }
     }
 
         /// Verifies an overlapping interprocess lock fails closed within the bounded wait

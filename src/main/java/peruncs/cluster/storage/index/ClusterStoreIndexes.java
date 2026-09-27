@@ -14,6 +14,7 @@ import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /// Keeps clustered text and vector search inside the Store object graph and
 /// registers the index types that are safe to replicate with Data Grid.
@@ -53,6 +54,14 @@ public final class ClusterStoreIndexes {
          * any other code synchronizing on it could deadlock with registration,
          * and nothing else honors that monitor. One executor guards both. */
     private static final LockedExecutor REGISTRATION = LockedExecutor.New();
+
+    static void withRegistrationRead(final Runnable validation) {
+        REGISTRATION.read(Objects.requireNonNull(validation, "validation")::run);
+    }
+
+    static <T> T withRegistrationRead(final Supplier<T> validation) {
+        return REGISTRATION.read(Objects.requireNonNull(validation, "validation")::get);
+    }
 
     private ClusterStoreIndexes() {
     }
@@ -220,7 +229,7 @@ public final class ClusterStoreIndexes {
     /// @throws IllegalArgumentException if a vector index uses external
     ///                                  storage or a background graph mode
     public static void validateVectorIndexes(final GigaMap<?> map) {
-        ClusterIndexValidation.validateVectorIndexes(map);
+        withRegistrationRead(() -> ClusterIndexValidation.validateVectorIndexes(map));
     }
 
     /// Validates every index attached to one map.
@@ -237,7 +246,7 @@ public final class ClusterStoreIndexes {
     ///                                  storage or belongs to an unknown category
     /// @throws IllegalStateException    if index groups cannot be enumerated completely
     public static void validateMap(final GigaMap<?> map) {
-        ClusterIndexValidation.validateMap(map, null);
+        withRegistrationRead(() -> ClusterIndexValidation.validateMap(map, null));
     }
 
     /// Enforcement entry point: scans a Store root object graph and rejects any
@@ -255,7 +264,8 @@ public final class ClusterStoreIndexes {
     ///                                  non-persisted vector index is reachable from the root
     /// @throws IllegalStateException    if a large index-relevant graph cannot be inspected completely
     public static void validateGraph(final Object root) {
-        ClusterIndexValidation.validateGraph(root, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null);
+        withRegistrationRead(() -> ClusterIndexValidation.validateGraph(
+                root, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null));
     }
 
         /// Validates every Store root held by a storage connection.
@@ -270,8 +280,8 @@ public final class ClusterStoreIndexes {
     /// @throws IllegalArgumentException if any root violates the index policy
     /// @throws IllegalStateException    if a root cannot be inspected completely
     public static void validateStorageRoots(final StorageConnection storage) {
-        ClusterIndexValidation.validateStorageRoots(
-                storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null);
+        withRegistrationRead(() -> ClusterIndexValidation.validateStorageRoots(
+                storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null));
     }
 
         /// Reader-side maintenance: retires cached search views before an import

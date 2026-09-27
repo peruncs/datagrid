@@ -679,11 +679,9 @@ final class WriterFencingLease implements AutoCloseable {
 
     /// Stops renewal, leaving the lease file in place for the next holder.
     ///
-    /// An in-flight heartbeat is awaited (bounded) and the interprocess lock
-    /// is acquired (bounded) before close returns. A renewal that entered
-    /// before close observes `closed` under the state lock while holding the
-    /// interprocess lock and never rewrites the file, so no heartbeat write
-    /// can happen after close completes. The file's heartbeat then ages out:
+    /// Closing first disables new renewal work. The interprocess lock is then
+    /// acquired (bounded) before close returns, proving any renewal already in
+    /// progress has finished. The file's heartbeat then ages out:
     /// a same-node restart re-acquires with the next token, and any successor
     /// steals the lease with a strictly greater token once the staleness bound
     /// passes. The fencing token series therefore survives clean restarts,
@@ -692,6 +690,7 @@ final class WriterFencingLease implements AutoCloseable {
     public synchronized void close() {
         synchronized (this.stateLock) {
             if (this.closed) return;
+            this.closed = true;
         }
         this.heartbeat.shutdownNow();
         try {
@@ -708,10 +707,9 @@ final class WriterFencingLease implements AutoCloseable {
              final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
             /* Nothing to write: the file intentionally survives release.
              * Holding the interprocess lock here proves that a renewal or
-             * terminal offer which passed the closed check has finished. A
-             * bounded failure is logged rather than thrown: `closed` already
-             * prevents every future renewal write, and close() must stay
-             * callable while an unrelated offer is in flight. */
+             * terminal offer which passed admission before close has finished.
+             * A bounded failure is logged; `closed` already prevents new
+             * offers and heartbeat writes. */
             if (!ignored.isValid()) {
                 throw new IOException("writer lease lock became invalid during release");
             }
@@ -724,9 +722,6 @@ final class WriterFencingLease implements AutoCloseable {
                     releaseFailure);
         }
         if (releaseProven) {
-            synchronized (this.stateLock) {
-                this.closed = true;
-            }
             ACTIVE.remove(this.path, this);
         }
     }

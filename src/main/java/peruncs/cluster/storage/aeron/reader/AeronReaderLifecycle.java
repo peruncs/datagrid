@@ -116,7 +116,9 @@ final class AeronReaderLifecycle {
                  * retry after this thread reaches its finally block. */
                 throw new IllegalStateException("cannot dispose Aeron reader from its polling thread");
             }
-            thread.interrupt();
+            /* Polling and reconnect work is bounded between active checks.
+             * Do not interrupt the poller: it may be completing the final
+             * durability wait, where interruption would poison the merger. */
             final long deadline = ReplicationRetry.deadlineNanos(timeoutNanos);
             try {
                 final long remaining = ReplicationRetry.remainingNanos(deadline);

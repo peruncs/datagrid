@@ -784,43 +784,4 @@ record AeronSettings(
         }
     }
 
-    /// Erases the settings-held Aeron auth credentials when the owning transport closes.
-    ///
-    /// The owning [AeronRuntime] calls this once its driver, client, and Archive
-    /// are all released, so a closed node keeps no long-lived credential copy.
-    /// Copies previously issued through [#authenticatorSupplier()] and
-    /// [#credentialsSupplier()] are owned by the Aeron Archive and client
-    /// contexts they were issued to and are released together with those
-    /// contexts by the same close; only this settings-held copy is erased
-    /// here. The principal is a non-secret identity string and has no
-
-
-        /// Builds the Archive authenticator for the embedded Archive, or `null` when auth is disabled.
-    ///
-    /// Authentication is enforced at the Archive control protocol: unauthenticated
-    /// sessions are rejected before any recording or replay is authorized. This never
-    /// replaces network policy — the control, replication, and watermark channels must
-    /// still sit on an isolated network, which remains the defense-in-depth boundary
-    /// against observers and denial-of-service.
-    ///
-    /// @return authenticator supplier, or `null`
-
-
-        /// Builds the Archive authorization service for the embedded Archive, or `null` when auth is disabled.
-    ///
-    /// Only the configured principal is authorized, and only for the
-    /// role-specific Archive actions required by this node. Reader principals
-    /// receive discovery and replay actions; writer principals additionally
-    /// receive recording and retention-maintenance actions. Unknown actions
-    /// and principals are denied by default.
-    ///
-    /// @return authorization service supplier, or `null`
-
-
-
-
-        /// Builds the client credentials presented to the Archive, or `null` when auth is disabled.
-    ///
-    /// @return credentials supplier, or `null`
-
 }

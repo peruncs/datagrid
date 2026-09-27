@@ -7,7 +7,9 @@ import peruncs.cluster.node.replication.DurableCursorFile;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.storage.ReplicationCursor;
 
+import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -111,10 +113,18 @@ public final class BackupRestorePolicy {
             final Path storageRootPath,
             final StorageBackupBackend backend
     ) {
-        final boolean storageExists = Files.isDirectory(storageRootPath);
+        final boolean storageExists = !isMissingOrEmpty(storageRootPath);
+        if (!storageExists && this.ownAuthoritativeStore && this.transport.hasAuthoritativeWriterState()) {
+            throw new ReseedRequiredException(
+                    "writer Store is absent or empty while durable writer recovery state exists; refusing to resume the Archive from a backup seed");
+        }
         final BackupMetadata.Identity configured = this.configuredIdentity();
         final BackupMetadata selected = backend.findLatestCompatibleBackup(configured);
         if (selected == null) {
+            if (!storageExists && this.ownAuthoritativeStore && backend.containsBackups()) {
+                throw new ReseedRequiredException(
+                        "writer Store is absent or empty; the shared reader backup volume cannot provide an authoritative writer image");
+            }
             if (!storageExists && backend.containsBackups()) {
                 throw new NodeException(
                         "No backup on the shared volume is compatible with this node %s; refusing to install an unrelated image"
@@ -147,6 +157,10 @@ public final class BackupRestorePolicy {
                     inconsistent);
         }
         if (!storageExists) {
+            if (this.ownAuthoritativeStore) {
+                throw new ReseedRequiredException(
+                        "writer Store is absent or empty; a shared reader backup cannot replace the authoritative writer image");
+            }
             this.deleteOffsetFile.run();
             this.restoreBackupAndCursor(backend, selected, backup, storageRootPath);
             return true;
@@ -227,6 +241,15 @@ public final class BackupRestorePolicy {
                 failure.addSuppressed(cleanupFailure);
             }
             throw failure;
+        }
+    }
+
+    private static boolean isMissingOrEmpty(final Path directory) {
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) return true;
+        try (var entries = Files.list(directory)) {
+            return entries.findAny().isEmpty();
+        } catch (final IOException failure) {
+            throw new NodeException("Cannot inspect storage directory %s".formatted(directory), failure);
         }
     }
 }

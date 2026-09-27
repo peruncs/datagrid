@@ -225,6 +225,19 @@ class BackupArchiveTest {
         assertTrue(BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()) >= 0L);
     }
 
+    /// A digest rejects unknown central-directory sizes before it can trust them for its byte budget.
+    @Test
+    void digestRejectsUnknownEntrySizes(@TempDir final Path root) throws Exception {
+        final Path archive = root.resolve("unknown-sizes.zip");
+        writeRawStoredArchive(archive,
+                new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload", -1L),
+                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", -1L),
+                new RawEntry(StorageBackupBackend.READY_ENTRY, "", -1L));
+
+        assertThrows(NodeException.class,
+                () -> BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.of(1024L, 8)));
+    }
+
     /// Verifies the digest rejects an archive whose manifest exceeds the manifest bound.
     @Test
     void digestRejectsAnOversizedManifest(@TempDir final Path root) throws Exception {
@@ -260,6 +273,7 @@ class BackupArchiveTest {
         assertTrue(BackupArchiveLimits.of(1L).maxArchiveEntries() >= 1);
         assertEquals(BackupArchiveLimits.MAX_ENTRY_BUDGET,
                 BackupArchiveLimits.of(Long.MAX_VALUE).maxArchiveEntries());
+        assertEquals(1 << 16, BackupArchiveLimits.MAX_ENTRY_BUDGET);
     }
 
     private static void writeDuplicateArchive(final Path archive) throws IOException {

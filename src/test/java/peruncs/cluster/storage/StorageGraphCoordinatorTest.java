@@ -289,7 +289,7 @@ class StorageGraphCoordinatorTest {
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
         coordinator.write(() -> {
         });
-        assertDoesNotThrow(coordinator::drain);
+        assertDoesNotThrow(() -> coordinator.drain());
         assertTrue(coordinator.admissionClosed());
         assertThrows(IllegalStateException.class, () -> coordinator.write(() -> {
         }), "a write admitted after drain must fail closed");
@@ -300,7 +300,7 @@ class StorageGraphCoordinatorTest {
         assertThrows(IllegalStateException.class, () -> coordinator.writeExclusive(() -> {
         }), "an exclusive write admitted after drain must fail closed");
         /* Drain is idempotent: the close sequencer re-runs it on retry. */
-        assertDoesNotThrow(coordinator::drain);
+        assertDoesNotThrow(() -> coordinator.drain());
     }
 
         /// A section already holding the lock completes normally; a thread
@@ -316,7 +316,7 @@ class StorageGraphCoordinatorTest {
         final Thread holder = Thread.ofVirtual().start(() -> coordinator.write(() -> {
             sectionInside.countDown();
             try {
-                releaseSection.await(TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                releaseSection.await(30, java.util.concurrent.TimeUnit.SECONDS);
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }
@@ -332,9 +332,24 @@ class StorageGraphCoordinatorTest {
                 }
             });
             Thread.sleep(100L);
-            coordinator.drain();
+            final java.util.concurrent.atomic.AtomicReference<Throwable> drainFailure =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            final Thread drainer = Thread.ofVirtual().start(() -> {
+                try {
+                    coordinator.drain();
+                } catch (final Throwable failure) {
+                    drainFailure.set(failure);
+                }
+            });
+            final long deadline = System.nanoTime() + TIMEOUT.toNanos();
+            while (!coordinator.admissionClosed() && System.nanoTime() < deadline) Thread.yield();
+            assertTrue(coordinator.admissionClosed(), "drain must close admission before waiting");
             releaseSection.countDown();
+            drainer.join(TIMEOUT.toMillis());
+            assertFalse(drainer.isAlive(), "drain must finish after the active section leaves");
+            assertNull(drainFailure.get());
             lateReader.join(TIMEOUT.toMillis());
+            assertTrue(coordinator.isDrained());
             assertNotNull(lateReadFailure.get(), "a preempted admission must observe the closed latch");
             assertTrue(lateReadFailure.get() instanceof IllegalStateException,
                     "preempted admission reports closed admission: " + lateReadFailure.get());
@@ -342,5 +357,34 @@ class StorageGraphCoordinatorTest {
             releaseSection.countDown();
             holder.join(TIMEOUT.toMillis());
         }
+    }
+
+    /// A timed-out graph drain remains admission-closed and succeeds on retry after the section leaves.
+    @Test
+    void timedOutDrainDefersCompletionUntilRetry() throws Exception {
+        final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
+        final java.util.concurrent.CountDownLatch inside = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        final Thread holder = Thread.ofVirtual().start(() -> coordinator.write(() -> {
+            inside.countDown();
+            try {
+                release.await();
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        try {
+            assertTrue(inside.await(TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
+            assertThrows(IllegalStateException.class,
+                    () -> coordinator.drain(1L, java.util.concurrent.TimeUnit.MILLISECONDS));
+            assertTrue(coordinator.admissionClosed());
+            assertFalse(coordinator.isDrained());
+        } finally {
+            release.countDown();
+        }
+        holder.join(TIMEOUT.toMillis());
+        assertFalse(holder.isAlive());
+        coordinator.drain(1L, java.util.concurrent.TimeUnit.SECONDS);
+        assertTrue(coordinator.isDrained());
     }
 }

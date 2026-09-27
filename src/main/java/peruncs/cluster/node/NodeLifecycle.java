@@ -203,14 +203,8 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             // since the storage is now different from before,
             // the storage nodes also need the exact same storage
             mustPublishStarterBackup = true;
-            /* A user upload restores with backup metadata unchecked, so it
-             * is validated before the local image is destroyed: a partial,
-             * ambiguous, or over-budget upload must never replace working
-             * storage. The backend re-validates on the archive it extracts,
-             * closing the shared-volume window between this check and the
-             * restore. */
-            backend.validateUserUploadedStorage();
-            this.assembly.deleteDirectory(storageRootPath);
+            /* Restore stages and validates a private archive copy before it
+             * replaces the existing Store image. */
             backend.restoreUserUploadedStorage(storageParentPath);
             backend.deleteUserUploadedStorage();
         } else if (this.assembly.createBackupRestorePolicy().restoreLatestBackupIfRequired(storageRootPath, backend)) {
@@ -723,6 +717,15 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                             () -> collaborators.embeddedStorageManager != null,
                             () ->
                             {
+                                if (!collaborators.graphCoordinator.isDrained()) {
+                                    throw new IllegalStateException(
+                                            "Store close deferred: graph sections have not drained");
+                                }
+                                if (collaborators.maintenanceScheduler.isInitialized() &&
+                                    !collaborators.maintenanceScheduler.get().isStopped()) {
+                                    throw new IllegalStateException(
+                                            "Store close deferred: maintenance workers are still running");
+                                }
                                 if (backupTaskExecutor != null && backupTaskExecutor.isRunningBackup()) {
                                     throw new IllegalStateException("Store close deferred: backup still running");
                                 }

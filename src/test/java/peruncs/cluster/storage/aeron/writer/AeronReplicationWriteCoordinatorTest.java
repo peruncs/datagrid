@@ -30,6 +30,45 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies checkpoint transitions and fail-closed writer coordination.
 class AeronReplicationWriteCoordinatorTest {
+    /// Archive maintenance must make an authoritative ownership check after local admission.
+    @Test
+    void maintenanceRechecksOwnershipUnderTheLeaseGate() {
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512).build();
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AtomicBoolean maintenanceRan = new AtomicBoolean();
+        final WriterLeaseGate gate = new WriterLeaseGate() {
+            @Override
+            public boolean isValid() {
+                return true; // cached admission can pass just before takeover
+            }
+
+            @Override
+            public long offerUnderOwnership(final WriterLeaseGate.OwnedOffer offer) {
+                return offer.offer(() -> false);
+            }
+
+            @Override
+            public long executeUnderOwnership(final java.util.function.LongSupplier operation) {
+                throw new WriterFencedException("lease was taken over before Archive maintenance");
+            }
+        };
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, (state, sequence, length, chunks, crc, position) -> { }, bytes -> true, gate);
+        try {
+            assertThrows(WriterFencedException.class,
+                    () -> coordinator.withWritesPaused(() -> {
+                        maintenanceRan.set(true);
+                        return 1L;
+                    }));
+            assertFalse(maintenanceRan.get(), "a fenced writer must not enter Archive maintenance");
+        } finally {
+            coordinator.dispose();
+        }
+    }
+
     /// New writes fail instead of waiting behind Archive retention maintenance.
     @Test
     void maintenanceClosesWriteAdmission() throws Exception {

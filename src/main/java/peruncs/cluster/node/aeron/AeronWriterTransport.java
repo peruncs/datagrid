@@ -26,6 +26,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -537,6 +538,16 @@ final class AeronWriterTransport {
                             "writer fencing lease lost before commit; restart required");
                 }
                 return lease.executeUnderOwnership(offer);
+            }
+
+            @Override
+            public long executeUnderOwnership(final LongSupplier operation) {
+                final WriterFencingLease lease = writerLease;
+                if (lease == null) {
+                    throw new WriterFencedException(
+                            "writer fencing lease lost before Archive maintenance; restart required");
+                }
+                return lease.executeUnderOwnership(ignored -> operation.getAsLong());
             }
         };
     }

@@ -12,9 +12,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that reader shutdown stops polling before closing its subscription.
 class AeronReaderLifecycleTest {
-        /// Verifies subscription cleanup when the polling thread is interrupted while waiting.
+    /// Verifies subscription cleanup when the active flag stops a polling thread.
     @Test
-    void closesSubscriptionWhenPollingThreadWaitIsInterrupted() {
+    void closesSubscriptionWhenActiveFlagStopsPollingThread() {
         final AtomicBoolean active = new AtomicBoolean(true);
         final AtomicBoolean closed = new AtomicBoolean();
         final AtomicBoolean closeCompleted = new AtomicBoolean();
@@ -22,9 +22,7 @@ class AeronReaderLifecycleTest {
         final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
         {
             try {
-                Thread.sleep(30_000L);
-            } catch (final InterruptedException ignored) {
-                // Expected shutdown path.
+                while (active.get()) Thread.onSpinWait();
             } finally {
                 stopped.countDown();
             }
@@ -40,7 +38,7 @@ class AeronReaderLifecycleTest {
         assertTrue(closeCompleted.get());
     }
 
-        /// Verifies subscription cleanup even when the close callback fails.
+    /// Verifies subscription cleanup even when the close callback fails.
     @Test
     void closesSubscriptionEvenWhenTheCloseCallbackFails() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -58,7 +56,7 @@ class AeronReaderLifecycleTest {
         assertFalse(active.get());
     }
 
-        /// A completed close makes every later call a no-op.
+    /// A completed close makes every later call a no-op.
     @Test
     void closeIsIdempotentAfterSuccess() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -74,7 +72,7 @@ class AeronReaderLifecycleTest {
         assertTrue(closeCompleted.get());
     }
 
-        /// A timeout retains ownership so a later disposal can finish cleanup safely.
+    /// A timeout retains ownership so a later disposal can finish cleanup safely.
     @Test
     void timeoutLeavesSubscriptionOpenForRetry() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -85,19 +83,9 @@ class AeronReaderLifecycleTest {
         final Thread pollingThread = Thread.ofVirtual().unstarted(() ->
         {
             try {
-                while (!release.await(1L, TimeUnit.MILLISECONDS)) {
-                    // Deliberately ignore interruption until the owner releases the poller.
-                    Thread.onSpinWait();
-                }
-            } catch (final InterruptedException ignored) {
-                try {
-                    while (!release.await(1L, TimeUnit.MILLISECONDS)) {
-                        // Keep the simulated callback blocked after interruption.
-                        Thread.onSpinWait();
-                    }
-                } catch (final InterruptedException retryInterrupted) {
-                    Thread.currentThread().interrupt();
-                }
+                release.await();
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
             } finally {
                 stopped.countDown();
             }
@@ -121,7 +109,7 @@ class AeronReaderLifecycleTest {
         }
     }
 
-        /// An interrupted disposer keeps subscription ownership for a later retry.
+    /// An interrupted disposer keeps subscription ownership for a later retry.
     @Test
     void interruptedDisposalDoesNotCloseSubscription()
             throws Exception {
@@ -135,11 +123,7 @@ class AeronReaderLifecycleTest {
             try {
                 release.await();
             } catch (final InterruptedException ignored) {
-                try {
-                    release.await();
-                } catch (final InterruptedException retry) {
-                    Thread.currentThread().interrupt();
-                }
+                Thread.currentThread().interrupt();
             } finally {
                 stopped.countDown();
             }
@@ -172,7 +156,7 @@ class AeronReaderLifecycleTest {
         assertTrue(closed.get());
     }
 
-        /// A live polling thread must always provide the latch that owns its exit.
+    /// A live polling thread must always provide the latch that owns its exit.
     @Test
     void rejectsMissingExitLatchForLivePollingThread() {
         final Thread pollingThread = Thread.ofVirtual().unstarted(() -> {
@@ -182,7 +166,37 @@ class AeronReaderLifecycleTest {
                 }, 1L));
     }
 
-        /// Verifies shared polling loop stops only after an idle poll.
+    /// Timeout clears active even when timeout handling fails.
+    @Test
+    void timeoutClearsActiveEvenWhenHandlerFails() {
+        final AtomicBoolean active = new AtomicBoolean(true);
+        assertThrows(IllegalStateException.class, () -> AeronReaderLifecycle.runPollingLoop(
+                active, () -> false, () -> 0, () -> false, () -> true,
+                () -> { throw new IllegalStateException("timed out"); },
+                AeronRetryPolicy.defaults().idleStrategy()));
+        assertFalse(active.get());
+    }
+
+    /// Poller disposal must not mark its thread interrupted before final flush work.
+    @Test
+    void stopDoesNotInterruptPollingThread() throws Exception {
+        final AtomicBoolean active = new AtomicBoolean(true);
+        final AtomicBoolean interruptedAtExit = new AtomicBoolean();
+        final CountDownLatch stopped = new CountDownLatch(1);
+        final Thread pollingThread = Thread.ofVirtual().unstarted(() -> {
+            while (active.get()) Thread.onSpinWait();
+            interruptedAtExit.set(Thread.currentThread().isInterrupted());
+            stopped.countDown();
+        });
+        pollingThread.start();
+
+        AeronReaderLifecycle.stopAndClose(active, pollingThread, stopped, new AtomicBoolean(),
+                () -> { }, TimeUnit.SECONDS.toNanos(1L));
+
+        assertFalse(interruptedAtExit.get());
+    }
+
+    /// Verifies shared polling loop stops only after an idle poll.
     @Test
     void sharedPollingLoopStopsOnlyAfterAnIdlePoll() {
         final AtomicBoolean active = new AtomicBoolean(true);

@@ -34,13 +34,9 @@ import static java.lang.System.Logger.Level.WARNING;
 
 /// Owns one node's MediaDriver, Aeron client, and Archive client lifecycle.
 ///
-/// When [AeronSettings] enables Aeron authentication, the embedded Archive
-/// challenges every control session and the client presents the configured
-/// credentials. Authentication is one layer only: the live, replay, control,
-/// and watermark channels carry no encryption, so they must stay on an
-/// isolated network. That network policy is the defense-in-depth boundary
-/// against observers and denial-of-service; auth only keeps unauthenticated
-/// peers from driving the Archive protocol.
+/// Data Grid provides no node authentication or transport encryption. Keep
+/// the control, replay, replication, and watermark channels on a trusted
+/// network.
 final class AeronRuntime implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(AeronRuntime.class.getName());
     private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;
@@ -450,12 +446,8 @@ final class AeronRuntime implements AutoCloseable {
         if (failure != null) throw new IllegalStateException("failed to close Aeron runtime", failure);
     }
 
-        /// Exhaustively releases every owned resource and aggregates close failures.
+    /// Exhaustively releases every owned resource and aggregates close failures.
     ///
-    /// The settings-held auth credentials are erased only once every resource
-    /// is released: closing never re-authenticates, so erasing earlier is
-    /// unnecessary, while erasing on a partial close would leave a retried
-    /// close without diagnostics context.
     private Throwable closeAllQuietly() {
         Throwable failure = null;
         if (this.archive != null) {

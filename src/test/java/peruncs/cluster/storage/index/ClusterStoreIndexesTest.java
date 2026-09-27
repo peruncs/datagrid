@@ -87,6 +87,26 @@ class ClusterStoreIndexesTest {
                 "a subtype-held external index must trip validation, not hide behind the declared type");
     }
 
+    /// Custom Number and enum fields must not hide reachable external index metadata.
+    @Test
+    void scansCustomNumbersAndEnumsForIndexMetadata() {
+        final GigaMap<Article> indexed = GigaMap.New();
+        indexed.index().register(LuceneIndex.Category(LuceneContext.New(
+                this.storagePath.resolve("leaf-hidden-lucene"), new ArticlePopulator())));
+        final Root root = new Root();
+
+        root.special = new IndexCarrierNumber(indexed);
+        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+
+        root.special = EnumIndexCarrier.INSTANCE;
+        EnumIndexCarrier.INSTANCE.value = indexed;
+        try {
+            assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+        } finally {
+            EnumIndexCarrier.INSTANCE.value = null;
+        }
+    }
+
     /// Verifies Lucene contexts and vector configurations with external directories are rejected.
     @Test
     void externalDirectoriesAreRejected() {
@@ -759,8 +779,35 @@ class ClusterStoreIndexesTest {
     private static final class Root {
         GigaMap<Article> articles;
         Base holder;
+        Object special;
         @SuppressWarnings("MismatchedCollectionQueryUpdate")
         List<CatalogEntry> catalog;
+    }
+
+    private static final class IndexCarrierNumber extends Number {
+        private final Object value;
+
+        private IndexCarrierNumber(final Object value) {
+            this.value = value;
+        }
+
+        @Override
+        public int intValue() { return 0; }
+
+        @Override
+        public long longValue() { return 0L; }
+
+        @Override
+        public float floatValue() { return 0.0f; }
+
+        @Override
+        public double doubleValue() { return 0.0; }
+    }
+
+    private enum EnumIndexCarrier {
+        INSTANCE;
+
+        private Object value;
     }
 
     private static final class CatalogEntry {

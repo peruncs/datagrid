@@ -156,17 +156,14 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
         this.pending.clear();
     }
 
-        /// Stops future runs and releases the threads. A running task is interrupted.
+    /// Stops future runs and waits for every worker to terminate.
     ///
-    /// Only the flag flips hold the monitor; the bounded join runs without
-    /// it so scheduling threads are never blocked behind shutdown. A timeout
-    /// is logged as a warning and still marks the scheduler closed: the pool
-    /// was already shut down, so retrying cannot release anything more, and a
-    /// close must not fail the node for a bounded wait.
+    /// A timeout leaves the scheduler closing so no more work can start, but
+    /// does not report success. A later close can prove termination again.
     @Override
     public void close() {
         synchronized (this) {
-            if (this.closed || this.closing) {
+            if (this.closed) {
                 return;
             }
             this.closing = true;
@@ -180,18 +177,21 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
             final boolean workersStopped = this.workers.awaitTermination(
                     Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
             if (!schedulerStopped || !workersStopped) {
-                LOGGER.log(WARNING,
-                        "Node housekeeper did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                throw new IllegalStateException(
+                        "Node housekeeper workers did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
             }
-        } catch (final InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            LOGGER.log(WARNING, "Interrupted while stopping node housekeeper", interrupted);
-        } finally {
             synchronized (this) {
                 this.closed = true;
                 this.closing = false;
             }
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while stopping node housekeeper", interrupted);
         }
+    }
+
+    boolean isStopped() {
+        return this.closed && this.scheduler.isTerminated() && this.workers.isTerminated();
     }
 
     private record ScheduledTask(String name, Runnable task, long intervalMillis, AtomicBoolean running) {

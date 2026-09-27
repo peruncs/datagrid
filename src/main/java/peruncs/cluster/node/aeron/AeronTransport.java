@@ -6,6 +6,7 @@ import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.node.CloseSequencer;
 import peruncs.cluster.node.NodeRole;
+import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.backup.BackupMetadata;
 import peruncs.cluster.node.replication.*;
 import peruncs.cluster.storage.ReplicationCursor;
@@ -215,6 +216,20 @@ public final class AeronTransport implements ClusterReplicationTransport {
         return new BackupMetadata.Identity(
                 this.settings.topology().clusterId(), this.settings.topology().identity().storeGeneration(),
                 this.settings.topology().epoch(), this.settings.topology().recordingId());
+    }
+
+    @Override
+    public boolean hasAuthoritativeWriterState() {
+        if (!this.settings.topology().role().isWriter()) return false;
+        final Path checkpoint = this.settings.topology().directories().checkpointPath();
+        return existsOrFail(checkpoint) || existsOrFail(
+                checkpoint.resolveSibling("%s.inflight".formatted(checkpoint.getFileName())));
+    }
+
+    private static boolean existsOrFail(final Path path) {
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return true;
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) return false;
+        throw new NodeException("Cannot determine whether writer recovery state exists at %s".formatted(path));
     }
 
     /// Returns the replication publisher for the transport's single replication stream.

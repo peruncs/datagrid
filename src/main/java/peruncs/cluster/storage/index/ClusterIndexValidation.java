@@ -17,6 +17,8 @@ import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -549,10 +551,17 @@ final class ClusterIndexValidation {
     static boolean isLeafValue(final Class<?> type) {
         final String pkg = type.getPackageName();
         return type == String.class
-                || Number.class.isAssignableFrom(type)
+                || type == Byte.class
+                || type == Short.class
+                || type == Integer.class
+                || type == Long.class
+                || type == Float.class
+                || type == Double.class
+                || type == BigInteger.class
+                || type == BigDecimal.class
                 || type == Boolean.class
                 || type == Character.class
-                || Enum.class.isAssignableFrom(type)
+                || isStatelessEnum(type)
                 || type == Class.class
                 || type == UUID.class
                 /* Immutable `java.time` value types: their fields are
@@ -562,6 +571,11 @@ final class ClusterIndexValidation {
                  * relevant and could exhaust the validation bound. */
                 || pkg.equals("java.time")
                 || pkg.startsWith("java.time.");
+    }
+
+    private static boolean isStatelessEnum(final Class<?> type) {
+        return type.isEnum() && Arrays.stream(type.getDeclaredFields())
+                .allMatch(field -> Modifier.isStatic(field.getModifiers()));
     }
 
     /// Reports whether one value is an immutable leaf, without a second type

@@ -481,7 +481,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                 if (this.publisher.hasPendingTransaction()) {
                     throw new IllegalStateException("cannot run Archive maintenance while a transaction is pending");
                 }
-                return maintenance.getAsLong();
+                /* Recheck and hold authoritative lease ownership only after
+                 * local writes are drained. A cached admission check cannot
+                 * protect destructive Archive work from a concurrent takeover. */
+                return this.leaseGate.executeUnderOwnership(maintenance);
             } finally {
                 this.writeLock.unlock();
             }

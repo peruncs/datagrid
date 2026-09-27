@@ -26,6 +26,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -99,10 +100,9 @@ class FilesystemVolumeBackupBackendTest {
         try (OutputStream output = Files.newOutputStream(
                 volume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
              ZipOutputStream zip = new ZipOutputStream(output)) {
-            /* The upload restore path re-validates the archive on the exact
-             * file it extracts: the fixture must look like an operator upload
-             * a valid node would accept — one readable manifest plus a
-             * non-empty storage payload. */
+            /* The upload restore path validates the private archive copy it
+             * extracts: this fixture must look like an operator upload a
+             * valid node would accept. */
             zip.putNextEntry(new ZipEntry(StorageBackupBackend.MANIFEST_ENTRY));
             zip.write(ReplicationCursorStore.encode(CURSOR));
             zip.closeEntry();
@@ -268,6 +268,55 @@ class FilesystemVolumeBackupBackendTest {
                 () -> backend.createBackup(noOpStorageConnection(), moved, backup));
         assertEquals(cursor, backend.getCursorForBackup(backup),
                 "a conflicting publication must leave the durable archive untouched");
+    }
+
+    /// ZIP digest work happens before the shared publication lock and the destination stamp is rechecked.
+    @Test
+    void rechecksDestinationAfterOffLockDigest(@TempDir final Path backupVolume) throws Exception {
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
+        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
+        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
+        final CountDownLatch inspected = new CountDownLatch(1);
+        final CountDownLatch continuePublish = new CountDownLatch(1);
+        final AtomicInteger inspections = new AtomicInteger();
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        final Thread publisher = Thread.ofVirtual().start(() ->
+                FilesystemVolumeBackupBackend.runWithTestHook((point, path) -> {
+                    if (point.equals("AFTER_EXISTING_PUBLICATION_INSPECTION")) {
+                        if (inspections.incrementAndGet() == 1) {
+                            inspected.countDown();
+                            try {
+                                continuePublish.await();
+                            } catch (final InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(interrupted);
+                            }
+                        }
+                    }
+                }, () -> {
+                    try {
+                        backend.createBackup(noOpStorageConnection(), cursor, backup);
+                    } catch (final Throwable publishFailure) {
+                        failure.set(publishFailure);
+                    }
+                }));
+
+        assertTrue(inspected.await(5, TimeUnit.SECONDS), "digest inspection did not finish");
+        try (FileChannel channel = FileChannel.open(
+                backupVolume.resolve(".publish.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock held = channel.tryLock()) {
+            assertNotNull(held, "the digest inspection must not hold the publication lock");
+            Files.setLastModifiedTime(archive, FileTime.fromMillis(System.currentTimeMillis() + 1_000L));
+        } finally {
+            continuePublish.countDown();
+        }
+        publisher.join(TimeUnit.SECONDS.toMillis(10));
+        assertFalse(publisher.isAlive(), "publisher must leave the bounded lock wait");
+        assertNull(failure.get());
+        assertTrue(inspections.get() >= 2, "a changed destination stamp must trigger off-lock reinspection");
+        assertEquals(1, backend.listBackups().size());
     }
 
     /// Verifies concurrent same-name publications with different content elect exactly one winner while every loser fails without overwriting.
@@ -506,6 +555,11 @@ class FilesystemVolumeBackupBackendTest {
                         - FilesystemVolumeBackupBackend.ORPHAN_WORKSPACE_MAX_AGE.toMillis()
                         - 60_000L));
         final Path lease = live.resolveSibling(live.getFileName() + ".lease");
+        Files.writeString(lease, "active lease");
+        Files.setLastModifiedTime(lease, FileTime.fromMillis(
+                System.currentTimeMillis()
+                        - FilesystemVolumeBackupBackend.ORPHAN_WORKSPACE_MAX_AGE.toMillis()
+                        - 60_000L));
 
         try (FileChannel channel = FileChannel.open(lease,
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE);
@@ -513,6 +567,8 @@ class FilesystemVolumeBackupBackendTest {
             FilesystemVolumeBackupBackend.create(backupVolume);
             assertTrue(Files.exists(live, LinkOption.NOFOLLOW_LINKS),
                     "age alone must never delete an actively leased export");
+            assertTrue(Files.isRegularFile(lease, LinkOption.NOFOLLOW_LINKS),
+                    "a lease file with a workspace prefix is not an orphan directory");
         }
     }
 
@@ -581,6 +637,8 @@ class FilesystemVolumeBackupBackendTest {
         createUserArchive(backupVolume, "user");
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         final Path destination = root.resolve("destination");
+        Files.createDirectories(destination.resolve(StorageBackupBackend.STORAGE_ENTRY));
+        Files.writeString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), "previous");
 
         assertTrue(backend.hasUserUploadedStorage());
         /* Validation and restore enforce the same rules; both must accept a
@@ -592,10 +650,10 @@ class FilesystemVolumeBackupBackendTest {
         assertFalse(backend.hasUserUploadedStorage());
     }
 
-        /// An upload without a manifest is refused by both the pre-destroy
-    /// validation and the restore-time re-validation.
+    /// An upload without a manifest is refused by preflight and staged restore.
     @Test
-    void userUploadWithoutAManifestIsRefusedEverywhere(@TempDir final Path backupVolume) throws Exception {
+    void userUploadWithoutAManifestLeavesThePreviousStoreIntact(
+            @TempDir final Path backupVolume, @TempDir final Path root) throws Exception {
         try (OutputStream output = Files.newOutputStream(
                 backupVolume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
              ZipOutputStream zip = new ZipOutputStream(output)) {
@@ -604,14 +662,19 @@ class FilesystemVolumeBackupBackendTest {
             zip.closeEntry();
         }
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
+        final Path destination = root.resolve("destination");
+        Files.createDirectories(destination.resolve(StorageBackupBackend.STORAGE_ENTRY));
+        Files.writeString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), "previous");
 
         final NodeException validation = assertThrows(NodeException.class,
                 backend::validateUserUploadedStorage);
         assertTrue(validation.getMessage().contains("exactly one readable manifest"),
                 "must name the missing manifest, was: %s".formatted(validation.getMessage()));
         assertThrows(NodeException.class,
-                () -> backend.restoreUserUploadedStorage(backupVolume.resolveSibling("unused")),
-                "the restore re-validation must refuse the same upload");
+                () -> backend.restoreUserUploadedStorage(destination),
+                "the staged copy must be rejected before replacing local storage");
+        assertEquals("previous", Files.readString(
+                destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
         /// A zero-byte storage payload does not count as an uploadable Store
@@ -638,7 +701,7 @@ class FilesystemVolumeBackupBackendTest {
 
         /// The validation dry run measures the real decompressed content, so an
     /// upload whose actual payload exceeds the operator budget is refused —
-    /// before the caller ever destroys local storage — regardless of what the
+    /// before the caller replaces local storage — regardless of what the
     /// archive's central directory declares.
     @Test
     void userUploadInflatingBeyondTheExtractionBudgetIsRefusedBeforeRestore(

@@ -52,51 +52,55 @@ public final class ClusterIndexMaintenance {
     /// Records the indexes and root links that may change in the incoming batch.
     public void beforeApply(final StorageConnection storage, final ByteBuffer[] buffers,
                      final int length, final int maxValidatedObjects) {
-        if (!this.initialized || this.rootsChanged(storage)) this.scanRoots(storage, maxValidatedObjects);
-        this.reachabilityChanged = false;
-        for (int index = 0; index < length; index++) {
-            final ByteBuffer buffer = buffers[index];
-            if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
-                throw new IllegalArgumentException("index maintenance requires normalized direct buffers");
-            }
-            if (buffer.limit() != 0) {
-                final long start = getDirectByteBufferAddress(buffer);
-                if (ITERATOR.iterateEntityRawData(start, start + buffer.limit(), this.importedIdCheck) != 0L) {
-                    throw new CorruptReplicationDataException("incomplete entity in imported index batch");
+        ClusterStoreIndexes.withRegistrationRead(() -> {
+            if (!this.initialized || this.rootsChanged(storage)) this.scanRoots(storage, maxValidatedObjects);
+            this.reachabilityChanged = false;
+            for (int index = 0; index < length; index++) {
+                final ByteBuffer buffer = buffers[index];
+                if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
+                    throw new IllegalArgumentException("index maintenance requires normalized direct buffers");
+                }
+                if (buffer.limit() != 0) {
+                    final long start = getDirectByteBufferAddress(buffer);
+                    if (ITERATOR.iterateEntityRawData(start, start + buffer.limit(), this.importedIdCheck) != 0L) {
+                        throw new CorruptReplicationDataException("incomplete entity in imported index batch");
+                    }
                 }
             }
-        }
-        /* Lucene views are cached NRT readers built lazily per index, not per
-         * entity: even a batch that touched no known-reachable entity must
-         * retire them, or the next query reopens over the *pre-import* files
-         * (torn reads). Agents/src: refreshMaps is intentionally unconditional. */
-        refreshMaps(this.cachedMaps, this.scratch);
+            /* Lucene views are cached NRT readers built lazily per index, not per
+             * entity: even a batch that touched no known-reachable entity must
+             * retire them, or the next query reopens over the *pre-import* files
+             * (torn reads). Agents/src: refreshMaps is intentionally unconditional. */
+            refreshMaps(this.cachedMaps, this.scratch);
+        });
     }
 
     /// Validates changed roots and rebuilds only changed vector graphs.
     public void afterApply(final StorageConnection storage, final int maxValidatedObjects) {
-        final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
-        scratch.vectorGroups.clear();
-        scratch.rebuiltGroups.clear();
-        try {
-            if (this.reachabilityChanged || this.rootsChanged(storage)) {
-                this.scanRoots(storage, maxValidatedObjects);
-            } else {
-                for (final GigaMap<?> map : this.cachedMaps) {
-                    ClusterIndexValidation.validateMap(map, scratch.vectorGroups, scratch);
-                }
-            }
-            for (final ClusterIndexValidation.VectorGroup group : scratch.vectorGroups) {
-                if (scratch.rebuiltGroups.put(group.vectors(), Boolean.TRUE) == null) {
-                    resetChangedVectorSearchGraphs(group.vectors(), scratch);
-                }
-            }
-        } finally {
+        ClusterStoreIndexes.withRegistrationRead(() -> {
+            final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
             scratch.vectorGroups.clear();
             scratch.rebuiltGroups.clear();
-            scratch.vectorModCounts.clear();
-            scratch.vectorProbes.clear();
-        }
+            try {
+                if (this.reachabilityChanged || this.rootsChanged(storage)) {
+                    this.scanRoots(storage, maxValidatedObjects);
+                } else {
+                    for (final GigaMap<?> map : this.cachedMaps) {
+                        ClusterIndexValidation.validateMap(map, scratch.vectorGroups, scratch);
+                    }
+                }
+                for (final ClusterIndexValidation.VectorGroup group : scratch.vectorGroups) {
+                    if (scratch.rebuiltGroups.put(group.vectors(), Boolean.TRUE) == null) {
+                        resetChangedVectorSearchGraphs(group.vectors(), scratch);
+                    }
+                }
+            } finally {
+                scratch.vectorGroups.clear();
+                scratch.rebuiltGroups.clear();
+                scratch.vectorModCounts.clear();
+                scratch.vectorProbes.clear();
+            }
+        });
     }
 
     /// Drops all per-batch scratch after a failed phase.
@@ -131,22 +135,24 @@ public final class ClusterIndexMaintenance {
     }
 
     private void scanRoots(final StorageConnection storage, final int maxValidatedObjects) {
-        final var manager = storage.persistenceManager();
-        final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
-        this.cachedMaps.clear();
-        this.knownMaps.clear();
-        this.reachableIds.truncate();
-        scratch.vectorGroups.clear();
-        ClusterIndexValidation.validateStorageRoots(storage, maxValidatedObjects, scratch.vectorGroups, current -> {
-            if (current instanceof GigaMap<?> map && this.knownMaps.put(map, Boolean.TRUE) == null) {
-                this.cachedMaps.add(map);
-            }
-            final long id = manager.lookupObjectId(current);
-            if (id > 0L) this.reachableIds.add(id);
-        }, scratch);
-        this.rootValues.clear();
-        manager.viewRoots().iterateEntries(this.rootValues::put);
-        this.initialized = true;
+        ClusterStoreIndexes.withRegistrationRead(() -> {
+            final var manager = storage.persistenceManager();
+            final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
+            this.cachedMaps.clear();
+            this.knownMaps.clear();
+            this.reachableIds.truncate();
+            scratch.vectorGroups.clear();
+            ClusterIndexValidation.validateStorageRoots(storage, maxValidatedObjects, scratch.vectorGroups, current -> {
+                if (current instanceof GigaMap<?> map && this.knownMaps.put(map, Boolean.TRUE) == null) {
+                    this.cachedMaps.add(map);
+                }
+                final long id = manager.lookupObjectId(current);
+                if (id > 0L) this.reachableIds.add(id);
+            }, scratch);
+            this.rootValues.clear();
+            manager.viewRoots().iterateEntries(this.rootValues::put);
+            this.initialized = true;
+        });
     }
 
         /// Compatibility entry for refreshing views discovered from Store roots.
@@ -187,15 +193,16 @@ public final class ClusterIndexMaintenance {
     static ClusterIndexValidation.ValidationScratch refreshImportedIndexes(
             final StorageConnection storage, final int maxValidatedObjects) {
         Objects.requireNonNull(storage, "storage");
-        final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
-        scratch.vectorModCounts.clear();
-        collectMaps(storage, scratch, maxValidatedObjects);
-        try {
-            refreshMaps(scratch.maps, scratch);
-        } finally {
-            scratch.maps.clear();
-        }
-        return scratch;
+        return ClusterStoreIndexes.withRegistrationRead(() -> {
+            final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
+            collectMaps(storage, scratch, maxValidatedObjects);
+            try {
+                refreshMaps(scratch.maps, scratch);
+            } finally {
+                scratch.maps.clear();
+            }
+            return scratch;
+        });
     }
 
     private static void refreshMaps(final ArrayList<GigaMap<?>> maps,
@@ -246,21 +253,23 @@ public final class ClusterIndexMaintenance {
     static void validateAndRebuildImportedIndexes(final StorageConnection storage, final int maxValidatedObjects,
                                                   final ClusterIndexValidation.ValidationScratch scratch) {
         Objects.requireNonNull(storage, "storage");
-        scratch.vectorGroups.clear();
-        scratch.rebuiltGroups.clear();
-        try {
-            ClusterIndexValidation.validateStorageRoots(storage, maxValidatedObjects, scratch.vectorGroups);
-            for (final ClusterIndexValidation.VectorGroup group : scratch.vectorGroups) {
-                if (scratch.rebuiltGroups.put(group.vectors(), Boolean.TRUE) == null) {
-                    resetChangedVectorSearchGraphs(group.vectors(), scratch);
-                }
-            }
-        } finally {
+        ClusterStoreIndexes.withRegistrationRead(() -> {
             scratch.vectorGroups.clear();
             scratch.rebuiltGroups.clear();
-            scratch.vectorModCounts.clear();
-            scratch.vectorProbes.clear();
-        }
+            try {
+                ClusterIndexValidation.validateStorageRoots(storage, maxValidatedObjects, scratch.vectorGroups);
+                for (final ClusterIndexValidation.VectorGroup group : scratch.vectorGroups) {
+                    if (scratch.rebuiltGroups.put(group.vectors(), Boolean.TRUE) == null) {
+                        resetChangedVectorSearchGraphs(group.vectors(), scratch);
+                    }
+                }
+            } finally {
+                scratch.vectorGroups.clear();
+                scratch.rebuiltGroups.clear();
+                scratch.vectorModCounts.clear();
+                scratch.vectorProbes.clear();
+            }
+        });
     }
 
     private static void resetChangedVectorSearchGraphs(final VectorIndices<?> vectors,

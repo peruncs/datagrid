@@ -4,6 +4,7 @@ import peruncs.cluster.errors.WriterFencedException;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
 
 /// Gates each replication-frame offer on continued writer-lease ownership.
 ///
@@ -49,6 +50,19 @@ public interface WriterLeaseGate {
     /// @throws UnsupportedOperationException when the gate cannot serialize offers
     ///                                       with the interprocess lock
     long offerUnderOwnership(final OwnedOffer offer);
+
+    /// Runs a bounded Archive maintenance operation while ownership is serialized with takeover.
+    ///
+    /// Production gates hold the interprocess lease lock for the whole
+    /// operation. Test and lease-free gates check their local validity and run
+    /// directly.
+    ///
+    /// @param operation maintenance operation
+    /// @return operation result
+    default long executeUnderOwnership(final LongSupplier operation) {
+        Objects.requireNonNull(operation, "operation");
+        return this.offerUnderOwnership(ignored -> operation.getAsLong());
+    }
 
     /// Supplies a publication operation and its per-attempt ownership check.
     @FunctionalInterface

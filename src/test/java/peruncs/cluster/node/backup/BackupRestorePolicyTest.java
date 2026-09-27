@@ -77,6 +77,46 @@ class BackupRestorePolicyTest {
         assertEquals(0, backend.restoreCalls, "a writer must never call the restore path");
     }
 
+    /// A missing writer Store cannot be rebuilt from its old checkpoint or a reader seed.
+    @Test
+    void missingWriterStoreWithCheckpointRequiresReseed(@TempDir final Path temp) {
+        final BackupMetadata.Identity identity = new BackupMetadata.Identity(CLUSTER, GENERATION, 4L, 9L);
+        final BackupRestorePolicy policy = policy(
+                transport("aeron", identity, true),
+                positionProvider(new NodeException("no live position")),
+                cursorManager(ReplicationCursor.NONE), true);
+        final FakeBackend backend = new FakeBackend(identity);
+
+        final ReseedRequiredException failure = assertThrows(ReseedRequiredException.class,
+                () -> policy.restoreLatestBackupIfRequired(temp.resolve("missing-storage"), backend));
+
+        assertTrue(failure.getMessage().contains("durable writer recovery state"));
+        assertEquals(0, backend.restoreCalls, "writer recovery must not install a reader backup");
+    }
+
+    /// A fresh writer also cannot adopt a reader backup as its authoritative image.
+    @Test
+    void missingWriterStoreCannotRestoreSharedReaderBackup(@TempDir final Path temp) {
+        final BackupMetadata.Identity identity = new BackupMetadata.Identity(CLUSTER, GENERATION, 4L, 9L);
+        final BackupRestorePolicy policy = policy(
+                transport("aeron", identity),
+                positionProvider(new NodeException("no live position")),
+                cursorManager(ReplicationCursor.NONE), true);
+        final FakeBackend backend = new FakeBackend(identity);
+        final ReplicationCursor backupCursor = ReplicationCursor.of("aeron", GENERATION, 9L,
+                new peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor(
+                        CLUSTER, UUID.randomUUID(), GENERATION, 7L, 1L, 4L, 0L, 9L).encode());
+        final BackupMetadata backup = BackupMetadata.create(1_000L, false, backupCursor);
+        backend.backups.add(backup);
+        backend.cursorForBackup = backupCursor;
+
+        final ReseedRequiredException failure = assertThrows(ReseedRequiredException.class,
+                () -> policy.restoreLatestBackupIfRequired(temp.resolve("missing-storage"), backend));
+
+        assertTrue(failure.getMessage().contains("shared reader backup"));
+        assertEquals(0, backend.restoreCalls, "a reader seed must not become the writer image");
+    }
+
     /// A configured transport identity survives an unreadable local cursor.
     @Test
     void unreadableCursorFallsBackToConfiguredIdentity() {
@@ -119,12 +159,18 @@ class BackupRestorePolicyTest {
 
     private static ClusterReplicationTransport transport(
             final String id, final BackupMetadata.Identity identity) {
+        return transport(id, identity, false);
+    }
+
+    private static ClusterReplicationTransport transport(
+            final String id, final BackupMetadata.Identity identity, final boolean writerState) {
         return (ClusterReplicationTransport) Proxy.newProxyInstance(
                 ClusterReplicationTransport.class.getClassLoader(),
                 new Class<?>[]{ClusterReplicationTransport.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "id" -> id;
                     case "configuredBackupIdentity" -> identity;
+                    case "hasAuthoritativeWriterState" -> writerState;
                     default -> defaultValue(method.getReturnType());
                 });
     }

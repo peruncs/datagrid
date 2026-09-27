@@ -1,6 +1,6 @@
 # Consolidated review findings
 
-Reviewed the six `*review.md` files modified on 2026-09-26: `SPARK-REVIEW.md`, `final-review.md`, `KIMI-REVIEW.md`, `MIMO-REVIEW.md`, `ds-review.md`, and `glm-review.md`. Each candidate below was checked against the current working tree; duplicate and already-fixed reports were consolidated. This is static analysis only; no build or tests were run.
+Reviewed the six `*review.md` files modified on 2026-09-26: `SPARK-REVIEW.md`, `final-review.md`, `KIMI-REVIEW.md`, `MIMO-REVIEW.md`, `ds-review.md`, and `glm-review.md`. Each candidate below was checked against the code before implementation; duplicate and already-fixed reports were consolidated. All surviving mitigations below have since been applied, and the focused regression suites pass. The review itself was static analysis; verification followed implementation.
 
 ## P0 — Stop writer startup on a missing authoritative Store
 

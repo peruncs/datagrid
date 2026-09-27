@@ -435,12 +435,12 @@ final class BackupArchive {
         try (ZipFile zip = openArchive(archive)) {
             final List<ZipEntry> entries = listEntries(zip, limits.maxArchiveEntries());
             final long declared = declaredTotalBytes(entries);
-            if (declared > limits.maxExtractedBytes()) {
+            if (declared < 0L || declared > limits.maxExtractedBytes()) {
                 throw new NodeException("Backup archive is too large");
             }
             final String prefix = StorageBackupBackend.STORAGE_ENTRY + "/";
             ZipEntry manifest = null;
-            final List<String> names = new ArrayList<>();
+            final List<ZipEntry> storageEntries = new ArrayList<>();
             for (final ZipEntry entry : entries) {
                 if (StorageBackupBackend.MANIFEST_ENTRY.equals(entry.getName())) {
                     if (entry.isDirectory()) {
@@ -448,22 +448,40 @@ final class BackupArchive {
                     }
                     manifest = entry;
                 } else if (!entry.isDirectory() && entry.getName().startsWith(prefix)) {
-                    names.add(entry.getName().substring(prefix.length()));
+                    storageEntries.add(entry);
                 }
             }
             if (manifest == null) {
                 throw new IncompleteArchiveException("Backup archive is missing manifest in %s".formatted(archive));
             }
             final CRC32 digest = new CRC32();
-            digest.update(readBoundedManifest(zip, manifest, archive));
-            names.sort(String::compareTo);
+            final byte[] manifestBytes = readBoundedManifest(zip, manifest, archive);
+            if (manifest.getSize() != manifestBytes.length) {
+                throw new NodeException("Backup manifest size does not match its declaration");
+            }
+            digest.update(manifestBytes);
+            long actualBytes = manifestBytes.length;
+            if (actualBytes > limits.maxExtractedBytes()) {
+                throw new NodeException("Backup archive is too large");
+            }
+            storageEntries.sort(Comparator.comparing(entry -> entry.getName().substring(prefix.length())));
             final byte[] buffer = new byte[8192];
-            for (final String name : names) {
+            for (final ZipEntry entry : storageEntries) {
+                final String name = entry.getName().substring(prefix.length());
                 digest.update(name.getBytes(StandardCharsets.UTF_8));
-                try (InputStream data = zip.getInputStream(zip.getEntry(prefix + name))) {
+                try (InputStream data = zip.getInputStream(entry)) {
                     int read;
+                    long entryBytes = 0L;
                     while ((read = data.read(buffer)) != -1) {
+                        if (read > limits.maxExtractedBytes() - actualBytes) {
+                            throw new NodeException("Backup archive is too large");
+                        }
                         digest.update(buffer, 0, read);
+                        actualBytes += read;
+                        entryBytes += read;
+                    }
+                    if (entry.getSize() != entryBytes) {
+                        throw new NodeException("Backup archive entry size does not match its declaration");
                     }
                 }
             }
@@ -544,10 +562,22 @@ final class BackupArchive {
                     extractedBytes = extractEntry(zip, root, entry, extractedBytes, budget, transferBuffer);
                 }
             }
+            forceExtractedDirectories(root);
         } catch (final IOException failure) {
             throw new NodeException("Failed to extract storage", failure);
         }
         validateExtractedArchive(root, requireBackupMetadata);
+    }
+
+    private static void forceExtractedDirectories(final Path root) throws IOException {
+        try (var paths = Files.walk(root)) {
+            for (final Path directory : paths
+                    .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+                    .sorted(Comparator.comparingInt(Path::getNameCount).reversed())
+                    .toList()) {
+                AtomicFileWriter.forceDirectory(directory);
+            }
+        }
     }
 
         /// Reads the manifest from an archive without extracting the payload.
@@ -744,13 +774,15 @@ final class BackupArchive {
          * link, without re-walking every path component for each entry. */
         final long declared = entry.getSize();
         final long entryBudget = declared >= 0L ? declared : budget - extractedBytes;
-        try (OutputStream output = Files.newOutputStream(target,
+        try (FileChannel file = FileChannel.open(target,
                 StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE,
                 LinkOption.NOFOLLOW_LINKS);
+             OutputStream output = Channels.newOutputStream(file);
              InputStream data = zip.getInputStream(entry)) {
             extractedBytes += transferBounded(data, output, 0L, entryBudget, transferBuffer);
             if (extractedBytes > budget) throw new IOException("Backup archive exceeds extraction limit");
+            file.force(true);
             return extractedBytes;
         }
     }

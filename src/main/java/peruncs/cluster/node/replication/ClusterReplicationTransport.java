@@ -28,6 +28,17 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     default BackupMetadata.Identity configuredBackupIdentity() {
         return BackupMetadata.Identity.unknown();
     }
+
+    /// Reports whether this writer has durable recovery state for an existing history.
+    ///
+    /// Startup must not create a fresh or backup-seeded Store image when a
+    /// writer checkpoint or unresolved in-flight fence already exists.
+    ///
+    /// @return `true` when local writer recovery state exists
+    default boolean hasAuthoritativeWriterState() {
+        return false;
+    }
+
         /// Creates a transport that performs no replication.
     ///
     /// @return the shared disabled transport

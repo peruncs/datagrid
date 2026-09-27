@@ -5,6 +5,7 @@ import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -80,6 +81,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// read-to-write upgrade immediately: a thread holding only a read hold would
 /// deadlock against the fair write lock otherwise.
 public final class StorageGraphCoordinator {
+    private static final long DEFAULT_DRAIN_TIMEOUT_MILLIS = 5_000L;
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
     /* Latched while a failed write section still holds the write lock: after
      * release, every coordinated access must fail closed instead of serving a
@@ -89,6 +91,7 @@ public final class StorageGraphCoordinator {
      * must fail closed afterwards: the close sequencer drains first, so no
      * admitted section can execute on a dead Store. */
     private final AtomicBoolean admissionClosed = new AtomicBoolean();
+    private final AtomicBoolean drained = new AtomicBoolean();
 
     /// Creates a fair coordinator for one Store object graph.
     public StorageGraphCoordinator() {
@@ -276,13 +279,35 @@ public final class StorageGraphCoordinator {
     /// rejected by the closed check in their own entry points; writers must
     /// not hold this lock themselves while draining.
     public void drain() {
-        /* Admission closes BEFORE the lock is taken: a thread that passed the
-         * outer check can then only see the latch inside an acquired section.
-         * Sets from within a graph section are impossible because every write
-         * caller re-checks the latch after acquiring the lock and fails. */
+        this.drain(DEFAULT_DRAIN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    void drain(final long timeout, final TimeUnit unit) {
+        Objects.requireNonNull(unit, "unit");
+        if (timeout < 0L) throw new IllegalArgumentException("timeout must not be negative");
+        /* Close admission before waiting: a thread that passed the outer
+         * check can only see the latch again after it enters this lock. */
         this.admissionClosed.set(true);
-        this.lock.writeLock().lock();
-        this.lock.writeLock().unlock();
+        try {
+            if (!this.lock.writeLock().tryLock(timeout, unit)) {
+                throw new IllegalStateException("Timed out while draining active graph sections");
+            }
+            try {
+                this.drained.set(true);
+            } finally {
+                this.lock.writeLock().unlock();
+            }
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while draining active graph sections", interrupted);
+        }
+    }
+
+    /// Reports whether the most recent drain completed its bounded wait.
+    ///
+    /// @return `true` once every graph section has left the Store boundary
+    public boolean isDrained() {
+        return this.drained.get();
     }
 
     /// Reports whether admission has been closed by a drain.

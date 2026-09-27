@@ -9,6 +9,7 @@ import peruncs.cluster.storage.ReplicationRetry;
 import peruncs.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
@@ -64,14 +65,10 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     private static final long LOCK_RETRY_NANOS = Duration.ofMillis(10).toNanos();
 
     private static final System.Logger LOGGER = System.getLogger(FilesystemVolumeBackupBackend.class.getName());
-    /* One advisory lock file per volume serializes archive publication.
-     * The existence check, the completeness/identity comparison, the atomic
-     * rename, and archive deletion must hold while no other publisher acts:
-     * without the lock a second publisher can create the destination between
-     * the check and the move, or delete a just-published archive while
-     * replacing a partial file, silently overwriting one backup with another.
-     * The in-JVM mutex covers threads of this process; the file lock covers
-     * separate processes sharing the volume. */
+    /* One advisory lock per volume serializes destination identity rechecks,
+     * atomic renames, and deletions across processes. ZIP validation and
+     * content digests run outside the lock; a file stamp proves the checked
+     * archive is still the one observed under the lock. */
     private static final String PUBLISH_LOCK_FILE_NAME = ".publish.lock";
     private static final String WORKSPACE_LEASE_SUFFIX = ".lease";
     private static final ConcurrentHashMap<Path, PublicationMutex> PUBLISH_MUTEXES = new ConcurrentHashMap<>();
@@ -128,6 +125,12 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
 
     /// Identifies one archive file version for the metadata cache.
     private record ArchiveStamp(Object fileKey, FileTime modifiedTime, long size) {
+    }
+
+    private record PublicationInspection(ArchiveStamp stamp, boolean complete, boolean identical) {
+    }
+
+    private static final class RetryPublicationInspection extends RuntimeException {
     }
 
     /// One cached archive resolution; a `null` metadata marks an unreadable file.
@@ -413,18 +416,11 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         BackupArchive.validateUpload(this.userUploadedStorageArchivePath, this.limits);
     }
 
-        /// Restores user-uploaded storage.
-    ///
-    /// The upload is re-validated on the same open archive immediately before
-    /// extraction: the time between the caller's validation and this restore
-    /// is an unguarded window on a shared volume, and re-pinning the rules on
-    /// the exact file being extracted closes it. A swapped or in-place
-    /// rewritten upload is refused here rather than installed.
+    /// Stages and validates one private copy of user-uploaded storage before replacing the local image.
     @Override
     public void restoreUserUploadedStorage(final Path storageDestinationParentPath) throws NodeException {
         this.ensureVolumeDirectory();
-        BackupArchive.validateUpload(this.userUploadedStorageArchivePath, this.limits);
-        this.restoreArchive(this.userUploadedStorageArchivePath, storageDestinationParentPath, false);
+        this.restoreArchive(this.userUploadedStorageArchivePath, storageDestinationParentPath, false, true);
     }
 
     @Override
@@ -437,21 +433,66 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             final Path storageDestinationParentPath,
             final boolean requireBackupMetadata
     ) throws NodeException {
+        this.restoreArchive(archive, storageDestinationParentPath, requireBackupMetadata, false);
+    }
+
+    private void restoreArchive(
+            final Path archive,
+            final Path storageDestinationParentPath,
+            final boolean requireBackupMetadata,
+            final boolean replaceExisting
+    ) throws NodeException {
         this.createDestinationDirectory(storageDestinationParentPath);
         final Path workingDirectory = this.createTemporaryDirectory(storageDestinationParentPath, ".backup-restore-");
         Throwable primaryFailure = null;
         try {
+            final Path pinnedArchive = replaceExisting ? workingDirectory.resolve("upload.zip") : archive;
+            if (replaceExisting) {
+                copyArchive(archive, pinnedArchive, this.limits);
+                BackupArchive.validateUpload(pinnedArchive, this.limits);
+            }
             final Path extracted = workingDirectory.resolve("extracted");
-            BackupArchive.extractArchive(extracted, archive, requireBackupMetadata, this.limits);
-            this.verifyExtractedDigest(archive, extracted);
-            AtomicFileWriter.installStorage(
-                    extracted.resolve(StorageBackupBackend.STORAGE_ENTRY),
-                    storageDestinationParentPath.resolve(StorageBackupBackend.STORAGE_ENTRY));
+            BackupArchive.extractArchive(extracted, pinnedArchive, requireBackupMetadata, this.limits);
+            this.verifyExtractedDigest(pinnedArchive, extracted);
+            final Path restoredStorage = extracted.resolve(StorageBackupBackend.STORAGE_ENTRY);
+            final Path destination = storageDestinationParentPath.resolve(StorageBackupBackend.STORAGE_ENTRY);
+            if (replaceExisting) {
+                AtomicFileWriter.replaceStorage(restoredStorage, destination);
+            } else {
+                AtomicFileWriter.installStorage(restoredStorage, destination);
+            }
         } catch (final RuntimeException | Error failure) {
             primaryFailure = failure;
             throw failure;
         } finally {
             AtomicFileWriter.cleanup(workingDirectory, primaryFailure);
+        }
+    }
+
+    private static void copyArchive(
+            final Path source,
+            final Path destination,
+            final BackupArchiveLimits limits
+    ) throws NodeException {
+        final long overhead = Math.min((long) limits.maxArchiveEntries() * 8192L, 1L << 28);
+        final long budget = limits.maxExtractedBytes() > Long.MAX_VALUE - overhead
+                ? Long.MAX_VALUE : limits.maxExtractedBytes() + overhead;
+        try (FileChannel input = FileChannel.open(source, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+             FileChannel output = FileChannel.open(destination, StandardOpenOption.CREATE_NEW,
+                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+            final ByteBuffer buffer = ByteBuffer.allocate(8192);
+            long copied = 0L;
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                if (read > budget - copied) throw new IOException("Uploaded backup archive exceeds copy limit");
+                copied += read;
+                buffer.flip();
+                while (buffer.hasRemaining()) output.write(buffer);
+                buffer.clear();
+            }
+            output.force(true);
+        } catch (final IOException failure) {
+            throw new NodeException("Failed to stage uploaded backup archive", failure);
         }
     }
 
@@ -486,8 +527,46 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             final byte[] manifestBytes,
             final long digest
     ) throws NodeException {
-        this.withPublicationLock(
-                () -> this.publishArchiveLocked(temporaryArchive, destination, manifestBytes, digest));
+        for (int attempt = 0; attempt < 3; attempt++) {
+            final PublicationInspection inspection = inspectPublication(destination, manifestBytes, digest);
+            testPoint("AFTER_EXISTING_PUBLICATION_INSPECTION", destination);
+            try {
+                this.withPublicationLock(() -> this.publishArchiveLocked(temporaryArchive, destination, inspection));
+                return;
+            } catch (final RetryPublicationInspection changed) {
+                // Reinspect the replacement outside the publication lock.
+            }
+        }
+        throw new NodeException("Backup archive kept changing during publication at %s".formatted(destination));
+    }
+
+    private PublicationInspection inspectPublication(
+            final Path destination,
+            final byte[] manifestBytes,
+            final long digest
+    ) throws NodeException {
+        final ArchiveStamp before = archiveStamp(destination);
+        if (before == null) return new PublicationInspection(null, false, false);
+        final boolean complete = this.isCompleteArchive(destination);
+        final boolean identical = complete && this.isIdenticalPublication(destination, manifestBytes, digest);
+        if (!before.equals(archiveStamp(destination))) throw new RetryPublicationInspection();
+        return new PublicationInspection(before, complete, identical);
+    }
+
+    private static ArchiveStamp archiveStamp(final Path archive) throws NodeException {
+        try {
+            final BasicFileAttributes attributes = Files.readAttributes(
+                    archive, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!attributes.isRegularFile() || attributes.fileKey() == null) {
+                throw new NodeException(
+                        "Backup destination has no stable regular-file identity: %s".formatted(archive));
+            }
+            return new ArchiveStamp(attributes.fileKey(), attributes.lastModifiedTime(), attributes.size());
+        } catch (final NoSuchFileException absent) {
+            return null;
+        } catch (final IOException failure) {
+            throw new NodeException("Failed to inspect backup destination %s".formatted(archive), failure);
+        }
     }
 
     /// Runs one operation while holding the volume publication lock.
@@ -531,8 +610,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     private void publishArchiveLocked(
             final Path temporaryArchive,
             final Path destination,
-            final byte[] manifestBytes,
-            final long digest
+            final PublicationInspection inspection
     ) throws NodeException {
         /* Kill window: the complete archive is compressed in the workspace and
          * the publication lock is held, but the atomic rename has not run, so
@@ -544,12 +622,16 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
              * an existence check first; the move-time catch only covers
              * a publisher that bypassed the volume lock. */
             if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
-                this.resolveSameNamePublication(temporaryArchive, destination, manifestBytes, digest);
+                if (!Objects.equals(inspection.stamp(), archiveStamp(destination))) {
+                    throw new RetryPublicationInspection();
+                }
+                this.resolveSameNamePublication(temporaryArchive, destination, inspection);
             } else {
+                if (inspection.stamp() != null) throw new RetryPublicationInspection();
                 try {
                     AtomicFileWriter.moveFileAtomically(temporaryArchive, destination);
                 } catch (final FileAlreadyExistsException raced) {
-                    this.resolveSameNamePublication(temporaryArchive, destination, manifestBytes, digest);
+                    throw new RetryPublicationInspection();
                 }
             }
             AtomicFileWriter.forceDirectory(this.backupVolumePath);
@@ -581,14 +663,13 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     private void resolveSameNamePublication(
             final Path temporaryArchive,
             final Path destination,
-            final byte[] manifestBytes,
-            final long digest
+            final PublicationInspection inspection
     ) throws NodeException {
         try {
-            if (!this.isCompleteArchive(destination)) {
+            if (!inspection.complete()) {
                 AtomicFileWriter.deleteRegularFile(destination);
                 AtomicFileWriter.moveFileAtomically(temporaryArchive, destination);
-            } else if (this.isIdenticalPublication(destination, manifestBytes, digest)) {
+            } else if (inspection.identical()) {
                 LOGGER.log(System.Logger.Level.DEBUG,
                         "Backup archive is already published at %s".formatted(destination));
                 /* The export workspace cleanup deletes this file; a best
@@ -785,6 +866,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         final long cutoffMillis = System.currentTimeMillis() - ORPHAN_WORKSPACE_MAX_AGE.toMillis();
         try (final var entries = Files.list(this.backupVolumePath)) {
             entries.filter(path -> path.getFileName().toString().startsWith(EXPORT_WORKSPACE_PREFIX))
+                    .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
                     .filter(path -> isOlderThan(path, cutoffMillis))
                     .forEach(this::deleteOrphanWorkspace);
         } catch (final IOException failure) {
