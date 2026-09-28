@@ -1,44 +1,32 @@
-# Peruncs Cluster
+# PerunCS Cluster
 
-Peruncs Cluster is an in-memory data processing layer to speed up database
-applications and relieve the database. It combines distributed caching,
-high-speed in-memory searching, and complex data manipulation on the native
-Java object model, persisted transaction-safe by Eclipse Store and moved
-between nodes over Aeron. It is based on a single-writer approach: each node
-is fully consistent locally, while the cluster model is eventual consistency.
-
-The repository is a single Maven project producing the `peruncs-cluster`
-artifact: node lifecycle, backup, Store replication, and indexes over Aeron,
-documented in the cluster section below.
+Embedded Eclipse Store clustering: one writer and N reader nodes, replicated
+over Aeron. Each node is fully consistent locally; the cluster is eventually
+consistent. Architecture and the reasons behind every rule below are recorded
+in [`module-info.java`](src/main/java/module-info.java) (the ADR). This file
+covers only building, configuring, and operating a node.
 
 ## Build
 
-Requires an exact Java 27 runtime and Maven 3.9+. Every consumer JVM must enable
-the preview and vector modules and export Serializer's required JDK package.
-For a classpath launch, use:
+Requires Java 27 exactly and Maven 3.9+. Every JVM using the library needs:
 
 ```text
 --enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED
 ```
 
-For a named-module launch, target the export at `org.eclipse.serializer.base`
-instead of `ALL-UNNAMED`. This artifact is intentionally a pre-release build
-and is not ready for Maven Central publication until the preview dependency is
-removed or the release policy explicitly supports it.
+On the module path, target the export at `org.eclipse.serializer.base`
+instead of `ALL-UNNAMED`.
 
 ```bash
-mvn test
-mvn package
+mvn test                      # default gate
+mvn verify -Pintegration      # embedded Store/Aeron integration
+mvn verify -Pcrashmatrix      # forked crash matrix
+mvn verify -Psoak             # writer/reader soak
 ```
 
-Heavier suites live behind profiles (see below for knobs): `mvn verify
--Pintegration` for embedded Store/Aeron integration, `mvn verify -Pcrashmatrix`
-for the forked crash matrix, and `mvn verify -Psoak` for the writer/reader soak.
-
-The checkout is aligned with the locally installed Eclipse Store/Serializer
-`5.0.0-SNAPSHOT` artifacts; use one dated snapshot repository state for a
-deployment and treat the snapshot as pre-release. Do not mix daily snapshot
-metadata across nodes.
+The build tracks Eclipse Store/Serializer `5.0.0-SNAPSHOT`. Deploy every node
+from the same dated snapshot. This is a pre-release artifact, not published
+to Maven Central.
 
 ## Use
 
@@ -49,403 +37,193 @@ metadata across nodes.
 </dependency>
 ```
 
-The JPMS module exports only `peruncs.cluster.api` (node contracts)
-and `peruncs.cluster.errors` (typed failures to name at your
-boundary). Open a node through the small owned facade; Aeron, Store
-adapters, checkpoints, indexes, backup internals, and lifecycle controls
-deliberately remain inaccessible:
-
 ```java
 try (var node = ClusterNode.open(NodeOptions.of(MyRoot::new))) {
     ClusterStorageManager<MyRoot> storage = node.storageManager();
-    // Writer: mutate inside the exclusive write section and persist
-    // explicitly — concurrent mutations and queries observe either the whole
-    // change or none. The boundary itself persists nothing.
+    // Writer: mutate and persist inside a write section.
     int size = storage.graphBoundary().write(() -> {
         MyRoot root = storage.root().get();
         root.add("value");
         storage.store(root);
         return root.size();
     });
-    // Reader: copy what you need inside the read section — never traverse a
-    // live graph object outside it.
+    // Reader: traverse only inside a read section; copy out what you need.
     int seen = storage.graphBoundary().read(() -> storage.root().get().size());
     NodeStatus status = node.status();
 }
 ```
 
-`GraphBoundary.write` holds the exclusive graph lock but does not roll back
-mutations or persist automatically. If a callback fails before changing the
-graph, the failure can propagate normally. If it may have changed graph state
-or written uncertain bytes, call `invalidate(cause)` before leaving the write
-section; later reads and writes then fail closed until the node reloads or is
-reseeded. Node close waits up to `ECLIPSE_DATAGRID_GRAPH_DRAIN_TIMEOUT_MILLIS`
-(5 seconds by default) for active graph sections.
+- If a write callback may have changed the graph before failing, call
+  `graphBoundary().invalidate(cause)` before leaving the section.
+- `ClusterNode.close()` and `storageManager().shutdown()` are equivalent and
+  idempotent.
+- Exceptions from `peruncs.cluster.errors`:
+  - `ReaderWriteRejectedException`: a write on a reader;
+  - `WriterFencedException`: this writer lost its lease;
+  - `StorageLimitReachedException`: the Store is full;
+  - `GraphInvalidatedException`: the graph is latched invalid; restart or
+    reseed;
+  - `ReseedRequiredException`: seed the node again.
 
-`ClusterStorageManager` is the drop-in `StorageManager` facade of a node:
-application writes on a reader are rejected with `ReaderWriteRejectedException`,
-a fenced writer with `WriterFencedException`, and a full Store with
-`StorageLimitReachedException` (all from `peruncs.cluster.errors`). An
-uncertain-commit failure is not safe to retry blindly; see the
-`ClusterStorageManager` Javadoc. `ClusterNode.close` and
-`storageManager().shutdown()` both own the complete node lifecycle and are
-idempotent.
+## Configuration
 
-## Cluster node with Aeron replication
-`peruncs-cluster` runs a Data Grid node with Aeron replication, including the
-Store binary transport and the embedded index policy. Add it and set:
+Settings come from the process environment by default. An application can
+supply its own `NodeSettingsSource` through
+`NodeOptions.withNodeSettingsSource(...)` to read any other configuration
+system. All keys use the `ECLIPSE_DATAGRID_` prefix. Legacy unprefixed and
+`MSCNL_*` names are still read as a fallback and logged as deprecated.
+
+### Required on every replicated node
 
 ```text
+ECLIPSE_DATAGRID_PROD_MODE=true
 ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron
 ECLIPSE_DATAGRID_REPLICATION_ROLE=writer|reader|backup-reader
-ECLIPSE_DATAGRID_AERON_CLUSTER_ID=<stable-cluster-uuid>
-ECLIPSE_DATAGRID_AERON_RECORDING_ID=<writer archive recording id>
-ECLIPSE_DATAGRID_AERON_NODE_ID=<stable-node-uuid>
-ECLIPSE_DATAGRID_AERON_STORE_GENERATION=<store-generation-uuid>
+ECLIPSE_DATAGRID_AERON_CLUSTER_ID=<stable cluster UUID>
+ECLIPSE_DATAGRID_AERON_NODE_ID=<stable node UUID>
+ECLIPSE_DATAGRID_AERON_STORE_GENERATION=<Store generation UUID>
+ECLIPSE_DATAGRID_AERON_WIRE_NONCE=<same non-zero value on all nodes>
+ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK=true
+ECLIPSE_DATAGRID_STORAGE_LIMIT_GB=<limit>                              # writer and reader
+ECLIPSE_DATAGRID_STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES=<minutes>      # writer and reader
 ```
 
-The remaining `ECLIPSE_DATAGRID_AERON_*` settings select the UDP live,
-Archive-control, replay and Archive-replication channels, directory, archive
-directory, writer checkpoint, file-sync, term, MTU, chunk, transaction,
-threading, segment, low-storage, and replay-concurrency limits. Production
-defaults to dedicated MediaDriver/Archive threads; development and tests use
-shared threads. Override with `ECLIPSE_DATAGRID_AERON_THREADING_MODE` when the
-deployment deliberately chooses another supported mode. Set
-`ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH` to a durable, owner-only path. The
-MediaDriver directory is recreated by Aeron on startup, so archive and
-checkpoint paths must not be children of `ECLIPSE_DATAGRID_AERON_DIRECTORY`.
-Production deployments must replace the loopback channel defaults with
-routable node/Service addresses; the provider rejects loopback and wildcard
-endpoints when production mode is enabled.
+Readers discover the writer's recording through the `alias=` of the live
+channel. Set `ECLIPSE_DATAGRID_AERON_RECORDING_ID` only to override
+discovery. Without `ECLIPSE_DATAGRID_PROD_MODE=true`, a node starts as a
+standalone development Store, and replication settings are rejected.
 
-Every node setting uses the `ECLIPSE_DATAGRID_` prefix. The earlier bare names
-(`IS_BACKUP_NODE`, `GC_INTERVAL_MINUTES`, ...) and the `MSCNL_*` names are
-still accepted as a fallback when the prefixed name is unset; the prefixed name
-wins when both are set, and a consumed legacy name is logged once as
-deprecated so operators can migrate.
+### Storage paths
 
-For a reader, set `ECLIPSE_DATAGRID_AERON_RECORDING_ID` to the writer's
-recording. Reader identity/checkpoint persistence is supplied by the
-node deployment; this provider does not invent an identity from the
-network address.
+Put every live path on node-local storage: a local disk, or a block volume
+attached to this host only. Never put them on NFS, SMB, or another shared
+network file system. The backup volume is the only path that may be shared.
 
-Before a reader (or a backup node without a user upload) starts, seed it
-with a matching Store directory plus its durable replication cursor — either
-restore a compatible backup on the shared volume or copy the writer's Store
-directory and offset file while the writer is stopped. (Why a seed is
-required at all is a design invariant; see the module documentation.)
-One provider instance owns one configured replication stream; use separate
-provider instances/channels for multiple streams.
+| Setting | Default | Holds | Media |
+| --- | --- | --- | --- |
+| `ECLIPSE_DATAGRID_STORAGE_PATH` | `storage` | Store (`<path>/storage`) and reader cursor (`<path>/offset`) | local |
+| `ECLIPSE_DATAGRID_AERON_DIRECTORY` | `/tmp/eclipse-datagrid-aeron` | Aeron MediaDriver files (recreated at start) | local; tmpfs such as `/dev/shm` recommended; `/tmp` rejected in production |
+| `ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY` | `<aeron dir>.archive` | Aeron Archive recording | local, durable |
+| `ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH` | `<aeron dir>.writer.checkpoint` | writer checkpoint | local, durable, owner-only |
+| `ECLIPSE_DATAGRID_BACKUP_PATH` | `backups` | backup archives; writer fencing lease | may be a shared network volume |
 
-### Running multiple clusters on one network
+- Production paths must be absolute.
+- The driver, archive, and checkpoint paths must not overlap.
+- Keep the Store, cursor, Archive, and checkpoint of one node together:
+  losing any one of them means a reseed.
+- Writer only, until the lease moves to local storage (see the ADR):
+  `ECLIPSE_DATAGRID_BACKUP_PATH` must be a pre-provisioned NFSv4 export
+  shared by every potential writer, and
+  `ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true` must be set. Keep
+  writer hosts on synchronized clocks (NTP/chrony), because lease freshness
+  compares wall-clock timestamps.
 
-Clusters may share a VPN or other routed network, but each cluster must have
-its own Aeron traffic namespace. Configure distinct live-channel control
-endpoints, distinct replay and watermark endpoints when those channels are
-shared, and distinct stream IDs for every cluster. Every cluster must also use
-a unique `ECLIPSE_DATAGRID_AERON_CLUSTER_ID` and the same non-zero
-`ECLIPSE_DATAGRID_AERON_WIRE_NONCE` on every production participant. Development
-may derive the nonce from the cluster id for local fixtures only. (Why namespaces can't be shared
-is a design constraint; see the module documentation.)
+### Network
 
-Network policy must still restrict access to each cluster's live and watermark
-endpoints. Archive control and replay channels have no node authentication, so
-isolate those endpoints on the same trusted network.
+- Run replication on an isolated network (VPN, firewall rules, Kubernetes
+  NetworkPolicies) covering the live, replay, Archive-control, and watermark
+  endpoints.
+- Replace the loopback channel defaults with routable private addresses.
+  Production mode rejects loopback and wildcard endpoints.
+- The development live channel is
+  `control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=datagrid-<cluster>`.
+- **Several clusters on one network:** give each cluster its own
+  `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`, its own control, replay, and watermark
+  endpoints, and its own stream ids.
 
-The development live-channel default is a dynamic MDC loopback channel
-(`control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=datagrid-<cluster>`)
-so multiple readers can attach. The replay default points at the same local
-control endpoint with a dynamic response stream. Production deployments must
-configure routable control and replay endpoints.
-The default wire tuning is a 16 MiB term, 128 KiB Store chunk, 1,408-byte MTU,
-and 64 MiB transaction limit; override with the full environment keys
-`ECLIPSE_DATAGRID_AERON_TERM_LENGTH`,
-`ECLIPSE_DATAGRID_AERON_MTU_LENGTH`,
-`ECLIPSE_DATAGRID_AERON_CHUNK_SIZE`,
-`ECLIPSE_DATAGRID_AERON_MAX_TRANSACTION_BYTES`, and
-`ECLIPSE_DATAGRID_AERON_OFFER_TIMEOUT_NANOS` (publication back-pressure only).
-Archive recording startup,
-recorded-position, and stop waits are independently configurable with
-`ECLIPSE_DATAGRID_AERON_RECORDING_START_TIMEOUT_NANOS`,
-`ECLIPSE_DATAGRID_AERON_RECORDED_POSITION_TIMEOUT_NANOS`, and
-`ECLIPSE_DATAGRID_AERON_RECORDING_STOP_TIMEOUT_NANOS`; reader shutdown uses
-`ECLIPSE_DATAGRID_AERON_READER_STOP_TIMEOUT_NANOS`. Waiting for Archive
-durability of a live terminal marker and reconnecting after an Archive outage
-have independent 30-second budgets, configurable with
-`ECLIPSE_DATAGRID_AERON_LIVE_WITHHOLD_TIMEOUT_NANOS` and
-`ECLIPSE_DATAGRID_AERON_RECONNECT_TIMEOUT_NANOS`.
-Archive control calls have their own
-`ECLIPSE_DATAGRID_AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS` (5 s default, matching
-Aeron), the watermark channel flushes on close within
-`ECLIPSE_DATAGRID_AERON_WATERMARK_CLOSE_TIMEOUT_NANOS` (5 s default), and the
-fencing lease bounds every interprocess lock wait with
-`ECLIPSE_DATAGRID_AERON_LEASE_LOCK_TIMEOUT_MILLIS` (5,000 ms default).
-Replication must run on an isolated network
-(VPN, firewall rules, or Kubernetes NetworkPolicies): any host that can reach
-the live channel can publish well-formed frames; the nonce only rejects
-accidental cross-wiring and is not authentication. Every writer and reader must
-set `ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK=true` in production to acknowledge
-that boundary. Without that acknowledgement startup fails, and an untrusted
-development topology cannot enable quorum-based Archive deletion. Every participant must
-use the same cluster id, epoch, and fencing lineage; a mismatch fails closed
-before Store data is applied. Writer lease freshness uses shared wall-clock
-timestamps, so all writer hosts must run synchronized NTP/chrony clocks. A
-heartbeat far in the future is rejected as clock skew instead of being treated
-as an indefinitely fresh lease.
-Archive runtime tuning is controlled by
-`ECLIPSE_DATAGRID_AERON_ARCHIVE_REPLICATION_CHANNEL`,
-`ECLIPSE_DATAGRID_AERON_ARCHIVE_SEGMENT_FILE_LENGTH`,
-`ECLIPSE_DATAGRID_AERON_ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD`, and
-`ECLIPSE_DATAGRID_AERON_MAX_CONCURRENT_REPLAYS`. The provider maps the
-configured threading mode to matching MediaDriver and Archive threading.
-`CHUNK_SIZE + 84` must fit Aeron's publication maximum (`term-length / 8`,
-capped at 16 MiB). Store bytes are sent directly inside the fixed replication
-envelope; no SBE or second serialization pass is required.
+| Setting group | Keys (`ECLIPSE_DATAGRID_AERON_…`) | Defaults |
+| --- | --- | --- |
+| Channels | `LIVE_CHANNEL`, `REPLAY_CHANNEL`, `CONTROL_CHANNEL`, `CONTROL_RESPONSE_CHANNEL`, `ARCHIVE_REPLICATION_CHANNEL`, `WATERMARK_CHANNEL`, `STREAM_ID`, `WATERMARK_STREAM_ID` | loopback; stream `1001` |
+| Wire | `TERM_LENGTH`, `MTU_LENGTH`, `CHUNK_SIZE`, `MAX_TRANSACTION_BYTES` | 16 MiB, 1,408 B, 128 KiB, 64 MiB. Constraint: `CHUNK_SIZE + 84 ≤ min(TERM_LENGTH / 8, 16 MiB)` |
+| Timeouts | `OFFER_TIMEOUT_NANOS`, `RECORDING_START_TIMEOUT_NANOS`, `RECORDED_POSITION_TIMEOUT_NANOS`, `RECORDING_STOP_TIMEOUT_NANOS`, `READER_STOP_TIMEOUT_NANOS`, `LIVE_WITHHOLD_TIMEOUT_NANOS`, `RECONNECT_TIMEOUT_NANOS`, `ARCHIVE_CONTROL_TIMEOUT_NANOS`, `WATERMARK_CLOSE_TIMEOUT_NANOS`, `LEASE_LOCK_TIMEOUT_MILLIS` | live-withhold and reconnect 30 s; Archive control, watermark close, and lease lock 5 s |
+| Archive | `FILE_SYNC_LEVEL`, `ARCHIVE_SEGMENT_FILE_LENGTH`, `ARCHIVE_LOW_STORAGE_SPACE_THRESHOLD`, `MAX_CONCURRENT_REPLAYS`, `MIN_ARCHIVE_FREE_BYTES` | sync level `1` (`0` rejected in production) |
+| Threading | `THREADING_MODE` | dedicated in production, shared otherwise |
+| Epoch | `EPOCH` | `1` |
 
-Writer checkpoint persistence is enabled in the provider. Quorum-gated,
-segment-boundary retention is available only when an embedded writer is started
-with `ECLIPSE_DATAGRID_AERON_RETENTION_READERS` (a comma-separated list of
-reader UUIDs). Name the quorum on the writer only: readers need no retention
-list of their own. Configure `ECLIPSE_DATAGRID_AERON_WATERMARK_CHANNEL` and
-`ECLIPSE_DATAGRID_AERON_WATERMARK_STREAM_ID` on every participant. Each reader
-first persists its recovery cursor and then sends an `AeronReaderWatermark`
-covering reader, cluster, Store generation, epoch, recording, sequence, and
-position over that dedicated stream. Readers publish unconditionally — the
-stream is latest-value fire-and-forget, an unreceived value is retained for
-retry until the writer subscribes (or discarded at close if none ever does),
-and the writer records only quorum members, rejecting any other reader's
-watermark. The writer records those
-acknowledgements automatically; call `deleteThrough` with the ordinary durable
-backup cursor naming the desired sequence. The configured reader quorum,
-rather than the maintenance request itself, authorizes deletion. (How the
-quorum gates deletion is a design decision; see the module documentation.)
-An active replay defers maintenance without deleting data. External Archives and
-incomplete reader quorums remain unsupported for deletion. Without a
-configured reader list, retention is reported as
-unsupported and history is preserved. Operators must monitor Archive capacity
-and rotate or expand storage before it is exhausted.
-The supported capacity procedure is: alert when
-`archiveUsableSpaceBytes()` approaches the configured
-`ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES`, stop acknowledged writes (the
-provider will reject them below the threshold), take a matched Store+Archive
-backup, stop the writer, provision or attach a larger Archive filesystem, and
-restart with the same recording and checkpoint. Do not delete active recording
-segments or manually advance a reader cursor; if the Archive cannot be
-restored, initialize a new epoch and reseed every reader.
+### Node settings
 
-Aeron Archive control and replay channels have no node authentication or
-transport encryption. The wire nonce only rejects accidental cross-wiring;
-cluster UUIDs and CRCs validate data identity and integrity, not credentials.
-Production deployments must isolate every endpoint with private interfaces,
-firewall rules, and Kubernetes NetworkPolicies. Do not enable ACK-driven
-deletion on an untrusted network.
+| Key (`ECLIPSE_DATAGRID_…`) | Default | Purpose |
+| --- | --- | --- |
+| `GRAPH_DRAIN_TIMEOUT_MILLIS` | 5,000 | Close waits this long for active graph sections |
+| `BACKUP_CLOSE_TIMEOUT_MILLIS` | 60,000 | Close waits this long for a running backup |
+| `KEPT_BACKUPS_COUNT` | 3 | Scheduled backups retained |
+| `BACKUP_INTERVAL_MINUTES` | 120 | Backup-reader backup cadence |
+| `GC_INTERVAL_MINUTES` | 60 (30 on backup-reader) | Full Store GC and cache check cadence |
+| `DATA_MERGER_TIMEOUT`, `DATA_MERGER_LIMIT`, `DATA_MERGER_APPLY_TIMEOUT` | built-in | Reader apply tuning |
+| `AERON_LEASE_STALENESS_MILLIS` | built-in | Writer lease staleness bound |
 
-## Network boundary
+## Operations
 
-PerunCS Cluster intentionally provides and requires neither node
-authentication nor transport encryption. Do not add either feature to the
-cluster protocol. The wire nonce and CRC32C detect accidental cross-wiring and
-corruption; they are not credentials or encryption.
+### Seeding a reader
 
-Fencing tokens and CRC32C are correctness checks, not security: what each
-control does and does not prove is a design decision recorded in the module
-documentation. Operationally, none of them replaces the network boundary:
+Before a reader (or a backup-reader without an upload) starts for the first
+time, give it a matching Store and cursor, by either:
 
-- The isolated VPN stays the primary network boundary: firewall rules and
-  NetworkPolicies must scope every live, replay, storage-data, and watermark
-  endpoint. These controls isolate traffic; Data Grid does not authenticate
-  individual nodes or encrypt their transport.
+- restoring a compatible backup from the backup volume (done automatically
+  at startup when one exists), or
+- with the writer stopped, copying the writer's `<storage path>/storage` and
+  `<storage path>/offset` to the reader.
 
-Run replication on a VPN-contained network: the isolated network is the only
-traffic boundary for replication frames and reader watermarks.
+A node reporting `RESEED_REQUIRED` needs the same procedure.
 
-A writer requires a shared `ECLIPSE_DATAGRID_BACKUP_PATH` for its fencing
-lease; manual promotion and automated failover remain
-deployment responsibilities, and the lease directory must not sit inside the
-Aeron driver, archive, or checkpoint tree. Provision this path before startup
-on Linux NFSv4, with the same export mounted by every potential writer and
-working cross-host advisory locks, atomic replacement, and directory force.
-Production startup rejects missing directories and filesystems other than
-`nfs4`; the type check and local atomic-write probe cannot prove that hosts
-share one export. Local disks, host-local container volumes, and separately
-mounted copies do not provide cross-host fencing. Validate takeover on the exact
-production filesystem before enabling failover, then set
-`ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true`. Production writers fail
-startup without that explicit deployment assertion.
+### Status and control
 
-## Filesystem backups
+`ClusterNode` exposes:
 
-Backups use the filesystem named by `ECLIPSE_DATAGRID_BACKUP_PATH` (default
-`backups`). This can be a network-mounted volume, and it also holds the writer
-fencing lease. Each generated backup is a single compressed archive named
-`<timestamp>.zip` or `<timestamp>.manual.zip`; the archive contains `storage/`,
-`manifest`, and `ready`. The complete archive is atomically moved into the
-volume, so readers never select an in-progress export. Operator-provided
-storage is kept as `user-uploaded-storage.zip` and is restored through its
-separate API. Node close allows an active export up to
-`ECLIPSE_DATAGRID_BACKUP_CLOSE_TIMEOUT_MILLIS` (60 seconds by default); if it
-is still running, Store shutdown stays deferred and a later close retries the
-drain.
+- `status()`: an immutable `NodeStatus` with the role, `ready`, `healthy`,
+  storage bytes, and `ReplicationStatus` (state, sequences, lag). Operator
+  actions:
+  - `FAILED`: stop serving and inspect;
+  - `DEGRADED`: may serve, but fix the dependency;
+  - `RESEED_REQUIRED`: stop and reseed.
+- `startStorageChecks()`: periodic Store checks (writer and reader).
+- `createScheduledBackup()` / `createManualBackup()`: backup-reader only. A
+  concurrent request throws `BackupBusyException`.
 
-Archive extraction rejects traversal, symbolic-link paths, duplicate entries,
-oversized content, missing storage, and incomplete generated metadata. The
-backup operations below trigger and read these local-volume operations; no
-backup HTTP transport or hosted backup target is configured by the node.
+These are in-process calls without authentication. If you expose them over a
+network, securing that endpoint is the application's job. A typical mapping:
 
-## Programmatic control boundary
+- `BackupBusyException` → 409;
+- not ready or unhealthy → 503;
+- anything else → 500.
 
-The Boundary–Control–Entity separation itself is an architectural decision
-recorded in the module documentation. What remains here is the operator
-contract for driving the node, exposed through `ClusterNode`:
+### Backups
 
-- `status()` returns an immutable `NodeStatus`: role (`writer`), readiness
-  (`ready`), liveness (`healthy`), whether storage checks are running,
-  storage size (`storageBytes`), and `ReplicationStatus` with replay/live
-  state, current/latest sequence, and derived lag (`lagTransactions()`).
-  Unreplicated nodes report `NOT_CONFIGURED` with empty metric boundaries.
-  See the `NodeStatus` Javadoc for the operator action of each `ReplicationState` (`FAILED`,
-  `DEGRADED`, `RESEED_REQUIRED`). The embedder renders these typed values
-  as JSON or Prometheus text itself.
-- `startStorageChecks()` starts periodic storage checks (writer and reader
-  roles).
-- `createScheduledBackup()` and `createManualBackup()` run backups on a
-  backup-reader: they pause replication at a durable boundary, snapshot, and
-  resume. A concurrent backup is rejected as busy.
+- Backups are written to `ECLIPSE_DATAGRID_BACKUP_PATH` as
+  `<timestamp>.zip` (scheduled) or `<timestamp>.manual.zip`.
+- To bootstrap a cluster from an existing Store, place it as
+  `user-uploaded-storage.zip` in the backup volume and start the
+  backup-reader. It installs the upload, publishes a starter backup, and then
+  deletes the upload.
 
-The role is validated before anything starts, so probing the wrong role never
-starts Store, Aeron, recovery, or background threads.
-The mutating operations (backups, storage checks, pausing and resuming
-replication) are in-process APIs and carry no authentication. If an embedding
-application chooses to expose them through a network endpoint, that endpoint's
-access policy belongs to the application. Map `BackupBusyException` to a
-conflict response, unhealthy/not-ready to a retryable unavailable response,
-and any other failure to an internal error.
+### Archive retention and capacity
 
-## Store binary transport
+- **Enabling retention:** set `ECLIPSE_DATAGRID_AERON_RETENTION_READERS=<reader UUIDs, comma-separated>`
+  on the writer only, and set the watermark channel and stream on every node.
+- **Behaviour:** the writer collects reader confirmations and deletes Archive
+  segments only once every listed reader has confirmed it. Without the list,
+  history is kept forever.
+- **Known gap:** no production code path currently triggers this deletion.
+  Backups run on the backup-reader, whose retention reports "unsupported",
+  and the writer never starts a deletion itself. Until this is fixed
+  (`OPUS_REVIEW.md`, N3), plan Archive capacity as if history grows forever.
+- **Capacity procedure:**
+  1. Alert when `archiveUsableSpaceBytes` approaches
+     `ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES` (below it, writes are
+     rejected).
+  2. Take a Store and Archive backup.
+  3. Stop the writer.
+  4. Enlarge or replace the Archive's local storage.
+  5. Restart with the same recording and checkpoint.
+- Never delete recording segments or edit a cursor by hand. If the Archive is
+  lost, start a new epoch and reseed every reader.
 
-The transport keeps Eclipse Serializer/Eclipse Store `Binary` bytes opaque
-inside a versioned envelope. (Envelope framing and the Archive-first write
-ordering are design decisions; see the module documentation.) The transport
-wiring — writer coordination, replay/live reader, and durable cursor and
-checkpoint persistence — is internal to the node and assembled by
-`ClusterNode.open`; applications do not touch those types because the module
-does not export them.
+## Testing
 
-Chunk size must remain below `min(termLength / 8, 16 MiB) - 84`. Aeron fragments each envelope
-as needed for the selected MTU.
+Test design, invariants, and fault models are documented in the test classes'
+Javadoc. This section lists commands and knobs only.
 
-CRC32C detects accidental corruption; it does not authenticate a sender. Bind
-UDP and Archive-control channels to private interfaces and restrict them with
-firewall or network-policy rules; do not enable ACK-driven retention on an
-untrusted network.
-
-Run the transport and UDP/Archive integration tests with:
-
-```text
-mvn verify
-```
-
-The threaded writer/reader soak and the forked crash matrix live outside the
-default gate. They are intentionally separate: the soak explores concurrent
-load and recovery over time, while the crash matrix kills isolated child
-processes at named durability boundaries and checks exact recovery outcomes.
-
-### Writer/reader soak
-
-`AeronWriterReaderSoakIT` runs one writer Store with `-Dsoak.readers` reader
-Stores (three by default; tested with five and six). The
-writer performs adds, updates, and removals while reader query threads access
-the graph, Lucene, and JVector indexes. The test keeps a transaction model of
-the expected title, body, vector, and title/body checksum. A reader is only
-checked against entities whose own persisted cursor proves that the entity was
-applied; this separates replication lag from data loss. Positive index checks
-use a short refresh retry because graph materialization and searcher refresh
-are not the same event.
-
-The run is divided into setup, concurrent soak, convergence, and quiescent
-verification:
-
-1. Seed the writer with ordinary entities and three vector sentinels, copy the
-   seed Store to each reader, and record the baseline writer sequence.
-2. Run writer, query, audit, and chaos workers. The audit worker performs
-   bounded-lag checks and mini-censuses; query workers verify ghost-title
-   absence, graph bodies/checksums, Lucene hits, and non-sentinel JVector hits.
-3. Run a seeded fixed rotation of single restart, dual restart, slow-reader,
-   CPU/GC burst, forced-GC burst, cursor corruption, rollback cursor, live
-   Archive-tail corruption, writer restart, reseed-and-rejoin, and watermark
-   retention. There is no privileged first operation — heavy operations such as
-   writer restart are schedulable from the first draw — and transport
-   interruption is still guaranteed because the first restart-capable
-   operation dealt is forced abrupt. Every operation is logged as selected,
-   effective, or skipped with a reason. Coverage is gated per operation type
-   on every run, short or long: each enabled operation must close the run with
-   at least one effective execution or one park-caused skip (parked-victim or
-   quorum-guard, where the parks are themselves the evidence); any other skip
-   ledger fails the run. An operation disabled by its knob never appears in
-   the required set.
-4. Stop writers, converge or explicitly park every reader, then run strict
-   samples and an uncapped graph/Lucene/JVector census. A reader may be
-   converged, reseed-parked, corruption-parked, or reseeded-and-rejoined by
-   the chaos thread; it may not disappear silently.
-
-The extended operations assert protocol guarantees, not just survival:
-
-- **writer-restart** restarts the writer transport and Store with the same
-  cluster, node, and generation (abrupt teardown on a seeded coin flip). The
-  restarted writer must mint a strictly greater fencing token, and one
-  post-restart transaction must reach every live reader from its unchanged
-  durable cursor.
-- **reseed** executes the documented manual reseed procedure: with the writer
-  frozen, copy the writer's Store into the victim's home, replace any torn
-  cursor file with the frozen boundary cursor, and restart. Parked readers
-  are preferred victims (this is their recovery); otherwise a live reader is
-  proactively reseeded, never the last live one. Rejoined readers re-enter
-  the chaos victim pool and the final convergence census; `reseedsExecuted`
-  counts them distinctly from demanded reseeds.
-- **gc** churns a seeded 32-256 MB through the heap and calls `System.gc()`,
-  forcing a real pause during checkpoints. It adds no data assertions; the
-  pause evidence lands in `target/soak.jfr`.
-- **retention** runs on the real watermark quorum (every soak reader is a
-  configured retention reader on the writer). It first proves deletion of
-  history a lagging live reader needs is never reported as deleted, then
-  purges complete segments up to the minimum durable reader cursor. The
-  parked-behind-the-deleted-boundary restart case (must yield
-  RESEED_REQUIRED, never torn data) is a first-class deterministic test:
-  `AeronStoreIntegrationIT#readerRestartBehindAPurgedSegmentDemandsAReseed`
-  parks a reader at a frozen cursor, retires it from the retention quorum,
-  purges the segment holding that cursor, restarts the reader, and asserts
-  the typed reseed signal with the durable cursor and graph untouched.
-
-Recovery behavior the enhanced soak asserts (product guarantees, not soak
-artifacts):
-
-- A writer restart closing the writer-owned Archive from under readers
-  mid-replay is absorbed by the reader's bounded reconnect. An Archive loss
-  reported by the subscription (escaped `ArchiveException` or the
-  client-side self-heal loop surfacing through the persistent subscription
-  listener) opens a reconnect incident bounded by the reconnect timeout;
-  resolved progress or reaching the live stream closes it, and a channel
-  that stays down past the budget latches a typed `ReseedRequiredException`
-  (health reports `RESEED_REQUIRED`) instead of dying on a raw transport
-  stack or stalling forever.
-- Retention validates watermarks against the Archive's durably recorded
-  position, not the trailing terminal checkpoint: commit progress past the
-  checkpoint is admissible when it occupies recorded bytes, while fabricated
-  or unrecorded progress still fails closed. The quorum assembles mid-soak,
-  so a `quorum-not-supported` skip means genuinely missing readers.
-
-The soak fails on worker failures, lost event-log writes, phantom index hits,
-bad checksums, unexpected exceptions, torn-boundary convergence, excessive
-classified torn-read retries, lag-SLO violations, missing chaos coverage, or a
-reader without a recorded fate. `target/soak-events.jsonl` is the authoritative
-per-run schedule: each line has a run id and sequence number. The seed repeats
-workload values and chaos distribution, but timing-dependent skips and reader
-states can change the exact operation schedule. The fork also writes
-`target/soak.jfr`; use `jfr summary` or the `SoakJfrReport` aggregation for
-compact GC, monitor, allocation, and virtual-thread-pinning signals. JFR is
-warn-first unless `-Dsoak.jfr.fail=true` is enabled after baseline calibration.
-
-Run a single soak or a seed sweep:
+### Writer/reader soak (`AeronWriterReaderSoakIT`)
 
 ```text
 mvn verify -Psoak -Dsoak.seconds=30 -Dsoak.restarts=10
@@ -454,104 +232,34 @@ for seed in 1 2 3 4 5 6 7 8 9 10; do
 done
 ```
 
-Soak controls are:
+Prefer many seeds over one long run. Outputs:
+- `target/soak-events.jsonl`: the per-run chaos schedule;
+- `target/soak.jfr`: summarize with `jfr summary` or `SoakJfrReport`.
 
 | Property | Default | Purpose |
 | --- | ---: | --- |
-| `soak.seed` | `1` | Workload values and chaos-rotation start offset |
-| `soak.seconds` | `30` | Concurrent workload duration before convergence |
-| `soak.readers` | `3` | Reader count; every per-reader gate, gate lock, and event ledger scales with it (tested with 5-6) |
-| `soak.writer.threads` | `3` | Writer workload threads, serialized by the one-writer test lock |
+| `soak.seed` | `1` | Workload values and chaos rotation offset |
+| `soak.seconds` | `30` | Workload duration before convergence |
+| `soak.readers` | `3` | Reader count (tested with 5–6) |
+| `soak.writer.threads` | `3` | Writer workload threads |
 | `soak.query.threads` | `2` | Query threads per reader |
-| `soak.payloadBytes` | `0` | Target padded size of each add/update transaction body; `0` keeps the compact default |
-| `soak.restarts` | `10` | Effective chaos-work budget; heavy operations may count as two |
-| `soak.lagSlots` | `100` | Reader lag-SLO allowance in replication slots |
-| `soak.miniCensus` | `20` | Entities checked by each mid-soak mini-census |
-| `soak.pollDelayMs` | `2` | Applied delay used by slow-reader chaos |
-| `soak.pollStallMs` | `800` | Slow-reader burst duration; near the configured reader-stop timeout it also probes the sliding deadline |
-| `soak.fsyncDelayMs` | `3` | Delay injected through the AtomicFileWriter fsync hook |
-| `soak.maxTornReads` | `64` | Maximum classified benign query retries; set to `0` for strict mode |
-| `soak.corrupt` | `true` | Enable cursor, rollback, and Archive-tail corruption operations |
-| `soak.gc` | `true` | Enable the forced-GC burst operation |
-| `soak.writerRestart` | `true` | Enable the writer-restart operation |
-| `soak.reseed` | `true` | Enable the reseed-and-rejoin operation |
-| `soak.retention` | `true` | Enable watermark retention and the retention purge operation |
-| `soak.events` | `target/soak-events.jsonl` | JSONL event-log destination |
-| `soak.jfr.fail` | `false` | Turn calibrated JFR budget warnings into failures |
+| `soak.payloadBytes` | `0` | Padded transaction body size; `0` = compact |
+| `soak.restarts` | `10` | Chaos-work budget; heavy operations count as two |
+| `soak.lagSlots` | `100` | Reader lag allowance in replication slots |
+| `soak.miniCensus` | `20` | Entities per mid-run census |
+| `soak.pollDelayMs` | `2` | Slow-reader applied delay |
+| `soak.pollStallMs` | `800` | Slow-reader burst duration |
+| `soak.fsyncDelayMs` | `3` | Injected fsync delay |
+| `soak.maxTornReads` | `64` | Benign query retries allowed; `0` = strict |
+| `soak.corrupt` | `true` | Cursor, rollback, and Archive-tail corruption |
+| `soak.gc` | `true` | Forced-GC bursts |
+| `soak.writerRestart` | `true` | Writer restarts |
+| `soak.reseed` | `true` | Reseed and rejoin |
+| `soak.retention` | `true` | Watermark retention and purge |
+| `soak.events` | `target/soak-events.jsonl` | Event log path |
+| `soak.jfr.fail` | `false` | Fail on calibrated JFR budget warnings |
 
-At the small default, `soak.pollStallMs` is primarily a backlog widener. The
-sliding live-marker deadline is probed only when it is configured near
-`ECLIPSE_DATAGRID_AERON_LIVE_WITHHOLD_TIMEOUT_NANOS`.
-
-`-Dsoak.corrupt=false` removes cursor, rollback, and Archive-tail corruption
-from the rotation; it does not turn off restart or load chaos. The per-op
-coverage gate fires on every run regardless of duration, so even a 25-second
-run must show every enabled op landed effectively (or was skipped only because
-its victim was parked); a disabled op is simply absent from the required set.
-Use independent seeds rather than one very long run: duration increases load,
-while seeds increase schedule coverage.
-
-### Forked crash matrix
-
-`-Pcrashmatrix` runs the provider crash matrix together with the external
-Archive, Aeron transport, Store integration, and reader crash suites configured
-in the Maven profile. The central `ProviderCrashMatrixIT` uses an isolated
-temporary directory and a forked `ProviderCrashChildMain`:
-
-1. Phase 1 starts the writer/Archive fixture, writes the requested payloads,
-   and records `control/ready` and the exact `control/milestone.reached`.
-2. The parent validates the phase-1 Store prefix expected at that boundary and
-   forcibly kills the child.
-3. Phase 2 restarts the same directory, retrying only transient active-driver
-   startup failures while the Archive finishes stopping.
-4. The parent parses `control/outcome` and checks the recovery policy, health,
-   checkpoint identity/CRC, and exact Store records.
-
-The oracle is deliberately two-valued. `CONTINUE` is allowed only when the
-checkpoint and Archive position prove an unambiguous boundary; recovery must
-be `LIVE` and append each missing transaction exactly once.
-`RESEED_REQUIRED` is required when a prepare, data tail, commit offer, local
-write, uncertain checkpoint, or corrupted artifact makes the boundary
-ambiguous; recovery must fail closed and must not reuse the tail. Missing
-milestones, harness errors, invalid outcomes, wrong Store prefixes, and an
-unexpected policy are failures rather than acceptable crash variation.
-
-Deterministic cells cover:
-
-- publication, prepare, local-write, commit-offer, recorded-commit, abort,
-- checkpoint temp-write, rename, directory-sync, and committed-sequence seams;
-- one-byte, chunk-minus-one, chunk-plus-one, multi-chunk, random, tiny-term,
-  and 200 KiB payloads;
-- randomized per-chunk budget kills between named milestones;
-- checkpoint-byte-flip and Archive-tail corruption;
-- reader inflight corruption and deleted cursors; and
-- double- and triple-crash recovery chains.
-
-Each cell appends `selection`, `milestone`, mutation, recovery, and `outcome`
-records to `control/events.jsonl`. When a cell fails, the diagnostic collector
-creates a sibling `*.evidence` directory containing the reason, control files,
-child stdout/stderr, and a directory listing of the Store/checkpoint/Archive
-fixture. This is the first place to look when a crash barrier or recovery
-policy assertion fails.
-
-Crash-matrix controls are:
-
-| Property | Default | Purpose |
-| --- | ---: | --- |
-| `crash.matrix.seed` | `1` | Seed for randomized budget/scenario selection |
-| `crash.matrix.random.iterations` | `10` in `-Pcrashmatrix` | Seeded process-kill iterations; `0` disables that test |
-| `crash.matrix.random.seeds` | `1` | Number of consecutive seed values |
-| `crash.matrix.budget.iterations` | `3` | Randomized chunk-budget cells |
-| `crash.matrix.subscriber` | `true` | Disable for the no-subscriber backpressure variant |
-| `crash.matrix.termLength` | `1048576` | Child Aeron term length in bytes |
-| `crash.matrix.chunkSize` | derived | Overrides the child chunk size; default is bounded by term size |
-| `crash.budget.startup` | `120000` ms | Child startup/outcome wait |
-| `crash.budget.milestone` | `60000` ms | Barrier wait |
-| `crash.budget.archiveStop` | `30000` ms | Active-Archive retry window |
-| `crash.budget.cell` | `600000` ms | Overall cell wait ceiling |
-
-Run the full profile, or a focused provider cell when investigating one
-boundary:
+### Crash matrix (`ProviderCrashMatrixIT`)
 
 ```text
 mvn verify -Pcrashmatrix
@@ -561,15 +269,19 @@ mvn -q -Pcrashmatrix -DskipTests \
   org.apache.maven.plugins:maven-failsafe-plugin:3.6.0:verify
 ```
 
-The crash matrix intentionally does not claim to model arbitrary UDP loss or
-duplication, disk-full ENOSPC, SIGSTOP, or hostile network traffic. Those need
-separate fault-injection mechanisms; these tests focus on durable ordering,
-checkpoint truth, process death, and fail-closed recovery.
+A failed cell leaves a sibling `*.evidence` directory with the reason,
+control files, child output, and a fixture listing. Look there first.
 
-## Design
-
-The architectural decisions — Archive-first replication, fixed roles,
-durable cursors and checkpoints, seeding and reseed, quorum-gated retention,
-in-graph indexes, and the boundary–control–entity separation — are recorded
-in the module documentation:
-[`src/main/java/module-info.java`](src/main/java/module-info.java).
+| Property | Default | Purpose |
+| --- | ---: | --- |
+| `crash.matrix.seed` | `1` | Randomized scenario seed |
+| `crash.matrix.random.iterations` | `10` | Seeded kill iterations; `0` disables |
+| `crash.matrix.random.seeds` | `1` | Consecutive seeds |
+| `crash.matrix.budget.iterations` | `3` | Randomized chunk-budget cells |
+| `crash.matrix.subscriber` | `true` | `false` = no-subscriber back-pressure variant |
+| `crash.matrix.termLength` | `1048576` | Child term length |
+| `crash.matrix.chunkSize` | derived | Child chunk size override |
+| `crash.budget.startup` | `120000` ms | Child startup/outcome wait |
+| `crash.budget.milestone` | `60000` ms | Barrier wait |
+| `crash.budget.archiveStop` | `30000` ms | Active-Archive retry window |
+| `crash.budget.cell` | `600000` ms | Per-cell ceiling |
