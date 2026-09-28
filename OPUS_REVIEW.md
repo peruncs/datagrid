@@ -58,6 +58,10 @@ reader nodes, replicated over Aeron.
   - Application drain uses `NodeClose.awaitAppIdle(Duration)` and the settings timeout.
     `AppSections` uses a lock-protected count; lifecycle admission under that lock is the close
     gate, so a second permanent `closing` flag is unnecessary.
+  - The direct low-level publisher now has its own recorded-ABORT regression test: sequence 0 is
+    consumed, the rejection retains its durable abort position, and sequence 1 succeeds. The
+    index-validation bound has one shared default/parser; blank values use that default and
+    malformed or non-positive values fail.
   - Starter backup waits are bounded. Retention caps requests at the complete reader-quorum
     watermark, preserves history for incomplete or lagging readers, and has a configurable cadence.
   - C5 deliberately keeps `LazyHolder` synchronization: close must wait for a resource factory
@@ -143,28 +147,29 @@ reader nodes, replicated over Aeron.
 
 **Current gate status.** This table is the acceptance plan, not a completion ledger. The
 2026-09-28 follow-up addresses the confirmed code-review defects in C1, C2, C3, C6, C10, A4,
-F1, and N3. Verification is green: `mvn verify` passed 793 unit tests (1 skipped) and 13
-integration tests; `mvn verify -Pintegration` passed 793 unit tests (1 skipped) and 10
-integration tests; `mvn verify -Pcrashmatrix` passed 793 unit tests (1 skipped) and all 69 crash
-and integration tests; and `mvn verify -Psoak` passed 793 unit tests (1 skipped) and the soak.
-The final soak completed 326 transactions, 56,778 queries, 44,593 verified reads, zero torn
-transactions, and successful reader/index convergence. Its 49-second JFR recording passed
-`SoakJfrReportTest` with failure gating enabled: maximum GC pause 24 ms, with no GC pause over
-100 ms, monitor blocking, or virtual-thread pinning. A separate 60-second soak repeat completed
-945 transactions; its live `jcmd` sample found no deadlock. An Archive-resume regression test
-now verifies that retention can purge a segment and the writer can publish again through a fresh
-publication.
+F1, and N3. Verification is green: `mvn verify` passed 800 unit tests (1 skipped) and 13
+integration tests; `mvn verify -Pintegration` passed 800 unit tests (1 skipped) and 13
+integration tests; `mvn verify -Pcrashmatrix` passed 800 unit tests (1 skipped) and all 72 crash
+and integration tests; and `mvn verify -Psoak` passed 800 unit tests (1 skipped) and the soak.
+The final soak completed 418 transactions, 52,814 queries, 42,527 verified reads, zero torn
+transactions, and successful reader/index convergence. Its 53-second JFR recording passed
+`SoakJfrReportTest` with failure gating enabled: maximum GC pause 25 ms, no GC pause over 100 ms,
+maximum monitor block 24 ms, and no virtual-thread pinning. A live `jcmd` sample reported 43 MB
+heap used and no deadlock. An Archive-resume regression test now verifies that retention can
+purge a segment and the writer can publish again through a fresh publication.
 
-Step 0/4 benchmark evidence is still open. F1's JMH threshold and equivalence against the
-upstream iterator over real Serializer output remain unclaimed, as do its fuzz cases. The N3
-scheduler-specific multi-reader integration case remains open; current integration coverage
-drives the retention controller directly. C5 deliberately keeps `LazyHolder` synchronization for
-the in-flight-factory close race described above. C1 covers writer recovery and reader resolution
-through sequence S+2. C2 exercises an active write during close,
+Step 0/4 benchmark evidence remains open. F1's JMH threshold is unclaimed; scanner fuzz tests and
+equivalence against the upstream iterator over 10,000 entities from real Serializer output now
+pass. The N3 scheduler-specific multi-reader integration case remains open; current integration
+coverage drives the retention controller directly. C5 deliberately keeps `LazyHolder`
+synchronization for the in-flight-factory close race described above. C1 covers writer recovery
+and reader resolution through sequence S+2. C2 exercises an active write during close,
 timeout with the Store left open, and a successful retry through the facade; the full
 `NodeLifecycle` close graph remains an integration gap. C3 covers bounded running-backup close,
-and C10 covers submission rejection returning the executor to IDLE; starter-upload preservation
-still needs an executable test. No step-0 baseline or step-4 performance comparison is available.
+and C10 covers submission rejection returning the executor to IDLE, with fatal submission errors
+re-thrown after the state reset. The starter-upload helper test
+verifies failure and timeout retain the upload, while success deletes it only after publication.
+No step-0 baseline or step-4 performance comparison is available.
 
 ---
 
@@ -382,7 +387,7 @@ would not remove the lock needed by close and cancellation.
 
 | Transition | Where |
 |------------|-------|
-| `IDLE → QUEUED` | `runBackup`, under the monitor, immediately before `submit`. If `submit` throws, restore `IDLE` and complete the returned future exceptionally. |
+| `IDLE → QUEUED` | `runBackup` reserves the slot under the monitor, then calls `submit` outside it. A runtime submission rejection restores `IDLE` and completes the future exceptionally; a fatal `Error` restores `IDLE` then rethrows. |
 | `QUEUED → RUNNING` | First statement of the task body, under the monitor. If `phase != QUEUED` (the close path already reset it), return without running. |
 | `RUNNING → IDLE` | Task `finally`, under the monitor. |
 | `QUEUED → IDLE` | `close()`, under the monitor: `backupTask.cancel(false)`, then `if (phase == QUEUED) phase = IDLE`. |
@@ -673,6 +678,19 @@ settings) and the `module-info` "Durable cursors and checkpoints" / "Seeding and
 - **S-5 (recovery).** For each A1.5 rule, synthesize the tail with the existing crash hooks and
   assert the action, with replay ≤ `W − p` bytes.
 
+**S-1 result (2026-09-28): PASS.** `AeronStoreIntegrationIT.namedReplicationRootKeepsItsIdentityAcrossOneHundredImports`
+registers the same named-root identifier on the writer and reader, persists the root with user
+data, copies the seed Store, then imports 100 writer transactions. The reader's original root
+instance resolves by its persisted object id after every import and exposes each new sequence and
+value. Registering the named root on every new Store foundation is required before `start()`.
+
+**S-3 result (2026-09-28): PASS.**
+`AeronStoreIntegrationIT.storerRootSnapshotMatchesStoreRootOnFreshAndExistingStores` writes the
+default root and a named mark in one `storeAll` call, then compares a fresh Store and a root
+replacement on an existing Store against upstream `storeRoot()`. Existing-object field mutation is
+intentionally excluded: Store documents that `storeRoot()` only stores a new root or a previously
+unknown graph, and does not persist arbitrary changes to already-known objects.
+
 #### A1.10 Tests
 
 - **Crash matrix:** new oracle `CONTINUE`, except rules 1–8 → `RESEED_REQUIRED`; checkpoint cells
@@ -819,8 +837,9 @@ it yields a crash or garbage, not an exception.
   @FunctionalInterface interface EntityVisitor { void entity(long typeId, long objectId, long offset, long length); }
   ```
 - **Format:** the scanner uses Serializer's native-order entity header layout, including 8-byte
-  length, type-id and object-id fields. The old PerunCS byte walk has been removed; equivalence with
-  `BinaryEntityRawDataIterator` over real Serializer output remains an explicit open gate.
+  length, type-id and object-id fields. The old PerunCS byte walk has been removed; the upstream
+  `BinaryEntityRawDataIterator` equivalence check passes for 10,000 real Serializer-produced
+  entities.
 - **Users:**
   - P1-1 `commitTouchesIndexes` (writer `Binary`);
   - A1.4 step 3 mark check (writer `Binary`);
@@ -843,8 +862,9 @@ it yields a crash or garbage, not an exception.
 - **Fuzz:** truncated buffers, a length past the end, a zero or negative length, and a header
   split across the end, each → `CorruptReplicationDataException`, never a JVM crash. 10k seeded
   random corrupt length fields are rejected by both framing validation and header scanning.
-- **Equivalence:** for 10k valid binaries, `EntityHeaders.forEach` yields exactly the entities of
-  the current parser (run both during migration).
+- **Equivalence:** for 10,000 entities in real Serializer output,
+  `EntityHeaders.forEach` yields exactly the entities reported by
+  `BinaryEntityRawDataIterator`.
 - **Micro-benchmark** (JMH, `-Pbench`): compare FFM scans of 64 KiB and 1 MiB Serializer binaries
   against the upstream raw iterator. The 5% gate remains open and is not claimed complete.
 

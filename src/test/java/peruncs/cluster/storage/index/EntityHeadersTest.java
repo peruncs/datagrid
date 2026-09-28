@@ -4,17 +4,25 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
+import org.eclipse.store.storage.types.Storage;
+import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.errors.CorruptReplicationDataException;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EntityHeadersTest {
     @Test
@@ -95,6 +103,62 @@ class EntityHeadersTest {
     }
 
     @Test
+    void matchesUpstreamWalkForRealSerializerOutput(@TempDir final Path directory) {
+        final StorageConfiguration configuration = StorageConfiguration.Builder()
+                .setStorageFileProvider(Storage.FileProvider(directory))
+                .setChannelCountProvider(Storage.ChannelCountProvider(1))
+                .createConfiguration();
+        final var foundation = EmbeddedStorage.Foundation(configuration);
+        final var connectionFoundation = foundation.getConnectionFoundation();
+        final PersistenceTarget<Binary> delegate = connectionFoundation.getPersistenceTarget();
+        final List<Header> captured = new ArrayList<>();
+        connectionFoundation.setPersistenceTarget(new PersistenceTarget<>() {
+            @Override
+            public void write(final Binary binary) {
+                final List<Header> headers = new ArrayList<>();
+                EntityHeaders.forEach(binary, (typeId, objectId, _, _) -> headers.add(new Header(typeId, objectId)));
+                final List<Header> upstreamHeaders = new ArrayList<>();
+                final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
+                final boolean wrapped = binary instanceof ChunksWrapper;
+                binary.iterateChannelChunks(channel -> {
+                    for (final ByteBuffer source : channel.buffers()) {
+                        final int length = wrapped ? source.position() : source.limit();
+                        final ByteBuffer view = source.duplicate().clear().order(ByteOrder.nativeOrder());
+                        final long start = XMemory.getDirectByteBufferAddress(source);
+                        assertEquals(0L, iterator.iterateEntityRawData(start, start + length,
+                                (entityAddress, _) -> {
+                                    final int offset = Math.toIntExact(entityAddress - start);
+                                    upstreamHeaders.add(new Header(
+                                            view.getLong(offset + Long.BYTES),
+                                            view.getLong(offset + 2 * Long.BYTES)));
+                                    return true;
+                                }));
+                    }
+                });
+                assertEquals(upstreamHeaders, headers,
+                        "the bounded scanner must match Serializer's iterator on stored entities");
+                captured.addAll(headers);
+                delegate.write(binary);
+            }
+
+            @Override public boolean isWritable() { return delegate.isWritable(); }
+            @Override public void prepareTarget() { delegate.prepareTarget(); }
+            @Override public void closeTarget() { delegate.closeTarget(); }
+        });
+
+        final SerializerRoot root = new SerializerRoot();
+        for (int index = 0; index < 10_000; index++) {
+            root.entities.add(new SerializerEntity("serialized entity %d".formatted(index)));
+        }
+        try (EmbeddedStorageManager storage = foundation.start(root)) {
+            storage.storeRoot();
+        }
+
+        assertTrue(captured.size() >= 10_000,
+                "the test must compare at least 10,000 real serialized Store entities");
+    }
+
+    @Test
     void tenThousandRandomCorruptLengthsAreRejectedAsReplicationData() {
         final ByteBuffer buffer = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
         buffer.putLong(24).putLong(17).putLong(29);
@@ -133,6 +197,18 @@ class EntityHeadersTest {
     }
 
     private record Header(long typeId, long objectId) {
+    }
+
+    public static final class SerializerRoot {
+        public List<SerializerEntity> entities = new ArrayList<>();
+    }
+
+    public static final class SerializerEntity {
+        public String value;
+
+        SerializerEntity(final String value) {
+            this.value = value;
+        }
     }
 
 }

@@ -462,6 +462,37 @@ class AeronReplicationPublisherTest {
         }
     }
 
+    /// A low-level publisher can recover when a prepare timeout is durably terminated by ABORT.
+    @Test
+    void directPublisherRecoversAfterRecordedAbort() {
+        final AtomicBoolean rejectData = new AtomicBoolean(true);
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .chunkSize(256).maxTransactionBytes(512)
+                .offerTimeoutNanos(TimeUnit.MILLISECONDS.toNanos(5)).build();
+        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> {
+                    final AeronReplicationEnvelope.Kind kind =
+                            AeronReplicationEnvelope.decode(buffer, offset, length).kind();
+                    if (kind == AeronReplicationEnvelope.Kind.STORE_BINARY && rejectData.get()) {
+                        return Publication.BACK_PRESSURED;
+                    }
+                    if (kind == AeronReplicationEnvelope.Kind.ABORT) rejectData.set(false);
+                    return length;
+                }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            final WriteRejectedException rejected = assertThrows(WriteRejectedException.class,
+                    () -> publisher.prepareTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
+            assertTrue(rejected.hasRecordedAbort());
+            assertFalse(publisher.isFailed());
+
+            try (final var next = publisher.prepareTransaction(
+                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{2})})) {
+                assertEquals(1L, next.sequence(), "the ABORTed sequence 0 must not be reused");
+                publisher.commit(next);
+            }
+            assertFalse(publisher.isFailed());
+        }
+    }
+
         /// Verifies abort failure fails closed after prepared chunks were published.
     @Test
     void abortFailureFailsClosedAfterPreparedChunksWerePublished() {

@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -118,6 +119,42 @@ class StorageBackupTaskExecutorTest {
         }
     }
 
+    @Test
+    void completesBackupCallbacksOutsideTheStateMonitor() throws Exception {
+        final BlockingManager manager = new BlockingManager();
+        try (final StorageBackupTaskExecutor executor =
+                     StorageBackupTaskExecutor.create(new TestStorageConnection(), manager)) {
+            final CompletableFuture<BackupInfo> result = executor.runBackup(BackupSlot.SCHEDULED);
+            assertTrue(manager.entered.await(5, TimeUnit.SECONDS));
+            final CountDownLatch observed = new CountDownLatch(1);
+            final AtomicReference<Throwable> observerFailure = new AtomicReference<>();
+            final CompletableFuture<Void> callback = result.thenRun(() -> {
+                Thread.ofVirtual().start(() -> {
+                    try {
+                        assertFalse(executor.isRunningBackup());
+                    } catch (final Throwable failure) {
+                        observerFailure.set(failure);
+                    } finally {
+                        observed.countDown();
+                    }
+                });
+                try {
+                    if (!observed.await(1, TimeUnit.SECONDS)) {
+                        throw new AssertionError("completion callback held the backup state monitor");
+                    }
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(interrupted);
+                }
+                if (observerFailure.get() != null) throw new AssertionError(observerFailure.get());
+            });
+
+            manager.release.countDown();
+            assertEquals(BACKUP, result.get(5, TimeUnit.SECONDS));
+            callback.get(5, TimeUnit.SECONDS);
+        }
+    }
+
     /// Verifies a closed executor accepts no new backup and tolerates a repeated close.
     @Test
     void rejectsBackupsAfterCloseAndClosesIdempotently() {
@@ -176,6 +213,18 @@ class StorageBackupTaskExecutorTest {
             final CompletableFuture<BackupInfo> result = executor.runBackup(BackupSlot.SCHEDULED);
             assertInstanceOf(RejectedExecutionException.class,
                     assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS)).getCause());
+            assertFalse(executor.isRunningBackup());
+        }
+    }
+
+    @Test
+    void propagatesFatalSubmissionErrorAfterRestoringIdlePhase() {
+        final Error fatal = new AssertionError("fatal thread creation failure");
+        final ExecutorService executorService = Executors.newSingleThreadExecutor(ignored -> { throw fatal; });
+        try (final StorageBackupTaskExecutor.Default executor = new StorageBackupTaskExecutor.Default(
+                new TestStorageConnection(), new BlockingManager(), 100L, executorService)) {
+            assertSame(fatal, assertThrows(AssertionError.class,
+                    () -> executor.runBackup(BackupSlot.SCHEDULED)));
             assertFalse(executor.isRunningBackup());
         }
     }

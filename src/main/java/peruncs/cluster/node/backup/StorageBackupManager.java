@@ -159,11 +159,10 @@ public interface StorageBackupManager {
         @Override
         public BackupInfo createStorageBackup(final BackupSlot slot) throws NodeException {
             Objects.requireNonNull(slot, "slot");
-            final boolean useManualSlot = slot == BackupSlot.MANUAL;
             LOGGER.log(System.Logger.Level.TRACE, "Creating new storage backup");
 
             final List<BackupMetadata> backups = this.listBackups();
-            final long timestamp = this.nextBackupTimestamp(backups, useManualSlot);
+            final long timestamp = this.nextBackupTimestamp(backups, slot);
             final RuntimeException readerFailure = this.dataClient.failure();
             if (readerFailure != null) {
                 throw new NodeException("Cannot create backup after replication reader failure", readerFailure);
@@ -199,13 +198,13 @@ public interface StorageBackupManager {
             Throwable operationFailure = null;
             try {
                 final ReplicationCursor cursor = this.cursorSupplier.get();
-                final var newBackup = BackupMetadata.create(timestamp, useManualSlot, cursor);
+                final var newBackup = BackupMetadata.create(timestamp, slot == BackupSlot.MANUAL, cursor);
                 final var localIdentity = BackupMetadata.Identity.of(cursor);
                 this.backend.createBackup(this.storageConnection, cursor, newBackup);
-                this.runMaintenance(backups, useManualSlot, newBackup, localIdentity);
+                this.runMaintenance(backups, slot, newBackup, localIdentity);
                 return new BackupInfo(newBackup.backupId(),
                         Instant.ofEpochMilli(newBackup.timestamp()),
-                        newBackup.logicalSequence(), useManualSlot);
+                        newBackup.logicalSequence(), slot == BackupSlot.MANUAL);
             } catch (final RuntimeException | Error failure) {
                 operationFailure = failure;
                 throw failure;
@@ -237,7 +236,7 @@ public interface StorageBackupManager {
         /// before this method runs is never affected.
         private void runMaintenance(
                 final List<BackupMetadata> backups,
-                final boolean useManualSlot,
+                final BackupSlot slot,
                 final BackupMetadata created,
                 final BackupMetadata.Identity localIdentity
         ) {
@@ -248,16 +247,17 @@ public interface StorageBackupManager {
              * previous archive still exists to read it from. */
             final ReplicationCursor retentionCursor;
             try {
-                retentionCursor = useManualSlot ? null : this.retentionCursorExcluding(created, localIdentity);
+                retentionCursor = slot == BackupSlot.MANUAL
+                        ? null : this.retentionCursorExcluding(created, localIdentity);
             } catch (final RuntimeException failure) {
                 this.recordMaintenanceFailure("resolve the retention cursor", failure);
-                this.pruneBackups(backups, useManualSlot, localIdentity);
+                this.pruneBackups(backups, slot, localIdentity);
                 return;
             }
 
-            this.pruneBackups(backups, useManualSlot, localIdentity);
+            this.pruneBackups(backups, slot, localIdentity);
             try {
-                this.advanceRetention(useManualSlot, retentionCursor);
+                this.advanceRetention(slot, retentionCursor);
             } catch (final RuntimeException failure) {
                 this.recordMaintenanceFailure("advance replication retention", failure);
             }
@@ -287,7 +287,7 @@ public interface StorageBackupManager {
         /// delete another generation sharing the volume.
         private void pruneBackups(
                 final List<BackupMetadata> backups,
-                final boolean useManualSlot,
+                final BackupSlot slot,
                 final BackupMetadata.Identity localIdentity
         ) {
             try {
@@ -297,7 +297,7 @@ public interface StorageBackupManager {
                 if (compatible.isEmpty()) {
                     return;
                 }
-                if (useManualSlot) {
+                if (slot == BackupSlot.MANUAL) {
                     compatible.stream().filter(BackupMetadata::manualSlot).forEach(this::deleteBackup);
                     return;
                 }
@@ -317,9 +317,9 @@ public interface StorageBackupManager {
         }
 
         /// Advances log retention, reporting but not rethrowing failures.
-        private void advanceRetention(final boolean useManualSlot, final ReplicationCursor retentionCursor)
+        private void advanceRetention(final BackupSlot slot, final ReplicationCursor retentionCursor)
                 throws NodeException {
-            if (useManualSlot) {
+            if (slot == BackupSlot.MANUAL) {
                 return;
             }
             if (!this.retention.isSupported()) {
@@ -355,10 +355,10 @@ public interface StorageBackupManager {
             return this.maintenanceFailure.get();
         }
 
-        private long nextBackupTimestamp(final List<BackupMetadata> backups, final boolean manualSlot) {
+        private long nextBackupTimestamp(final List<BackupMetadata> backups, final BackupSlot slot) {
             long timestamp = System.currentTimeMillis();
             for (final BackupMetadata backup : backups) {
-                if (backup.manualSlot() == manualSlot && backup.timestamp() >= timestamp) {
+                if (backup.manualSlot() == (slot == BackupSlot.MANUAL) && backup.timestamp() >= timestamp) {
                     timestamp = backup.timestamp() == Long.MAX_VALUE ? Long.MAX_VALUE : backup.timestamp() + 1L;
                 }
             }

@@ -77,12 +77,15 @@ class AeronSettingsTest {
     @Test
     void indexValidationBoundDefaultsAndCanBeConfigured() {
         assertEquals(65_536, properties(Map.of()).indexValidationMaxObjects());
-        assertEquals(32, properties(Map.of()).indexValidationMaxObjects(32),
-                "an absent override must preserve the caller's configured default");
+        assertEquals(65_536, properties(Map.of("ECLIPSE_DATAGRID_INDEX_VALIDATION_MAX_OBJECTS", " "))
+                .indexValidationMaxObjects(), "a blank override uses the shared default");
         assertEquals(128, properties(Map.of("ECLIPSE_DATAGRID_INDEX_VALIDATION_MAX_OBJECTS", "128"))
                 .indexValidationMaxObjects());
         assertThrows(IllegalArgumentException.class,
                 () -> properties(Map.of("ECLIPSE_DATAGRID_INDEX_VALIDATION_MAX_OBJECTS", "0"))
+                        .indexValidationMaxObjects());
+        assertThrows(IllegalArgumentException.class,
+                () -> properties(Map.of("ECLIPSE_DATAGRID_INDEX_VALIDATION_MAX_OBJECTS", "many"))
                         .indexValidationMaxObjects());
     }
 

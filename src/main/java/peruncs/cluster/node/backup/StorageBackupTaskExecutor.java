@@ -41,7 +41,8 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     /// Starts a backup and returns its eventual result.
     ///
     /// @param slot scheduled or manual retention slot
-    /// @return a future completed with backup details or exceptionally if busy or failed
+    /// @return a future completed with backup details or exceptionally if busy, closed, rejected, or failed
+    /// @throws Error if submission fails fatally; the single-flight state is reset first
     CompletableFuture<BackupInfo> runBackup(BackupSlot slot);
 
     /// Creates the periodic full-backup task.
@@ -157,57 +158,77 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         }
 
         @Override
-        public synchronized CompletableFuture<BackupInfo> runBackup(final BackupSlot slot) {
+        public CompletableFuture<BackupInfo> runBackup(final BackupSlot slot) {
             Objects.requireNonNull(slot, "slot");
-            if (this.backupClosing || this.backupClosed) {
-                return CompletableFuture.failedFuture(
-                        new IllegalStateException("Storage backup task executor is closed"));
-            }
-            if (this.phase != BackupPhase.IDLE) {
-                return CompletableFuture.failedFuture(new BackupBusyException("Storage backup is already running"));
-            }
-            LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage backup");
             final CompletableFuture<BackupInfo> result = new CompletableFuture<>();
-            this.backupResult = result;
-            this.phase = BackupPhase.QUEUED;
+            synchronized (this) {
+                if (this.backupClosing || this.backupClosed) {
+                    return CompletableFuture.failedFuture(
+                            new IllegalStateException("Storage backup task executor is closed"));
+                }
+                if (this.phase != BackupPhase.IDLE) {
+                    return CompletableFuture.failedFuture(new BackupBusyException("Storage backup is already running"));
+                }
+                LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage backup");
+                this.backupResult = result;
+                this.phase = BackupPhase.QUEUED;
+            }
             try {
-                this.backupTask = this.backupExecutor.submit(() -> {
-                    synchronized (this) {
-                        if (this.phase != BackupPhase.QUEUED) return;
-                        this.phase = BackupPhase.RUNNING;
+                final Future<?> task = this.backupExecutor.submit(() -> this.runBackup(slot, result));
+                boolean cancelTask = false;
+                synchronized (this) {
+                    if (this.phase == BackupPhase.QUEUED && this.backupResult == result) {
+                        this.backupTask = task;
+                    } else {
+                        /* close() may have cancelled this queued run while
+                         * submit() was outside the state monitor. */
+                        cancelTask = true;
                     }
-                    BackupInfo backup = null;
-                    Throwable failure = null;
-                    try {
-                        backup = this.backupManager.createStorageBackup(slot);
-                        this.backupFailure.set(null);
-                        this.lastSuccessEpochMillis.set(System.currentTimeMillis());
-                    } catch (final Exception backupFailure) {
-                        failure = backupFailure;
-                        this.backupFailure.set(backupFailure);
-                        LOGGER.log(ERROR, "Storage backup failed", backupFailure);
-                    } catch (final Error fatalFailure) {
-                        failure = fatalFailure;
-                        this.backupFailure.set(fatalFailure);
-                        LOGGER.log(ERROR, "Fatal storage-backup failure", fatalFailure);
-                    } finally {
-                        synchronized (this) {
-                            this.phase = BackupPhase.IDLE;
-                            this.backupTask = null;
-                            this.backupResult = null;
-                            if (failure == null) result.complete(backup);
-                            else result.completeExceptionally(failure);
-                        }
-                    }
-                    if (failure instanceof Error fatalFailure) throw fatalFailure;
-                });
+                }
+                if (cancelTask) task.cancel(false);
             } catch (final RuntimeException | Error failure) {
-                this.phase = BackupPhase.IDLE;
-                this.backupTask = null;
-                this.backupResult = null;
+                synchronized (this) {
+                    if (this.backupResult == result) {
+                        this.phase = BackupPhase.IDLE;
+                        this.backupTask = null;
+                        this.backupResult = null;
+                    }
+                }
+                if (failure instanceof Error error) throw error;
                 result.completeExceptionally(failure);
             }
             return result;
+        }
+
+        private void runBackup(final BackupSlot slot, final CompletableFuture<BackupInfo> result) {
+            synchronized (this) {
+                if (this.phase != BackupPhase.QUEUED || this.backupResult != result) return;
+                this.phase = BackupPhase.RUNNING;
+            }
+            BackupInfo backup = null;
+            Throwable failure = null;
+            try {
+                backup = this.backupManager.createStorageBackup(slot);
+                this.backupFailure.set(null);
+                this.lastSuccessEpochMillis.set(System.currentTimeMillis());
+            } catch (final Exception backupFailure) {
+                failure = backupFailure;
+                this.backupFailure.set(backupFailure);
+                LOGGER.log(ERROR, "Storage backup failed", backupFailure);
+            } catch (final Error fatalFailure) {
+                failure = fatalFailure;
+                this.backupFailure.set(fatalFailure);
+                LOGGER.log(ERROR, "Fatal storage-backup failure", fatalFailure);
+            } finally {
+                synchronized (this) {
+                    this.phase = BackupPhase.IDLE;
+                    this.backupTask = null;
+                    this.backupResult = null;
+                }
+                if (failure == null) result.complete(backup);
+                else result.completeExceptionally(failure);
+            }
+            if (failure instanceof Error fatalFailure) throw fatalFailure;
         }
 
         @Override
@@ -247,6 +268,7 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         @Override
         public void close() {
             final boolean closeBackup;
+            CompletableFuture<BackupInfo> cancelledResult = null;
             synchronized (this) {
                 closeBackup = !this.backupClosed;
                 if (closeBackup) {
@@ -254,13 +276,15 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                     if (this.backupTask != null) this.backupTask.cancel(false);
                     if (this.phase == BackupPhase.QUEUED) {
                         this.phase = BackupPhase.IDLE;
-                        if (this.backupResult != null) {
-                            this.backupResult.completeExceptionally(
-                                    new CancellationException("queued backup cancelled during close"));
-                        }
+                        cancelledResult = this.backupResult;
+                        this.backupTask = null;
                         this.backupResult = null;
                     }
                 }
+            }
+            if (cancelledResult != null) {
+                cancelledResult.completeExceptionally(
+                        new CancellationException("queued backup cancelled during close"));
             }
             Throwable failure = null;
             if (closeBackup) {

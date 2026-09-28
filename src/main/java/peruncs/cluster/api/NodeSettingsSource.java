@@ -57,29 +57,21 @@ public interface NodeSettingsSource {
 
     /// Maximum number of index-relevant objects and collection entries per validation scan.
     ///
+    /// An absent or blank override uses the shared default; malformed or non-positive values fail.
+    ///
     /// @return configured positive bound, or 65,536
     default int indexValidationMaxObjects() {
-        return this.indexValidationMaxObjects(DEFAULT_INDEX_VALIDATION_MAX_OBJECTS);
-    }
-
-    /// Returns the configured validation bound or the supplied default.
-    ///
-    /// A blank value uses the supplied default; malformed or non-positive values are rejected.
-    ///
-    /// @param defaultValue bound to use when the setting is absent
-    /// @return configured or default positive bound
-    default int indexValidationMaxObjects(final int defaultValue) {
-        if (defaultValue <= 0) throw new IllegalArgumentException("defaultValue must be positive");
         final String key = EnvKeys.INDEX_VALIDATION_MAX_OBJECTS;
         final String configured = this.replicationProperty(key);
-        if (configured == null || configured.isBlank()) return defaultValue;
+        if (configured == null || configured.isBlank()) return DEFAULT_INDEX_VALIDATION_MAX_OBJECTS;
+        final int maximum;
         try {
-            final int maximum = Integer.parseInt(configured.trim());
-            if (maximum > 0) return maximum;
+            maximum = Integer.parseInt(configured.trim());
         } catch (final NumberFormatException ignored) {
             throw new IllegalArgumentException(key + " must be a positive integer", ignored);
         }
-        throw new IllegalArgumentException(key + " must be a positive integer");
+        if (maximum <= 0) throw new IllegalArgumentException(key + " must be a positive integer");
+        return maximum;
     }
 
     /// Maximum time to wait for active Store graph sections during close.

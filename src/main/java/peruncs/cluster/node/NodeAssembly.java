@@ -609,8 +609,7 @@ final class NodeCollaborators {
         final Long cachingTimeoutMs = this.getNodeSettingsSource().dataMergerTimeoutMs();
         final Long cachedBytesLimit = this.getNodeSettingsSource().dataMergerCachedDataLimit();
         final Long applyTimeoutMs = this.getNodeSettingsSource().dataMergerApplyTimeoutMs();
-        final int maxValidatedIndexObjects =
-                this.getNodeSettingsSource().indexValidationMaxObjects(configuration.maxValidatedIndexObjects());
+        final int maxValidatedIndexObjects = this.getNodeSettingsSource().indexValidationMaxObjects();
         if (cachingTimeoutMs == null && cachedBytesLimit == null && applyTimeoutMs == null &&
             maxValidatedIndexObjects == configuration.maxValidatedIndexObjects()) {
             return StorageBinaryDataMerger.create(configuration);

@@ -6,6 +6,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.gigamap.jvector.*;
 import org.eclipse.store.gigamap.lucene.DocumentPopulator;
+import org.eclipse.store.gigamap.lucene.LuceneContext;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
 import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
@@ -13,11 +14,13 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
+import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import peruncs.cluster.api.ClusterIndexes;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.ReseedRequiredException;
+import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.node.replication.*;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.storage.ReplicationCursor;
@@ -32,6 +35,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -501,6 +505,191 @@ class AeronStoreIntegrationIT {
         } finally {
             delete(root);
         }
+    }
+
+    /// Verifies the real Store pre-filter rejects a directly registered external Lucene index before persistence or publication.
+    @Test
+    void realWriterPrefilterRejectsExternalLuceneBeforeLocalPersistence() throws Exception {
+        final Path root = Files.createTempDirectory("dg-aeron-prefilter-");
+        final UUID clusterId = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final int controlPort = freePort();
+        final int livePort = freePort();
+        final int watermarkPort = freePort();
+        final Path writerStore = root.resolve("writer-store");
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
+                properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
+                        controlPort, livePort, watermarkPort))) {
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
+            final AtomicReference<StorageConnection> writerStorage = new AtomicReference<>();
+            final var targetFactory = writerTransport.persistenceTargetFactory(
+                    "store", distributor, writerStorage::get);
+            final IndexRoot initial = new IndexRoot();
+            initial.articles = GigaMap.New();
+            final EmbeddedStorageFoundation<?> writerFoundation = foundation(writerStore);
+            DistributedStorage.configureWriting(writerFoundation, distributor, targetFactory);
+            final EmbeddedStorageManager writer = writerFoundation.start(initial);
+            writerStorage.set(writer);
+            try {
+                writer.storeRoot();
+                final ReplicationCursor before = latest(writerTransport);
+                final IndexRoot invalidRoot = new IndexRoot();
+                invalidRoot.articles = GigaMap.New();
+                invalidRoot.articles.index().register(LuceneIndex.Category(LuceneContext.New(
+                        root.resolve("external-index"), new IndexedArticlePopulator())));
+                writer.setRoot(invalidRoot);
+
+                assertThrows(WriteRejectedException.class, writer::storeRoot);
+                assertEquals(before.logicalSequence(), latest(writerTransport).logicalSequence(),
+                        "a pre-filter rejection must not publish a sequence");
+            } finally {
+                writer.shutdown();
+                writerStorage.set(null);
+            }
+
+            final EmbeddedStorageFoundation<?> reopenedFoundation = foundation(writerStore);
+            DistributedStorage.configureWriting(reopenedFoundation, distributor, targetFactory);
+            try (EmbeddedStorageManager reopened = reopenedFoundation.start()) {
+                writerStorage.set(reopened);
+                final IndexRoot reopenedRoot = reopened.root();
+                assertNull(luceneIndex(reopenedRoot.articles),
+                        "the rejected external registration must not reach the local Store");
+            } finally {
+                writerStorage.set(null);
+            }
+        } finally {
+            delete(root);
+        }
+    }
+
+    /// Verifies that a named Store root is updated in place by each imported transaction.
+    @Test
+    void namedReplicationRootKeepsItsIdentityAcrossOneHundredImports() throws Exception {
+        final Path root = Files.createTempDirectory("dg-aeron-named-root-");
+        final UUID clusterId = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final int controlPort = freePort();
+        final int livePort = freePort();
+        final int watermarkPort = freePort();
+        final Path writerStore = root.resolve("writer-store");
+        final Path readerStore = root.resolve("reader-store");
+        final ProbeMark writerMark = new ProbeMark();
+        final Root userRoot = new Root();
+        try (ClusterReplicationTransport writerTransport = new AeronTransport(
+                properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
+                        controlPort, livePort, watermarkPort))) {
+            final ReplicationPublisher distributor = writerTransport.distributor("store");
+            final EmbeddedStorageFoundation<?> writerFoundation = foundation(writerStore);
+            writerFoundation.getConnectionFoundation().getRootResolverProvider()
+                    .registerRoot("peruncs.replication", writerMark);
+            DistributedStorage.configureWriting(writerFoundation, distributor,
+                    writerTransport.persistenceTargetFactory("store", distributor));
+            final EmbeddedStorageManager writer = writerFoundation.start(userRoot);
+            try {
+                writerMark.sequence = 0;
+                writerMark.value = "seed";
+                writer.storeAll(userRoot, writerMark);
+            } finally {
+                writer.shutdown();
+            }
+
+            final ReplicationCursor baseline = latest(writerTransport);
+            copyDirectory(writerStore, readerStore);
+            final ProbeMark readerMark = new ProbeMark();
+            final EmbeddedStorageFoundation<?> resumedWriterFoundation = foundation(writerStore);
+            resumedWriterFoundation.getConnectionFoundation().getRootResolverProvider()
+                    .registerRoot("peruncs.replication", writerMark);
+            DistributedStorage.configureWriting(resumedWriterFoundation, distributor,
+                    writerTransport.persistenceTargetFactory("store", distributor));
+            try (ReaderNode reader = ReaderNode.open(root.resolve("reader"), readerStore, "reader",
+                    UUID.randomUUID(), clusterId, generation, baseline, controlPort, livePort, watermarkPort,
+                    readerMark);
+                 EmbeddedStorageManager resumedWriter = resumedWriterFoundation.start()) {
+                reader.start();
+                reader.awaitLive();
+                final Root writerRoot = resumedWriter.root();
+                final var readerPersistence = reader.storage.persistenceManager();
+                final long markObjectId = readerPersistence.lookupObjectId(readerMark);
+                for (long sequence = 1; sequence <= 100; sequence++) {
+                    writerMark.sequence = sequence;
+                    writerMark.value = "mark-%s".formatted(sequence);
+                    writerRoot.values.add("value-%s".formatted(sequence));
+                    resumedWriter.storeAll(writerRoot, writerMark);
+                    reader.await(latest(writerTransport));
+                    assertEquals(sequence, readerMark.sequence, "named root was not materialized in place");
+                    assertEquals("mark-%s".formatted(sequence), readerMark.value);
+                    assertSame(readerMark, readerPersistence.getObject(markObjectId));
+                }
+            }
+        } finally {
+            delete(root);
+        }
+    }
+
+    /// Checks the public roots view can reproduce storeRoot while persisting an additional named root.
+    @Test
+    void storerRootSnapshotMatchesStoreRootOnFreshAndExistingStores() throws Exception {
+        final Path root = Files.createTempDirectory("dg-store-root-spike-");
+        final Path upstreamPath = root.resolve("upstream");
+        final Path markedPath = root.resolve("marked");
+        try {
+            final Root upstreamRoot = new Root();
+            upstreamRoot.values.add("fresh-store");
+            try (EmbeddedStorageManager upstream = foundation(upstreamPath).start(upstreamRoot)) {
+                upstream.storeRoot();
+            }
+            final ProbeMark mark = new ProbeMark();
+            mark.sequence = 0;
+            mark.value = "seed";
+            final Root markedRoot = new Root();
+            markedRoot.values.add("fresh-store");
+            try (EmbeddedStorageManager marked = startWithProbeMark(markedPath, mark, markedRoot)) {
+                storeRootWithMark(marked, mark);
+            }
+
+            try (EmbeddedStorageManager upstream = foundation(upstreamPath).start();
+                 EmbeddedStorageManager marked = startWithProbeMark(markedPath, mark)) {
+                final Root upstreamReplacement = new Root();
+                upstreamReplacement.values.add("existing-store");
+                upstream.setRoot(upstreamReplacement);
+                upstream.storeRoot();
+                final Root markedReplacement = new Root();
+                markedReplacement.values.add("existing-store");
+                marked.setRoot(markedReplacement);
+                mark.sequence = 1;
+                mark.value = "update";
+                storeRootWithMark(marked, mark);
+            }
+
+            try (EmbeddedStorageManager upstream = foundation(upstreamPath).start();
+                 EmbeddedStorageManager marked = startWithProbeMark(markedPath, mark)) {
+                assertEquals(1L, mark.sequence);
+                assertEquals("update", mark.value);
+                assertEquals(((Root) upstream.root()).values, ((Root) marked.root()).values);
+                assertEquals(List.of("existing-store"), ((Root) marked.root()).values);
+            }
+        } finally {
+            delete(root);
+        }
+    }
+
+    private static EmbeddedStorageManager startWithProbeMark(final Path path, final ProbeMark mark) {
+        return startWithProbeMark(path, mark, null);
+    }
+
+    private static EmbeddedStorageManager startWithProbeMark(
+            final Path path,
+            final ProbeMark mark,
+            final Object initialRoot
+    ) {
+        final EmbeddedStorageFoundation<?> foundation = foundation(path);
+        foundation.getConnectionFoundation().getRootResolverProvider()
+                .registerRoot("peruncs.replication", mark);
+        return initialRoot == null ? foundation.start() : foundation.start(initialRoot);
+    }
+
+    private static void storeRootWithMark(final EmbeddedStorageManager storage, final ProbeMark mark) {
+        storage.storeAll(storage.viewRoots().rootReference(), storage.root(), mark);
     }
 
     /// Verifies ordinary and backup readers import real Store data, resume from atomic cursors, and assemble a purgeable retention quorum.
@@ -1188,7 +1377,8 @@ class AeronStoreIntegrationIT {
                 final ReplicationCursor startingCursor,
                 final int controlPort,
                 final int livePort,
-                final int watermarkPort
+                final int watermarkPort,
+                final Object namedRoot
         ) {
             this.transport = new AeronTransport(properties(
                     nodeRoot, clusterId, nodeId, generation, role, -1L, controlPort, livePort, watermarkPort));
@@ -1197,6 +1387,10 @@ class AeronStoreIntegrationIT {
                 this.cursorPath = nodeRoot.resolve("cursor");
                 this.cursorManager = DurableCursorFile.of(this.cursorPath);
                 this.foundation = foundation(storePath);
+                if (namedRoot != null) {
+                    this.foundation.getConnectionFoundation().getRootResolverProvider()
+                            .registerRoot("peruncs.replication", namedRoot);
+                }
                 this.storage = this.foundation.start();
                 this.receiver = this.newReceiver();
                 this.client = this.newClient(startingCursor);
@@ -1286,9 +1480,26 @@ class AeronStoreIntegrationIT {
                 final int livePort,
                 final int watermarkPort
         ) throws Exception {
+            return open(nodeRoot, storePath, role, nodeId, clusterId, generation, startingCursor,
+                    controlPort, livePort, watermarkPort, null);
+        }
+
+        static ReaderNode open(
+                final Path nodeRoot,
+                final Path storePath,
+                final String role,
+                final UUID nodeId,
+                final UUID clusterId,
+                final UUID generation,
+                final ReplicationCursor startingCursor,
+                final int controlPort,
+                final int livePort,
+                final int watermarkPort,
+                final Object namedRoot
+        ) throws Exception {
             Files.createDirectories(nodeRoot);
             return new ReaderNode(nodeRoot, storePath, role, nodeId, clusterId, generation,
-                    startingCursor, controlPort, livePort, watermarkPort);
+                    startingCursor, controlPort, livePort, watermarkPort, namedRoot);
         }
 
         private static RuntimeException append(final RuntimeException current, final RuntimeException additional) {
@@ -1477,6 +1688,11 @@ class AeronStoreIntegrationIT {
         public final List<String> values = new ArrayList<>();
         public final List<NewType> objects = new ArrayList<>();
         public byte[] payload = new byte[0];
+    }
+
+    public static final class ProbeMark {
+        public long sequence;
+        public String value;
     }
 
     public static final class NewType {
