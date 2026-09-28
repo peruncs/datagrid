@@ -19,7 +19,8 @@ class ApplyWorkerBudgetTest {
 
     private static ApplyWorker worker(final MergerLifecycle owner, final ObjectGraphUpdateHandler handler, final long budgetMs) {
         final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
-        return new ApplyWorker(owner, new ApplyQueue(owner, 1L, 1L << 20, 60_000L), New(), watchdog,
+        final NativeBufferPool pool = new NativeBufferPool(0L);
+        return new ApplyWorker(owner, new ApplyQueue(owner, pool, 1L, 1L << 20, 60_000L), pool, New(), watchdog,
                 StorageBinaryDataMergerTestSupport.foundation(),
                 StorageBinaryDataMergerTestSupport.connection(),
                 handler, 0L, 10_000, budgetMs);

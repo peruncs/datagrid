@@ -12,8 +12,8 @@ import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.errors.CorruptReplicationDataException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
-import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.ReplicationRetry;
+import peruncs.cluster.storage.StorageGraphCoordinator;
 
 import java.lang.System.Logger.Level;
 import java.nio.ByteBuffer;
@@ -200,6 +200,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     private final long materializationBudgetMs;
     private final long awaitAppliedBudgetMs;
     private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
+    private final NativeBufferPool bufferPool;
     private final ApplyQueue queue;
     private final ApplyWorker worker;
     /* Cached so admissions allocate no submission lambda on the hot path. */
@@ -233,10 +234,12 @@ private StorageBinaryDataMerger(final Configuration configuration) {
             throw new IllegalArgumentException("applyTimeoutMs is too large for the full materialization and index-refresh wait: %s"
                     .formatted(applyTimeoutMs), overflow);
         }
-        this.queue = new ApplyQueue(this, cacheBytesLimit, this.maxCachedBytes, this.applyTimeoutMs);
+        this.bufferPool = new NativeBufferPool(Math.min(NativeBufferPool.MAX_RETAINED_BYTES, this.maxCachedBytes));
+        this.queue = new ApplyQueue(this, this.bufferPool, cacheBytesLimit, this.maxCachedBytes, this.applyTimeoutMs);
         this.worker = new ApplyWorker(
                 this,
                 this.queue,
+                this.bufferPool,
                 this.materialization,
                 this.watchdog,
                 this.foundation,
@@ -263,6 +266,16 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         return true;
     }
 
+    @Override
+    public ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
+        return this.bufferPool.acquire(minimumCapacity);
+    }
+
+    @Override
+    public void releaseNativeBuffer(final ByteBuffer buffer) {
+        this.bufferPool.release(buffer);
+    }
+
             /// Receives a borrowed binary. Must be called by the single
     /// transport delivery thread; see the class javadoc.
     ///
@@ -282,7 +295,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
                 .importArray(data);
         /* Copy before queueing because the caller releases the borrowed
          * binary as soon as this callback returns. */
-        final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.copyOwned(sourceBuffers);
+        final ByteBuffer[] ownedBuffers = StorageBinaryDataImporter.copyOwned(sourceBuffers, this.bufferPool);
         /* scheduleMaterialization owns cleanup on every rejection.  Releasing here
          * as well would double-free buffers when the worker has already drained its
          * queue after a terminal failure. */
@@ -322,8 +335,8 @@ private StorageBinaryDataMerger(final Configuration configuration) {
              * array yet, so fall back to freeing whatever direct buffers the
              * binary still exposes. */
             try {
-                if (buffers != null) StorageBinaryDataImporter.release(buffers);
-                else StorageBinaryBuffers.releaseDirect(data);
+                if (buffers != null) StorageBinaryDataImporter.release(buffers, this.bufferPool);
+                else StorageBinaryBuffers.releaseDirect(data, this.bufferPool);
             } catch (final RuntimeException | Error cleanupFailure) {
                 if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
             }
@@ -337,11 +350,11 @@ private StorageBinaryDataMerger(final Configuration configuration) {
 
     private void scheduleMaterialization(final ByteBuffer[] ownedBuffers) {
         if (this.failure.get() != null) {
-            StorageBinaryDataImporter.release(ownedBuffers);
+            StorageBinaryDataImporter.release(ownedBuffers, this.bufferPool);
             throw this.failure.get();
         }
         if (this.disposed) {
-            StorageBinaryDataImporter.release(ownedBuffers);
+            StorageBinaryDataImporter.release(ownedBuffers, this.bufferPool);
             throw new ReplicationUnavailableException("Storage binary merger is disposed");
         }
 
@@ -351,11 +364,11 @@ private StorageBinaryDataMerger(final Configuration configuration) {
             for (final ByteBuffer buffer : ownedBuffers) total = Math.addExact(total, buffer.remaining());
             incomingBytes = total;
         } catch (final ArithmeticException overflow) {
-            StorageBinaryDataImporter.release(ownedBuffers);
+            StorageBinaryDataImporter.release(ownedBuffers, this.bufferPool);
             throw new IllegalArgumentException("Storage binary length overflows accounting", overflow);
         }
         if (incomingBytes > this.maxCachedBytes) {
-            StorageBinaryDataImporter.release(ownedBuffers);
+            StorageBinaryDataImporter.release(ownedBuffers, this.bufferPool);
             throw new IllegalArgumentException(
                     "Storage binary of %s bytes exceeds the configured maxCachedBytes limit of %s bytes"
                             .formatted(incomingBytes, this.maxCachedBytes));
@@ -366,7 +379,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
             } catch (final RuntimeException | Error failure) {
                 /* The buffers have not entered the queue yet, so this method still owns
                  * them when the pre-admission flush fails. Release them exactly once. */
-                StorageBinaryDataImporter.release(ownedBuffers);
+                StorageBinaryDataImporter.release(ownedBuffers, this.bufferPool);
                 throw failure;
             }
         }
@@ -378,7 +391,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
             /* Admission either rejected before enqueueing or rolled its own
              * enqueue back on submission failure, so the buffers never
              * transferred to the queue on a thrown path. Release exactly once. */
-            StorageBinaryDataImporter.release(ownedBuffers);
+            StorageBinaryDataImporter.release(ownedBuffers, this.bufferPool);
             throw failure;
         }
 
@@ -642,7 +655,11 @@ private StorageBinaryDataMerger(final Configuration configuration) {
          * Lifecycle needs no monitor: disposed is volatile, worker scheduling is
          * only touched under the queue lock, and the executor is thread-safe. */
         if (this.disposed && this.executor.isTerminated()) {
-            this.queue.releaseAll();
+            try {
+                this.queue.releaseAll();
+            } finally {
+                this.bufferPool.close();
+            }
             return;
         }
         this.disposed = true;
@@ -668,7 +685,11 @@ private StorageBinaryDataMerger(final Configuration configuration) {
              * later batches must keep their watchdog protection. */
             if (this.executor.isTerminated()) {
                 this.watchdog.shutdownNow();
-                this.queue.releaseAll();
+                try {
+                    this.queue.releaseAll();
+                } finally {
+                    this.bufferPool.close();
+                }
             }
         }
     }

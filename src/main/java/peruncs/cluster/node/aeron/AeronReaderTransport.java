@@ -18,6 +18,7 @@ import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 import peruncs.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -388,6 +389,16 @@ final class AeronReaderTransport {
     /// Adapts complete Aeron data to the neutral binary receiver.
     private record ReceiverAdapter(AeronTransportShared shared, StorageBinaryDataReceiver receiver)
             implements StorageBinaryDataReceiver {
+        @Override
+        public ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
+            return this.receiver().allocateNativeBuffer(minimumCapacity);
+        }
+
+        @Override
+        public void releaseNativeBuffer(final ByteBuffer buffer) {
+            this.receiver().releaseNativeBuffer(buffer);
+        }
+
         public void receiveTypeDictionary(final String value) {
             this.shared().runInDeliveryCallback(() -> this.receiver().receiveTypeDictionary(value));
         }

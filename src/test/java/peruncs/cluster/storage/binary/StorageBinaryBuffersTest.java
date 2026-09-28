@@ -58,6 +58,7 @@ class StorageBinaryBuffersTest {
             source.put(new byte[]{1, 2, 3});
             final var binary = ChunksWrapper.New(source);
             final ByteBuffer[] owned = StorageBinaryBuffers.ownedArray(binary);
+            assertSame(binary.buffers(), owned);
             assertEquals(1, owned.length);
             assertSame(source, owned[0]);
             assertEquals(0, owned[0].position());

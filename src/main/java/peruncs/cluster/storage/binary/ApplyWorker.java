@@ -27,6 +27,7 @@ final class ApplyWorker {
             System.getLogger(StorageBinaryDataMerger.class.getName());
     private final MergerLifecycle owner;
     private final ApplyQueue queue;
+    private final NativeBufferPool bufferPool;
     private final LockedExecutor materialization;
     private final ScheduledExecutorService watchdog;
     private final BinaryPersistenceFoundation<?> foundation;
@@ -67,6 +68,7 @@ final class ApplyWorker {
     ApplyWorker(
             final MergerLifecycle owner,
             final ApplyQueue queue,
+            final NativeBufferPool bufferPool,
             final LockedExecutor materialization,
             final ScheduledExecutorService watchdog,
             final BinaryPersistenceFoundation<?> foundation,
@@ -77,6 +79,7 @@ final class ApplyWorker {
             final long materializationBudgetMs) {
         this.owner = owner;
         this.queue = queue;
+        this.bufferPool = bufferPool;
         this.materialization = materialization;
         this.watchdog = watchdog;
         this.foundation = foundation;
@@ -264,7 +267,7 @@ final class ApplyWorker {
             } finally {
                 materializationWatchdog.cancel(false);
                 try {
-                    StorageBinaryDataImporter.release(this.drain.buffers, pending);
+                    StorageBinaryDataImporter.release(this.drain.buffers, pending, this.bufferPool);
                 } finally {
                     this.drain.clear();
                     this.queue.completeInFlight(batchBytes);

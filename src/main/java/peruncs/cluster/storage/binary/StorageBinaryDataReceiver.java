@@ -1,7 +1,10 @@
 package peruncs.cluster.storage.binary;
 
 
+import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
+
+import java.nio.ByteBuffer;
 
 /// Receives complete Store binaries and type dictionaries from a provider.
 ///
@@ -12,6 +15,21 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 /// `true` only after the receiver has taken responsibility for releasing
 /// every direct buffer in the supplied binary.
 public interface StorageBinaryDataReceiver {
+    /// Allocates native storage for a transaction being assembled for this receiver.
+    ///
+    /// @param minimumCapacity required capacity in bytes
+    /// @return writable native buffer with at least the requested capacity
+    default ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
+        return XMemory.allocateDirectNative(minimumCapacity);
+    }
+
+    /// Releases native storage acquired for a transaction for this receiver.
+    ///
+    /// @param buffer native buffer to release
+    default void releaseNativeBuffer(final ByteBuffer buffer) {
+        XMemory.deallocateDirectByteBuffer(buffer);
+    }
+
         /// Returns a terminal receiver failure, or `null` while healthy.
     ///
     /// @return terminal failure, or `null`

@@ -370,7 +370,7 @@ final class TransactionAssembler {
                             .formatted(lastResolvedSequence));
                 }
                 if (this.transaction == null) {
-                    this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
+                    this.transaction = new Transaction(this.receiver, envelope.sequence(), envelope.fencingToken(),
                             this.configuration.maxTransactionBytes(), true,
                             this.dataCrc);
                 }
@@ -443,7 +443,7 @@ final class TransactionAssembler {
                     "non-data envelope on replication data stream: %s".formatted(envelope.kind()));
         }
         if (this.transaction == null) {
-            this.transaction = new Transaction(envelope.sequence(), envelope.fencingToken(),
+            this.transaction = new Transaction(this.receiver, envelope.sequence(), envelope.fencingToken(),
                     this.configuration.maxTransactionBytes(), false,
                     this.dataCrc);
         }
@@ -705,8 +705,9 @@ final class TransactionAssembler {
         }
     }
 
-        /// Holds fragments and commit metadata for one transaction.
+    /// Holds fragments and commit metadata for one transaction.
     static final class Transaction {
+        private final StorageBinaryDataReceiver receiver;
         private final long sequence;
         private final long fencingToken;
         private final int maxBytes;
@@ -730,8 +731,10 @@ final class TransactionAssembler {
         private int dictionaryLength;
         private int dataLength;
 
-        Transaction(final long sequence, final long fencingToken, final int maxBytes, final boolean duplicate,
+        Transaction(final StorageBinaryDataReceiver receiver, final long sequence, final long fencingToken,
+                    final int maxBytes, final boolean duplicate,
                     final CRC32C dataCrc) {
+            this.receiver = receiver;
             this.sequence = sequence;
             this.fencingToken = fencingToken;
             this.maxBytes = maxBytes;
@@ -830,7 +833,9 @@ final class TransactionAssembler {
             final int oldCapacity = current == null ? 0 : current.capacity();
             final long doubled = oldCapacity == 0 ? Math.min(required, 64 * 1024L) : (long) oldCapacity * 2L;
             final int capacity = (int) Math.min(this.maxBytes, Math.max(required, doubled));
-            final ByteBuffer replacementStorage = XMemory.allocateDirectNative(capacity);
+            final ByteBuffer replacementStorage = dictionary
+                    ? XMemory.allocateDirectNative(capacity)
+                    : this.receiver.allocateNativeBuffer(capacity);
             try {
                 final UnsafeBuffer replacement = new UnsafeBuffer(replacementStorage);
                 final int copied = dictionary ? this.dictionaryOffset : this.dataOffset;
@@ -846,10 +851,14 @@ final class TransactionAssembler {
                     this.dataCrcView = replacementStorage.duplicate();
                 }
             } catch (final RuntimeException | Error failure) {
-                XMemory.deallocateDirectByteBuffer(replacementStorage);
+                if (dictionary) XMemory.deallocateDirectByteBuffer(replacementStorage);
+                else this.receiver.releaseNativeBuffer(replacementStorage);
                 throw failure;
             }
-            if (current != null) XMemory.deallocateDirectByteBuffer(current);
+            if (current != null) {
+                if (dictionary) XMemory.deallocateDirectByteBuffer(current);
+                else this.receiver.releaseNativeBuffer(current);
+            }
         }
 
         /// Returns the incremental checksum of the assembled Store binary.
@@ -873,7 +882,7 @@ final class TransactionAssembler {
                 this.dictionaryStorage = null;
             }
             if (!dataTransferred && this.dataStorage != null) {
-                XMemory.deallocateDirectByteBuffer(this.dataStorage);
+                this.receiver.releaseNativeBuffer(this.dataStorage);
                 this.dataStorage = null;
             }
             this.dataCrcView = null;

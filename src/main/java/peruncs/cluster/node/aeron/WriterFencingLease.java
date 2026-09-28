@@ -24,11 +24,11 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 import static java.lang.System.Logger.Level.WARNING;
@@ -242,7 +242,7 @@ final class WriterFencingLease implements AutoCloseable {
             } else if (now - existing.heartbeatMillis() > maxStaleness.toMillis()) {
                 token = nextToken(existing.token(), clusterId, storeGeneration);
                 writeAtomically(path, new LeaseFile(token, nodeId, PROCESS_HOLDER_ID, now));
-            } else if (existing.nodeId().equals(nodeId)) {
+            } else if (existing.matchesNode(nodeId)) {
                 /* The same writer restarting — cleanly or after a crash, in
                  * this JVM or a new process — mints the next token without
                  * waiting out its own heartbeat. Node identity is the fencing
@@ -355,6 +355,7 @@ final class WriterFencingLease implements AutoCloseable {
     private final long token;
     private final UUID nodeId;
     private final UUID holderId;
+    private final LeaseReadScratch leaseReadScratch = new LeaseReadScratch();
     private final long maxStalenessNanos;
     private final long checkIntervalNanos;
     /* Bounded wait for every interprocess lease lock (acquisition, renewal,
@@ -467,8 +468,11 @@ final class WriterFencingLease implements AutoCloseable {
                 return this.lastCheckResult;
             }
         }
-        final LeaseFile current = readQuietly(this.path);
-        final boolean result = current != null && this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
+        final boolean result;
+        synchronized (this.leaseReadScratch) {
+            final LeaseFile current = readQuietly(this.path, this.leaseReadScratch);
+            result = current != null && this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
+        }
         synchronized (this.stateLock) {
             if (this.closed || this.releaseUnproven || this.heartbeatFailure.get() != null) return false;
             this.hasCheck = true;
@@ -479,8 +483,8 @@ final class WriterFencingLease implements AutoCloseable {
     }
 
     private boolean matchesHolder(final LeaseFile current) {
-        return current.token() == this.token && current.nodeId().equals(this.nodeId) &&
-               current.holderId().equals(this.holderId);
+        return current.token() == this.token && current.matchesNode(this.nodeId) &&
+               current.matchesHolder(this.holderId);
     }
 
         /// Reports whether the heartbeat this holder last wrote is still within
@@ -509,10 +513,12 @@ final class WriterFencingLease implements AutoCloseable {
             }
             try (final FileChannel lockChannel = openLockChannel(lockPath);
                  final FileLock ignored = lockFile(lockChannel, this.lockTimeout)) {
-                final LeaseFile current = readForAcquire(this.path);
-                if (!this.matchesHolder(current)) {
-                    throw new WriterFencedException(
-                            "writer lease for token %s was stolen or removed; this writer is fenced".formatted(this.token));
+                synchronized (this.leaseReadScratch) {
+                    final LeaseFile current = readForAcquire(this.path, this.leaseReadScratch);
+                    if (!this.matchesHolder(current)) {
+                        throw new WriterFencedException(
+                                "writer lease for token %s was stolen or removed; this writer is fenced".formatted(this.token));
+                    }
                 }
                 /* Renewal window: the interprocess lock is held and the holder
                  * was verified, but the new heartbeat is not durable yet. */
@@ -615,9 +621,12 @@ final class WriterFencingLease implements AutoCloseable {
             try (final FileChannel lockChannel = openLockChannel(lockPath);
                  final FileLock ignored = lockFile(lockChannel,
                          Duration.ofNanos(Math.min(this.lockTimeout.toNanos(), this.terminalOfferBudgetNanos())))) {
-                final LeaseFile current = readForAcquire(this.path);
                 final long nowNanos = System.nanoTime();
-                final boolean fresh = this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
+                final boolean fresh;
+                synchronized (this.leaseReadScratch) {
+                    final LeaseFile current = readForAcquire(this.path, this.leaseReadScratch);
+                    fresh = this.matchesHolder(current) && this.ownLeaseFresh(nowNanos);
+                }
                 if (!fresh) {
                     this.publishFailedCheck(nowNanos);
                     throw new WriterFencedException(
@@ -733,12 +742,66 @@ final class WriterFencingLease implements AutoCloseable {
         }
     }
 
-    private record LeaseFile(long token, UUID nodeId, UUID holderId, long heartbeatMillis) {
+    /// Stores the lease file fields as primitives so hot ownership checks allocate no UUIDs.
+    private static final class LeaseFile {
+        private long token;
+        private long nodeMostSignificantBits;
+        private long nodeLeastSignificantBits;
+        private long holderMostSignificantBits;
+        private long holderLeastSignificantBits;
+        private long heartbeatMillis;
+
+        private LeaseFile() {
+        }
+
+        private LeaseFile(final long token, final UUID nodeId, final UUID holderId, final long heartbeatMillis) {
+            this.set(token, nodeId.getMostSignificantBits(), nodeId.getLeastSignificantBits(),
+                    holderId.getMostSignificantBits(), holderId.getLeastSignificantBits(), heartbeatMillis);
+        }
+
+        private LeaseFile set(final long token, final long nodeMostSignificantBits, final long nodeLeastSignificantBits,
+                              final long holderMostSignificantBits, final long holderLeastSignificantBits,
+                              final long heartbeatMillis) {
+            this.token = token;
+            this.nodeMostSignificantBits = nodeMostSignificantBits;
+            this.nodeLeastSignificantBits = nodeLeastSignificantBits;
+            this.holderMostSignificantBits = holderMostSignificantBits;
+            this.holderLeastSignificantBits = holderLeastSignificantBits;
+            this.heartbeatMillis = heartbeatMillis;
+            return this;
+        }
+
+        private long token() { return this.token; }
+        private long heartbeatMillis() { return this.heartbeatMillis; }
+        private boolean matchesNode(final UUID id) {
+            return this.nodeMostSignificantBits == id.getMostSignificantBits() &&
+                   this.nodeLeastSignificantBits == id.getLeastSignificantBits();
+        }
+        private boolean matchesHolder(final UUID id) {
+            return this.holderMostSignificantBits == id.getMostSignificantBits() &&
+                   this.holderLeastSignificantBits == id.getLeastSignificantBits();
+        }
+        private UUID nodeId() { return new UUID(this.nodeMostSignificantBits, this.nodeLeastSignificantBits); }
+    }
+
+    /// Reuses the bytes, parser view, and mutable lease for serialized reads on one lease.
+    private static final class LeaseReadScratch {
+        private final byte[] bytes = new byte[ENCODED_BYTES];
+        private final ByteBuffer buffer = ByteBuffer.wrap(this.bytes).order(ByteOrder.BIG_ENDIAN);
+        private final LeaseFile lease = new LeaseFile();
     }
 
     private static LeaseFile readQuietly(final Path path) {
         try {
             return readForAcquire(path);
+        } catch (final IOException | RuntimeException failure) {
+            return null;
+        }
+    }
+
+    private static LeaseFile readQuietly(final Path path, final LeaseReadScratch scratch) {
+        try {
+            return readForAcquire(path, scratch);
         } catch (final IOException | RuntimeException failure) {
             return null;
         }
@@ -772,22 +835,26 @@ final class WriterFencingLease implements AutoCloseable {
     /// @throws IllegalStateException when the file is present but corrupt; acquisition fails closed
     ///                              instead of resetting the token series
     private static LeaseFile readForAcquire(final Path path) throws NoSuchFileException, IOException {
+        return readForAcquire(path, new LeaseReadScratch());
+    }
+
+    private static LeaseFile readForAcquire(final Path path, final LeaseReadScratch scratch)
+            throws NoSuchFileException, IOException {
         if (Files.isSymbolicLink(path)) {
             throw new IllegalStateException(
                     "writer lease path %s must not be a symbolic link".formatted(path));
         }
-        final byte[] bytes;
+        final ByteBuffer buffer = scratch.buffer;
         try (final FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
             if (channel.size() != ENCODED_BYTES) {
                 throw new IllegalStateException(
                         "writer lease file at %s has an unexpected length; refusing to reset the fencing token".formatted(path));
             }
-            bytes = new byte[ENCODED_BYTES];
-            final ByteBuffer view = ByteBuffer.wrap(bytes);
-            while (view.hasRemaining()) {
-                if (channel.read(view) < 0) break;
+            buffer.clear();
+            while (buffer.hasRemaining()) {
+                if (channel.read(buffer) < 0) break;
             }
-            if (view.hasRemaining()) {
+            if (buffer.hasRemaining()) {
                 throw new IllegalStateException(
                         "writer lease file at %s is truncated; refusing to reset the fencing token".formatted(path));
             }
@@ -796,21 +863,24 @@ final class WriterFencingLease implements AutoCloseable {
         } catch (final IOException failure) {
             throw new IllegalStateException("cannot read writer lease file at %s".formatted(path), failure);
         }
-        final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
+        buffer.flip();
         if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION) {
             throw new IllegalStateException(
                     "writer lease file at %s has an unknown format; refusing to reset the fencing token".formatted(path));
         }
         final long token = buffer.getLong();
-        final UUID nodeId = new UUID(buffer.getLong(), buffer.getLong());
-        final UUID holderId = new UUID(buffer.getLong(), buffer.getLong());
+        final long nodeMostSignificantBits = buffer.getLong();
+        final long nodeLeastSignificantBits = buffer.getLong();
+        final long holderMostSignificantBits = buffer.getLong();
+        final long holderLeastSignificantBits = buffer.getLong();
         final long heartbeat = buffer.getLong();
         if (token <= 0 || heartbeat <= 0 ||
-            buffer.getInt() != Crc32C.compute(bytes, 0, ENCODED_BYTES - Integer.BYTES)) {
+            buffer.getInt() != Crc32C.compute(scratch.bytes, 0, ENCODED_BYTES - Integer.BYTES)) {
             throw new IllegalStateException(
                     "writer lease file at %s failed validation; refusing to reset the fencing token".formatted(path));
         }
-        return new LeaseFile(token, nodeId, holderId, heartbeat);
+        return scratch.lease.set(token, nodeMostSignificantBits, nodeLeastSignificantBits,
+                holderMostSignificantBits, holderLeastSignificantBits, heartbeat);
     }
 
     private static final FileAttribute<Set<PosixFilePermission>> LOCK_FILE_PERMISSIONS =
@@ -829,10 +899,10 @@ final class WriterFencingLease implements AutoCloseable {
     private static void writeAtomically(final Path path, final LeaseFile lease) {
         final byte[] bytes = new byte[ENCODED_BYTES];
         final ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(MAGIC).putShort(VERSION).putLong(lease.token())
-                .putLong(lease.nodeId().getMostSignificantBits()).putLong(lease.nodeId().getLeastSignificantBits())
-                .putLong(lease.holderId().getMostSignificantBits()).putLong(lease.holderId().getLeastSignificantBits())
-                .putLong(lease.heartbeatMillis());
+        buffer.putInt(MAGIC).putShort(VERSION).putLong(lease.token)
+                .putLong(lease.nodeMostSignificantBits).putLong(lease.nodeLeastSignificantBits)
+                .putLong(lease.holderMostSignificantBits).putLong(lease.holderLeastSignificantBits)
+                .putLong(lease.heartbeatMillis);
         buffer.putInt(Crc32C.compute(bytes, 0, ENCODED_BYTES - Integer.BYTES));
         try {
             AtomicFileWriter.writeBytes(path, bytes);

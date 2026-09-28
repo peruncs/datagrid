@@ -43,6 +43,7 @@ final class ApplyQueue {
     private final ArrayDeque<ByteBuffer> cachedData = new ArrayDeque<>();
     private final ArrayDeque<Integer> cachedTransactionLengths = new ArrayDeque<>();
     private final MergerLifecycle owner;
+    private final NativeBufferPool bufferPool;
     private final long cacheBytesLimit;
     private final long maxCachedBytes;
     private final long applyTimeoutMs;
@@ -66,10 +67,12 @@ final class ApplyQueue {
 
     ApplyQueue(
             final MergerLifecycle owner,
+            final NativeBufferPool bufferPool,
             final long cacheBytesLimit,
             final long maxCachedBytes,
             final long applyTimeoutMs) {
         this.owner = owner;
+        this.bufferPool = bufferPool;
         this.cacheBytesLimit = cacheBytesLimit;
         this.maxCachedBytes = maxCachedBytes;
         this.applyTimeoutMs = applyTimeoutMs;
@@ -308,7 +311,7 @@ final class ApplyQueue {
                 drain.batchBytes = 0L;
                 drain.bufferCount = 0;
                 drain.transactionCount = 0;
-                StorageBinaryDataImporter.release(prefix);
+                StorageBinaryDataImporter.release(prefix, this.bufferPool);
                 throw failure;
             }
             this.inFlightBytes = Math.addExact(this.inFlightBytes, drain.batchBytes);
@@ -413,7 +416,7 @@ final class ApplyQueue {
             /* Failure- and shutdown-path cleanup only: every queued buffer
              * is distinctly owned, so the unconditional release frees
              * exactly what the queue holds. */
-            StorageBinaryDataImporter.release(pending.toArray(ByteBuffer[]::new));
+            StorageBinaryDataImporter.release(pending.toArray(ByteBuffer[]::new), this.bufferPool);
         } finally {
             this.queueLock.unlock();
         }

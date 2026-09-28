@@ -147,7 +147,7 @@ final class StorageBinaryDataMaterializer {
         private XGettingCollection<? extends Binary> takeImported(final PersistenceIdSet[] ids) {
             if (!this.supplied) {
                 this.supplied = true;
-                return X.Enum(ChunksWrapper.New(this.buffers));
+                return X.Constant(ChunksWrapper.New(this.buffers));
             }
             return ids == null ? this.fallback.source().read() : this.fallback.source().readByObjectIds(ids);
         }

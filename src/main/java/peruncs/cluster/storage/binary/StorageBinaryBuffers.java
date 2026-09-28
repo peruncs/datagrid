@@ -1,6 +1,5 @@
 package peruncs.cluster.storage.binary;
 
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import peruncs.cluster.errors.CorruptReplicationDataException;
@@ -67,8 +66,13 @@ final class StorageBinaryBuffers {
     /// @return original direct buffers, positioned at zero
     static ByteBuffer[] ownedArray(final Binary data) {
         Objects.requireNonNull(data, "data");
-        /* One pass with one reused scratch list: each buffer is validated and
-         * normalized inline, so no boxed length list and no second loop.
+        if (data instanceof ChunksWrapper chunks) {
+            final ByteBuffer[] owned = chunks.buffers();
+            for (final ByteBuffer buffer : owned) normalizeOwnedBuffer(data, buffer);
+            return owned;
+        }
+        /* One pass through the channel buffers validates and normalizes each
+         * buffer inline, so no boxed length list and no second loop.
          * Normalizing before a later buffer fails is unobservable: the caller
          * discards the whole binary on failure and releases its native storage
          * through the ownership cleanup block instead. */
@@ -78,15 +82,7 @@ final class StorageBinaryBuffers {
             {
                 if (channel == null) throw new CorruptReplicationDataException("binary contains a null channel");
                 for (final ByteBuffer buffer : channel.buffers()) {
-                    if (buffer == null || !buffer.isDirect()) {
-                        throw new CorruptReplicationDataException("owned binary contains a non-direct buffer");
-                    }
-                    final int logicalLength = logicalLength(data, buffer);
-                    if (logicalLength < 0 || logicalLength > buffer.capacity()) {
-                        throw new CorruptReplicationDataException("owned binary contains an invalid buffer length");
-                    }
-                    buffer.clear();
-                    buffer.limit(logicalLength);
+                    normalizeOwnedBuffer(data, buffer);
                     scratch.add(buffer);
                 }
             });
@@ -98,17 +94,30 @@ final class StorageBinaryBuffers {
         }
     }
 
-        /// Best-effort release of every direct buffer still reachable from a binary
-        /// whose owned extraction failed before producing a normalized array.
+    private static void normalizeOwnedBuffer(final Binary data, final ByteBuffer buffer) {
+        if (buffer == null || !buffer.isDirect()) {
+            throw new CorruptReplicationDataException("owned binary contains a non-direct buffer");
+        }
+        final int logicalLength = logicalLength(data, buffer);
+        if (logicalLength < 0 || logicalLength > buffer.capacity()) {
+            throw new CorruptReplicationDataException("owned binary contains an invalid buffer length");
+        }
+        buffer.clear();
+        buffer.limit(logicalLength);
+    }
+
+    /// Best-effort return of every direct buffer still reachable from a binary
+    /// whose owned extraction failed before producing a normalized array.
     ///
     /// Extraction validates inline, so a late malformed buffer leaves earlier
-    /// direct buffers with no owner but the caller. This fallback frees exactly
-    /// those buffers — direct, non-empty views only — and never throws, so it
-    /// cannot mask the original validation failure.
+    /// direct buffers with no owner but the caller. This fallback returns those
+    /// buffers to the pool and never throws, so it cannot mask the original failure.
     ///
     /// @param data binary whose extraction failed, or `null`
-    static void releaseDirect(final Binary data) {
+    /// @param pool bounded pool that owns the direct buffers
+    static void releaseDirect(final Binary data, final NativeBufferPool pool) {
         if (data == null) return;
+        Objects.requireNonNull(pool, "pool");
         try {
             data.iterateChannelChunks(channel ->
             {
@@ -123,7 +132,7 @@ final class StorageBinaryBuffers {
                 for (final ByteBuffer buffer : buffers) {
                     if (buffer != null && buffer.isDirect() && buffer.capacity() > 0) {
                         try {
-                            XMemory.deallocateDirectByteBuffer(buffer);
+                            pool.release(buffer);
                         } catch (final RuntimeException ignored) {
                             /* One unfreeable buffer must not stop the rest. */
                         }
