@@ -15,6 +15,7 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import peruncs.cluster.api.ClusterIndexes;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.node.replication.*;
@@ -50,9 +51,9 @@ class AeronStoreIntegrationIT {
     }
 
     static void configureIndexes(final GigaMap<IndexedArticle> articles) {
-        ClusterStoreIndexes.registerLucene(articles, new IndexedArticlePopulator());
+        ClusterIndexes.registerLucene(articles, new IndexedArticlePopulator());
         final VectorIndices<IndexedArticle> vectors = articles.index().register(VectorIndices.Category());
-        ClusterStoreIndexes.addVector(vectors, "articles", VectorIndexConfiguration.builder()
+        ClusterIndexes.addVector(vectors, "articles", VectorIndexConfiguration.builder()
                 .dimension(3).similarityFunction(VectorSimilarityFunction.COSINE).build(), new IndexedArticleVectorizer());
     }
 
@@ -254,7 +255,8 @@ class AeronStoreIntegrationIT {
             throws Exception {
         final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
-        final Process child = new ProcessBuilder(java, "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+        final Process child = new ProcessBuilder(java, "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", classpath,
                 "-Ddg.aeron.store.root=%s".formatted(root),
                 "-Ddg.aeron.store.cluster=%s".formatted(clusterId),
@@ -372,7 +374,6 @@ class AeronStoreIntegrationIT {
             public String replicationProperty(final String name) {
                 return switch (name) {
                     case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID" -> clusterId.toString();
-                    case "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK" -> "true";
                     case "ECLIPSE_DATAGRID_AERON_NODE_ID" -> nodeId.toString();
                     case "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> generation.toString();
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
@@ -407,6 +408,22 @@ class AeronStoreIntegrationIT {
     static int freePort() throws Exception {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();
+        }
+    }
+
+    static int[] freePorts(final int count) throws Exception {
+        final ServerSocket[] sockets = new ServerSocket[count];
+        try {
+            final int[] ports = new int[count];
+            for (int i = 0; i < count; i++) {
+                sockets[i] = new ServerSocket(0);
+                ports[i] = sockets[i].getLocalPort();
+            }
+            return ports;
+        } finally {
+            for (final ServerSocket socket : sockets) {
+                if (socket != null) socket.close();
+            }
         }
     }
 

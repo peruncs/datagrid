@@ -1,6 +1,7 @@
 package peruncs.cluster.storage.index;
 
 import org.eclipse.serializer.concurrency.LockedExecutor;
+import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
 import org.eclipse.store.gigamap.jvector.VectorIndices;
@@ -14,10 +15,11 @@ import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
 import java.util.Objects;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /// Keeps clustered text and vector search inside the Store object graph and
-/// registers the index types that are safe to replicate with Data Grid.
+/// registers the index types safe to carry in the replicated Store graph.
 ///
 /// A replicated Store transaction is the only source of truth. An index
 /// directory outside that transaction can advance independently, so it cannot
@@ -43,9 +45,9 @@ import java.util.function.Supplier;
 /// unrelated writer. A GigaMap is validated wherever the scan meets it;
 /// registration exists to build the supported index kinds, not to track maps.
 ///
-/// Reader and writer both validate the same way. [#validateStorageRoots] is
-/// the single enforcement name: the reader materialization hook, node
-/// startup, and the writer commit gate all call it.
+/// Reader materialization and node startup always call [#validateStorageRoots].
+/// The writer first scans changed entity type ids and only runs the bounded
+/// root validation when one could reach index metadata.
 ///
 /// See [ClusterIndexValidation] for what the scan covers and why it fails
 /// closed.
@@ -282,27 +284,50 @@ public final class ClusterStoreIndexes {
     /// @throws IllegalArgumentException if any root violates the index policy
     /// @throws IllegalStateException    if a root cannot be inspected completely
     public static void validateStorageRoots(final StorageConnection storage) {
-        withRegistrationRead(() -> ClusterIndexValidation.validateStorageRoots(
-                storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null));
+        validateStorageRoots(storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS);
     }
 
-    /// Creates a serialized writer validation callback with reusable scan state.
+    /// Validates every Store root using an explicit scan bound.
     ///
-    /// The callback is intended for the writer's exclusive persistence path;
-    /// it reads the current connection for every write and keeps only scratch
-    /// collections between scans.
+    /// @param storage    storage connection owning the materialized graph
+    /// @param maxObjects maximum index-relevant objects and collection entries
+    public static void validateStorageRoots(final StorageConnection storage, final int maxObjects) {
+        if (maxObjects <= 0) throw new IllegalArgumentException("maxObjects must be positive");
+        withRegistrationRead(() -> ClusterIndexValidation.validateStorageRoots(
+                storage, maxObjects, null));
+    }
+
+    /// Creates a serialized writer validation callback with an explicit object bound.
     ///
-    /// @param storage current writer connection supplier
+    /// @param storage    current writer connection supplier
+    /// @param maxObjects maximum index-relevant objects and collection entries
     /// @return validation callback
-    public static Runnable writerValidator(final Supplier<StorageConnection> storage) {
+    public static Runnable writerValidator(final Supplier<StorageConnection> storage, final int maxObjects) {
         Objects.requireNonNull(storage, "storage");
+        if (maxObjects <= 0) throw new IllegalArgumentException("maxObjects must be positive");
         final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
         return () -> {
             final StorageConnection connection = storage.get();
             if (connection != null) {
                 withRegistrationRead(() -> ClusterIndexValidation.validateStorageRoots(
-                        connection, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null, null, scratch));
+                        connection, maxObjects, null, null, scratch));
             }
+        };
+    }
+
+    /// Returns whether outgoing entity types can reach index metadata.
+    /// Unknown type ids return `true` so validation fails closed.
+    ///
+    /// @param storage current writer connection supplier
+    /// @return entity-type pre-filter
+    public static Predicate<Binary> writerCommitTouchesIndexes(final Supplier<StorageConnection> storage) {
+        Objects.requireNonNull(storage, "storage");
+        final ClusterIndexValidation.CommitPrefilterScratch scratch = new ClusterIndexValidation.CommitPrefilterScratch();
+        return binary -> {
+            final StorageConnection connection = storage.get();
+            if (connection == null) return true;
+            return ClusterIndexValidation.commitTouchesIndexes(
+                    binary, connection.persistenceManager().typeDictionary(), scratch);
         };
     }
 

@@ -10,6 +10,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryProvider;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.CorruptReplicationDataException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.ReplicationRetry;
@@ -171,8 +172,8 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     static final long DISPOSE_ORDERLY_TIMEOUT_MS = 30_000L;
     /// Default interrupt-based worker termination window during disposal, in milliseconds.
     static final long DISPOSE_INTERRUPT_TIMEOUT_MS = 5_000L;
-    /// Default bound on index-relevant objects visited by one root scan.
-    static final int MAX_VALIDATED_INDEX_OBJECTS = 65_536;
+    /// Default bound on index-relevant objects and collection entries visited by one root scan.
+    static final int MAX_VALIDATED_INDEX_OBJECTS = NodeSettingsSource.DEFAULT_INDEX_VALIDATION_MAX_OBJECTS;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
             .name("eclipse-datagrid-store-materializer", 0L)
             .factory());

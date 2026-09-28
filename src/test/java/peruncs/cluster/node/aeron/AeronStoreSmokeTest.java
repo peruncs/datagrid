@@ -42,9 +42,10 @@ class AeronStoreSmokeTest {
         /* Ports stay stable across the restart: the Archive recording pins
          * its live channel, so the restarted writer must publish on the same
          * channels. */
-        final int controlPort = AeronStoreIntegrationIT.freePort();
-        final int livePort = AeronStoreIntegrationIT.freePort();
-        final int watermarkPort = AeronStoreIntegrationIT.freePort();
+        final int[] ports = AeronStoreIntegrationIT.freePorts(3);
+        final int controlPort = ports[0];
+        final int livePort = ports[1];
+        final int watermarkPort = ports[2];
 
         final String seedOutput = runPhase("seed-store", root, clusterId, generation, writerNodeId, readerNodeId,
                 controlPort, livePort, watermarkPort);
@@ -77,7 +78,8 @@ class AeronStoreSmokeTest {
          * enough output, the child blocks on write, and a healthy run turns
          * into a timeout. */
         final Path output = root.resolve(phase + ".log");
-        final Process child = new ProcessBuilder(java, "--enable-preview", "--add-exports",
+        final Process child = new ProcessBuilder(java, "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "--add-exports",
                 "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", classpath, AeronStoreSmokeChildMain.class.getName(),
                 phase, root.toString(), clusterId, generation, writerNodeId, readerNodeId,

@@ -88,8 +88,8 @@ class ModuleDescriptorConsistencyTest {
     }
 
         /// The exported facade exposes the Store and Serializer contracts in
-    /// its signatures, so exactly those two upstream modules flow transitively
-    /// to consumers. Every other implementation dependency stays local.
+    /// its signatures, plus the types exposed by the index facade, so only
+    /// those public API dependencies flow transitively to consumers.
     @Test
     void exportedFacadeHasNoTransitiveImplementationDependencies() {
         final Set<String> transitive = descriptor().requires().stream()
@@ -100,8 +100,13 @@ class ModuleDescriptorConsistencyTest {
         assertEquals(Set.of(
                         "org.eclipse.store.storage",
                         "org.eclipse.serializer.base",
-                        "org.eclipse.store.storage.embedded"), transitive,
-                "only the exported Store surface may be transitive: " + transitive);
+                        "org.eclipse.store.storage.embedded",
+                        "org.eclipse.store.gigamap",
+                        "org.eclipse.store.gigamap.lucene",
+                        "org.apache.lucene.core",
+                        "org.eclipes.store.gigamap.jvector",
+                        "jvector"), transitive,
+                "only public API dependencies may be transitive: " + transitive);
     }
 
     /// Exactly one application facade is exported; transport, Store adapter,

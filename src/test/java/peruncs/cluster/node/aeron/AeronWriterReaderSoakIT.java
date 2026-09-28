@@ -15,6 +15,7 @@ import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.replication.DurableCursorFile;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
 import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
 import peruncs.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
@@ -355,7 +356,7 @@ class AeronWriterReaderSoakIT {
                 /* The watchdog is deliberately not joined: it watches the join
                  * itself, so joining it would deadlock the test it guards. */
                 launch("soak-watchdog", () -> watchdogLoop(startNanos, workers));
-                audit(startNanos, "soak-start threads=%d".formatted(workers.size()));
+                audit(startNanos, "soak-start pid=%d threads=%d".formatted(ProcessHandle.current().pid(), workers.size()));
                 for (final Thread worker : workers) worker.join();
                 assertNoWorkerFailures();
                 audit(startNanos, "soak-end tx=%d queries=%d verified=%d torn=%d restarts=%d abrupt=%d chaosOps=%d slow=%d fsyncStalls=%d corrupt=%d liveFlips=%d"
@@ -1507,11 +1508,9 @@ class AeronWriterReaderSoakIT {
     /// means genuinely missing readers, not checkpoint-cadence rejections.
     /// Retention IS coverage-gated like every enabled op: a purge that never
     /// lands and never had a park-caused skip fails the run. When the quorum
-    /// assembles, deleteThrough asserts fail-closed: the deferral probe uses a
-    /// non-head boundary strictly ahead of a lagging reader, and refusal —
-    /// whether a status or the provider's IllegalStateException vocabulary —
-    /// is the pass, EXCEPT a refusal complaining about the durable writer
-    /// boundary, which is the fixed soak bug surfacing again. The
+    /// assembles, deleteThrough caps a request ahead of a lagging reader at the
+    /// slowest reader's complete segment boundary. A deletion up to that cap is
+    /// safe; a boundary beyond it is the failure. The
     /// parked-behind-the-deleted-boundary restart case (a reader resumed from
     /// a cursor below deleteThrough must be answered RESEED_REQUIRED, never
     /// torn data) is covered deterministically by AeronStoreIntegrationIT's
@@ -1574,31 +1573,19 @@ class AeronWriterReaderSoakIT {
                 }
             }
             boolean deferredChecked = false;
-            /* Deferral probe: a boundary strictly ahead of the slowest reader
-             * must never report DELETED — the lagging reader is still
-             * replaying that history. Refusal arrives either as a non-DELETED
-             * status or as the provider's IllegalStateException ("reader
-             * quorum has not reached the requested sequence"); both are the
-             * fail-closed pass, a DELETED result is the failure. */
+            /* A request from the fastest reader must be capped at the slowest
+             * reader's durable position. A DELETED result is safe when it stops
+             * at or before that reader's position. */
             if (maxLiveCursor != null && maxLiveSequence > minSequence) {
                 deferredChecked = true;
-                try {
-                    final ReplicationLogRetention.MaintenanceResult deferred =
-                            retention.deleteThrough(maxLiveCursor);
-                    assertNotEquals(ReplicationLogRetention.MaintenanceResult.Status.DELETED,
-                            deferred.status(),
-                            "retention deleted history a lagging live reader still needed: %s"
-                                    .formatted(deferred));
-                } catch (final IllegalStateException refused) {
-                    final String message = String.valueOf(refused.getMessage());
-                    if (message.contains("ahead of the durable writer boundary")) {
-                        throw new AssertionError(
-                                "legitimate watermark refused against the durable writer boundary: %s"
-                                        .formatted(message), refused);
-                    }
-                    audit(startNanos, "retention-defer-refused (%s)".formatted(message));
-                }
-                audit(startNanos, "retention-defer-ok boundary=%d".formatted(maxLiveSequence));
+                final ReplicationLogRetention.MaintenanceResult deferred = retention.deleteThrough(maxLiveCursor);
+                final long slowestPosition = AeronReplicationCursor.decode(
+                        minCursor.providerPositionBytes()).recordingPosition();
+                assertTrue(deferred.position() <= slowestPosition,
+                        "retention crossed the slowest reader's durable position: %s slowest=%d"
+                                .formatted(deferred, slowestPosition));
+                audit(startNanos, "retention-boundary-safe requested=%d result=%s slowestPosition=%d"
+                        .formatted(maxLiveSequence, deferred.status(), slowestPosition));
             }
             if (minCursor == null || minSequence <= this.baselineSeq) {
                 audit(startNanos, "retention-skipped (no reader progress past baseline)");
@@ -1609,27 +1596,12 @@ class AeronWriterReaderSoakIT {
              * corruption); when unreadable it is not waited on, and the purge
              * retries absorb a watermark the writer has not yet observed. */
             audit(startNanos, "retention-purge-attempt minCursor=%d".formatted(minSequence));
-            ReplicationLogRetention.MaintenanceResult purged = null;
-            for (int attempt = 0; attempt < 20; attempt++) {
-                try {
-                    purged = retention.deleteThrough(minCursor);
-                } catch (final IllegalStateException refused) {
-                    if (String.valueOf(refused.getMessage()).contains("ahead of the durable writer boundary")) {
-                        throw new AssertionError(
-                                "legitimate purge boundary refused against the durable writer boundary: %s"
-                                        .formatted(refused.getMessage()), refused);
-                    }
-                    /* Quorum watermark below our local minimum cursor: parked
-                     * readers can lag the file view. The retries absorb it. */
-                    LockSupport.parkNanos(250_000_000L);
-                    continue;
-                }
-                if (purged.status() == ReplicationLogRetention.MaintenanceResult.Status.DELETED) break;
+            ReplicationLogRetention.MaintenanceResult purged = retention.deleteThrough(minCursor);
+            for (int attempt = 1; attempt < 20 && purged.status() !=
+                    ReplicationLogRetention.MaintenanceResult.Status.DELETED; attempt++) {
                 LockSupport.parkNanos(250_000_000L);
-            }
-            if (purged == null) {
-                audit(startNanos, "retention-skipped (quorum watermark behind local cursor minimum)");
-                return OpOutcome.skipped("quorum-watermark-behind");
+                purged = retention.deleteThrough(minCursor);
+                if (purged.status() == ReplicationLogRetention.MaintenanceResult.Status.DELETED) break;
             }
             if (purged.status() == ReplicationLogRetention.MaintenanceResult.Status.DELETED) {
                 this.retentionPurges.incrementAndGet();

@@ -2,21 +2,21 @@ package peruncs.cluster.probe;
 
 import org.apache.lucene.document.Document;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
+import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.jvector.VectorSimilarityFunction;
 import org.eclipse.store.gigamap.jvector.Vectorizer;
 import org.eclipse.store.gigamap.lucene.DocumentPopulator;
+import org.eclipse.store.gigamap.lucene.LuceneContext;
 import org.eclipse.store.gigamap.types.GigaMap;
-import peruncs.cluster.storage.index.ClusterStoreIndexes;
+import peruncs.cluster.api.ClusterIndexes;
 
-/// Forked probe exercising the reflective index validator inside the named module.
+/// Forked probe exercising the exported index facade with the cluster module resolved by JPMS.
 ///
 /// Launched by [ModulePathRuntimeProbeTest] on a module path that resolves
 /// `peruncs.cluster` as a real named module. The probe class itself
-/// stays on the class path, so the run proves that the exported storage
-/// contracts are consumable from an unnamed module and that the reflective
-/// validator — which reads upstream index internals through Store's
-/// offset-based memory accessor — works under JPMS access rules, where
-/// class-path suites never exercise it.
+/// stays on the class path, so the run proves that an unnamed application can
+/// consume the facade while the cluster and its Lucene/JVector dependencies
+/// are resolved as named modules.
 public final class ModulePathProbeMain {
     private ModulePathProbeMain() {
     }
@@ -39,15 +39,20 @@ public final class ModulePathProbeMain {
     }
 
     static void main(final String[] args) {
+        if (ModuleLayer.boot().findModule("jdk.incubator.vector").isEmpty()) {
+            throw new AssertionError("the JDK Vector API must be enabled for JVector");
+        }
         final GigaMap<ProbeArticle> map = GigaMap.New();
-        ClusterStoreIndexes.registerLucene(map, new ProbePopulator());
-        ClusterStoreIndexes.registerVector(map, "probe-vectors",
+        final ProbePopulator populator = new ProbePopulator();
+        final LuceneContext<ProbeArticle> context = ClusterIndexes.embeddedLuceneContext(populator);
+        if (context.directoryCreator() != null) throw new AssertionError("Lucene context must stay embedded");
+        ClusterIndexes.registerLucene(map, populator);
+        ClusterIndexes.addVector(map.index().register(VectorIndices.Category()), "probe-vectors",
                 VectorIndexConfiguration.builder()
                         .dimension(3)
                         .similarityFunction(VectorSimilarityFunction.COSINE)
                         .build(),
                 new ProbeVectorizer());
-        ClusterStoreIndexes.validateMap(map);
         System.out.println("MODULE-PATH-PROBE-OK");
     }
 }

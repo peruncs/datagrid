@@ -56,4 +56,9 @@ final class ReadOnlyStorageManager<T> extends GuardingStorageManager<T> {
     PersistenceTarget<Binary> gateTarget(final PersistenceTarget<Binary> raw) {
         return RejectingPersistenceTarget.create(raw);
     }
+
+    @Override
+    boolean isReadOnly() {
+        return true;
+    }
 }

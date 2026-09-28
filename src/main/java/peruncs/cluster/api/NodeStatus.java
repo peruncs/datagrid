@@ -26,12 +26,15 @@ package peruncs.cluster.api;
 /// @param storageBytes current Store size
 /// @param replication replication observability, including an explicit
 ///                    `NOT_CONFIGURED` state
+/// @param backup last backup outcome; backup and post-publication maintenance
+///               failures do not change node readiness or replication health
 public record NodeStatus(
         boolean writer,
         boolean ready,
         boolean healthy,
         boolean storageChecksRunning,
         long storageBytes,
-        ReplicationStatus replication
+        ReplicationStatus replication,
+        BackupStatus backup
 ) {
 }

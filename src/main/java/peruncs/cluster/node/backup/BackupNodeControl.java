@@ -1,8 +1,12 @@
 package peruncs.cluster.node.backup;
 
-import peruncs.cluster.errors.NodeException;
+import peruncs.cluster.api.BackupInfo;
+import peruncs.cluster.api.BackupSlot;
+import peruncs.cluster.api.BackupStatus;
 import peruncs.cluster.node.NodeAssembly;
 import peruncs.cluster.node.StorageNodeControl;
+
+import java.util.concurrent.CompletableFuture;
 
 /// Protocol-neutral control view of a backup node manager.
 ///
@@ -16,7 +20,7 @@ import peruncs.cluster.node.StorageNodeControl;
 ///
 /// @since 1.0
 public interface BackupNodeControl {
-        /// Borrows the storage control view of this backup node.
+    /// Borrows the storage control view of this backup node.
     ///
     /// The returned view exposes readiness, health, and observability only;
     /// the backup-specific operations stay on this control.
@@ -24,27 +28,13 @@ public interface BackupNodeControl {
     /// @return the storage control view owned by the same manager
     StorageNodeControl storage();
 
-        /// Stops the reader at the latest safe message boundary.
-    void stopReadingAtLatestMessage();
-
-        /// Resumes the reader after backup work.
+    /// Creates a storage backup asynchronously.
     ///
-    /// @throws NodeException if the reader cannot resume
-    void resumeReading() throws NodeException;
+    /// @param slot scheduled or manual retention slot
+    /// @return future completed with the published backup details
+    CompletableFuture<BackupInfo> createStorageBackup(BackupSlot slot);
 
-        /// Reports whether the reader is active.
-    ///
-    /// @return `true` when the reader is active
-    boolean isReading();
+    /// Returns the latest backup outcome.
+    BackupStatus backupStatus();
 
-        /// Creates a storage backup.
-    ///
-    /// @param useManualSlot whether to use the manual backup slot
-    /// @throws NodeException if backup creation fails
-    void createStorageBackup(final boolean useManualSlot) throws NodeException;
-
-        /// Reports whether a backup is running.
-    ///
-    /// @return `true` when backup work is active
-    boolean isBackupRunning();
 }

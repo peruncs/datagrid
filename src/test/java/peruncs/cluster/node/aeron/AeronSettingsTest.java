@@ -47,7 +47,6 @@ class AeronSettingsTest {
                 return switch (name) {
                     case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID" -> cluster.toString();
                     case "ECLIPSE_DATAGRID_AERON_WIRE_NONCE" -> "731947";
-                    case "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK" -> "true";
                     case "ECLIPSE_DATAGRID_AERON_NODE_ID" -> node.toString();
                     case "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> generation.toString();
                     case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
@@ -63,6 +62,28 @@ class AeronSettingsTest {
     @Test
     void acceptsTheValidatedEmbeddedWriterDefaults() {
         assertDoesNotThrow(() -> AeronSettings.fromEnvironment(properties(Map.of())));
+    }
+
+    /// Production mode does not require an acknowledgement for the unauthenticated, unencrypted protocol.
+    @Test
+    void productionDoesNotRequireTrustedNetworkAcknowledgement() {
+        final AeronSettings settings = AeronSettings.fromEnvironment(prodProperties(Map.of(
+                "ECLIPSE_DATAGRID_AERON_RETENTION_READERS", UUID.randomUUID().toString()
+        )));
+
+        assertEquals(1, settings.archivePolicy().retentionReaders().size());
+    }
+
+    @Test
+    void indexValidationBoundDefaultsAndCanBeConfigured() {
+        assertEquals(65_536, properties(Map.of()).indexValidationMaxObjects());
+        assertEquals(32, properties(Map.of()).indexValidationMaxObjects(32),
+                "an absent override must preserve the caller's configured default");
+        assertEquals(128, properties(Map.of("ECLIPSE_DATAGRID_INDEX_VALIDATION_MAX_OBJECTS", "128"))
+                .indexValidationMaxObjects());
+        assertThrows(IllegalArgumentException.class,
+                () -> properties(Map.of("ECLIPSE_DATAGRID_INDEX_VALIDATION_MAX_OBJECTS", "0"))
+                        .indexValidationMaxObjects());
     }
 
     /// Verifies an external archive writer accepts retention readers as unsupported configuration with one reader parsed.
@@ -84,11 +105,11 @@ class AeronSettingsTest {
         ))));
     }
 
-    /// Verifies removed replication, retention, and network-profile secrets are ignored without failing parsing.
+    /// Verifies retired secret settings are ignored without failing parsing.
     @Test
     void removedSecretSettingsAreIgnored() {
         /* A stale deployment environment may still export the removed
-         * replication, retention, rotation, and network-profile settings.
+         * replication, retention, and rotation settings.
          * They are inert: parsing succeeds and no secret is retained. */
         final AeronSettings settings = AeronSettings.fromEnvironment(properties(Map.of(
                 "ECLIPSE_DATAGRID_AERON_REPLICATION_SECRET",
@@ -99,8 +120,7 @@ class AeronSettingsTest {
                 "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET",
                 Base64.getEncoder().encodeToString("sixteen-byte-key".getBytes(StandardCharsets.US_ASCII)),
                 "ECLIPSE_DATAGRID_AERON_RETENTION_SECRET_PREVIOUS",
-                Base64.getEncoder().encodeToString("sixteen-byte-key".getBytes(StandardCharsets.US_ASCII)),
-                "ECLIPSE_DATAGRID_NETWORK_PROFILE", "trusted-network"
+                Base64.getEncoder().encodeToString("sixteen-byte-key".getBytes(StandardCharsets.US_ASCII))
         )));
         assertTrue(settings.archivePolicy().retentionReaders().isEmpty());
     }
@@ -271,7 +291,7 @@ class AeronSettingsTest {
     private static NodeSettingsSource prodProperties(final Map<String, String> overrides) {
         final HashMap<String, String> merged = new HashMap<>(overrides);
         final Path root = Path.of(System.getProperty("user.home"),
-                "datagrid-auth-test-%s".formatted(UUID.randomUUID()));
+                "datagrid-settings-test-%s".formatted(UUID.randomUUID()));
         merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_DIRECTORY", root.resolve("driver").toString());
         merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY", root.resolve("archive").toString());
         merged.putIfAbsent("ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH",

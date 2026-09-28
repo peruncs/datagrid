@@ -1,5 +1,9 @@
 package peruncs.cluster.node.store;
 
+import peruncs.cluster.errors.GraphDrainTimeoutException;
+
+import java.time.Duration;
+
 /// Internal callback running the complete, ordered node teardown.
 ///
 /// Implemented by the owning node lifecycle; invoked when an application
@@ -11,6 +15,12 @@ public interface NodeClose {
     /// observing another caller's successful close; concurrent callers wait
     /// for the in-flight attempt and propagate its failure
     boolean close();
+
+    /// Waits for application calls to leave the node-owned Store facade.
+    ///
+    /// @param timeout maximum drain wait
+    /// @throws GraphDrainTimeoutException if application calls remain active
+    void awaitAppIdle(Duration timeout);
 
     /// Rejects admission once the owning node is closed, closing, or
     /// retry-pending after a failed close.

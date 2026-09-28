@@ -4,9 +4,9 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.CloseSequencer;
 import peruncs.cluster.node.NodeRole;
-import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.backup.BackupMetadata;
 import peruncs.cluster.node.replication.*;
 import peruncs.cluster.storage.ReplicationCursor;
@@ -58,7 +58,7 @@ public final class AeronTransport implements ClusterReplicationTransport {
         this.shared = new AeronTransportShared(new AeronArchiveCapacity(this.settings));
         this.runtimeOwner = new AeronRuntimeOwner(this);
         this.writerTransport = new AeronWriterTransport(this, leaseDirectoryPath,
-                properties.writerLeaseStalenessMillis());
+                properties.writerLeaseStalenessMillis(), properties.indexValidationMaxObjects());
         this.readerTransport = new AeronReaderTransport(this);
         this.retentionOwner = new AeronRetentionOwner(this);
         this.shared.installWatermarks(new WatermarkCollector(this.runtimeOwner::aeron, this.settings,

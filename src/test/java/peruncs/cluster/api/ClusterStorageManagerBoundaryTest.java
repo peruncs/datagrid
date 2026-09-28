@@ -411,6 +411,10 @@ class ClusterStorageManagerBoundaryTest {
             }
 
             @Override
+            public void awaitAppIdle(final java.time.Duration timeout) {
+            }
+
+            @Override
             public void checkOpen() {
             }
         };

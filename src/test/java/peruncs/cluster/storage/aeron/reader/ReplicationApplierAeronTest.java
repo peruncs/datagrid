@@ -235,6 +235,43 @@ class ReplicationApplierAeronTest {
         assertEquals(0, receiver.dataCalls);
     }
 
+    /// A reader resolves the writer's recorded rejection and accepts the next consumed sequence.
+    @Test
+    void appliesSequenceAfterRecordedAbort() {
+        final RecordingReceiver receiver = new RecordingReceiver();
+        final TransactionAssembler assembler = assembler(receiver, 1024);
+        try {
+            final byte[] committed = {1};
+            accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
+                    committed, committed.length));
+            accept(assembler, AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 0,
+                    AeronReplicationEnvelope.Kind.COMMIT, committed.length, 0, 1, 0,
+                    AeronReplicationEnvelope.crc32c(committed), new byte[0]));
+
+            final byte[] rejected = {2};
+            accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 1, 0, 1, 0,
+                    rejected, rejected.length));
+            accept(assembler, AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 1,
+                    AeronReplicationEnvelope.Kind.ABORT, rejected.length, 0, 1, 0, 0, new byte[0]));
+            assertEquals(1, assembler.lastResolvedSequence());
+            assertEquals(0, assembler.lastAppliedSequence());
+            assertEquals(1, receiver.dataCalls);
+
+            final byte[] retried = {3};
+            accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 2, 0, 1, 0,
+                    retried, retried.length));
+            accept(assembler, AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 2,
+                    AeronReplicationEnvelope.Kind.COMMIT, retried.length, 0, 1, 0,
+                    AeronReplicationEnvelope.crc32c(retried), new byte[0]));
+            assertEquals(2, assembler.lastResolvedSequence());
+            assertEquals(2, assembler.lastAppliedSequence());
+            assertEquals(2, receiver.dataCalls);
+            assertArrayEquals(retried, receiver.data);
+        } finally {
+            assembler.dispose();
+        }
+    }
+
         /// Verifies a committed zero-length transaction is delivered as an empty binary.
     @Test
     void emptyCommitDeliversAnEmptyBinary() {

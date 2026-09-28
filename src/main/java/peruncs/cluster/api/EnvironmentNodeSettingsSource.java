@@ -109,6 +109,11 @@ final class EnvironmentNodeSettingsSource implements NodeSettingsSource {
     }
 
     @Override
+    public Integer aeronRetentionIntervalMinutes() {
+        return this.envInteger(NodeSettingsSource.EnvKeys.AERON_RETENTION_INTERVAL_MINUTES);
+    }
+
+    @Override
     public Integer storageLimitGB() {
         final String configured = this.envString(NodeSettingsSource.EnvKeys.STORAGE_LIMIT_GB);
         if (configured == null || configured.isBlank()) {

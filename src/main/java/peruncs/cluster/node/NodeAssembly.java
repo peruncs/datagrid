@@ -124,8 +124,8 @@ public interface NodeAssembly extends AutoCloseable {
 
     /// Returns the storage node control view, starting the node when necessary.
     ///
-    /// This is the programmatic control surface the embedding application
-    /// uses in place of a network boundary: role, health, readiness,
+    /// This is the embedding application's programmatic control surface for
+    /// role, health, readiness,
     /// storage size, and replication metrics. The view carries no `close()`:
     /// the assembly owns the manager and closes it on [NodeAssembly#close].
     /// The role is validated before anything starts, so probing the wrong
@@ -138,10 +138,9 @@ public interface NodeAssembly extends AutoCloseable {
 
     /// Returns the backup node control view, starting the node when necessary.
     ///
-    /// This is the programmatic control surface the embedding application
-    /// uses in place of a network boundary: backup triggers and reader
-    /// pause/resume. The view carries no `close()`: the assembly owns the
-    /// manager and closes it on [NodeAssembly#close]. The role is
+    /// This is the embedding application's programmatic control surface for
+    /// backup requests, status, and running state. The view carries no `close()`:
+    /// this assembly owns it and closes it on [NodeAssembly#close]. The role is
     /// validated before anything starts, so probing the wrong role never
     /// starts Store, Aeron, recovery, or background threads.
     ///
@@ -610,7 +609,10 @@ final class NodeCollaborators {
         final Long cachingTimeoutMs = this.getNodeSettingsSource().dataMergerTimeoutMs();
         final Long cachedBytesLimit = this.getNodeSettingsSource().dataMergerCachedDataLimit();
         final Long applyTimeoutMs = this.getNodeSettingsSource().dataMergerApplyTimeoutMs();
-        if (cachingTimeoutMs == null && cachedBytesLimit == null && applyTimeoutMs == null) {
+        final int maxValidatedIndexObjects =
+                this.getNodeSettingsSource().indexValidationMaxObjects(configuration.maxValidatedIndexObjects());
+        if (cachingTimeoutMs == null && cachedBytesLimit == null && applyTimeoutMs == null &&
+            maxValidatedIndexObjects == configuration.maxValidatedIndexObjects()) {
             return StorageBinaryDataMerger.create(configuration);
         }
         return StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
@@ -623,7 +625,7 @@ final class NodeCollaborators {
                 applyTimeoutMs == null ? configuration.applyTimeoutMs() : applyTimeoutMs,
                 configuration.disposeOrderlyTimeoutMs(),
                 configuration.disposeInterruptTimeoutMs(),
-                configuration.maxValidatedIndexObjects(),
+                maxValidatedIndexObjects,
                 configuration.graphCoordinator()));
     }
 
@@ -791,7 +793,7 @@ final class NodeCollaborators {
         return this.positionProvider.get();
     }
 
-    private ReplicationLogRetention getReplicationLogRetention() {
+    ReplicationLogRetention getReplicationLogRetention() {
         return this.replicationRetention.get();
     }
 }

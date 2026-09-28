@@ -2,6 +2,7 @@ package peruncs.cluster.storage.aeron.writer;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.cluster.errors.ReplicationUnavailableException;
+import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.errors.WriterFencedException;
 import peruncs.cluster.storage.ReplicationRetry;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
@@ -352,7 +353,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             metadata = this.publisher.transactionMetadata(buffers, bufferCount);
         } catch (final RuntimeException | Error failure) {
             this.clearBufferScratch();
-            this.publisher.failClosed();
+            this.failClosedUnlessRejected(failure);
             throw failure;
         }
         try {
@@ -380,9 +381,25 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     this.activeWrite.dictionary(), this.activeWrite.buffers(),
                     this.activeWrite.bufferCount(), this.activeWrite.sequence(), this.activeWrite.metadata());
         } catch (final RuntimeException | Error failure) {
+            final PreparedWrite rejected = this.activeWrite;
+            if (failure instanceof WriteRejectedException rejection && rejected != null) {
+                try {
+                    this.notifyStateOutsideAdmission(AeronReplicationCheckpoint.State.REJECTED,
+                            rejected.sequence(), rejected.metadata().dataLength(),
+                            rejected.metadata().dataChunkCount(), rejected.metadata().crc32c(),
+                            rejection.recordedAbortPosition());
+                } catch (final RuntimeException | Error journalFailure) {
+                    this.publisher.failClosed();
+                    journalFailure.addSuppressed(failure);
+                    this.clearActiveWrite();
+                    this.clearBufferScratch();
+                    throw journalFailure;
+                }
+                this.retryDictionary = rejected.dictionary();
+            }
             this.clearActiveWrite();
             this.clearBufferScratch();
-            this.publisher.failClosed();
+            this.failClosedUnlessRejected(failure);
             throw failure;
         }
         try {
@@ -427,12 +444,17 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     "writer fencing lease lost, restart required; this writer is fenced");
         }
         final long dictionaryLength = dictionary == null ? 0L : dictionary.length;
-        final long requiredBytes = Math.addExact(dataLength, dictionaryLength);
+        final long requiredBytes;
+        try {
+            requiredBytes = Math.addExact(dataLength, dictionaryLength);
+        } catch (final ArithmeticException overflow) {
+            throw new WriteRejectedException("Store transaction exceeds maxTransactionBytes", overflow);
+        }
         if (requiredBytes > this.publisher.maxTransactionBytes()) {
-            throw new IllegalArgumentException("Store transaction exceeds maxTransactionBytes");
+            throw new WriteRejectedException("Store transaction exceeds maxTransactionBytes");
         }
         if (!this.writeAdmission.test(requiredBytes)) {
-            throw new ReplicationUnavailableException(
+            throw new WriteRejectedException(
                     "Aeron Archive has insufficient free capacity for transaction bytes=%s".formatted(requiredBytes));
         }
     }
@@ -495,17 +517,17 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
     private void lockWriteAdmission() {
         if (this.maintenance.get()) {
-            throw new IllegalStateException("Aeron Archive maintenance is in progress; write admission is closed");
+            throw new WriteRejectedException("Aeron Archive maintenance is in progress; write admission is closed");
         }
         final long deadline = ReplicationRetry.deadlineNanos(this.publisher.admissionTimeoutNanos());
         try {
             if (!this.writeLock.tryLock(ReplicationRetry.remainingNanos(deadline), TimeUnit.NANOSECONDS)) {
-                throw new ReplicationUnavailableException(
+                throw new WriteRejectedException(
                         "timed out waiting for Aeron write admission", null);
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            throw new ReplicationUnavailableException(
+            throw new WriteRejectedException(
                     "interrupted while waiting for Aeron write admission", interrupted);
         }
         boolean admitted = false;
@@ -515,22 +537,22 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
                     throw new IllegalStateException("cannot re-enter an active Aeron write");
                 }
                 if (this.maintenance.get()) {
-                    throw new ReplicationUnavailableException("Aeron Archive maintenance is in progress; write admission is closed");
+                    throw new WriteRejectedException("Aeron Archive maintenance is in progress; write admission is closed");
                 }
                 final long remaining = ReplicationRetry.remainingNanos(deadline);
                 if (remaining == 0L) {
-                    throw new ReplicationUnavailableException("timed out waiting for Aeron write admission", null);
+                    throw new WriteRejectedException("timed out waiting for Aeron write admission", null);
                 }
                 try {
                     this.writeDone.await(remaining, TimeUnit.NANOSECONDS);
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    throw new ReplicationUnavailableException(
+                    throw new WriteRejectedException(
                             "interrupted while waiting for Aeron write admission", interrupted);
                 }
             }
             if (this.maintenance.get()) {
-                throw new ReplicationUnavailableException("Aeron Archive maintenance is in progress; write admission is closed");
+                throw new WriteRejectedException("Aeron Archive maintenance is in progress; write admission is closed");
             }
             admitted = true;
         } finally {
@@ -659,6 +681,10 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private void clearBufferScratch() {
         Arrays.fill(this.bufferScratch, 0, this.bufferScratchCount, null);
         this.bufferScratchCount = 0;
+    }
+
+    private void failClosedUnlessRejected(final Throwable failure) {
+        if (!(failure instanceof WriteRejectedException)) this.publisher.failClosed();
     }
 
     /// Marks the prepared transaction uncertain and releases admission.

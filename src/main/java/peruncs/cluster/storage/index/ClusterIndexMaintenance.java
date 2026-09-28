@@ -4,16 +4,12 @@ import io.github.jbellis.jvector.graph.GraphIndexBuilder;
 import io.github.jbellis.jvector.graph.OnHeapGraphIndex;
 import org.eclipse.serializer.collections.Set_long;
 import org.eclipse.serializer.exceptions.IORuntimeException;
-import org.eclipse.serializer.persistence.binary.types.Binary;
-import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataAcceptor;
-import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndices;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
 import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.gigamap.types.IndexGroup;
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.cluster.errors.CorruptReplicationDataException;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -21,7 +17,6 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
 
 /// Reader-side index maintenance for replicated Store imports.
 ///
@@ -29,20 +24,15 @@ import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
 /// object swap; vector graphs are rebuilt afterward only when their persisted
 /// change counter advanced.
 public final class ClusterIndexMaintenance {
-    private static final BinaryEntityRawDataIterator ITERATOR = BinaryEntityRawDataIterator.New();
     private final ArrayList<GigaMap<?>> cachedMaps = new ArrayList<>();
     private final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
     private final IdentityHashMap<GigaMap<?>, Boolean> knownMaps = new IdentityHashMap<>();
     private final Set_long reachableIds = Set_long.New();
     private final Map<String, Object> rootValues = new HashMap<>();
-    private final BinaryEntityRawDataAcceptor importedIdCheck = (start, bound) -> {
-        if (start + Binary.entityHeaderLength() > bound) {
-            throw new IllegalStateException("truncated imported entity header during index maintenance");
-        }
-        if (this.reachableIds.contains(Binary.getEntityObjectIdRawValue(start))) {
+    private final EntityHeaders.EntityVisitor importedIdCheck = (_, objectId, _, _) -> {
+        if (this.reachableIds.contains(objectId)) {
             this.reachabilityChanged = true;
         }
-        return true;
     };
     private boolean initialized;
     private boolean reachabilityChanged;
@@ -61,10 +51,7 @@ public final class ClusterIndexMaintenance {
                     throw new IllegalArgumentException("index maintenance requires normalized direct buffers");
                 }
                 if (buffer.limit() != 0) {
-                    final long start = getDirectByteBufferAddress(buffer);
-                    if (ITERATOR.iterateEntityRawData(start, start + buffer.limit(), this.importedIdCheck) != 0L) {
-                        throw new CorruptReplicationDataException("incomplete entity in imported index batch");
-                    }
+                    EntityHeaders.forEach(buffer, this.importedIdCheck);
                 }
             }
             /* Lucene views are cached NRT readers built lazily per index, not per

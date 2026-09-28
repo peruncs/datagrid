@@ -29,7 +29,8 @@ class AeronDriverFailureIT {
             final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
             /* Agrona uses jdk.internal.misc.Unsafe on this JDK; this is module access,
              * not reflective test plumbing. */
-            final Process child = new ProcessBuilder(java, "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+            final Process child = new ProcessBuilder(java, "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                    "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                     "-cp", ChildJava.classpath(),
                     "-Ddg.driver.failure.root=%s".formatted(root), AeronDriverFailureChildMain.class.getName())
                     .redirectErrorStream(true).start();

@@ -12,6 +12,8 @@ import peruncs.cluster.errors.ReaderWriteRejectedException;
 import peruncs.cluster.errors.StorageLimitReachedException;
 
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -25,13 +27,30 @@ class StorageWriteGatingTest {
     @Test
     void writesAreRejectedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
+            final AtomicBoolean limitReached = new AtomicBoolean(true);
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> true, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
+                    ClusterStorageManagers.guarding(delegate, limitReached::get, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
             assertThrows(StorageLimitReachedException.class, () -> manager.store(new Payload("a")));
             assertThrows(StorageLimitReachedException.class, () -> manager.storeAll(new Payload("b")));
             assertThrows(StorageLimitReachedException.class, manager::storeRoot);
             assertThrows(StorageLimitReachedException.class, () -> manager.createStorer().commit());
+
+            limitReached.set(false);
+            assertDoesNotThrow(() -> manager.store(new Payload("after capacity recovers")));
+        }
+    }
+
+    /// Writer registry access remains delegated as required by the Store contract.
+    @Test
+    void writerObjectRegistryKeepsEclipseStoreBehavior(@TempDir final Path dir) {
+        try (EmbeddedStorageManager delegate = start(dir)) {
+            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+                    delegate, StorageSizeValidation.notReached(), newNodeClose(),
+                    new peruncs.cluster.storage.StorageGraphCoordinator());
+
+            assertSame(delegate.persistenceManager().objectRegistry(),
+                    manager.persistenceManager().objectRegistry());
         }
     }
 
@@ -83,8 +102,10 @@ class StorageWriteGatingTest {
     @Test
     void readOnlyManagerRejectsEveryMutationApi(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
-            delegate.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Payload("root")));
+            final Payload storedRoot = new Payload("root");
+            delegate.setRoot(org.eclipse.serializer.reference.Lazy.Reference(storedRoot));
             delegate.storeRoot();
+            final long storedRootId = delegate.persistenceManager().lookupObjectId(storedRoot);
             final ClusterStorageManager<Object> manager =
                     ClusterStorageManagers.readOnly(delegate, newNodeClose(), new peruncs.cluster.storage.StorageGraphCoordinator());
 
@@ -129,7 +150,19 @@ class StorageWriteGatingTest {
                     () -> manager.graphBoundary().write(() -> "x"),
                     "reader boundary writes are rejected before the callback");
             assertDoesNotThrow(manager::typeDictionary);
-            assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("g")));
+            assertEquals(storedRootId, manager.persistenceManager().ensureObjectId(storedRoot));
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.persistenceManager().ensureObjectId(new Payload("g")));
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.persistenceManager().<Object>ensureObjectId(new Payload("h"), null, null));
+            assertThrows(ReaderWriteRejectedException.class,
+                    () -> manager.persistenceManager().<Object>ensureObjectIdGuaranteedRegister(new Payload("i"), null, null));
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.persistenceManager().mergeEntries(null));
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.persistenceManager().registerLocalRegistry(null));
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.persistenceManager().consolidate());
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.persistenceManager().createRegisterer());
+            assertThrows(ReaderWriteRejectedException.class, () -> manager.persistenceManager().objectRegistry());
+            assertEquals("root", manager.graphBoundary().read(() -> ((Payload) manager.root().get()).value));
             assertTrue(manager.isRunning(), "read-only manager must stay usable for reads");
         }
     }
@@ -159,7 +192,7 @@ class StorageWriteGatingTest {
         }
     }
 
-    /// Verifies maintenance and object-id registration still work when the storage limit is reached.
+    /// Registry operations retain Eclipse Store writer behavior when the application storage limit is reached.
     @Test
     void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
@@ -169,6 +202,20 @@ class StorageWriteGatingTest {
             assertThrows(UnsupportedOperationException.class, () -> manager.importData(X.Enum()));
             assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("c")));
             assertDoesNotThrow(() -> manager.persistenceManager().consolidate());
+            assertTrue(manager.persistenceManager().createRegisterer().register(new Payload("d")) >= 0L);
+        }
+    }
+
+    /// The writer keeps Eclipse Store's object-registry behavior; readers reject it.
+    @Test
+    void writerRetainsObjectRegistryAccess(@TempDir final Path dir) {
+        try (EmbeddedStorageManager delegate = start(dir)) {
+            final ClusterStorageManager<Object> manager =
+                    ClusterStorageManagers.guarding(
+                            delegate, StorageSizeValidation.notReached(), newNodeClose(),
+                            new peruncs.cluster.storage.StorageGraphCoordinator());
+
+            assertNotNull(manager.persistenceManager().objectRegistry());
         }
     }
 
@@ -190,7 +237,7 @@ class StorageWriteGatingTest {
         }
     }
 
-    private static EmbeddedStorageManager start(final Path dir) {
+    static EmbeddedStorageManager start(final Path dir) {
         final StorageConfiguration configuration = StorageConfiguration.Builder()
                 .setStorageFileProvider(Storage.FileProvider(dir))
                 .setChannelCountProvider(Storage.ChannelCountProvider(1))
@@ -209,6 +256,10 @@ class StorageWriteGatingTest {
 
     private static NodeClose newNodeClose() {
         return new NodeClose() {
+            @Override
+            public void awaitAppIdle(final Duration timeout) {
+            }
+
             @Override
             public boolean close() {
                 return false;

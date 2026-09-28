@@ -1,7 +1,7 @@
-# PerunCS Cluster — Review and Implementation Spec (Opus), revision 6
+# PerunCS Cluster — Review and Implementation Spec (Opus), revision 7
 
-**Baseline:** commit `9975d95`. This is a static review: nothing was built or run, and no
-production code was changed.
+**Baseline:** commit `9975d95`. Revision 6 was a static review; revision 7 records implementation
+follow-up and remaining benchmark gates.
 
 ## 0. Scope, conventions, revision history
 
@@ -42,6 +42,26 @@ reader nodes, replicated over Aeron.
   - Added the limited FFM adoption policy (D-29) with two spec blocks: **F1**, bounds-checked
     parsing of replicated bytes, and **F2**, an arena-backed buffer pool spike folded into N1.
   - Added N3 (retention never triggered), found while writing the rev-5 documentation.
+- **rev 7 (implementation sweep):**
+  - Implemented C9 backup outcome reporting, including separate post-publication maintenance
+    failures; implemented writer-driven N3 retention; removed the D-17 pause/resume control API.
+  - Kept S1's same-name archive checks after tracing the crash-retry and conflicting-content
+    cases: removing them can overwrite a durable backup. Digest inspection stays outside the
+    publication lock and rechecks the destination stamp before publishing.
+  - Confirmed the protocol has no node authentication or transport encryption and needs neither.
+    P1-1/F1 code and parser checks are present; their remaining performance benchmark gate is
+    not claimed complete.
+- **Current review follow-up (2026-09-28):**
+  - Recorded-ABORT rejection now applies to coordinator and low-level publisher preparation. The
+    original failure remains in the cause chain and the abort position reaches the checkpoint
+    journal. Cause cycles, excessive depth, errors, and unrelated replication failures fail closed.
+  - Application drain uses `NodeClose.awaitAppIdle(Duration)` and the settings timeout.
+    `AppSections` uses a lock-protected count; lifecycle admission under that lock is the close
+    gate, so a second permanent `closing` flag is unnecessary.
+  - Starter backup waits are bounded. Retention caps requests at the complete reader-quorum
+    watermark, preserves history for incomplete or lagging readers, and has a configurable cadence.
+  - C5 deliberately keeps `LazyHolder` synchronization: close must wait for a resource factory
+    already in progress before it can skip disposal; `volatile initialized` alone loses that race.
 - **rev 5:**
   - Data Grid-derived items removed: the `ClusterFoundation` naming, the exported
     `ObjectGraphUpdateHandler` SPI and the provider SPI. A9 is now purely "Eclipse Store API
@@ -77,12 +97,12 @@ reader nodes, replicated over Aeron.
 | D-14 | Unsectioned reader traversal | Documented rule: on readers, traverse inside `graphBoundary().read(...)`. | Default |
 | D-15 | Environment prefix | `PERUNCS_`. | Default |
 | D-16 | Optional values in public records | AGENTS rule 3: primitive + `-1`/`""` sentinel + `has…()` accessors. | AGENTS.md |
-| D-17 | Pause/resume replication API | Delete (`BackupNodeControl.stopReadingAtLatestMessage/resumeReading/isReading`) and the README claim. | Default |
+| D-17 | Pause/resume replication API | Deleted (`BackupNodeControl.stopReadingAtLatestMessage/resumeReading/isReading`); backup work owns its own boundary pause. | Default |
 | D-18 | Standalone `status()` | Returns `NOT_CONFIGURED`, never `WrongRoleException`. | README contract |
 | D-19 | Roles | Exported `enum NodeRole { STANDALONE, WRITER, READER, BACKUP_READER }`. `NodeStatus.writer` becomes `NodeStatus.role()`. | Default |
 | D-20 | P1-4 | Resolved by J1-a (PR #832): an off-lock warm-up. | Upstream |
 | D-21 | A8 | Discovery **already exists**. The remaining work is an epoch in the alias, verification against the mark, and README fixes. Needed only for A2b. | Code evidence |
-| D-22 | S1 | Delete the same-name publication path; keep `.publish.lock`. | Code evidence |
+| D-22 | S1 | Keep same-name identity checks: they prevent a conflicting retry from overwriting a durable archive. Retain off-lock digest inspection with a destination-stamp recheck to keep large-archive hashing outside the shared lock. | Code evidence; data-loss prevention |
 | D-23 | Group commit | Out of scope. | Spec |
 | D-24 | Apply thread | Platform daemon `peruncs-apply`, landing in the same change as N1. | Default |
 | D-25 | Benchmark gate | Writer p99 commit ≤ baseline × 1.10; writer commits/s ≥ baseline × 0.95; reader apply p99 ≤ baseline × 1.10; live end-to-end p99 ≤ baseline. | Default |
@@ -121,6 +141,31 @@ reader nodes, replicated over Aeron.
 | 11 | **J1-a + P1-4** (PR #832). | PR #832 in the eclipse-store snapshot | §9 J1-a rows pass. |
 | 12 | **N3** (writer-driven retention; P1, may be pulled forward), cleanup: C8, C9, C12, S1, S3, S5, S6, D2–D8, D10, J1-b, J2–J6, §6 security, §7 docs. Optional: **A2b**, **A8**. | 10 | Remaining §9 rows pass. |
 
+**Current gate status.** This table is the acceptance plan, not a completion ledger. The
+2026-09-28 follow-up addresses the confirmed code-review defects in C1, C2, C3, C6, C10, A4,
+F1, and N3. Verification is green: `mvn verify` passed 793 unit tests (1 skipped) and 13
+integration tests; `mvn verify -Pintegration` passed 793 unit tests (1 skipped) and 10
+integration tests; `mvn verify -Pcrashmatrix` passed 793 unit tests (1 skipped) and all 69 crash
+and integration tests; and `mvn verify -Psoak` passed 793 unit tests (1 skipped) and the soak.
+The final soak completed 326 transactions, 56,778 queries, 44,593 verified reads, zero torn
+transactions, and successful reader/index convergence. Its 49-second JFR recording passed
+`SoakJfrReportTest` with failure gating enabled: maximum GC pause 24 ms, with no GC pause over
+100 ms, monitor blocking, or virtual-thread pinning. A separate 60-second soak repeat completed
+945 transactions; its live `jcmd` sample found no deadlock. An Archive-resume regression test
+now verifies that retention can purge a segment and the writer can publish again through a fresh
+publication.
+
+Step 0/4 benchmark evidence is still open. F1's JMH threshold and equivalence against the
+upstream iterator over real Serializer output remain unclaimed, as do its fuzz cases. The N3
+scheduler-specific multi-reader integration case remains open; current integration coverage
+drives the retention controller directly. C5 deliberately keeps `LazyHolder` synchronization for
+the in-flight-factory close race described above. C1 covers writer recovery and reader resolution
+through sequence S+2. C2 exercises an active write during close,
+timeout with the Store left open, and a successful retry through the facade; the full
+`NodeLifecycle` close graph remains an integration gap. C3 covers bounded running-backup close,
+and C10 covers submission rejection returning the executor to IDLE; starter-upload preservation
+still needs an executable test. No step-0 baseline or step-4 performance comparison is available.
+
 ---
 
 ## 3. Specifications — step 1 and A1
@@ -152,13 +197,14 @@ reader nodes, replicated over Aeron.
    | `ensureWriteAdmitted:432` | `maxTransactionBytes`: `IllegalArgumentException` | `WriteRejectedException` |
    | `lockWriteAdmission` | admission timeout / interrupt | `WriteRejectedException` (interrupt flag restored) |
    | `AeronStorageBinaryReplicationTarget.prepareWrite` | a `RuntimeException` from `validateWriterState()` | wrapped as the cause of a `WriteRejectedException` |
-   | `AeronReplicationPublisher.prepareWithRecovery` (`M/storage/aeron/writer/AeronReplicationPublisher.java:324-357`) | prepare failure | A prepare failure whose ABORT was successfully **awaited recorded** becomes `WriteRejectedException`. The publisher knows this directly: it offers the ABORT and awaits its recorded position in the same method, before throwing. If the ABORT cannot be offered or recorded, it keeps today's behaviour (fail closed, latch). |
+   | `AeronReplicationPublisher.prepareWithRecovery` (`M/storage/aeron/writer/AeronReplicationPublisher.java:324-357`) | prepare failure | A prepare failure whose ABORT was successfully **awaited recorded** becomes `WriteRejectedException` in coordinator and low-level paths. It carries the durable ABORT position and preserves the original cause. If ABORT cannot be offered or recorded, it keeps today's behaviour (fail closed, latch). |
 
 3. **Classifier.** A package-private static `boolean isCleanRejection(Throwable)` in
    `GuardingStorageManager`:
-   - walk `t, t.getCause(), …` (max depth 16, identity-set cycle guard);
-   - return **true iff** a `WriteRejectedException` is found **and** no other
-     `ReplicationException` subtype and no `Error` appears anywhere in the chain (uncertain wins);
+   - walk `t, t.getCause(), …` (max depth 16, allocation-free cycle detection);
+   - return **true iff** a `WriteRejectedException` is found and no `Error` or unrelated
+     `ReplicationException` subtype appears. One `ReplicationUnavailableException` cause is allowed
+     only below a `WriteRejectedException` carrying a recorded ABORT position (uncertain wins);
    - otherwise return **false** (latch: the fail-closed default).
 
    `persist`'s catch invalidates only when `!isCleanRejection(failure)`. The walk covers Eclipse
@@ -205,13 +251,11 @@ coordinator's `LongPredicate writeAdmission`):
 application section.
 
 **API/format changes.**
-- **Counter.** In `GuardingStorageManager`, add a private final class `AppSections` with
-  `AtomicInteger active`, `volatile boolean closing`, `ReentrantLock lock` and `Condition idle`.
-  - `enter()`: `active.incrementAndGet()`.
-  - `exit()` (always in `finally`): `if (active.decrementAndGet() == 0 && closing)`, signal `idle`
-    under `lock`.
-  - `awaitIdle(Duration)`: set `closing`, then wait on `idle` while `active > 0`, until the
-    deadline. It returns a boolean.
+- **Counter.** `AppSections` is a static nested class with an `int active` protected by its
+  `ReentrantLock` and an `idle` condition. `enter()` checks `NodeClose.checkOpen()` under that
+  lock before incrementing; `exit()` decrements in `finally` and signals when the count reaches
+  zero. `awaitIdle(Duration)` waits to the caller's deadline. The lifecycle's admission state is
+  the only permanent close gate; a second `closing` flag would duplicate it.
 - **Single helper.** Every facade method classified **WRITE** or **READ** in C7 runs through
   `<R> R appSection(Supplier<R>)`. That includes `graphBoundary().read/write`, `persist`,
   `Database.getObject`, `exportAdjacencyData`, and (after C7) `exportTypes`, `issueFullBackup`,
@@ -220,9 +264,10 @@ application section.
   `!graphCoordinator.isHeldByCurrentThread()` at entry.
 - **The hook lives at the facade layer, not in `StorageGraphCoordinator`.** The replication merger
   enters the coordinator directly and is therefore never counted.
-- **Admission.** New application entries are already rejected once the lifecycle is closing:
-  `GuardingStorageManager.ensureOpen()` → `nodeClose.checkOpen()` → `NodeLifecycle.ensureOpen()`
-  checks `closing`. **Do not call `StorageGraphCoordinator.drain()` for this.** `drain()` takes the
+- **Admission.** `NodeClose.awaitAppIdle(Duration)` delegates the wait to the guarded manager.
+  New outer entries check `NodeClose.checkOpen()` while holding the section-count lock, closing
+  the gap between admission and increment. **Do not call `StorageGraphCoordinator.drain()` for
+  this.** `drain()` takes the
   write lock and would contend with a live merger. The coordinator's own admission stays open
   until the replication-side drain at stage 10.
 - **Close stages** (`M/node/NodeLifecycle.java:647-764`), in order:
@@ -237,15 +282,15 @@ application section.
   9. managers and collaborators;
   10. `graphCoordinator.drain()` (replication side, unchanged);
   11. embedded storage.
-- **Timeout.** `ECLIPSE_DATAGRID_GRAPH_DRAIN_TIMEOUT_MILLIS` (existing, default 5,000 ms; renamed
-  `PERUNCS_…` in D1). On timeout, stage 2 throws `GraphDrainTimeoutException`, and stages 6, 10
-  and 11 report **not ready** (their `ready()` requires `appDrained == true`), so the transport and
-  Store stay up. `close()` rethrows; a later `close()` retries from stage 2.
+- **Timeout.** `ECLIPSE_DATAGRID_GRAPH_DRAIN_TIMEOUT_MILLIS` (default 5,000 ms; renamed `PERUNCS_…`
+  in D1). On timeout, the app-drain stage throws `GraphDrainTimeoutException`; close stages 3–5
+  still stop maintenance and executors, while stages 6–11 remain not ready, keeping transport,
+  managers, graph drain, and Store open. `close()` reports the failure; a later call retries.
 - **The same behaviour holds pre-A1 and post-A1.** The close never proceeds past a live
   application section.
 
-**Files.** `M/node/store/GuardingStorageManager.java`, `M/node/store/NodeClose.java` (add
-`boolean awaitAppIdle(Duration)`), `M/node/NodeLifecycle.java`.
+**Files.** `M/node/store/GuardingStorageManager.java`, `M/node/store/NodeClose.java`
+(`void awaitAppIdle(Duration)`), `M/node/NodeLifecycle.java`.
 
 **Invariants.**
 1. No application section runs when the transport stops.
@@ -294,9 +339,11 @@ application section.
 
 ### C5 — `LazyHolder.get()` synchronized (P2)
 
-In `M/node/NodeAssembly.java:256-278`, remove `synchronized` from `get()` and `isInitialized()`.
-Use `private volatile boolean initialized`, set to `true` after `constant.get()` returns
-(`LazyConstant` is thread-safe). The class is deleted in step 10 (A5).
+`LazyConstant` serializes value creation, but its thread safety does not coordinate the separate
+`isInitialized()` probe used by close. Keep `get()` and `isInitialized()` synchronized so close
+waits for an in-flight factory and then sees the created resource before deciding whether its
+stage can be skipped. The volatile-only variant fails this close race. The class is deleted in
+step 10 (A5).
 
 ### C6 — Reader-side registry mutators (P1)
 
@@ -307,9 +354,8 @@ on read-only roles only:
 |--------|-----------|
 | `ensureObjectId(Object)`, `ensureObjectId(U, requestor, handler)`, `ensureObjectIdGuaranteedRegister(...)` | Return `delegate.lookupObjectId(object)` if the object is registered; otherwise throw `ReaderWriteRejectedException`. |
 | `mergeEntries`, `registerLocalRegistry`, `consolidate` | Throw `ReaderWriteRejectedException`. |
-| `createRegisterer()` | Throw `ReaderWriteRejectedException` immediately. |
-| `objectRegistry()` | Throw `ReaderWriteRejectedException`. |
-| Writer | Unchanged. |
+| `createRegisterer()`, `objectRegistry()` | Throw `ReaderWriteRejectedException` on readers. |
+| Writer | All listed operations delegate unchanged, preserving Eclipse Store behavior. |
 
 **Why internal loading is unaffected (verified):**
 - Store loading never uses this adapter. `Lazy` binds to the `ObjectSwizzling` loader captured at
@@ -331,22 +377,23 @@ its own code ("out of the body" versus the assignment inside the body, `:158`).
 
 **Decision.** A three-state machine under the executor monitor:
 `enum BackupPhase { IDLE, QUEUED, RUNNING }`, one field `phase`.
+The monitor keeps the phase, queued task and result future as one transition; a second atomic state
+would not remove the lock needed by close and cancellation.
 
 | Transition | Where |
 |------------|-------|
-| `IDLE → QUEUED` | `runBackup`, under the monitor, immediately before `submit`. If `submit` throws, set `IDLE` and rethrow. |
+| `IDLE → QUEUED` | `runBackup`, under the monitor, immediately before `submit`. If `submit` throws, restore `IDLE` and complete the returned future exceptionally. |
 | `QUEUED → RUNNING` | First statement of the task body, under the monitor. If `phase != QUEUED` (the close path already reset it), return without running. |
 | `RUNNING → IDLE` | Task `finally`, under the monitor. |
 | `QUEUED → IDLE` | `close()`, under the monitor: `backupTask.cancel(false)`, then `if (phase == QUEUED) phase = IDLE`. |
 
 `isRunningBackup()` returns `phase != IDLE` (the busy check) and `isBackupExecuting()` returns
-`phase == RUNNING`. The Store-close gate in `NodeLifecycle` uses `isBackupExecuting()`. Fix the
-comment accordingly.
+`phase == RUNNING`. The Store-close gate in `NodeLifecycle` uses `isBackupExecuting()`.
 
 **Tests.**
 - Cancel while queued → the phase is `IDLE`, the close completes, and the body never runs.
 - Close while running → close waits (bounded) and the phase ends `IDLE`.
-- A submit rejection → `IDLE`.
+- A submit rejection → the returned future fails and the phase is `IDLE`.
 
 ### A4 — Export the index registration facade (P1)
 
@@ -354,8 +401,8 @@ comment accordingly.
 - **Surface.** Exactly three methods are exported. The other public methods of
   `ClusterStoreIndexes` (`withRegistrationRead`×2, `validate*`, `validateStorageRoots`,
   `writerValidator`, `registerVector`) remain internal.
-- **Module requirements.** The index modules become `requires transitive`, because their types
-  appear in exported signatures.
+- **Module requirements.** The GigaMap, Lucene, JVector, and Lucene Core modules become
+  `requires transitive`, because their types appear in exported signatures.
 
 **API/format changes.** `peruncs.cluster.api.ClusterIndexes` (final, private constructor):
 
@@ -366,16 +413,16 @@ public static <E> VectorIndex<E>   addVector(/* exact parameter list of ClusterS
 ```
 
 `src/main/java/module-info.java`: change `requires org.eclipse.store.gigamap`,
-`requires org.eclipse.store.gigamap.lucene`, `requires org.eclipes.store.gigamap.jvector` and
-`requires jvector` to `requires transitive`. Keep the upstream misspelling `org.eclipes`.
+`requires org.eclipse.store.gigamap.lucene`, `requires org.eclipes.store.gigamap.jvector`,
+`requires jvector` and `requires org.apache.lucene.core` to `requires transitive`. Keep the
+upstream misspelling `org.eclipes`.
 
 **Tests.**
-- `T/probe/ModulePathRuntimeProbeTest.java`: **remove**
-  `"--add-exports", "peruncs.cluster/peruncs.cluster.storage.index=ALL-UNNAMED"`. Today it masks
-  this gap.
+- `T/probe/ModulePathRuntimeProbeTest.java`: no `--add-exports`; its named consumer compiles with
+  only `requires peruncs.cluster` while using Lucene/JVector types from the facade.
 - `T/probe/ModulePathProbeMain.java`: use only `peruncs.cluster.api.ClusterIndexes`.
-- A new integration test registers Lucene and JVector through the facade on a writer, replicates,
-  and queries on a reader.
+- `AeronStoreIntegrationIT.aeronReplicatesEmbeddedLuceneAndVectorStateToAReader`: register both
+  indexes through the facade on a writer, replicate, and query on a reader.
 
 ---
 
@@ -712,10 +759,12 @@ at the latest boundary.
 - Opaque stateful `java.*` holders also throw (`M/storage/index/ClusterIndexValidation.java:446-456`).
 
 **Changes.**
-- **Shared scanner (built per F1).** Extract a package-private static entity-header scanner from
+- **Shared scanner (built per F1).** Extract the bounds-checked entity-header scanner from
   `M/storage/index/ClusterIndexMaintenance.java:34-70` into `M/storage/index/EntityHeaders.java`,
   usable for a writer-held `Binary` (iterate `binary.iterateChannelChunks` → buffers) and for
-  imported buffers. It uses Serializer's entity header layout (length, typeId, objectId), as today.
+  imported buffers. The class and cross-package `validateFraming` hook are public for use by
+  `storage.binary.StorageBinaryDataMaterializer`; the visitor and parser details remain
+  package-private. It uses Serializer's entity header layout (length, typeId, objectId), as today.
 - **Pre-filter.** `ClusterIndexValidation.commitTouchesIndexes(Binary, PersistenceTypeHandlerManager)`:
   for each entity type id → handler → `type()` → the existing `INDEX_RELEVANT` `ClassValue`.
 - **Gate.** `AeronStorageBinaryReplicationTarget.prepareWrite` runs the full validation only when
@@ -736,9 +785,10 @@ at the latest boundary.
 
 ### F1 — Bounds-checked parsing of replicated bytes with FFM (P1; step 6, with P1-1)
 
-**Problem.** Replicated Store binaries arrive from the network (untrusted within the trust
-boundary: corruption, bugs, or a wrong writer). They are walked with raw native address
-arithmetic through Serializer helpers:
+**Problem.** Replicated Store binaries can be malformed by corruption or software bugs. The
+cluster requirement is no node authentication and no transport encryption; framing validation
+handles malformed bytes and does not authenticate or authorize publishers. Binaries were walked
+with raw native address arithmetic through Serializer helpers:
 - the entity-header walk in `M/storage/index/ClusterIndexMaintenance.java:34-70`, which fails on
   a "truncated imported entity header";
 - the materializer's `BinaryEntityRawDataIterator.iterateEntityRawData(address, address + limit, …)`
@@ -757,18 +807,20 @@ it yields a crash or garbage, not an exception.
   it, so the iterator never sees a length that runs past the buffer.
 
 **API/format changes.**
-- **New scanner.** `M/storage/index/EntityHeaders.java` (package-private, final, static methods):
+- **New scanner.** `M/storage/index/EntityHeaders.java` exposes the cross-package framing hook to
+  `storage.binary.StorageBinaryDataMaterializer`; only the class and `validateFraming` are public,
+  while visitor and implementation details remain package-private:
   ```java
-  // Serializer entity header: [long length][long typeId][long objectId], little-endian (as parsed today in ClusterIndexMaintenance)
-  private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+  // Serializer writes entity headers in native order through XMemory.
+  private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.nativeOrder());
   static void forEach(ByteBuffer directBuffer, EntityVisitor visitor);   // MemorySegment.ofBuffer(directBuffer); loop: length = seg.get(LONG, off) …
   static void forEach(Binary binary, EntityVisitor visitor);             // iterateChannelChunks → forEach(buffer)
-  static void validateFraming(ByteBuffer directBuffer);                  // every entity: length ≥ header size, off + length ≤ segment size
+  public static void validateFraming(ByteBuffer directBuffer);           // every entity: length ≥ header size, off + length ≤ segment size
   @FunctionalInterface interface EntityVisitor { void entity(long typeId, long objectId, long offset, long length); }
   ```
-- **Before:** the byte order and header offsets must be copied from the current
-  `ClusterIndexMaintenance` parser. It remains the source of truth for the layout, so read it and do
-  not re-derive the layout.
+- **Format:** the scanner uses Serializer's native-order entity header layout, including 8-byte
+  length, type-id and object-id fields. The old PerunCS byte walk has been removed; equivalence with
+  `BinaryEntityRawDataIterator` over real Serializer output remains an explicit open gate.
 - **Users:**
   - P1-1 `commitTouchesIndexes` (writer `Binary`);
   - A1.4 step 3 mark check (writer `Binary`);
@@ -789,13 +841,12 @@ it yields a crash or garbage, not an exception.
 
 **Tests.**
 - **Fuzz:** truncated buffers, a length past the end, a zero or negative length, and a header
-  split across the end, each → `CorruptReplicationDataException`, never a JVM crash. Random
-  mutation of 10k valid binaries → exception or a correct parse only.
+  split across the end, each → `CorruptReplicationDataException`, never a JVM crash. 10k seeded
+  random corrupt length fields are rejected by both framing validation and header scanning.
 - **Equivalence:** for 10k valid binaries, `EntityHeaders.forEach` yields exactly the entities of
   the current parser (run both during migration).
-- **Micro-benchmark** (JMH, `-Pbench`): scanning 64 KiB and 1 MiB binaries with FFM is within 5% of
-  the current raw walk. The JIT hoists bounds checks in the loop; if it is slower, report it before
-  switching.
+- **Micro-benchmark** (JMH, `-Pbench`): compare FFM scans of 64 KiB and 1 MiB Serializer binaries
+  against the upstream raw iterator. The 5% gate remains open and is not claimed complete.
 
 **Out of scope.** Aeron envelope decode (`AeronReplicationEnvelope`), which stays on Agrona
 `DirectBuffer` (D-29): Aeron hands us its term buffer as a `DirectBuffer`, and its reads are already
@@ -1135,9 +1186,10 @@ others are examples.
 | `Storer.store`/`storeAll` (buffering), `Storer.clear`/`skip*`/capacity methods | ADMIN | Buffer only; the commit is WRITE |
 | `exportAdjacencyData`, `exportTypes`, `issueFullBackup`, `exportChannels`, `Database.getObject`, PM `lookupObject`/`getObject`/`get`/`collect`×2/`createLoader`/`typeDictionary`, `typeDictionary()`, `viewRoots()` | READ | |
 | `root()`, `persistenceManager()`, `database()`, `createStorer`/`createLazyStorer`/`createEagerStorer`, PM `createStorer`×4, `createConnection()`, PM `source()`, PM `target()` | HANDLE | Validity check only; each returned object's methods are classified in their own rows. `createConnection()` returns the facade itself. |
-| PM `ensureObjectId*`, `mergeEntries`, `registerLocalRegistry`, `consolidate`, `createRegisterer`, `objectRegistry()` | WRITE (writer) / REJECT (readers, per C6) | |
+| PM `ensureObjectId*`, `mergeEntries`, `registerLocalRegistry`, `consolidate`, `createRegisterer` | ADMIN (writer, unchanged per C6) / REJECT (readers) | Direct writer delegation preserves Store behavior; these calls do not enter cluster persistence gating. |
+| PM `objectRegistry()` | Writer delegates unchanged / REJECT (readers, per C6) | Preserves Eclipse Store's writer behavior. |
 | `issueGarbageCollection`, `issueCacheCheck`, `issueFileCheck`, `issueIntegrityCheck`, `issueTransactionsLogCleanup`, `issueStorageFlush`, `createStorageStatistics`, `configuration`, `initializationTime`, `operationModeTime`, `isRunning`/`isActive`/`isAcceptingTasks`/`isShuttingDown`/`isStartingUp`, `checkAcceptingTasks`, PM `getTargetByteOrder`/`currentObjectId`/`objectRegistryMonitor` | ADMIN | Store-internal housekeeping or read-only probes |
-| `accessUsageMarks`, `markUsedFor`, `unmarkUsedFor`, `markUnused`, `isUsed` | ADMIN | These mutate only the in-memory *usage-mark* set Eclipse Store uses to decide whether a manager is still in use. They never assign object ids and never produce persisted bytes. `objectRegistry()` does both (ids), hence REJECT. |
+| `accessUsageMarks`, `markUsedFor`, `unmarkUsedFor`, `markUnused`, `isUsed` | ADMIN | These mutate only the in-memory *usage-mark* set Eclipse Store uses to decide whether a manager is still in use. The writer's `objectRegistry()` preserves Store behavior; readers reject it. |
 | `start()`, `shutdown()`, PM `close()` | LIFECYCLE | `start` = idempotent admission check; `shutdown` = node close (C2); PM `close` = no-op |
 | `importData`, `importFiles`, `Database.setStorage`, `Database.guaranteeNoActiveStorage` | REJECT | |
 
@@ -1209,6 +1261,8 @@ others are examples.
     successful backup.
   - `ready`/`healthy` no longer depend on backup failure (`M/node/backup/BackupNodeManager.java:210-214`).
   - `ReplicationState.DEGRADED` stays replication-scoped.
+  - **Status:** implemented. `BackupStatus` also reports post-publication maintenance failure
+    separately; a durable backup remains successful and readiness is unchanged.
 - **C12 (P2).** Hard-coded retries move into `NodeConfig`:
   - `StorageBackupManager.java:128-131`
   - `FilesystemVolumeBackupBackend.java:533`
@@ -1223,9 +1277,12 @@ others are examples.
   → measure in the limit task, or use `createStorageStatistics()`.
 - **P1-12 (P2).** Threads per reader after A1 + P1-7: poll, apply, watermark, maintenance, storage
   checks, retention. Compose poll + watermark + budget as Agrona agents on one `AgentRunner`.
-- **S1 (P2; D-22).** Delete `resolveSameNamePublication`, `isIdenticalPublication`,
-  `inspectPublication` and `RetryPublicationInspection` from `M/node/backup/FilesystemVolumeBackupBackend.java`;
-  keep `.publish.lock`.
+- **S1 (P2; D-22).** Retain same-name publication checks in
+  `M/node/backup/FilesystemVolumeBackupBackend.java`: a crash retry is idempotent only for the
+  same archive identity, and a conflicting ID must not replace a durable backup. The ZIP digest
+  runs outside `.publish.lock`; a file-stamp check retries if the destination changes before the
+  locked publish. Removing this path would reintroduce data loss or hold the shared lock while
+  hashing a potentially large archive.
 - **S3, S5, S6.**
   - S3: one `section(lock, invalidateOnFailure, supplier)` helper in `StorageGraphCoordinator`
     (`:119-264`).
@@ -1254,7 +1311,7 @@ others are examples.
 
 ### N3 — Archive retention is never triggered in a deployed cluster (P1; found in the rev-5 documentation pass)
 
-**Evidence.**
+**Original evidence (before this change).**
 - `ReplicationLogRetention.deleteThrough` has exactly one production caller:
   `StorageBackupManager` (`M/node/backup/StorageBackupManager.java:478-482`).
 - `StorageBackupManager` is wired only for the backup-reader (`M/node/NodeAssembly.java`,
@@ -1263,28 +1320,36 @@ others are examples.
   (`M/node/aeron/AeronRetentionOwner.java:43-61`), because retention requires an embedded writer
   with configured retention readers. `advanceRetention` therefore only logs "preserving Archive
   history".
-- The writer, which owns the Archive and collects the watermarks, never calls `deleteThrough`.
-
-Only tests and the soak call it directly.
+- The writer, which owns the Archive and collects the watermarks, did not call `deleteThrough`;
+  only tests and the soak did.
 
 **Consequence.** The writer's Archive grows without bound in production. The quorum and watermark
 machinery is inert.
 
-**Fix.** Choose one:
-1. **(Recommended)** The writer runs retention itself, on its maintenance scheduler. The boundary
-   is the minimum of the quorum's durable watermarks, bounded to complete segments. This removes
-   the dependency on backups entirely: it is safe as long as every listed reader has confirmed,
-   which is exactly the quorum rule.
-2. The backup-reader asks the writer to delete through a control message. This means a new
-   protocol message, so it is not preferred.
+**Fix.** The writer runs retention on its maintenance scheduler. Each pass requests its latest
+durable boundary; the retention controller caps deletion at the minimum durable quorum watermark
+and complete Archive segments. Incomplete quorums and unavailable retention preserve history.
+
+**Current status.** `NodeLifecycle` schedules Aeron writer retention at the configurable
+`ECLIPSE_DATAGRID_AERON_RETENTION_INTERVAL_MINUTES` cadence (default one minute). Each pass asks
+for the latest durable writer position; `AeronArchiveRetention` caps that request at the complete
+reader-quorum watermark and purges only complete durable segments. An incomplete quorum or a
+quorum that has not crossed a segment preserves history. The backup-reader path remains
+unsupported and no control-message protocol was added. Controller quorum-capping tests exist;
+the scheduler-specific writer-plus-two-readers test remains open.
 
 **After A1,** watermarks report the reader's mark (`sequence`, `prepareStartPosition`).
 
-**Test.** A writer plus 2 retention readers with a small segment length. After the readers pass
-two segments, the writer's maintenance deletes the older segment. With one reader lagging, nothing
-is deleted.
+**Remaining test.** A writer plus 2 retention readers with a small segment length. Drive the
+writer's scheduled pass: after both readers pass two segments, it deletes the older segment; while
+one reader has not crossed a complete segment, the pass preserves history and maintenance health
+stays healthy.
 
 ## 7. Security and documentation
+
+- **Protocol constraint.** PerunCS does not provide node authentication or transport encryption;
+  neither is required or permitted. No trusted-network acknowledgement setting is part of the
+  configuration.
 
 - **SEC1.** Default Aeron directory (`M/node/aeron/AeronSettings.java:251-258`) →
   `<storage>/aeron`; reject `/tmp` in production.

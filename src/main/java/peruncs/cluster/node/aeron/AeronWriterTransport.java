@@ -7,11 +7,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.api.ReplicationState;
-import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.errors.ReplicationPositionUnavailableException;
-import peruncs.cluster.errors.ReplicationUnavailableException;
-import peruncs.cluster.errors.ReseedRequiredException;
-import peruncs.cluster.errors.WriterFencedException;
+import peruncs.cluster.errors.*;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.RejectingPersistenceTarget;
 import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
@@ -28,6 +24,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -54,6 +51,7 @@ final class AeronWriterTransport {
     private final Path leaseDirectory;
     /// Heartbeat staleness bound for the writer fencing lease.
     private final long leaseStalenessMillis;
+    private final int indexValidationMaxObjects;
     private volatile WriterFencingLease writerLease;
     /* Fencing token captured when the lease is acquired. Writer checkpoints
      * and the position supplier read this snapshot instead of performing a
@@ -77,7 +75,8 @@ final class AeronWriterTransport {
     private ReplicationPublisher distributor;
     private ReplicationPositionProvider positionProvider;
 
-    AeronWriterTransport(final AeronTransport facade, final Path leaseDirectory, final Long leaseStalenessMillis) {
+    AeronWriterTransport(final AeronTransport facade, final Path leaseDirectory, final Long leaseStalenessMillis,
+                         final int indexValidationMaxObjects) {
         this.facade = facade;
         this.leaseDirectory = leaseDirectory;
         /* Heartbeat staleness bound for the fencing lease: configurable so
@@ -85,6 +84,7 @@ final class AeronWriterTransport {
          * default keeps takeover within half a minute. */
         this.leaseStalenessMillis = leaseStalenessMillis == null || leaseStalenessMillis <= 0L
                 ? DEFAULT_LEASE_STALENESS_MILLIS : leaseStalenessMillis;
+        this.indexValidationMaxObjects = indexValidationMaxObjects;
         this.writerRecordingId.set(facade.settings().topology().recordingId());
     }
 
@@ -210,23 +210,20 @@ final class AeronWriterTransport {
         final Runnable writerIndexValidation = writerStorage == null
                 ? () -> {
                 }
-                : ClusterStoreIndexes.writerValidator(writerStorage);
-        return delegate -> new AeronStorageBinaryReplicationTarget(
-                delegate,
-                coordinator,
-                distributor,
-                sequence ->
-                {
-                    if (distributor instanceof ReplicationPublisher cluster) {
-                        cluster.messageIndex(sequence);
-                    }
-                },
-                () -> !(distributor instanceof ReplicationPublisher cluster) || !cluster.ignoreDistribution(),
-                /* The topology can change without replacing a Store root,
-                 * so every write validates live state using writer-confined
-                 * reusable traversal scratch. */
-                writerIndexValidation
-        );
+                : ClusterStoreIndexes.writerValidator(writerStorage, this.indexValidationMaxObjects);
+        final Predicate<Binary> commitTouchesIndexes = writerStorage == null
+                ? null : ClusterStoreIndexes.writerCommitTouchesIndexes(writerStorage);
+        return delegate -> new AeronStorageBinaryReplicationTarget(delegate, coordinator,
+                new AeronStorageBinaryReplicationTarget.TargetCallbacks(
+                        distributor,
+                        sequence -> {
+                            if (distributor instanceof ReplicationPublisher cluster) {
+                                cluster.messageIndex(sequence);
+                            }
+                        },
+                        () -> !(distributor instanceof ReplicationPublisher cluster) || !cluster.ignoreDistribution(),
+                        writerIndexValidation,
+                        commitTouchesIndexes));
     }
 
     /// Returns the lazily created position provider for the stream.

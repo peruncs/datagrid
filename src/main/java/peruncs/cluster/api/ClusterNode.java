@@ -1,5 +1,6 @@
 package peruncs.cluster.api;
 
+import peruncs.cluster.errors.BackupBusyException;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.errors.WrongRoleException;
@@ -10,6 +11,7 @@ import peruncs.cluster.node.replication.ReplicationMetrics;
 
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 
 /// One owned cluster-node lifecycle and its guarded Store.
 ///
@@ -36,8 +38,9 @@ public final class ClusterNode<T> implements AutoCloseable {
     /// `ECLIPSE_DATAGRID_AERON_CLUSTER_ID`, `ECLIPSE_DATAGRID_AERON_NODE_ID`,
     /// and `ECLIPSE_DATAGRID_AERON_STORE_GENERATION` are required on every
     /// replicated node; production nodes additionally require an explicit
-    /// `ECLIPSE_DATAGRID_AERON_WIRE_NONCE` and the trusted-network and
-    /// shared-lease acknowledgements.
+    /// `ECLIPSE_DATAGRID_AERON_WIRE_NONCE` and the shared-lease acknowledgement.
+    /// The replication protocol has no node authentication or transport
+    /// encryption, by design.
     ///
     /// Startup fails closed: when durable local state cannot be reconciled
     /// with the Archive, or any required setting is missing or inconsistent,
@@ -110,31 +113,21 @@ public final class ClusterNode<T> implements AutoCloseable {
         this.control().startStorageChecks();
     }
 
-    /// Stops a backup-reader at a durable boundary and creates a scheduled-slot backup.
+    /// Creates a backup asynchronously at a resolved replication boundary.
     ///
-    /// Only a backup-reader may call this method; other roles are rejected.
-    /// One backup runs at a time: a concurrent request is rejected as busy
-    /// (map it to a conflict response). Replication pauses at a resolved
-    /// cursor, resumes after the snapshot finishes, and remains failed
-    /// closed if resume fails, so a failed backup never silently restarts
-    /// reading from an ambiguous position.
+    /// A concurrent request completes exceptionally with [BackupBusyException].
+    /// The future completes with the published backup details or the operation
+    /// failure. Cancelling the future does not cancel the backup task.
     ///
-    /// @throws NodeException if the backup or
-    /// the resume fails
-    public void createScheduledBackup() {
-        this.assembly.backupNodeManager().createStorageBackup(false);
-    }
-
-    /// Stops a backup-reader at a durable boundary and creates a retained manual backup.
-    ///
-    /// Same role, single-flight, and stop/resume rules as
-    /// [#createScheduledBackup()]; the manual slot is retained beyond the
-    /// scheduled retention sweep.
-    ///
-    /// @throws NodeException if the backup or
-    /// the resume fails
-    public void createManualBackup() {
-        this.assembly.backupNodeManager().createStorageBackup(true);
+    /// @param slot scheduled or retained manual slot
+    /// @return completion of the backup
+    /// @throws WrongRoleException unless this is a backup-reader
+    public CompletableFuture<BackupInfo> createBackup(final BackupSlot slot) {
+        Objects.requireNonNull(slot, "slot");
+        if (this.role != NodeRole.BACKUP_READER) {
+            throw new WrongRoleException("createBackup is only available on a backup-reader");
+        }
+        return this.assembly.backupNodeManager().createStorageBackup(slot);
     }
 
     /// Returns one immutable status snapshot.
@@ -148,7 +141,8 @@ public final class ClusterNode<T> implements AutoCloseable {
         final StorageNodeControl control = this.control();
         return new NodeStatus(control.isWriter(), control.isReady(), control.isHealthy(),
                 control.isRunningStorageChecks(), control.readStorageSizeBytes(),
-                replication(control));
+                replication(control), this.role == NodeRole.BACKUP_READER
+                        ? this.assembly.backupNodeManager().backupStatus() : BackupStatus.empty());
     }
 
     private StorageNodeControl control() {

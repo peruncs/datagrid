@@ -13,10 +13,10 @@ import static peruncs.cluster.storage.aeron.checkpoint.AeronCheckpointCodec.*;
 ///
 /// The seven identity and progress fields name one reader's durable boundary:
 /// a token copied from a different reader, cluster, generation, recording, or
-/// writer epoch cannot authorize deletion. Integrity comes from the CRC32C
-/// trailer, which detects corruption; trust comes from the deployment
-/// boundary, since watermarks travel the isolated replication network and only
-/// configured reader identities are accepted.
+/// writer epoch cannot authorize deletion. The CRC32C trailer detects
+/// corruption, not the sender. Configured reader identities define quorum
+/// membership, not authorization. The protocol provides no node authentication
+/// or transport encryption, and neither is required.
 ///
 /// @param readerId        reader that produced the watermark
 /// @param clusterId       replication cluster identity

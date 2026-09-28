@@ -218,6 +218,22 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
+    /// A late watermark cannot roll back an already accepted reader boundary.
+    @Test
+    void lateOlderWatermarkIsDiscardedAfterNewerProgress() {
+        try (final AeronArchiveRetention retention = retention(() -> {
+        })) {
+            retention.recordReaderWatermark(AeronReaderWatermark.of(
+                    READER, CLUSTER, GENERATION, 1, 17, 4, 8_192));
+            assertTrue(retention.isSupported());
+
+            assertTrue(retention.offerReaderWatermark(AeronReaderWatermark.of(
+                    READER, CLUSTER, GENERATION, 1, 17, 3, 4_096)));
+            assertTrue(retention.isSupported(), "stale queued progress must not replace a newer quorum token");
+            assertNull(retention.failure(), "superseded progress must not be retained as a retryable failure");
+        }
+    }
+
     /// Verifies a decoded control watermark completes the quorum without cursor re-encoding.
     @Test
     void decodedControlWatermarkCompletesTheQuorumWithoutCursorReencoding() {
@@ -329,6 +345,39 @@ class AeronArchiveRetentionTest {
                 "the quorum minimum position 9MiB crosses exactly one complete 8MiB segment");
         assertEquals(purged, purgedAt.get(),
                 "the purge must run through the segment boundary, not the raw watermark position");
+        retention.close();
+    }
+
+    /// A writer boundary ahead of a complete reader quorum caps retention safely.
+    @Test
+    void laggingReaderQuorumDefersDeletionWithoutFailingMaintenance() {
+        final AtomicInteger purges = new AtomicInteger();
+        final AeronArchiveRetention retention = retentionWithRecordedPosition(
+                16L * 1_024 * 1_024, ignored -> purges.incrementAndGet());
+        retention.recordReaderWatermark(AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 4, 8_192));
+
+        final ReplicationLogRetention.MaintenanceResult result = retention.deleteThrough(deletionCursor(
+                12L * 1_024 * 1_024));
+
+        assertEquals(ReplicationLogRetention.MaintenanceResult.Status.NOTHING_TO_DELETE, result.status());
+        assertEquals(0, purges.get());
+        assertNull(retention.failure());
+        retention.close();
+    }
+
+    @Test
+    void incompleteReaderQuorumPreservesArchiveHistory() {
+        final UUID secondReader = UUID.randomUUID();
+        final AeronArchiveRetention retention = retention(Set.of(READER, secondReader), null);
+        retention.recordReaderWatermark(AeronReaderWatermark.of(
+                READER, CLUSTER, GENERATION, 1, 17, 4, 8_192));
+
+        final ReplicationLogRetention.MaintenanceResult result = retention.deleteThrough(deletionCursor(8_192));
+
+        assertEquals(ReplicationLogRetention.MaintenanceResult.Status.NOTHING_TO_DELETE, result.status());
+        assertFalse(retention.isSupported());
+        assertNull(retention.failure());
         retention.close();
     }
 

@@ -33,10 +33,6 @@ import static java.lang.System.Logger.Level.DEBUG;
 import static java.lang.System.Logger.Level.WARNING;
 
 /// Owns one node's MediaDriver, Aeron client, and Archive client lifecycle.
-///
-/// Data Grid provides no node authentication or transport encryption. Keep
-/// the control, replay, replication, and watermark channels on a trusted
-/// network.
 final class AeronRuntime implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(AeronRuntime.class.getName());
     private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;

@@ -67,7 +67,8 @@ class AeronCrashMatrixIT {
         final Path stdout = base.resolve("control/%s-stdout.log".formatted(mode));
         final Path stderr = base.resolve("control/%s-stderr.log".formatted(mode));
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        final Process process = new ProcessBuilder(javaExecutable, "--enable-preview", "-cp", ChildJava.classpath(),
+        final Process process = new ProcessBuilder(javaExecutable, "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "-cp", ChildJava.classpath(),
                 "-Ddg.crash.base=%s".formatted(base), "-Ddg.crash.mode=%s".formatted(mode),
                 AeronCrashChildMain.class.getName())
                 .redirectOutput(stdout.toFile())

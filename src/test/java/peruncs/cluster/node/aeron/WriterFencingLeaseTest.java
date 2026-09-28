@@ -64,7 +64,8 @@ class WriterFencingLeaseTest {
         final UUID generation = UUID.randomUUID();
         final Process child = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(), WriterLeaseTakeoverChildMain.class.getName(),
                 volume.toString(), cluster.toString(), generation.toString())
                 .redirectErrorStream(true).start();
@@ -101,7 +102,8 @@ class WriterFencingLeaseTest {
         final UUID generation = UUID.randomUUID();
         final Process child = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-Ddg.lease.suspendHeartbeat=false",
                 "-cp", ChildJava.classpath(), WriterLeaseTakeoverChildMain.class.getName(),
                 volume.toString(), cluster.toString(), generation.toString())
@@ -296,7 +298,8 @@ class WriterFencingLeaseTest {
         final int childOffers = 32;
         final Process child = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(), WriterLeaseSharedVolumeChildMain.class.getName(),
                 volume.toString(), clusterB.toString(), generationB.toString(),
                 Integer.toString(childOffers))

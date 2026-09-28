@@ -24,9 +24,10 @@ import java.util.function.*;
 
 /// Writer-owned Archive retention controller.
 ///
-/// Watermarks are trusted by network isolation and configured identity, not by
-/// signatures: only watermarks from configured readers naming this writer are
-/// accepted. This component deliberately owns no transport lifecycle. The
+/// Configured reader IDs define quorum membership, not authorization. The
+/// protocol has no node authentication or transport encryption, and neither
+/// is required; any publisher that can reach the watermark stream can report
+/// progress. This component deliberately owns no transport lifecycle. The
 /// provider supplies a small writer access view, so retention cannot
 /// accidentally close or replace the publication while validating a reader
 /// watermark.
@@ -232,22 +233,21 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         if (cursor.logicalSequence() < 0)
             throw new IllegalArgumentException("retention cursor must name a resolved sequence");
         try {
+            final AeronWriterRecoveryBoundary requested = this.requestedBoundary(cursor);
+            this.ensureWriter.run();
+            final long activeRecordingId = this.recordingId.getAsLong();
+            if (requested.recordingId() != activeRecordingId)
+                throw new IllegalArgumentException("retention watermark recording does not match the active writer");
             if (!this.quorum.isComplete()) {
-                throw new IllegalStateException(
-                        "Aeron reader quorum has not acknowledged the requested boundary; missing=%s".formatted(this.quorum.missingReaders()));
+                return new MaintenanceResult(MaintenanceResult.Status.NOTHING_TO_DELETE, 0L,
+                        "reader quorum is incomplete; Archive history is retained");
             }
             final AeronReaderWatermark quorumWatermark = this.quorum.aggregate();
-            final AeronWriterRecoveryBoundary requested = this.requestedBoundary(cursor);
-            if (quorumWatermark.sequence() < requested.sequence() ||
-                quorumWatermark.sequence() == requested.sequence() &&
-                quorumWatermark.position() < requested.position())
-                throw new IllegalStateException("Aeron reader quorum has not reached the requested sequence");
-            final long targetPosition = Math.min(quorumWatermark.position(), requested.position());
-            this.ensureWriter.run();
-            this.requireWithinDurableBoundary(requested.sequence(), targetPosition);
-            final long activeRecordingId = this.recordingId.getAsLong();
-            if (requested.recordingId() != activeRecordingId || quorumWatermark.recordingId() != activeRecordingId)
+            if (quorumWatermark.recordingId() != activeRecordingId)
                 throw new IllegalArgumentException("retention watermark recording does not match the active writer");
+            final long targetPosition = Math.min(quorumWatermark.position(), requested.position());
+            final long targetSequence = Math.min(quorumWatermark.sequence(), requested.sequence());
+            this.requireWithinDurableBoundary(targetSequence, targetPosition);
             final long start = this.recordingPositions.startPosition().applyAsLong(activeRecordingId);
             final long boundary = AeronArchive.segmentFileBasePosition(start, targetPosition,
                     this.termLength.getAsInt(), this.segmentLength.getAsInt());
@@ -430,6 +430,19 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         }
         this.requireWithinDurableBoundary(watermark.sequence(), watermark.position());
         final AeronReaderWatermark previous = this.quorum.latest(watermark.readerId());
+        if (previous != null && previous.clusterId().equals(watermark.clusterId()) &&
+            previous.storeGeneration().equals(watermark.storeGeneration()) &&
+            previous.writerEpoch() == watermark.writerEpoch() &&
+            previous.recordingId() == watermark.recordingId()) {
+            if (watermark.sequence() < previous.sequence()) return;
+            if (watermark.sequence() == previous.sequence()) {
+                if (watermark.position() == previous.position()) return;
+                throw new IllegalArgumentException("reader watermark conflicts with its accepted sequence");
+            }
+            if (watermark.position() <= previous.position()) {
+                throw new IllegalArgumentException("reader watermark position did not advance");
+            }
+        }
         this.quorum.accept(watermark);
         final AeronReaderWatermark completeBoundary = this.completeBoundary(this.quorum);
         /* A watermark that does not advance the complete quorum cannot authorize a

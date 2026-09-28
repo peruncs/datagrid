@@ -10,12 +10,14 @@ class AeronFullPathBenchmarkTest {
     /// Verifies the benchmark measures the store, archive, reader-import, and cursor path and reports sane percentiles.
     @Test
     void measuresStoreArchiveReaderImportAndCursorPath() throws Exception {
-        final int payload = 64 * 1024;
-        final AeronFullPathBenchmark.Result result = AeronFullPathBenchmark.measure(payload, 4, 8);
+        final int payload = Integer.getInteger("aeron.benchmark.payload.bytes", 64 * 1024);
+        final int warmup = Integer.getInteger("aeron.benchmark.warmup", 4);
+        final int iterations = Integer.getInteger("aeron.benchmark.iterations", 8);
+        final AeronFullPathBenchmark.Result result = AeronFullPathBenchmark.measure(payload, warmup, iterations);
         System.out.printf("Aeron full-path regression: tx/s=%.1f MiB/s=%.2f p99-us=%.1f heap-bytes/tx=%d%n",
                 result.transactionsPerSecond(), result.mebibytesPerSecond(), result.p99Nanos() / 1_000.0,
                 result.heapBytesPerTransaction());
-        assertEquals(8, result.iterations());
+        assertEquals(iterations, result.iterations());
         assertTrue(result.p50Nanos() > 0L);
         assertTrue(result.p99Nanos() >= result.p50Nanos());
         /* Throughput and allocation numbers are deliberately reported, not hard-coded

@@ -3,10 +3,12 @@ package peruncs.cluster.storage.aeron.writer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfer;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
+import java.util.function.Predicate;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -21,38 +23,53 @@ import static org.eclipse.serializer.util.X.notNull;
 /// commit then waits for its Archive acknowledgement with no coordinator lock
 /// held, so a slow Archive never blocks health, maintenance, or dispose.
 public final class AeronStorageBinaryReplicationTarget implements PersistenceTarget<Binary> {
+    /// Provider callbacks associated with one target.
+    ///
+    /// @param dictionarySource      source of staged type dictionaries, or `null`
+    /// @param committedSequence     callback for committed sequence numbers
+    /// @param distributionEnabled   whether this target currently replicates writes
+    /// @param writerIndexValidation full writer graph check, or `null`
+    /// @param commitTouchesIndexes  entity type pre-filter, or `null` to validate every write
+    public record TargetCallbacks(
+            ReplicationPublisher dictionarySource,
+            LongConsumer committedSequence,
+            BooleanSupplier distributionEnabled,
+            Runnable writerIndexValidation,
+            Predicate<Binary> commitTouchesIndexes
+    ) {
+        public TargetCallbacks {
+            committedSequence = notNull(committedSequence);
+            distributionEnabled = notNull(distributionEnabled);
+        }
+    }
+
     private final PersistenceTarget<Binary> delegate;
     private final AeronReplicationWriteCoordinator coordinator;
     private final ReplicationPublisher dictionarySource;
     private final LongConsumer committedSequence;
     private final BooleanSupplier distributionEnabled;
     private final Runnable writerIndexValidation;
+    private final Predicate<Binary> commitTouchesIndexes;
 
-        /// Creates a target with the provider-owned dictionary, sequence and
-    /// admission callbacks.
+    /// Creates a target with its provider-owned callbacks.
     ///
-    /// The callbacks are deliberately supplied by the provider so that local
-    /// Store acceptance and the Aeron checkpoint transition remain one owner-
-    /// serialized operation.
+    /// The provider keeps Store acceptance and checkpoint transitions under
+    /// the same writer owner.
     ///
-    /// @param delegate              local Store target
-    /// @param coordinator           Aeron transaction coordinator
-    /// @param dictionarySource      source of staged type dictionaries
-    /// @param committedSequence     callback for the committed sequence
-    /// @param distributionEnabled   predicate that enables replication
-    /// @param writerIndexValidation writer index check, or `null` to skip
+    /// @param delegate    local Store target
+    /// @param coordinator Aeron transaction coordinator
+    /// @param callbacks   writer callbacks
     public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
                                                final AeronReplicationWriteCoordinator coordinator,
-                                               final ReplicationPublisher dictionarySource,
-                                               final LongConsumer committedSequence,
-                                               final BooleanSupplier distributionEnabled,
-                                               final Runnable writerIndexValidation) {
+                                               final TargetCallbacks callbacks) {
         this.delegate = notNull(delegate);
         this.coordinator = notNull(coordinator);
-        this.dictionarySource = dictionarySource;
-        this.committedSequence = notNull(committedSequence);
-        this.distributionEnabled = notNull(distributionEnabled);
-        this.writerIndexValidation = writerIndexValidation;
+        final TargetCallbacks checked = notNull(callbacks);
+        this.dictionarySource = checked.dictionarySource();
+        this.committedSequence = checked.committedSequence();
+        this.distributionEnabled = checked.distributionEnabled();
+        this.writerIndexValidation = checked.writerIndexValidation();
+        this.commitTouchesIndexes = checked.commitTouchesIndexes();
     }
 
         /// Creates a target with replication enabled for every write and no
@@ -63,8 +80,9 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// @return target that replicates every write
     static AeronStorageBinaryReplicationTarget create(final PersistenceTarget<Binary> delegate,
                                                    final AeronReplicationWriteCoordinator coordinator) {
-        return new AeronStorageBinaryReplicationTarget(delegate, coordinator, null, ignored -> {
-        }, () -> true, null);
+        return new AeronStorageBinaryReplicationTarget(delegate, coordinator,
+                new TargetCallbacks(null, ignored -> {
+                }, () -> true, null, null));
     }
 
         /// Creates a target with the provider-owned callbacks but no writer-side
@@ -81,8 +99,8 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                                                    final ReplicationPublisher dictionarySource,
                                                    final LongConsumer committedSequence,
                                                    final BooleanSupplier distributionEnabled) {
-        return new AeronStorageBinaryReplicationTarget(delegate, coordinator, dictionarySource,
-                committedSequence, distributionEnabled, null);
+        return new AeronStorageBinaryReplicationTarget(delegate, coordinator,
+                new TargetCallbacks(dictionarySource, committedSequence, distributionEnabled, null, null));
     }
 
         /// Runs the writer-side index check now.
@@ -132,7 +150,13 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
         /* Writer-side index enforcement before any publication step: a direct
          * external registration fails here, ahead of the local Store write
          * and the Aeron prepare/commit below. */
-        this.validateWriterState();
+        if (this.commitTouchesIndexes == null || this.commitTouchesIndexes.test(data)) {
+            try {
+                this.validateWriterState();
+            } catch (final IllegalArgumentException | IllegalStateException rejected) {
+                throw new WriteRejectedException("writer index validation rejected the Store write", rejected);
+            }
+        }
         if (this.dictionarySource != null) {
             final String dictionary = this.dictionarySource.consumeTypeDictionary();
             if (dictionary != null) {

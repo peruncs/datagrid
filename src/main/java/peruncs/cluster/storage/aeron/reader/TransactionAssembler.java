@@ -4,7 +4,6 @@ import io.aeron.archive.client.ArchiveException;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import peruncs.cluster.errors.CorruptReplicationDataException;
@@ -833,9 +832,7 @@ final class TransactionAssembler {
             final int oldCapacity = current == null ? 0 : current.capacity();
             final long doubled = oldCapacity == 0 ? Math.min(required, 64 * 1024L) : (long) oldCapacity * 2L;
             final int capacity = (int) Math.min(this.maxBytes, Math.max(required, doubled));
-            final ByteBuffer replacementStorage = dictionary
-                    ? XMemory.allocateDirectNative(capacity)
-                    : this.receiver.allocateNativeBuffer(capacity);
+            final ByteBuffer replacementStorage = this.receiver.allocateNativeBuffer(capacity);
             try {
                 final UnsafeBuffer replacement = new UnsafeBuffer(replacementStorage);
                 final int copied = dictionary ? this.dictionaryOffset : this.dataOffset;
@@ -851,13 +848,11 @@ final class TransactionAssembler {
                     this.dataCrcView = replacementStorage.duplicate();
                 }
             } catch (final RuntimeException | Error failure) {
-                if (dictionary) XMemory.deallocateDirectByteBuffer(replacementStorage);
-                else this.receiver.releaseNativeBuffer(replacementStorage);
+                this.receiver.releaseNativeBuffer(replacementStorage);
                 throw failure;
             }
             if (current != null) {
-                if (dictionary) XMemory.deallocateDirectByteBuffer(current);
-                else this.receiver.releaseNativeBuffer(current);
+                this.receiver.releaseNativeBuffer(current);
             }
         }
 
@@ -878,7 +873,7 @@ final class TransactionAssembler {
         /// @param dataTransferred whether the receiver already owns the Store storage
         void dispose(final boolean dataTransferred) {
             if (this.dictionaryStorage != null) {
-                XMemory.deallocateDirectByteBuffer(this.dictionaryStorage);
+                this.receiver.releaseNativeBuffer(this.dictionaryStorage);
                 this.dictionaryStorage = null;
             }
             if (!dataTransferred && this.dataStorage != null) {

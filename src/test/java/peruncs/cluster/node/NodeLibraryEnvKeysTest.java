@@ -5,6 +5,7 @@ import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.errors.NodeException;
 
 import java.util.Map;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -118,6 +119,22 @@ class NodeLibraryEnvKeysTest {
         assertThrows(NodeException.class, () -> env(Map.of(
                 NodeSettingsSource.EnvKeys.BACKUP_CLOSE_TIMEOUT_MILLIS, "0"))
                 .backupCloseTimeoutMillis());
+    }
+
+    @Test
+    void lifecycleAppliesTheRetentionIntervalDefaultAndValidation() {
+        assertEquals(Duration.ofMinutes(1), NodeCollaborators.maintenanceInterval(
+                env(Map.of()).aeronRetentionIntervalMinutes(),
+                NodeSettingsSource.EnvKeys.AERON_RETENTION_INTERVAL_MINUTES, 1));
+        final Integer configured = env(Map.of(
+                NodeSettingsSource.EnvKeys.AERON_RETENTION_INTERVAL_MINUTES, "2"))
+                .aeronRetentionIntervalMinutes();
+        assertEquals(Duration.ofMinutes(2), NodeCollaborators.maintenanceInterval(
+                configured, NodeSettingsSource.EnvKeys.AERON_RETENTION_INTERVAL_MINUTES, 1));
+        assertThrows(NodeException.class, () -> NodeCollaborators.maintenanceInterval(
+                env(Map.of(NodeSettingsSource.EnvKeys.AERON_RETENTION_INTERVAL_MINUTES, "0"))
+                        .aeronRetentionIntervalMinutes(),
+                NodeSettingsSource.EnvKeys.AERON_RETENTION_INTERVAL_MINUTES, 1));
     }
 
         /// An unset role is absent and resolves through [NodeRole] to the

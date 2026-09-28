@@ -103,7 +103,8 @@ final class BackupCrashMatrixIT {
         Files.deleteIfExists(control.resolve("release"));
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final ProcessBuilder builder = new ProcessBuilder(javaExecutable,
-                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
                 "-Ddg.crash.base=%s".formatted(base),
                 "-Ddg.crash.point=%s".formatted(point),

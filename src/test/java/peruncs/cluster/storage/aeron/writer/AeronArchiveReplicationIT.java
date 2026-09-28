@@ -538,6 +538,57 @@ class AeronArchiveReplicationIT {
         }
     }
 
+    /// Retention resumes an Archive recording with a fresh publication at its stopped position.
+    @Test
+    void retentionResumeKeepsPublisherWritable() throws Exception {
+        final int controlPort = freePort();
+        final String directory = Files.createTempDirectory("datagrid-aeron-retention-resume-").toString();
+        final File archiveDirectory = new File(directory, "archive");
+        final String controlChannel = "aeron:udp?endpoint=localhost:%s".formatted(controlPort);
+        final String liveChannel = "aeron:ipc?term-length=65536|mtu=1408";
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(64 * 1024).mtuLength(1408).chunkSize(4 * 1024)
+                .maxTransactionBytes(256 * 1024).offerTimeoutNanos(10_000_000_000L).build();
+        final MediaDriver.Context mediaContext = new MediaDriver.Context()
+                .aeronDirectoryName(directory).threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true).dirDeleteOnShutdown(true);
+        final AeronArchive.Context clientContext = new AeronArchive.Context()
+                .aeronDirectoryName(directory).controlRequestChannel(controlChannel)
+                .controlResponseChannel(CONTROL_RESPONSE_CHANNEL).messageTimeoutNs(10_000_000_000L);
+        final Archive.Context archiveContext = new Archive.Context()
+                .aeronDirectoryName(directory).archiveDir(archiveDirectory).deleteArchiveOnStart(true)
+                .threadingMode(ArchiveThreadingMode.SHARED).segmentFileLength(64 * 1024)
+                .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
+
+        try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
+             AeronArchive archive = AeronArchive.connect(clientContext)) {
+            final UUID clusterId = UUID.randomUUID();
+            try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
+                    archive, liveChannel, 1001, configuration, clusterId, 1, 0,
+                    AeronReplicationEnvelope.defaultWireNonce(clusterId))) {
+                await(publisher.publication()::isConnected, 10_000);
+                publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
+                final long recordingId = awaitRecordingId(publisher);
+                final long firstStop = publisher.publication().position();
+                assertTrue(firstStop > 64 * 1024, "test transaction must reach a purgeable segment");
+
+                assertTrue(publisher.purgeSegmentsWhileWritesPaused(64 * 1024L) > 0,
+                        "retention must purge a complete historical segment");
+                assertTrue(publisher.recordingIsActive(), "retention must resume the recording");
+                assertFalse(publisher.isFailed(), "publication replacement must keep the writer usable");
+
+                publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1, 2, 3})});
+                final long resumedStop = publisher.publication().position();
+                assertTrue(resumedStop > firstStop, "publication must advance after retention resumes it");
+                assertEquals(recordingId, awaitRecordingId(publisher));
+                await(() -> archive.getMaxRecordedPosition(recordingId) >= resumedStop, 10_000);
+            }
+        } finally {
+            delete(archiveDirectory);
+            delete(new File(directory));
+        }
+    }
+
         /// A closed Archive must not make the publisher report a successful close while
     /// its recording may still be active. The wrapper is retained so a caller can
     /// retry the Archive stop after reconnecting the control client.

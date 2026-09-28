@@ -484,7 +484,7 @@
 					<artifactId>maven-surefire-plugin</artifactId>
 					<version>3.6.0</version>
 					<configuration>
-						<argLine>--enable-preview</argLine>
+						<argLine>--enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 					</configuration>
 				</plugin>
 				<plugin>
@@ -492,7 +492,7 @@
 					<artifactId>maven-failsafe-plugin</artifactId>
 					<version>3.6.0</version>
 					<configuration>
-						<argLine>--enable-preview</argLine>
+						<argLine>--enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 					</configuration>
 				</plugin>
 				<plugin>

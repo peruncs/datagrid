@@ -8,11 +8,15 @@ covers only building, configuring, and operating a node.
 
 ## Build
 
-Requires Java 27 exactly and Maven 3.9+. Every JVM using the library needs:
+Requires Java 27 exactly and Maven 3.9+. Every JVM running a node needs:
 
 ```text
 --enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED
 ```
+
+The first two flags enable Java 27's preview Vector API, which Eclipse
+Store's JVector index uses for SIMD acceleration ([configuration guide](https://docs.eclipsestore.io/manual/gigamap/indexing/jvector/configuration.html)).
+Maven applies these flags to its test and integration-test JVMs.
 
 On the module path, target the export at `org.eclipse.serializer.base`
 instead of `ALL-UNNAMED`.
@@ -83,7 +87,6 @@ ECLIPSE_DATAGRID_AERON_CLUSTER_ID=<stable cluster UUID>
 ECLIPSE_DATAGRID_AERON_NODE_ID=<stable node UUID>
 ECLIPSE_DATAGRID_AERON_STORE_GENERATION=<Store generation UUID>
 ECLIPSE_DATAGRID_AERON_WIRE_NONCE=<same non-zero value on all nodes>
-ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK=true
 ECLIPSE_DATAGRID_STORAGE_LIMIT_GB=<limit>                              # writer and reader
 ECLIPSE_DATAGRID_STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES=<minutes>      # writer and reader
 ```
@@ -120,11 +123,11 @@ network file system. The backup volume is the only path that may be shared.
 
 ### Network
 
-- Run replication on an isolated network (VPN, firewall rules, Kubernetes
-  NetworkPolicies) covering the live, replay, Archive-control, and watermark
-  endpoints.
-- Replace the loopback channel defaults with routable private addresses.
-  Production mode rejects loopback and wildcard endpoints.
+PerunCS replication deliberately has no node authentication or transport
+encryption, and it does not require either. Replace loopback channel defaults
+with addresses routable between peers; production mode rejects loopback and
+wildcard endpoints.
+
 - The development live channel is
   `control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=datagrid-<cluster>`.
 - **Several clusters on one network:** give each cluster its own
@@ -148,8 +151,10 @@ network file system. The backup volume is the only path that may be shared.
 | `BACKUP_CLOSE_TIMEOUT_MILLIS` | 60,000 | Close waits this long for a running backup |
 | `KEPT_BACKUPS_COUNT` | 3 | Scheduled backups retained |
 | `BACKUP_INTERVAL_MINUTES` | 120 | Backup-reader backup cadence |
+| `AERON_RETENTION_INTERVAL_MINUTES` | 1 | Writer Archive retention cadence; lagging/incomplete reader quorums preserve history |
 | `GC_INTERVAL_MINUTES` | 60 (30 on backup-reader) | Full Store GC and cache check cadence |
 | `DATA_MERGER_TIMEOUT`, `DATA_MERGER_LIMIT`, `DATA_MERGER_APPLY_TIMEOUT` | built-in | Reader apply tuning |
+| `INDEX_VALIDATION_MAX_OBJECTS` | 65,536 | Maximum index-relevant objects and collection entries inspected per validation scan |
 | `AERON_LEASE_STALENESS_MILLIS` | built-in | Writer lease staleness bound |
 
 ## Operations
@@ -171,17 +176,21 @@ A node reporting `RESEED_REQUIRED` needs the same procedure.
 `ClusterNode` exposes:
 
 - `status()`: an immutable `NodeStatus` with the role, `ready`, `healthy`,
-  storage bytes, and `ReplicationStatus` (state, sequences, lag). Operator
+  storage bytes, `ReplicationStatus` (state, sequences, lag), and backup-reader
+  status for backup and post-publication maintenance failures. Operator
   actions:
   - `FAILED`: stop serving and inspect;
   - `DEGRADED`: may serve, but fix the dependency;
   - `RESEED_REQUIRED`: stop and reseed.
 - `startStorageChecks()`: periodic Store checks (writer and reader).
-- `createScheduledBackup()` / `createManualBackup()`: backup-reader only. A
-  concurrent request throws `BackupBusyException`.
+- `createBackup(BackupSlot)`: backup-reader only; returns a
+  `CompletableFuture<BackupInfo>`. A concurrent request completes the future
+  exceptionally with `BackupBusyException`.
 
-These are in-process calls without authentication. If you expose them over a
-network, securing that endpoint is the application's job. A typical mapping:
+These are in-process calls without authentication. Cluster replication
+deliberately has no node authentication or transport encryption. If you expose
+these calls through a separate network service, endpoint policy belongs to the
+application. A typical mapping:
 
 - `BackupBusyException` → 409;
 - not ready or unhealthy → 503;
@@ -200,13 +209,10 @@ network, securing that endpoint is the application's job. A typical mapping:
 
 - **Enabling retention:** set `ECLIPSE_DATAGRID_AERON_RETENTION_READERS=<reader UUIDs, comma-separated>`
   on the writer only, and set the watermark channel and stream on every node.
-- **Behaviour:** the writer collects reader confirmations and deletes Archive
-  segments only once every listed reader has confirmed it. Without the list,
-  history is kept forever.
-- **Known gap:** no production code path currently triggers this deletion.
-  Backups run on the backup-reader, whose retention reports "unsupported",
-  and the writer never starts a deletion itself. Until this is fixed
-  (`OPUS_REVIEW.md`, N3), plan Archive capacity as if history grows forever.
+- **Behaviour:** the writer checks retention on its maintenance schedule and
+  deletes complete Archive segments only after every listed reader has
+  confirmed the boundary. Without the list or a complete quorum, history is
+  kept.
 - **Capacity procedure:**
   1. Alert when `archiveUsableSpaceBytes` approaches
      `ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES` (below it, writes are

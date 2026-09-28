@@ -12,6 +12,8 @@ import java.util.Objects;
 ///
 /// @since 1.0
 public interface NodeSettingsSource {
+    /// Default limit for index-relevant objects and collection entries in one validation scan.
+    int DEFAULT_INDEX_VALIDATION_MAX_OBJECTS = 65_536;
     /// Creates an environment-backed provider using the process environment.
     ///
     /// @return settings provider
@@ -51,6 +53,33 @@ public interface NodeSettingsSource {
     /// @return property value, or `null`
     default String replicationProperty(final String name) {
         return null;
+    }
+
+    /// Maximum number of index-relevant objects and collection entries per validation scan.
+    ///
+    /// @return configured positive bound, or 65,536
+    default int indexValidationMaxObjects() {
+        return this.indexValidationMaxObjects(DEFAULT_INDEX_VALIDATION_MAX_OBJECTS);
+    }
+
+    /// Returns the configured validation bound or the supplied default.
+    ///
+    /// A blank value uses the supplied default; malformed or non-positive values are rejected.
+    ///
+    /// @param defaultValue bound to use when the setting is absent
+    /// @return configured or default positive bound
+    default int indexValidationMaxObjects(final int defaultValue) {
+        if (defaultValue <= 0) throw new IllegalArgumentException("defaultValue must be positive");
+        final String key = EnvKeys.INDEX_VALIDATION_MAX_OBJECTS;
+        final String configured = this.replicationProperty(key);
+        if (configured == null || configured.isBlank()) return defaultValue;
+        try {
+            final int maximum = Integer.parseInt(configured.trim());
+            if (maximum > 0) return maximum;
+        } catch (final NumberFormatException ignored) {
+            throw new IllegalArgumentException(key + " must be a positive integer", ignored);
+        }
+        throw new IllegalArgumentException(key + " must be a positive integer");
     }
 
     /// Maximum time to wait for active Store graph sections during close.
@@ -111,6 +140,13 @@ public interface NodeSettingsSource {
     ///
     /// @return interval in minutes, or `null` for the node default
     default Integer backupIntervalMinutes() {
+        return null;
+    }
+
+    /// Returns the Archive retention maintenance interval in minutes.
+    ///
+    /// @return configured interval, or `null` for the one-minute default
+    default Integer aeronRetentionIntervalMinutes() {
         return null;
     }
 
@@ -197,6 +233,8 @@ public interface NodeSettingsSource {
         public static final String GRAPH_DRAIN_TIMEOUT_MILLIS = "ECLIPSE_DATAGRID_GRAPH_DRAIN_TIMEOUT_MILLIS";
         /// Maximum close wait for an active backup export.
         public static final String BACKUP_CLOSE_TIMEOUT_MILLIS = "ECLIPSE_DATAGRID_BACKUP_CLOSE_TIMEOUT_MILLIS";
+        /// Maximum index-relevant objects and collection entries visited in one validation scan.
+        public static final String INDEX_VALIDATION_MAX_OBJECTS = "ECLIPSE_DATAGRID_INDEX_VALIDATION_MAX_OBJECTS";
         /// Writer lease staleness environment variable.
         public static final String WRITER_LEASE_STALENESS_MILLIS = "ECLIPSE_DATAGRID_AERON_LEASE_STALENESS_MILLIS";
         /// Durable checkpoint path.
@@ -205,6 +243,8 @@ public interface NodeSettingsSource {
         public static final String AERON_ARCHIVE_DIRECTORY = "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY";
         /// Shared writer lease path.
         public static final String AERON_LEASE_PATH = "ECLIPSE_DATAGRID_AERON_LEASE_PATH";
+        /// Archive retention maintenance interval in minutes.
+        public static final String AERON_RETENTION_INTERVAL_MINUTES = "ECLIPSE_DATAGRID_AERON_RETENTION_INTERVAL_MINUTES";
 
         private EnvKeys() {
         }

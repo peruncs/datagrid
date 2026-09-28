@@ -100,18 +100,17 @@ import peruncs.cluster.api.NodeSettingsSource;
 /// stop position. An incomplete quorum or an active replay preserves history.
 /// Watermarks are epoch-bound but carry no fencing token, so they can neither
 /// fence nor un-fence a writer; any host on the replication network can
-/// report progress, which is why the network is the retention trust boundary.
+/// report progress. This is part of the deliberately unauthenticated protocol.
 ///
 /// # No authentication, no encryption
 ///
 /// The cluster protocol deliberately has neither node authentication nor
 /// transport encryption, and neither may be added. The wire nonce, cluster
 /// ids, and CRC32C detect accidental cross-wiring and corruption only; the
-/// isolated network is the trust boundary. Cluster ids are checked inside
+/// protocol does not require either feature. Cluster ids are checked inside
 /// received frames, cursors, checkpoints, and watermarks, but they cannot
 /// stop a subscriber from receiving another cluster's traffic; clusters that
-/// share a network must therefore use separate channels and stream ids, or
-/// they fail closed on mismatch.
+/// share a network use separate channels and stream ids to avoid cross-wiring.
 ///
 /// # Backups
 ///
@@ -155,12 +154,13 @@ module peruncs.cluster
     requires io.aeron.archive;
     requires io.aeron.driver;
     requires org.agrona;
-    requires org.eclipse.store.gigamap;
-    requires org.eclipse.store.gigamap.lucene;
+    requires transitive org.eclipse.store.gigamap;
+    requires transitive org.eclipse.store.gigamap.lucene;
+    requires transitive org.apache.lucene.core;
     // The upstream module name is misspelled; keep the dependency aligned with
     // the published module descriptor.
-    requires org.eclipes.store.gigamap.jvector;
-    requires jvector;
+    requires transitive org.eclipes.store.gigamap.jvector;
+    requires transitive jvector;
     exports peruncs.cluster.api;
     exports peruncs.cluster.errors;
 }

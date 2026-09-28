@@ -6,6 +6,7 @@ import peruncs.cluster.api.ClusterStorageManager;
 
 import java.lang.reflect.Proxy;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -43,6 +44,10 @@ class ClusterStorageManagerShutdownTest {
                 final int call = closeCalls.incrementAndGet();
                 if (call == 1) throw new IllegalStateException("retry me");
                 return call == 2;
+            }
+
+            @Override
+            public void awaitAppIdle(final Duration timeout) {
             }
 
             @Override
@@ -101,6 +106,10 @@ class ClusterStorageManagerShutdownTest {
                     throw new IllegalStateException(interrupted);
                 }
                 throw boom;
+            }
+
+            @Override
+            public void awaitAppIdle(final Duration timeout) {
             }
 
             @Override
@@ -168,6 +177,10 @@ class ClusterStorageManagerShutdownTest {
             @Override
             public boolean close() {
                 return closeCalls.incrementAndGet() == 1;
+            }
+
+            @Override
+            public void awaitAppIdle(final Duration timeout) {
             }
 
             @Override

@@ -2,7 +2,10 @@ package peruncs.cluster.node.store;
 
 import org.eclipse.store.storage.types.StorageManager;
 import peruncs.cluster.api.ClusterStorageManager;
+import peruncs.cluster.errors.GraphDrainTimeoutException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
+
+import java.time.Duration;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -47,5 +50,20 @@ public final class ClusterStorageManagers {
             final StorageGraphCoordinator graphCoordinator) {
         return new ReadOnlyStorageManager<>(
                 notNull(delegate), notNull(nodeClose), notNull(graphCoordinator));
+    }
+
+    /// Waits for application calls to leave the facade before its Store closes.
+    ///
+    /// @param manager guarded node Store facade
+    /// @param timeout maximum drain wait
+    /// @throws IllegalArgumentException if the manager is not this module's facade
+    /// @throws GraphDrainTimeoutException if application calls do not drain within the configured bound
+    public static void awaitApplicationSections(final StorageManager manager, final Duration timeout) {
+        if (!(notNull(manager) instanceof GuardingStorageManager<?> guarding)) {
+            throw new IllegalArgumentException("node close requires a guarded cluster storage manager");
+        }
+        if (!guarding.awaitAppIdle(notNull(timeout))) {
+            throw new GraphDrainTimeoutException("application Store sections did not drain before node close");
+        }
     }
 }

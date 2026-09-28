@@ -1054,7 +1054,8 @@ class ProviderCrashMatrixIT {
         final int crashChunkSize = Integer.getInteger(
                 "crash.matrix.chunkSize", Math.min(16384, maxChunkSize));
         final ProcessBuilder builder = new ProcessBuilder(javaExecutable,
-                "--enable-preview", "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--enable-preview", "--add-modules", "jdk.incubator.vector",
+                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
                 "-cp", ChildJava.classpath(),
                 "-Ddg.crash.base=%s".formatted(base),
                 "-Ddg.crash.mode=%s".formatted(mode),

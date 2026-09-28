@@ -14,8 +14,8 @@ public interface ReplicationLogRetention extends AutoCloseable {
     /// Returns whether this transport can safely delete replicated history. A
     /// provider that cannot prove durable, quorum-verified reader watermarks
     /// must return `false`; lifecycle code will retain history and continue
-    /// backups. Replication traffic carries no authentication by design —
-    /// see the module's trusted-network boundary note.
+    /// backups. Replication has no node authentication or transport encryption;
+    /// any publisher able to reach the stream can report a watermark.
     ///
     /// @return `true` when safe retention is supported
     default boolean isSupported() {

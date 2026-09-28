@@ -1,6 +1,9 @@
 package peruncs.cluster.storage.index;
 
 import org.eclipse.serializer.memory.XMemory;
+import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.typing.KeyValue;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
@@ -12,6 +15,7 @@ import org.eclipse.store.gigamap.types.GigaIndices;
 import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.gigamap.types.IndexGroup;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.cluster.api.NodeSettingsSource;
 
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
@@ -49,7 +53,7 @@ final class ClusterIndexValidation {
          * set: only index-relevant objects are visited (ordinary entity graphs
          * are pruned by class before they are enqueued), and the scan stops
          * here. The merger overrides this through its configuration. */
-    static final int DEFAULT_MAX_VALIDATED_OBJECTS = 65_536;
+    static final int DEFAULT_MAX_VALIDATED_OBJECTS = NodeSettingsSource.DEFAULT_INDEX_VALIDATION_MAX_OBJECTS;
 
         /* Per-class index-relevance cache backing the traversal prune. A class
          * is relevant when its instances could reach index metadata; anything
@@ -91,6 +95,31 @@ final class ClusterIndexValidation {
         final ArrayList<VectorIndex<?>> vectorIndexes = new ArrayList<>();
         final ArrayList<VectorIndex<?>> dirtyVectorIndexes = new ArrayList<>();
         final IdentityHashMap<VectorIndices<?>, Boolean> rebuiltGroups = new IdentityHashMap<>();
+    }
+
+    /// Reusable per-writer commit-type filter state; do not share across threads.
+    static final class CommitPrefilterScratch {
+        /* Type relevance is immutable for one PersistenceTypeDictionary identity. */
+        private PersistenceTypeDictionary dictionary;
+        private long lastTypeId;
+        private boolean hasLastType;
+        private boolean lastTypeRelevant;
+        private boolean touchesIndexes;
+        final EntityHeaders.EntityVisitor visitor = this::checkType;
+
+        private void checkType(final long typeId, final long ignoredObjectId,
+                               final long ignoredOffset, final long ignoredLength) {
+            if (this.touchesIndexes) return;
+            if (!this.hasLastType || this.lastTypeId != typeId) {
+                final PersistenceTypeDefinition definition = this.dictionary == null
+                        ? null : this.dictionary.lookupTypeById(typeId);
+                this.lastTypeId = typeId;
+                this.hasLastType = true;
+                this.lastTypeRelevant = definition == null || definition.type() == null ||
+                        INDEX_RELEVANT.get(definition.type());
+            }
+            this.touchesIndexes = this.lastTypeRelevant;
+        }
     }
 
         /// One vector index group and the map that owns it.
@@ -336,6 +365,19 @@ final class ClusterIndexValidation {
                 });
     }
 
+    /// Checks the changed entity types before paying for a full root-graph scan.
+    static boolean commitTouchesIndexes(final Binary binary, final PersistenceTypeDictionary dictionary,
+                                        final CommitPrefilterScratch scratch) {
+        Objects.requireNonNull(scratch, "scratch");
+        if (scratch.dictionary != dictionary) {
+            scratch.dictionary = dictionary;
+            scratch.hasLastType = false;
+        }
+        scratch.touchesIndexes = false;
+        EntityHeaders.forEach(binary, scratch.visitor);
+        return scratch.touchesIndexes;
+    }
+
     static void validateVectorIndicesGroup(final VectorIndices<?> group) {
         final List<KeyValue<String, ? extends VectorIndex<?>>> snapshot = new ArrayList<>();
         for (final KeyValue<String, ? extends VectorIndex<?>> entry : group) snapshot.add(entry);
@@ -471,7 +513,7 @@ final class ClusterIndexValidation {
         if (++scratch.scanWork > maximum) {
             throw new IllegalStateException(
                     ("index validation exceeded %s objects and collection elements; raise " +
-                            "StorageBinaryDataMerger.Configuration.maxValidatedIndexObjects or narrow " +
+                            NodeSettingsSource.EnvKeys.INDEX_VALIDATION_MAX_OBJECTS + " or narrow " +
                             "the index-relevant graph")
                             .formatted(maximum));
         }

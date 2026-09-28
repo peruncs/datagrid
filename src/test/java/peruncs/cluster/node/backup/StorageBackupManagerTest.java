@@ -2,6 +2,8 @@ package peruncs.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.api.BackupInfo;
+import peruncs.cluster.api.BackupSlot;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
 import peruncs.cluster.storage.ReplicationCursor;
@@ -100,11 +102,14 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, client, retention, 2);
 
-        manager.createStorageBackup(false);
+        final BackupInfo info = manager.createStorageBackup(BackupSlot.SCHEDULED);
 
         assertEquals(1, client.stopCalls);
         assertEquals(1, client.resumeCalls);
         assertEquals(1, backend.created.size());
+        assertEquals(backend.created.getFirst().backupId(), info.id());
+        assertEquals(7L, info.sequence());
+        assertFalse(info.manual());
         assertEquals(List.of(1L, 2L), backend.deleted.stream().map(BackupMetadata::timestamp).toList());
         assertEquals(List.of(CURSOR), retention.cursors);
         assertEquals(1, retention.calls);
@@ -127,7 +132,7 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 1);
 
-        manager.createStorageBackup(false);
+        manager.createStorageBackup(BackupSlot.SCHEDULED);
 
         assertEquals(1, backend.created.size());
         assertEquals(3, retention.calls);
@@ -144,7 +149,7 @@ class StorageBackupManagerTest {
                 () -> {
                     throw new NodeException("cursor read failed");
                 });
-        assertThrows(NodeException.class, () -> manager.createStorageBackup(false));
+        assertThrows(NodeException.class, () -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertEquals(1, client.stopCalls);
         assertEquals(1, client.resumeCalls, "a failed preparation after a stop must still resume the reader");
     }
@@ -159,7 +164,7 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
-        assertThrows(NodeException.class, () -> manager.createStorageBackup(false));
+        assertThrows(NodeException.class, () -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertEquals(1, client.stopCalls);
         assertEquals(0, client.resumeCalls);
         assertTrue(backend.created.isEmpty());
@@ -175,7 +180,7 @@ class StorageBackupManagerTest {
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
         final NodeException failure = assertThrows(
-                NodeException.class, () -> manager.createStorageBackup(false));
+                NodeException.class, () -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertSame(client.failure, failure.getCause());
         assertEquals(0, client.stopCalls);
         assertTrue(backend.created.isEmpty());
@@ -193,7 +198,7 @@ class StorageBackupManagerTest {
         final StorageBackupManager manager = manager(backend, client, new FakeRetention(), 1);
 
         final IllegalStateException failure = assertThrows(
-                IllegalStateException.class, () -> manager.createStorageBackup(false));
+                IllegalStateException.class, () -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertEquals("backup failed", failure.getMessage());
         assertEquals(1, failure.getSuppressed().length);
         assertSame(client.resumeFailure, failure.getSuppressed()[0]);
@@ -210,7 +215,7 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 1);
 
-        manager.createStorageBackup(true);
+        manager.createStorageBackup(BackupSlot.MANUAL);
 
         assertEquals(List.of(2L), backend.deleted.stream().map(BackupMetadata::timestamp).toList());
         assertEquals(0, retention.calls);
@@ -233,7 +238,7 @@ class StorageBackupManagerTest {
         backend.previousCursor = local;
         final FakeRetention retention = new FakeRetention();
 
-        manager(backend, client, retention, 2, () -> local).createStorageBackup(false);
+        manager(backend, client, retention, 2, () -> local).createStorageBackup(BackupSlot.SCHEDULED);
 
         assertEquals(List.of(1L), backend.deleted.stream().map(BackupMetadata::timestamp).toList());
         assertTrue(backend.backups.stream().anyMatch(b -> b.timestamp() == 0L),
@@ -252,7 +257,7 @@ class StorageBackupManagerTest {
                 generationBackup(6L, true, cluster, generation, 5L, 42L),
                 generationBackup(7L, false, cluster, generation, 5L, 42L)));
 
-        manager(backend, new FakeClient(), new FakeRetention(), 1, () -> local).createStorageBackup(true);
+        manager(backend, new FakeClient(), new FakeRetention(), 1, () -> local).createStorageBackup(BackupSlot.MANUAL);
 
         assertEquals(List.of(6L), backend.deleted.stream().map(BackupMetadata::timestamp).toList());
         assertTrue(backend.backups.stream().anyMatch(b -> b.timestamp() == 5L),
@@ -277,7 +282,7 @@ class StorageBackupManagerTest {
                 candidate.backupId().equals(compatible.backupId()) ? compatibleCursor : foreignCursor;
         final FakeRetention retention = new FakeRetention();
 
-        manager(backend, new FakeClient(), retention, 10, () -> local).createStorageBackup(false);
+        manager(backend, new FakeClient(), retention, 10, () -> local).createStorageBackup(BackupSlot.SCHEDULED);
 
         /* The retention cursor must come from the compatibility-selected
          * backup, never from the newest backup overall: exactly one
@@ -297,7 +302,7 @@ class StorageBackupManagerTest {
         final FakeRetention retention = new FakeRetention();
 
         manager(backend, client, retention, 1, () -> client.stopCalls == 0 ? before : stopped)
-                .createStorageBackup(false);
+                .createStorageBackup(BackupSlot.SCHEDULED);
 
         assertEquals(List.of(stopped), backend.createdCursors,
                 "the stored manifest must describe the stopped boundary, not the pre-stop position");
@@ -310,7 +315,7 @@ class StorageBackupManagerTest {
         backend.unreadable = List.of("broken.identity.zip");
         final StorageBackupManager manager = manager(backend, new FakeClient(), new FakeRetention(), 1);
 
-        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertDoesNotThrow(() -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertEquals(1, backend.unreadableScans,
                 "the prune path must sweep archives that can never be selected");
         assertNull(manager.maintenanceFailure());
@@ -330,7 +335,7 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, client, retention, 1);
 
-        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertDoesNotThrow(() -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertEquals(1, backend.created.size(), "the durable backup must be reported as successful");
         assertSame(backend.deleteFailure, manager.maintenanceFailure());
         assertEquals(1, retention.calls, "a prune failure must not skip retention");
@@ -349,7 +354,7 @@ class StorageBackupManagerTest {
 
         final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 2);
 
-        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertDoesNotThrow(() -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertSame(retention.failure, manager.maintenanceFailure());
     }
 
@@ -363,11 +368,11 @@ class StorageBackupManagerTest {
         retention.failure = new NodeException("retention failed");
         final StorageBackupManager manager = manager(backend, new FakeClient(), retention, 2);
 
-        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertDoesNotThrow(() -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertNotNull(manager.maintenanceFailure());
 
         retention.failure = null;
-        assertDoesNotThrow(() -> manager.createStorageBackup(false));
+        assertDoesNotThrow(() -> manager.createStorageBackup(BackupSlot.SCHEDULED));
         assertNull(manager.maintenanceFailure());
     }
 
@@ -384,7 +389,7 @@ class StorageBackupManagerTest {
         try {
             Thread.currentThread().interrupt();
             final NodeException failure = assertThrows(
-                    NodeException.class, () -> manager.createStorageBackup(false));
+                    NodeException.class, () -> manager.createStorageBackup(BackupSlot.SCHEDULED));
             assertTrue(failure.getMessage().contains("Interrupted"), failure.getMessage());
         } finally {
             Thread.interrupted();

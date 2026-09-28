@@ -1,2 +1,2 @@
-/// PerunCS packages for the Aeron-replicated data grid.
+/// PerunCS Cluster's Aeron-replicated storage packages.
 package peruncs;

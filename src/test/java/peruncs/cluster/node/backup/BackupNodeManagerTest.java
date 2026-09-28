@@ -2,13 +2,18 @@ package peruncs.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.api.BackupInfo;
+import peruncs.cluster.api.BackupSlot;
+import peruncs.cluster.api.BackupStatus;
 import peruncs.cluster.storage.ReplicationCursor;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.lang.reflect.Proxy;
+import java.time.Instant;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that backup-node health reflects the replication reader state.
 class BackupNodeManagerTest {
@@ -70,17 +75,54 @@ class BackupNodeManagerTest {
         assertFalse(manager.isHealthy());
     }
 
+    @Test
+    void backupFailureIsReportedWithoutChangingReaderHealth() {
+        final FakeClient client = new FakeClient();
+        client.running = true;
+        final FakeTasks tasks = new FakeTasks();
+        tasks.failure = new IllegalStateException("backup failed");
+
+        final BackupNodeManager manager = manager(client, tasks);
+
+        assertTrue(manager.isHealthy());
+        assertTrue(manager.isReady());
+        assertEquals(new BackupStatus(true, "backup failed", -1L, false, ""), manager.backupStatus());
+    }
+
+    @Test
+    void postPublicationMaintenanceFailureIsReportedSeparately() {
+        final FakeClient client = new FakeClient();
+        client.running = true;
+        final FakeTasks tasks = new FakeTasks();
+        tasks.maintenanceFailure = new IllegalStateException("retention failed");
+
+        final BackupNodeManager manager = manager(client, tasks);
+
+        assertTrue(manager.isHealthy());
+        assertEquals(new BackupStatus(false, "", -1L, true, "retention failed"), manager.backupStatus());
+    }
+
     /// Verifies a backup node stays healthy but not ready while an intentional backup holds the single-flight lock and stops the reader.
     @Test
     void healthyDuringAnIntentionalBackupStop() {
         final FakeClient client = new FakeClient();
         final FakeTasks tasks = new FakeTasks();
         tasks.backupRunning = true;
+        tasks.backupExecuting = true;
 
         final BackupNodeManager manager = manager(client, tasks);
 
         assertTrue(manager.isHealthy(), "a backup holding the single-flight lock stops the reader on purpose");
         assertFalse(manager.isReady(), "readiness still requires the reader to run");
+    }
+
+    @Test
+    void queuedBackupDoesNotHideAnUnexpectedlyStoppedReader() {
+        final FakeClient client = new FakeClient();
+        final FakeTasks tasks = new FakeTasks();
+        tasks.backupRunning = true;
+
+        assertFalse(manager(client, tasks).isHealthy());
     }
 
     private static final class FakeClient implements ReplicationApplier {
@@ -125,10 +167,14 @@ class BackupNodeManagerTest {
 
     private static final class FakeTasks implements StorageBackupTaskExecutor {
         private boolean backupRunning;
+        private boolean backupExecuting;
+        private Throwable failure;
+        private Throwable maintenanceFailure;
 
         @Override
-        public BackupStartResult runBackup(final boolean useManualSlot) {
-            return BackupStartResult.STARTED;
+        public CompletableFuture<BackupInfo> runBackup(final BackupSlot slot) {
+            return CompletableFuture.completedFuture(
+                    new BackupInfo(UUID.randomUUID(), Instant.now(), CURSOR.logicalSequence(), slot == BackupSlot.MANUAL));
         }
 
         @Override
@@ -137,8 +183,23 @@ class BackupNodeManagerTest {
         }
 
         @Override
+        public boolean isBackupExecuting() {
+            return this.backupExecuting;
+        }
+
+        @Override
         public Throwable backupFailure() {
-            return null;
+            return this.failure;
+        }
+
+        @Override
+        public long lastSuccessEpochMillis() {
+            return -1L;
+        }
+
+        @Override
+        public Throwable maintenanceFailure() {
+            return this.maintenanceFailure;
         }
 
         @Override

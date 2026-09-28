@@ -7,8 +7,9 @@ import org.eclipse.store.storage.types.StorageManager;
 ///
 /// An application-facing `StorageManager` with explicit cluster restrictions.
 /// The ordinary `PersistenceStoring`/`Persister` surface, storers, and the
-/// exported persistence-manager adapter are available as usual; role, root,
-/// coordination, and lifecycle rules still apply:
+/// exported persistence-manager adapter are available. The writer preserves
+/// Eclipse Store's object-registry behavior; readers reject registry access.
+/// Role, root, coordination, and lifecycle rules still apply:
 ///
 /// - reader and backup-reader nodes reject every durable application write
 ///   with [peruncs.cluster.errors.ReaderWriteRejectedException], so a reader

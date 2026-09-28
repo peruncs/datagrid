@@ -4,7 +4,7 @@
 /// failures; `ReplicationException` is the base for replication-boundary
 /// failures, with typed specializations for reader rejection, writer
 /// fencing, replication unavailability, corrupt data, the graph-invalidated
-/// gate after a partial update, and the reseed demand.
+/// gate after a partial update, clean writer rejection, and the reseed demand.
 /// This package is exported so boundary code can name and map these
 /// failures directly.
 package peruncs.cluster.errors;

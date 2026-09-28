@@ -196,15 +196,8 @@ record AeronSettings(
          * fails here, before any gate reads it. */
         final NodeRole role = NodeRole.of(properties);
         final boolean productionMode = properties.isProdMode();
-        final boolean trustedNetwork = Boolean.parseBoolean(value(
-                properties, "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK", "false"));
-        if (productionMode && !trustedNetwork) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK=true is required in production; "
-                            + "the replication protocol is not authenticated");
-        }
         final AeronReplicationConfiguration replication = replication(properties);
-        final ArchivePolicy archivePolicy = archivePolicy(properties, productionMode, replication, trustedNetwork);
+        final ArchivePolicy archivePolicy = archivePolicy(properties, productionMode, replication);
         final Topology topology = topology(properties, role, productionMode, replication,
                 archivePolicy.externalArchive());
         final ThreadingMode threadingMode = threadingMode(properties);
@@ -249,13 +242,13 @@ record AeronSettings(
     private static Directories directories(final NodeSettingsSource properties,
                                            final boolean productionMode) {
         final Path aeronDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_DIRECTORY", "/tmp/eclipse-datagrid-aeron"));
-        final Path archiveDirectory = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY",
+        final Path archiveDirectory = Paths.get(value(properties, NodeSettingsSource.EnvKeys.AERON_ARCHIVE_DIRECTORY,
                 aeronDirectory.resolveSibling("%s.archive".formatted(aeronDirectory.getFileName())).toString()));
         if (productionMode && (temporaryPath(aeronDirectory) || temporaryPath(archiveDirectory))) {
             throw new IllegalArgumentException("Aeron directories must not use /tmp in production mode");
         }
         // MediaDriver recreates its directory on startup, so checkpoints must live outside it.
-        final Path checkpointPath = Paths.get(value(properties, "ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH",
+        final Path checkpointPath = Paths.get(value(properties, NodeSettingsSource.EnvKeys.AERON_CHECKPOINT_PATH,
                 aeronDirectory.resolveSibling("%s.writer.checkpoint".formatted(aeronDirectory.getFileName())).toString()));
         final Path normalizedAeronDirectory = aeronDirectory.toAbsolutePath().normalize();
         final Path normalizedArchiveDirectory = archiveDirectory.toAbsolutePath().normalize();
@@ -321,8 +314,7 @@ record AeronSettings(
     /// Parses the Archive recording, retention, and capacity policy.
     private static ArchivePolicy archivePolicy(final NodeSettingsSource properties,
                                                final boolean productionMode,
-                                               final AeronReplicationConfiguration replication,
-                                               final boolean trustedNetwork) {
+                                               final AeronReplicationConfiguration replication) {
         final int archiveFileSyncLevel = parseInt(properties, "ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL", "1");
         if (archiveFileSyncLevel < 0 || archiveFileSyncLevel > 2) {
             throw new IllegalArgumentException("ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL must be 0, 1, or 2");
@@ -362,17 +354,10 @@ record AeronSettings(
             throw new IllegalArgumentException(
                     "Archive segment length must be a positive power of two; low-storage threshold must not be negative; max concurrent replays must be positive");
         }
-        /* Readers configured without the trusted-network acknowledgement must
-         * fail startup loudly: silently ignoring them would disable retention
-         * while the operator believes reader watermarks are being counted. */
         final Set<UUID> readers = retentionReaders(properties);
-        if (!trustedNetwork && !readers.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "ECLIPSE_DATAGRID_AERON_RETENTION_READERS is configured but ECLIPSE_DATAGRID_AERON_TRUSTED_NETWORK is not acknowledged; retention requires the trusted-network acknowledgement");
-        }
         return new ArchivePolicy(archiveFileSyncLevel, minimumArchiveFreeBytes, externalArchive,
                 archiveSegmentFileLength, archiveLowStorageSpaceThreshold, maxConcurrentReplays,
-                trustedNetwork ? readers : Set.of());
+                readers);
     }
 
     /// Parses the per-concern timeout budgets.

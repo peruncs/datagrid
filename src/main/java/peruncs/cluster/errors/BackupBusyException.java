@@ -5,9 +5,8 @@ import peruncs.cluster.api.ClusterNode;
 /// A backup was requested while another backup is still running.
 ///
 /// Exported so an embedding boundary can report a conflict (`409`) instead
-/// of mapping a busy backup to a server error: [ClusterNode#createScheduledBackup]
-/// and [ClusterNode#createManualBackup] throw it
-/// and the boundary catches it by name.
+/// of mapping a busy backup to a server error. [ClusterNode#createBackup]
+/// completes its future exceptionally with this type.
 public final class BackupBusyException extends NodeException {
     /// Creates a busy-backup failure.
     ///

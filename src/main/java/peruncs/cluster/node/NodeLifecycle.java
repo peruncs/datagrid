@@ -8,6 +8,7 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.exceptions.StorageException;
 import org.eclipse.store.storage.types.*;
+import peruncs.cluster.api.BackupSlot;
 import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.api.NodeSettingsSource.EnvKeys;
@@ -21,12 +22,20 @@ import peruncs.cluster.node.store.ClusterStorageManagers;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.node.store.NodeClose;
 import peruncs.cluster.node.store.StorageSizeValidation;
+import peruncs.cluster.node.replication.ReplicationLogRetention;
 import peruncs.cluster.storage.ReplicationCursor;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
@@ -69,6 +78,12 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 @Override
                 public void checkOpen() {
                     NodeLifecycle.this.ensureOpen();
+                }
+
+                @Override
+                public void awaitAppIdle(final Duration timeout) {
+                    final var manager = NodeLifecycle.this.assembly.clusterStorageManager;
+                    if (manager != null) ClusterStorageManagers.awaitApplicationSections(manager, timeout);
                 }
             };
 
@@ -251,7 +266,8 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         /* Same one-time policy scan as storage nodes: a seeded or uploaded
          * image with an external index registration is rejected before the
          * backup node serves or publishes anything. */
-        ClusterStoreIndexes.validateStorageRoots(embeddedStorageManager);
+        ClusterStoreIndexes.validateStorageRoots(
+                embeddedStorageManager, props.indexValidationMaxObjects());
 
         this.assembly.getReplicationPublisher().ignoreDistribution(false);
         this.queueWriterDictionary(embeddedStorageManager);
@@ -290,11 +306,36 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
              * uploaded storage until its cursor and backup are durable. Keep
              * the source upload until that boundary is safely published so a
              * failed bootstrap can retry from the same image. */
-            this.assembly.getStorageBackupManager().createStorageBackup(false);
-            backend.deleteUserUploadedStorage();
+            awaitStarterBackup(
+                    this.assembly.getStorageBackupTaskExecutor().runBackup(BackupSlot.SCHEDULED),
+                    props.backupCloseTimeoutMillis(), backend::deleteUserUploadedStorage);
         }
 
         maintenance.start();
+    }
+
+    /// Deletes an uploaded Store image only after its starter backup is published.
+    ///
+    /// @param backup starter-backup result
+    /// @param timeoutMillis maximum startup wait
+    /// @param deleteUserUpload removes the source upload after success
+    /// @throws NodeException when the backup fails, is cancelled, or exceeds its wait budget
+    static void awaitStarterBackup(
+            final CompletableFuture<?> backup, final long timeoutMillis, final Runnable deleteUserUpload)
+            throws NodeException {
+        try {
+            backup.get(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (final TimeoutException | CancellationException failure) {
+            throw new NodeException("Starter backup failed; uploaded storage was kept", failure);
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new NodeException("Interrupted while creating the starter backup; uploaded storage was kept", interrupted);
+        } catch (final ExecutionException failure) {
+            final Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+            if (cause instanceof Error error) throw error;
+            throw new NodeException("Starter backup failed; uploaded storage was kept", cause);
+        }
+        deleteUserUpload.run();
     }
 
     /// Starts a node that publishes storage data.
@@ -377,7 +418,8 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         /* One-time policy scan at Store start: a freshly deserialized or
          * seeded image containing an external index is rejected before
          * the node serves or publishes anything. */
-        ClusterStoreIndexes.validateStorageRoots(embeddedStorageManager);
+        ClusterStoreIndexes.validateStorageRoots(
+                embeddedStorageManager, props.indexValidationMaxObjects());
 
         final var limitGate = this.assembly.getStorageLimitGate();
         limitGate.updateUsage(this.assembly.getStorageUsageGauge().measureNow());
@@ -427,6 +469,24 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                         EnvKeys.STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES
                 ))
         );
+        if (writer && this.assembly.usesAeronReplication()) {
+            maintenance.schedule("AeronArchiveRetention", () -> {
+                final var retention = this.assembly.getReplicationLogRetention();
+                if (retention.isSupported()) {
+                    try {
+                        final var result = retention.deleteThrough(
+                                this.assembly.getReplicationPositionProvider().latest());
+                        if (result.status() == ReplicationLogRetention.MaintenanceResult.Status.DELETED) {
+                            LOGGER.log(INFO, "Aeron Archive retention: %s", result.detail());
+                        }
+                    } catch (final ReplicationPositionUnavailableException unavailable) {
+                        LOGGER.log(System.Logger.Level.DEBUG,
+                                "Aeron Archive retention waits for the first durable writer position", unavailable);
+                    }
+                }
+            }, NodeCollaborators.maintenanceInterval(props.aeronRetentionIntervalMinutes(),
+                    EnvKeys.AERON_RETENTION_INTERVAL_MINUTES, 1));
+        }
 
         maintenance.start();
     }
@@ -651,6 +711,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                     ? collaborators.storageBackupTaskExecutor.get() : null;
 
             final CloseSequencer sequencer = new CloseSequencer();
+            final AtomicBoolean appDrained = new AtomicBoolean();
             /* The whole close graph is owned here, in FINAL's dependency
              * order: stop maintenance, bound background work, stop the
              * replication reader/publisher, close the managers and their
@@ -659,6 +720,13 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
              * stages, and the Store stage waits for a still-running backup
              * instead of shutting down underneath its export. */
             sequencer
+                    .add(CloseSequencer.stage("application sections",
+                            () -> true,
+                            () -> {
+                                this.nodeCloseTrigger.awaitAppIdle(Duration.ofMillis(
+                                        collaborators.getNodeSettingsSource().graphDrainTimeoutMillis()));
+                                appDrained.set(true);
+                            }))
                     /* 1. Stop new maintenance work before anything it uses. */
                     .add(CloseSequencer.stage("maintenance scheduler",
                             collaborators.maintenanceScheduler::isInitialized,
@@ -676,13 +744,13 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                      * is shutting down, and the final cursor force needs the
                      * Store still open. */
                     .add(CloseSequencer.stage("replication transport",
-                            collaborators.replicationTransport::isInitialized,
+                            afterAppDrain(appDrained, collaborators.replicationTransport::isInitialized),
                             () -> collaborators.replicationTransport.get().close()))
                     .add(CloseSequencer.stage("position provider",
-                            collaborators.positionProvider::isInitialized,
+                            afterAppDrain(appDrained, collaborators.positionProvider::isInitialized),
                             () -> collaborators.positionProvider.get().close()))
                     .add(CloseSequencer.stage("replication retention",
-                            collaborators.replicationRetention::isInitialized,
+                            afterAppDrain(appDrained, collaborators.replicationRetention::isInitialized),
                             () -> collaborators.replicationRetention.get().close()))
                     /* 4. Close the managers. A started node manager owns its
                      * collaborators: closing it cascades to the applier,
@@ -692,39 +760,31 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                      * implementation is idempotent and tracks per-collaborator
                      * completion, so a retried close finishes the remainder. */
                     .add(CloseSequencer.stage("storage node manager",
-                            () -> storageManagerClosed,
+                            afterAppDrain(appDrained, () -> storageManagerClosed),
                             () -> collaborators.storageNodeManager.get().close()))
                     .add(CloseSequencer.stage("backup node manager",
-                            () -> backupManagerClosed,
+                            afterAppDrain(appDrained, () -> backupManagerClosed),
                             () -> collaborators.backupNodeManager.get().close()))
                     .add(CloseSequencer.stage("data distributor",
-                            () -> !storageManagerClosed && collaborators.dataDistributor.isInitialized(),
+                            afterAppDrain(appDrained, () -> !storageManagerClosed && collaborators.dataDistributor.isInitialized()),
                             () -> collaborators.dataDistributor.get().dispose()))
                     .add(CloseSequencer.stage("health check",
-                            () -> !storageManagerClosed && collaborators.healthCheck.isInitialized(),
+                            afterAppDrain(appDrained, () -> !storageManagerClosed && collaborators.healthCheck.isInitialized()),
                             () -> collaborators.healthCheck.get().close()))
                     .add(CloseSequencer.stage("data client",
-                            () -> !storageManagerClosed && !backupManagerClosed && collaborators.dataClient.isInitialized(),
+                            afterAppDrain(appDrained, () -> !storageManagerClosed && !backupManagerClosed && collaborators.dataClient.isInitialized()),
                             () -> collaborators.dataClient.get().dispose()))
                     .add(CloseSequencer.stage("data merger",
-                            collaborators.dataMerger::isInitialized,
+                            afterAppDrain(appDrained, collaborators.dataMerger::isInitialized),
                             () -> collaborators.dataMerger.get().dispose()))
                     .add(CloseSequencer.stage("applied listener",
-                            collaborators.commitAppliedListener::isInitialized,
+                            afterAppDrain(appDrained, collaborators.commitAppliedListener::isInitialized),
                             () -> collaborators.commitAppliedListener.get().close()))
                     .add(CloseSequencer.stage("stored cursor manager",
-                            () -> !collaborators.commitAppliedListener.isInitialized() && collaborators.durableCursorFile != null,
+                            afterAppDrain(appDrained, () -> !collaborators.commitAppliedListener.isInitialized() && collaborators.durableCursorFile != null),
                             collaborators::closeDurableCursorFile))
-                    /* 4b. Application admission is already closed for every
-                     * persistence entry (facade shutdown marked it before
-                     * calling here; ClusterNode.close drives validateState
-                     * through the lifecycle probe), so this drain joins every
-                     * in-flight graph section — inside or before a write —
-                     * and lets it finish before the Store stage runs. The
-                     * close thread itself must never hold the boundary: the
-                     * graph-section guard at closeNode entry rejects that. */
                     .add(CloseSequencer.stage("graph drain",
-                            () -> true,
+                            appDrained::get,
                             collaborators.graphCoordinator::drain))
                     /* 5. Close the Store last. A backup that outlived its
                      * executor budget must block this stage instead of losing
@@ -737,7 +797,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                      * may leave the raw Store started but unwrapped: without
                      * the facade this stage owns the raw manager directly. */
                     .add(CloseSequencer.stage("embedded storage",
-                            () -> collaborators.embeddedStorageManager != null,
+                            afterAppDrain(appDrained, () -> collaborators.embeddedStorageManager != null),
                             () ->
                             {
                                 if (!collaborators.graphCoordinator.isDrained()) {
@@ -749,7 +809,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                                     throw new IllegalStateException(
                                             "Store close deferred: maintenance workers are still running");
                                 }
-                                if (backupTaskExecutor != null && backupTaskExecutor.isRunningBackup()) {
+                                if (backupTaskExecutor != null && backupTaskExecutor.isBackupExecuting()) {
                                     throw new IllegalStateException("Store close deferred: backup still running");
                                 }
                                 /* Store returns false when the shutdown was
@@ -786,6 +846,11 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             }
         }
         return true;
+    }
+
+    private static BooleanSupplier afterAppDrain(
+            final AtomicBoolean drained, final BooleanSupplier readiness) {
+        return () -> drained.get() && readiness.getAsBoolean();
     }
 
     private void ensureOpen() {

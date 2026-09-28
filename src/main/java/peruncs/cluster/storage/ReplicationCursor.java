@@ -8,7 +8,7 @@ import java.util.UUID;
 
 /// Names a node's durable place in the replication stream.
 ///
-/// `logicalSequence` is the Data Grid ordering value. The opaque
+/// `logicalSequence` is the cluster replication ordering value. The opaque
 /// `providerPosition` is interpreted only by the transport (for example an
 /// Aeron recording id/position pair), stored as lowercase hex so the record
 /// is deeply immutable; an empty string carries no position.

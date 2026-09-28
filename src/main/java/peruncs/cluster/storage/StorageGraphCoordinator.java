@@ -1,7 +1,7 @@
 package peruncs.cluster.storage;
 
-import peruncs.cluster.errors.GraphInvalidatedException;
 import peruncs.cluster.errors.GraphDrainTimeoutException;
+import peruncs.cluster.errors.GraphInvalidatedException;
 import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
@@ -106,6 +106,11 @@ public final class StorageGraphCoordinator {
     public StorageGraphCoordinator(final long drainTimeoutMillis) {
         if (drainTimeoutMillis <= 0L) throw new IllegalArgumentException("drainTimeoutMillis must be positive");
         this.drainTimeoutMillis = drainTimeoutMillis;
+    }
+
+    /// Returns the configured deadline shared by graph and facade close drains.
+    public long drainTimeoutMillis() {
+        return this.drainTimeoutMillis;
     }
 
         /// Runs application graph access under the shared read side.

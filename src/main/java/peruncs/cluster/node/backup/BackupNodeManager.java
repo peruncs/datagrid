@@ -1,7 +1,9 @@
 package peruncs.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
-import peruncs.cluster.errors.BackupBusyException;
+import peruncs.cluster.api.BackupInfo;
+import peruncs.cluster.api.BackupSlot;
+import peruncs.cluster.api.BackupStatus;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.CloseSequencer;
 import peruncs.cluster.node.StorageNodeControl;
@@ -9,14 +11,16 @@ import peruncs.cluster.node.replication.ReplicationMetrics;
 import peruncs.cluster.node.store.StorageUsageGauge;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
+import java.util.concurrent.CompletableFuture;
+
 import static java.lang.System.Logger.Level.INFO;
 import static org.eclipse.serializer.util.X.notNull;
 
-/// Coordinates backups with replication pause and resume while exposing node health.
+/// Coordinates backup work while exposing node health.
 ///
-/// A backup stops the reader at a safe message boundary, creates the backup,
-/// and then resumes reading. Callers must not close the storage while either
-/// operation is active. Readiness requires an actively reading, 
+/// A backup stops the reader at a resolved boundary while it creates the
+/// backup. Callers must not close the storage while either
+/// operation is active. Readiness requires an actively reading,
 /// failure-free reader; health additionally tolerates the intentional reader
 /// stop a running backup performs, so a normal backup cycle does not flap the
 /// health endpoint.
@@ -100,36 +104,21 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
     }
 
     @Override
-    public void stopReadingAtLatestMessage() {
-        this.dataClient.stopAtLatestMessage();
+    public CompletableFuture<BackupInfo> createStorageBackup(final BackupSlot slot) {
+        return this.tasks.runBackup(slot);
     }
 
-    @Override
-    public void resumeReading() throws NodeException {
-        try {
-            this.dataClient.resume();
-        } catch (final NodeException alreadyDomain) {
-            throw alreadyDomain;
-        } catch (final RuntimeException failure) {
-            throw new NodeException("Failed to resume the replication reader", failure);
-        }
+    /// Returns the latest backup outcome without changing replication health.
+    public BackupStatus backupStatus() {
+        final Throwable failure = this.tasks.backupFailure();
+        final Throwable maintenanceFailure = this.tasks.maintenanceFailure();
+        return new BackupStatus(failure != null, message(failure), this.tasks.lastSuccessEpochMillis(),
+                maintenanceFailure != null, message(maintenanceFailure));
     }
 
-    @Override
-    public boolean isReading() {
-        return this.dataClient.isRunning();
-    }
-
-    @Override
-    public void createStorageBackup(final boolean useManualSlot) throws NodeException {
-        if (this.tasks.runBackup(useManualSlot) == StorageBackupTaskExecutor.BackupStartResult.BUSY) {
-            throw new BackupBusyException("Storage backup is already running");
-        }
-    }
-
-    @Override
-    public boolean isBackupRunning() {
-        return this.tasks.isRunningBackup();
+    private static String message(final Throwable failure) {
+        if (failure == null) return "";
+        return failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
     }
 
     @Override
@@ -140,7 +129,7 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
          * does not flap the health endpoint. Maintenance failures after a
          * durable backup are exposed through the task executor and
          * intentionally do not make the node unhealthy. */
-        return this.isOperational() && (this.dataClient.isRunning() || this.tasks.isRunningBackup());
+        return this.isOperational() && (this.dataClient.isRunning() || this.tasks.isBackupExecuting());
     }
 
     @Override
@@ -209,7 +198,6 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
     /// running. This keeps the two truth tables from drifting apart.
     private boolean isOperational() {
         return this.isStorageAvailable()
-                && this.dataClient.failure() == null
-                && this.tasks.backupFailure() == null;
+                && this.dataClient.failure() == null;
     }
 }

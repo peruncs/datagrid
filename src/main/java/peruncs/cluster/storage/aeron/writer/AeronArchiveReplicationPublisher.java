@@ -30,7 +30,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /* The default AeronArchive Context uses a ReentrantLock and the client is
      * thread-safe; do not add a second intrinsic lock around its operations. */
     private final AeronArchive archive;
-    private final ExclusivePublication publication;
+    private volatile ExclusivePublication publication;
     private final AeronReplicationPublisher publisher;
     private final long recordingIdHint;
     private final AeronReplicationConfiguration configuration;
@@ -189,6 +189,21 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
             final SourceLocation sourceLocation,
             final long wireNonce
     ) {
+        final ExclusivePublication publication = extendPublication(
+                archive, recordingId, streamId, configuration, sourceLocation);
+        return new AeronArchiveReplicationPublisher(archive, publication,
+                AeronReplicationPublisher.onPublication(publication, configuration, clusterId, epoch, initialSequence,
+                        positionValue -> awaitRecorded(archive, publication, recordingId, configuration, positionValue),
+                        wireNonce), recordingId, configuration, sourceLocation);
+    }
+
+    private static ExclusivePublication extendPublication(
+            final AeronArchive archive,
+            final long recordingId,
+            final int streamId,
+            final AeronReplicationConfiguration configuration,
+            final SourceLocation sourceLocation
+    ) {
         final String[] channel = new String[1];
         final long[] position = new long[1];
         final int[] initialTermId = new int[1];
@@ -218,15 +233,12 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         final String baseChannel = new ChannelUriStringBuilder(channel[0]).sessionId((Integer) null).build();
         final String extendedChannel = new ChannelUriStringBuilder(baseChannel)
                 .initialPosition(position[0], initialTermId[0], termLength[0]).build();
-        final ExclusivePublication publication = archive.context().aeron().addExclusivePublication(extendedChannel, streamId);
+        final ExclusivePublication publication = archive.context().aeron()
+                .addExclusivePublication(extendedChannel, streamId);
         try {
             archive.extendRecording(recordingId, extendedChannel, streamId, sourceLocation);
             awaitRecordingStarted(archive, publication, recordingId, configuration);
-            return new AeronArchiveReplicationPublisher(archive, publication,
-                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, epoch, initialSequence,
-                            positionValue -> awaitRecorded(archive, publication, recordingId, configuration, positionValue),
-                            wireNonce), recordingId,
-                    configuration, sourceLocation);
+            return publication;
         } catch (final RuntimeException | Error failure) {
             final Throwable stopFailure = tryStopRecording(
                     archive, publication, recordingId, configuration);
@@ -365,13 +377,21 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                 nextErrorProbe = errorNow + configuration.retryPolicy().archiveProbeDelayNanos();
             }
             int counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId(), archive.archiveId());
-            if (counterId < 0 && recordingIdHint >= 0) {
-                counterId = RecordingPos.findCounterIdByRecording(counters, recordingIdHint, archive.archiveId());
-            }
             if (counterId >= 0) {
-                final long recordingId = RecordingPos.getRecordingId(counters, counterId);
-                if (RecordingPos.isActive(counters, counterId, recordingId)) return recordingId;
-            } else if (recordingIdHint >= 0 || System.nanoTime() >= nextCatalogProbe) {
+                final long sessionRecordingId = RecordingPos.getRecordingId(counters, counterId);
+                if (sessionRecordingId >= 0 &&
+                    (recordingIdHint < 0 || sessionRecordingId == recordingIdHint) &&
+                    RecordingPos.isActive(counters, counterId, sessionRecordingId)) {
+                    return sessionRecordingId;
+                }
+            }
+            if (recordingIdHint >= 0) {
+                counterId = RecordingPos.findCounterIdByRecording(counters, recordingIdHint, archive.archiveId());
+                if (counterId >= 0 && RecordingPos.isActive(counters, counterId, recordingIdHint)) {
+                    return recordingIdHint;
+                }
+            }
+            if (System.nanoTime() >= nextCatalogProbe) {
                 final long discovered = recordingIdHint >= 0 ? recordingIdHint : findRecordingId(archive, publication);
                 if (discovered >= 0) {
                     /* A catalog entry is only a hint. A stopped entry can be found while
@@ -391,11 +411,9 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                          * must surface immediately. */
                     }
                 }
-                if (recordingIdHint < 0) {
-                    nextCatalogProbe = System.nanoTime() + catalogProbeDelayNanos;
-                    catalogProbeDelayNanos = Math.min(
-                            configuration.retryPolicy().catalogProbeMaxDelayNanos(), catalogProbeDelayNanos * 2L);
-                }
+                nextCatalogProbe = System.nanoTime() + catalogProbeDelayNanos;
+                catalogProbeDelayNanos = Math.min(
+                        configuration.retryPolicy().catalogProbeMaxDelayNanos(), catalogProbeDelayNanos * 2L);
             }
             if (ReplicationRetry.expired(deadline)) {
                 throw new IllegalStateException("Aeron archive recording did not start before timeout (recordingId=%s, session=%s, channel=%s)".formatted(recordingIdHint, publication.sessionId(), publication.channel()));
@@ -576,8 +594,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         return this.publisher.isFailed();
     }
 
-        /// Suspends recording while complete historical segments are purged, then
-    /// extends the same recording at the exact stop position before writes resume.
+    /// Suspends recording while complete historical segments are purged, then
+    /// extends the same recording from a fresh publication at its exact stop position.
     /// The caller must hold the write coordinator monitor for the complete call;
     /// otherwise a publication offer could land in the stop/extend gap.
     ///
@@ -591,6 +609,7 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         final long recordingId = this.recordingId();
         if (recordingId < 0) throw new IllegalStateException("cannot determine active Aeron recording identity");
         boolean stopped = getStopPosition(this.archive, recordingId) >= 0;
+        boolean oldPublicationClosed = false;
         Throwable operationFailure = null;
         long deleted = 0L;
         try {
@@ -599,6 +618,8 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                 awaitStopped(this.archive, recordingId, this.configuration);
                 stopped = true;
             }
+            this.publication.close();
+            oldPublicationClosed = true;
             deleted = purgeSegments(this.archive, recordingId, newStartPosition);
         } catch (final RuntimeException | Error failure) {
             operationFailure = failure;
@@ -614,21 +635,30 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                     }
                 }
             }
-            if (stopped) {
+            if (stopped && oldPublicationClosed) {
                 try {
                     final long stopPosition = getStopPosition(this.archive, recordingId);
                     if (stopPosition < 0) {
                         throw new IllegalStateException("Aeron recording has no stop position after maintenance");
                     }
-                    final String extensionChannel = new ChannelUriStringBuilder(this.publication.channel())
-                            .sessionId(this.publication.sessionId())
-                            .initialPosition(stopPosition, this.publication.initialTermId(),
-                                    this.publication.termBufferLength())
-                            .build();
-                    extendRecording(this.archive, recordingId, extensionChannel,
-                            this.publication.streamId(), this.sourceLocation);
+                    final ExclusivePublication resumedPublication = extendPublication(
+                            this.archive, recordingId, this.publication.streamId(),
+                            this.configuration, this.sourceLocation);
+                    try {
+                        this.publisher.rebindPublication(resumedPublication,
+                                position -> awaitRecorded(this.archive, resumedPublication, recordingId,
+                                        this.configuration, position));
+                    } catch (final RuntimeException | Error failure) {
+                        try {
+                            resumedPublication.close();
+                        } catch (final RuntimeException | Error closeFailure) {
+                            failure.addSuppressed(closeFailure);
+                        }
+                        throw failure;
+                    }
+                    this.publication = resumedPublication;
                     this.recordingCounterId.set(-1);
-                    awaitRecordingStarted(this.archive, this.publication, recordingId, this.configuration);
+                    this.recordingStopped = false;
                 } catch (final RuntimeException | Error resumeFailure) {
                     this.publisher.failClosed();
                     if (operationFailure == null) operationFailure = resumeFailure;

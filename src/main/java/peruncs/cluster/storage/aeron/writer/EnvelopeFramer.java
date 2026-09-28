@@ -144,8 +144,9 @@ final class EnvelopeFramer implements AutoCloseable {
 
     /// Computes the CRC32C of the populated prefix of a reusable buffer array
     /// without offering anything. Used for fence metadata and failure evidence.
-    static int computeDataCrc(final ByteBuffer[] sources, final int sourceCount, final int length) {
-        final CRC32C crc = new CRC32C();
+    static int computeDataCrc(final ByteBuffer[] sources, final int sourceCount, final int length,
+                              final CRC32C crc) {
+        crc.reset();
         int remaining = length;
         for (int sourceIndex = 0; sourceIndex < sourceCount; sourceIndex++) {
             final ByteBuffer sourceBuffer = sources[sourceIndex];

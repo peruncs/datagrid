@@ -5,6 +5,7 @@ import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.ReplicationUnavailableException;
+import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
@@ -262,6 +263,33 @@ class AeronReplicationPublisherTest {
         }
     }
 
+    /// A direct publisher also recovers after an acknowledged ABORT.
+    @Test
+    void lowLevelPrepareKeepsPublisherReadyAfterRecordedAbort() {
+        final AtomicBoolean rejectData = new AtomicBoolean(true);
+        final AeronReplicationConfiguration configuration = configuration(5_000_000L);
+        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> {
+                    final var envelope = AeronReplicationEnvelope.decode(buffer, offset, length);
+                    if (envelope.kind() == AeronReplicationEnvelope.Kind.STORE_BINARY && rejectData.get()) {
+                        return Publication.BACK_PRESSURED;
+                    }
+                    if (envelope.kind() == AeronReplicationEnvelope.Kind.ABORT) rejectData.set(false);
+                    return length;
+                }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            assertThrows(WriteRejectedException.class,
+                    () -> publisher.prepareTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
+            assertFalse(publisher.isFailed());
+            assertEquals(1L, publisher.nextSequence());
+            try (final var next = publisher.prepareTransaction(null,
+                    new ByteBuffer[]{ByteBuffer.wrap(new byte[]{2})})) {
+                assertEquals(1L, next.sequence());
+                publisher.commit(next);
+            }
+            assertFalse(publisher.isFailed());
+        }
+    }
+
         /// Verifies publisher shutdown aborts an outstanding token and invokes its abort callback.
     @Test
     void publisherShutdownInvokesPendingAbortCallback() {
@@ -395,7 +423,7 @@ class AeronReplicationPublisherTest {
                     return 1;
                 },
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            assertThrows(IllegalArgumentException.class, () -> publisher.prepareTransaction(
+            assertThrows(WriteRejectedException.class, () -> publisher.prepareTransaction(
                     new byte[300], new ByteBuffer[]{ByteBuffer.wrap(new byte[300])}));
             assertEquals(0, offers.get());
         }
@@ -523,6 +551,22 @@ class AeronReplicationPublisherTest {
             assertFalse(publisher.hasSequenceReservation());
             assertEquals(reserved, prepared.sequence());
             publisher.commit(prepared);
+        }
+    }
+
+    @Test
+    void transactionMetadataResetsItsReusedChecksum() {
+        final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            final byte[] first = {3, 4};
+            final byte[] second = {9};
+            assertEquals(AeronReplicationEnvelope.crc32c(first),
+                    publisher.transactionMetadata(new ByteBuffer[]{ByteBuffer.wrap(first)}, 1).crc32c());
+            assertEquals(AeronReplicationEnvelope.crc32c(second),
+                    publisher.transactionMetadata(new ByteBuffer[]{ByteBuffer.wrap(second)}, 1).crc32c());
+            assertEquals(AeronReplicationEnvelope.crc32c(new byte[0]),
+                    publisher.transactionMetadata(new ByteBuffer[0], 0).crc32c());
         }
     }
 

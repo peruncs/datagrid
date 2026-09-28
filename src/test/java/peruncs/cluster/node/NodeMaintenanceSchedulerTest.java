@@ -1,15 +1,21 @@
 package peruncs.cluster.node;
 
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.api.BackupInfo;
+import peruncs.cluster.api.BackupSlot;
+import peruncs.cluster.errors.BackupBusyException;
 import peruncs.cluster.node.backup.StorageBackupTaskExecutor;
 import peruncs.cluster.node.store.StorageLimitGate;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.CountDownLatch;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -289,17 +295,17 @@ class NodeMaintenanceSchedulerTest {
         private final AtomicReference<Boolean> running = new AtomicReference<>(false);
 
         @Override
-        public StorageBackupTaskExecutor.BackupStartResult runBackup(final boolean useManualSlot) {
+        public CompletableFuture<BackupInfo> runBackup(final BackupSlot slot) {
             this.backupRequests.incrementAndGet();
-            this.manualSlot.set(useManualSlot);
+            this.manualSlot.set(slot == BackupSlot.MANUAL);
             if (this.rejectWithoutRunning.get()) {
-                return StorageBackupTaskExecutor.BackupStartResult.BUSY;
+                return CompletableFuture.failedFuture(new BackupBusyException("busy"));
             }
             if (this.busy.get()) {
                 this.running.set(true);
-                return StorageBackupTaskExecutor.BackupStartResult.BUSY;
+                return CompletableFuture.failedFuture(new BackupBusyException("busy"));
             }
-            return StorageBackupTaskExecutor.BackupStartResult.STARTED;
+            return CompletableFuture.completedFuture(new BackupInfo(UUID.randomUUID(), Instant.now(), -1L, false));
         }
 
         @Override
@@ -308,7 +314,22 @@ class NodeMaintenanceSchedulerTest {
         }
 
         @Override
+        public boolean isBackupExecuting() {
+            return this.running.get();
+        }
+
+        @Override
         public Throwable backupFailure() {
+            return null;
+        }
+
+        @Override
+        public long lastSuccessEpochMillis() {
+            return -1L;
+        }
+
+        @Override
+        public Throwable maintenanceFailure() {
             return null;
         }
 

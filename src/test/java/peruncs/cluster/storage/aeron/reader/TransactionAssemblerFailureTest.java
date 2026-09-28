@@ -1,17 +1,21 @@
 package peruncs.cluster.storage.aeron.reader;
 
 import org.agrona.concurrent.UnsafeBuffer;
+import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.errors.CorruptReplicationDataException;
+import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
-import peruncs.cluster.errors.CorruptReplicationDataException;
-import peruncs.cluster.errors.ReseedRequiredException;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -221,6 +225,51 @@ class TransactionAssemblerFailureTest {
         } finally {
             assembler.dispose();
         }
+    }
+
+    @Test
+    void dictionaryAndDataBuffersUseTheReceiverReleasePath() {
+        final AtomicInteger allocations = new AtomicInteger();
+        final AtomicInteger releases = new AtomicInteger();
+        final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
+            @Override
+            public ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
+                allocations.incrementAndGet();
+                return XMemory.allocateDirectNative(minimumCapacity);
+            }
+
+            @Override
+            public void releaseNativeBuffer(final ByteBuffer buffer) {
+                releases.incrementAndGet();
+                XMemory.deallocateDirectByteBuffer(buffer);
+            }
+
+            @Override
+            public void receiveData(final Binary value) {
+            }
+
+            @Override
+            public void receiveTypeDictionary(final String value) {
+                assertEquals("type", value);
+            }
+        };
+        final TransactionAssembler assembler = assembler(receiver);
+        final byte[] dictionary = "type".getBytes(StandardCharsets.UTF_8);
+        final byte[] data = {1, 2, 3};
+        try {
+            accept(assembler, AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 0,
+                    AeronReplicationEnvelope.Kind.TYPE_DICTIONARY, dictionary.length, 0, 1, 0, 0, dictionary));
+            accept(assembler, AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 0,
+                    AeronReplicationEnvelope.Kind.STORE_BINARY, data.length, 0, 1, 0, 0, data));
+            assertEquals(2, allocations.get());
+            accept(assembler, AeronReplicationEnvelopeTestSupport.encode(CLUSTER, EPOCH, 1L, 0,
+                    AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
+                    AeronReplicationEnvelope.crc32c(data), new byte[0]));
+            assertEquals(2, releases.get(), "dictionary and borrowed data buffers return through receiver");
+        } finally {
+            assembler.dispose();
+        }
+        assertEquals(allocations.get(), releases.get(), "disposing the assembler must not leak native buffers");
     }
 
     /// Proves a zero wire nonce is rejected by the canonical constructor.

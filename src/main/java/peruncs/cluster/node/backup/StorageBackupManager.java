@@ -1,6 +1,8 @@
 package peruncs.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.cluster.api.BackupInfo;
+import peruncs.cluster.api.BackupSlot;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
 import peruncs.cluster.storage.ReplicationCursor;
@@ -8,7 +10,9 @@ import peruncs.cluster.storage.ReplicationRetry;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -25,7 +29,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// itself does not queue or lock, so callers must sequence backup requests
 /// through the task executor.
 public interface StorageBackupManager {
-        /// Creates a backup manager.
+    /// Creates a backup manager.
     ///
     /// @param storageConnection    Store connection
     /// @param maxBackupCount       maximum backup count
@@ -51,7 +55,7 @@ public interface StorageBackupManager {
         );
     }
 
-        /// Creates a storage backup.
+    /// Creates a storage backup.
     ///
     /// Backups are single-flight at [StorageBackupTaskExecutor]. A failed
     /// reader, or a reader stop stuck in an unresolved state, aborts the
@@ -69,9 +73,9 @@ public interface StorageBackupManager {
     /// compatible backup older than the one just published, or is skipped for
     /// the manual slot.
     ///
-    /// @param useManualSlot whether to use the manual slot
+    /// @param slot scheduled or manual retention slot
     /// @throws NodeException if backup creation or publication fails
-    void createStorageBackup(boolean useManualSlot) throws NodeException;
+    BackupInfo createStorageBackup(BackupSlot slot) throws NodeException;
 
         /// Lists available backups.
     ///
@@ -79,7 +83,7 @@ public interface StorageBackupManager {
     /// @throws NodeException if listing fails
     List<BackupMetadata> listBackups() throws NodeException;
 
-        /// Returns the failure of the most recent post-publication maintenance
+    /// Returns the failure of the most recent post-publication maintenance
     /// step (resolving retention, pruning, or log retention), if any.
     ///
     /// The value is reset when the next backup reaches its maintenance phase
@@ -88,41 +92,39 @@ public interface StorageBackupManager {
     /// backup has run yet.
     ///
     /// @return last maintenance failure, or `null`
-    default Throwable maintenanceFailure() {
-        return null;
-    }
+    Throwable maintenanceFailure();
 
-        /// Deletes one backup.
+    /// Deletes one backup.
     ///
     /// @param backup backup to delete
     /// @throws NodeException if deletion fails
     void deleteBackup(BackupMetadata backup) throws NodeException;
 
-        /// Restores one backup.
+    /// Restores one backup.
     ///
     /// @param storageDestinationParentPath destination parent
     /// @param backup                       backup to restore
     /// @throws NodeException if restore fails
     void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeException;
 
-        /// Reports whether user storage exists.
+    /// Reports whether user storage exists.
     ///
     /// @return `true` when user storage exists
     /// @throws NodeException if the check fails
     boolean hasUserUploadedStorage() throws NodeException;
 
-        /// Restores user storage.
+    /// Restores user storage.
     ///
     /// @param storageDestinationParentPath destination parent
     /// @throws NodeException if restore fails
     void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeException;
 
-        /// Deletes user storage.
+    /// Deletes user storage.
     ///
     /// @throws NodeException if deletion fails
     void deleteUserUploadedStorage() throws NodeException;
 
-        /// Implements the stop, backup, retention, and resume sequence.
+    /// Implements the stop, backup, retention, and resume sequence.
     class Default implements StorageBackupManager {
         private static final System.Logger LOGGER = System.getLogger(StorageBackupManager.class.getName());
         private static final long STOP_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(1);
@@ -155,7 +157,9 @@ public interface StorageBackupManager {
         }
 
         @Override
-        public void createStorageBackup(final boolean useManualSlot) throws NodeException {
+        public BackupInfo createStorageBackup(final BackupSlot slot) throws NodeException {
+            Objects.requireNonNull(slot, "slot");
+            final boolean useManualSlot = slot == BackupSlot.MANUAL;
             LOGGER.log(System.Logger.Level.TRACE, "Creating new storage backup");
 
             final List<BackupMetadata> backups = this.listBackups();
@@ -199,6 +203,9 @@ public interface StorageBackupManager {
                 final var localIdentity = BackupMetadata.Identity.of(cursor);
                 this.backend.createBackup(this.storageConnection, cursor, newBackup);
                 this.runMaintenance(backups, useManualSlot, newBackup, localIdentity);
+                return new BackupInfo(newBackup.backupId(),
+                        Instant.ofEpochMilli(newBackup.timestamp()),
+                        newBackup.logicalSequence(), useManualSlot);
             } catch (final RuntimeException | Error failure) {
                 operationFailure = failure;
                 throw failure;

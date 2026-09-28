@@ -18,6 +18,7 @@ import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
 
@@ -55,7 +56,7 @@ class WriterIndexValidationTest {
             assertTrue(probe.hookRan.get(), "the startup check must run the validation hook");
 
             probe.hookRan.set(false);
-            assertThrows(IllegalArgumentException.class,
+            assertThrows(WriteRejectedException.class,
                     () -> probe.target.write(binary()),
                     "the commit path must reject a direct external registration");
             assertTrue(probe.hookRan.get(), "the commit path must run the validation hook");
@@ -84,7 +85,7 @@ class WriterIndexValidationTest {
         try (Probe probe = probe(rootsViewConnection(root))) {
             assertThrows(IllegalArgumentException.class, probe.target::validateWriterState,
                     "the startup check must reject a direct external registration");
-            assertThrows(IllegalArgumentException.class, () -> probe.target.write(binary()),
+            assertThrows(WriteRejectedException.class, () -> probe.target.write(binary()),
                     "the commit path must reject a direct external registration");
             assertTrue(probe.localWrites.isEmpty(), "a rejected transaction must not reach the local target");
             assertTrue(probe.publications.isEmpty(), "a rejected transaction must not reach publication");
@@ -137,6 +138,33 @@ class WriterIndexValidationTest {
         }
     }
 
+    @Test
+    void plainEntityCommitSkipsTheRootGraphScan() {
+        final AtomicBoolean validationRan = new AtomicBoolean();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
+                .build();
+        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
+                UUID.randomUUID(), 1, 0);
+        final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
+                publisher, (state, sequence, length, chunks, crc, position) -> {
+        });
+        try {
+            final List<String> localWrites = new ArrayList<>();
+            final AeronStorageBinaryReplicationTarget target = new AeronStorageBinaryReplicationTarget(
+                    recordingTarget(localWrites), coordinator,
+                    new AeronStorageBinaryReplicationTarget.TargetCallbacks(null, ignored -> {
+                    }, () -> true, () -> validationRan.set(true), ignored -> false));
+
+            assertDoesNotThrow(() -> target.write(binary()));
+            assertFalse(validationRan.get());
+            assertEquals(List.of("local"), localWrites);
+        } finally {
+            coordinator.dispose();
+        }
+    }
+
     private static Binary binary() {
         return ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{7}));
     }
@@ -178,16 +206,13 @@ class WriterIndexValidationTest {
                     publisher, (state, sequence, length, chunks, crc, position) -> {
             });
             this.target = new AeronStorageBinaryReplicationTarget(
-                    recordingTarget(this.localWrites),
-                    this.coordinator,
-                    null,
-                    this.committed::set,
-                    () -> true,
-                    () ->
-                    {
-                        this.hookRan.set(true);
-                        ClusterStoreIndexes.validateStorageRoots(connection);
-                    });
+                    recordingTarget(this.localWrites), this.coordinator,
+                    new AeronStorageBinaryReplicationTarget.TargetCallbacks(
+                            null, this.committed::set, () -> true,
+                            () -> {
+                                this.hookRan.set(true);
+                                ClusterStoreIndexes.validateStorageRoots(connection);
+                            }, ignored -> true));
         }
 
         @Override

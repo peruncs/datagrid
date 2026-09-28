@@ -7,6 +7,7 @@ import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageConnectionFoundation;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.errors.CorruptReplicationDataException;
+import peruncs.cluster.storage.index.EntityHeaders;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
@@ -50,16 +51,24 @@ final class StorageBinaryDataMaterializer {
         }
         final ObjectMaterializer materializer = manager == null ? null : this.objectMaterializer;
         if (materializer != null) materializer.clearCollected();
-        for (int index = offset; index < end; index++) {
-            final ByteBuffer buffer = buffers[index];
-            if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
-                throw new CorruptReplicationDataException("materializer requires direct buffers at position zero");
+        try {
+            for (int index = offset; index < end; index++) {
+                final ByteBuffer buffer = buffers[index];
+                if (buffer == null || !buffer.isDirect() || buffer.position() != 0) {
+                    throw new CorruptReplicationDataException("materializer requires direct buffers at position zero");
+                }
+                if (buffer.limit() == 0) continue;
+                EntityHeaders.validateFraming(buffer);
+                /* D-29 keeps Serializer's iterator as the materializer. PerunCS validates the
+                 * framing first; this upstream API still requires the direct-buffer address. */
+                final long address = getDirectByteBufferAddress(buffer);
+                if (materializer != null) {
+                    ITERATOR.iterateEntityRawData(address, address + buffer.limit(), materializer);
+                }
             }
-            if (buffer.limit() == 0) continue;
-            final long address = getDirectByteBufferAddress(buffer);
-            if (materializer != null) {
-                ITERATOR.iterateEntityRawData(address, address + buffer.limit(), materializer);
-            }
+        } catch (final RuntimeException | Error failure) {
+            if (materializer != null) materializer.clearCollected();
+            throw failure;
         }
         if (materializer == null) return;
         if (this.loader == null) {

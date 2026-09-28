@@ -5,6 +5,8 @@ import io.aeron.ExclusivePublication;
 import org.agrona.BufferUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import peruncs.cluster.errors.ReplicationUnavailableException;
+import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.errors.WriterFencedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -17,6 +19,7 @@ import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.LongUnaryOperator;
 import java.util.function.Supplier;
+import java.util.zip.CRC32C;
 
 /// Publishes one ordered transaction at a time.
 ///
@@ -25,8 +28,8 @@ import java.util.function.Supplier;
 /// Every transaction reuses the same direct staging buffer; publication ownership
 /// prevents a second transaction from writing it while one is pending.
 final class AeronReplicationPublisher implements AutoCloseable {
-    private final AeronOfferRetryer offerer;
-    private final int maxMessageLength;
+    private volatile AeronOfferRetryer offerer;
+    private volatile int maxMessageLength;
     private final AeronReplicationConfiguration configuration;
     private final UUID clusterId;
     private final long wireNonce;
@@ -36,9 +39,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
      * keeps the neutral default; production writers always claim the lease. */
     private volatile long fencingToken = 1L;
     private boolean fencingTokenClaimed;
-    private final AutoCloseable closeAction;
-    private final LongUnaryOperator commitPositionAwaiter;
+    private volatile AutoCloseable closeAction;
+    private volatile LongUnaryOperator commitPositionAwaiter;
     private final ByteBuffer framingStorage;
+    /* transactionMetadata is synchronized, so its CRC accumulator is confined
+     * to one publisher call at a time and can be reset for each transaction. */
+    private final CRC32C metadataCrc = new CRC32C();
     private final AtomicBoolean framingStorageFreed = new AtomicBoolean();
     /* All sequence operations are protected by this publisher's monitor. Keeping
      * the value primitive avoids an allocation and makes the ownership rule
@@ -168,6 +174,21 @@ final class AeronReplicationPublisher implements AutoCloseable {
         };
     }
 
+    /// Rebinds an idle publisher after its Archive recording is extended.
+    synchronized void rebindPublication(final ExclusivePublication publication,
+                                        final LongUnaryOperator commitPositionAwaiter) {
+        Objects.requireNonNull(publication, "publication");
+        Objects.requireNonNull(commitPositionAwaiter, "commitPositionAwaiter");
+        this.ensureOpen();
+        if (this.pendingTransaction != null || this.preparing || this.terminalOperation) {
+            throw new IllegalStateException("cannot replace Aeron publication while a transaction is active");
+        }
+        this.maxMessageLength = actualMaxMessageLength(publication, this.configuration);
+        this.offerer = new AeronOfferRetryer(offerer(publication), this.configuration);
+        this.closeAction = publication;
+        this.commitPositionAwaiter = commitPositionAwaiter;
+    }
+
     private static int actualMaxMessageLength(final ExclusivePublication publication,
                                               final AeronReplicationConfiguration configuration) {
         Objects.requireNonNull(publication, "publication");
@@ -230,7 +251,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
             final int dictionaryLength = dictionary == null ? 0 : dictionary.length;
             final long totalDataLength = totalRemaining(dataBuffers, bufferCount);
             if (totalDataLength > (long) this.configuration.maxTransactionBytes() - dictionaryLength) {
-                throw new IllegalArgumentException("Store transaction exceeds maxTransactionBytes");
+                throw new WriteRejectedException("Store transaction exceeds maxTransactionBytes");
             }
             dataLength = (int) totalDataLength;
             sequence = this.nextSequence;
@@ -310,16 +331,11 @@ final class AeronReplicationPublisher implements AutoCloseable {
             /* Do not allocate, compute a checksum, or offer a compensating marker
              * while the JVM is already in a fatal Error path.  The durable fence (when
              * one exists) remains unresolved and therefore forces fail-closed recovery. */
+            final PreparedTransaction pending;
             synchronized (this) {
-                final PreparedTransaction pending = this.pendingTransaction;
-                if (pending != null) {
-                    pending.terminal = true;
-                    this.pendingTransaction = null;
-                }
-                if (this.reservedSequence == sequence) this.reservedSequence = -1L;
-                this.preparing = false;
-                this.failed = true;
+                pending = this.pendingTransaction;
             }
+            this.failPendingTransaction(pending, sequence);
             throw failure;
         } catch (final RuntimeException failure) {
             /* AFTER_PREPARE can throw after the token has become the pending
@@ -337,18 +353,44 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 this.failPendingTransaction(pending, sequence);
                 throw failure;
             }
+            long abortPosition = -1L;
+            boolean abortRecorded = false;
             try {
                 // Clear any transaction prefix that reached the log. If the publication
                 // itself is gone this fails as well, and recovery must retain the tail.
                 if (framer != null) {
-                    framer.offerMarker(AeronReplicationEnvelope.Kind.ABORT, dataLength, dataChunks, 0);
+                    final long offeredPosition = framer.offerMarker(
+                            AeronReplicationEnvelope.Kind.ABORT, dataLength, dataChunks, 0);
+                    abortPosition = this.commitPositionAwaiter.applyAsLong(offeredPosition);
+                    abortRecorded = true;
                 }
-                synchronized (this) {
-                    this.failed = true;
-                }
-                CrashHook.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
             } catch (final RuntimeException abortFailure) {
                 failure.addSuppressed(abortFailure);
+            } catch (final Error abortFailure) {
+                this.failPendingTransaction(pending, sequence);
+                abortFailure.addSuppressed(failure);
+                throw abortFailure;
+            }
+            if (abortRecorded) {
+                try {
+                    CrashHook.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
+                    if (pending != null) pending.invokeAbortAction(abortPosition);
+                } catch (final RuntimeException | Error cleanupFailure) {
+                    this.failPendingTransaction(pending, sequence);
+                    cleanupFailure.addSuppressed(failure);
+                    throw cleanupFailure;
+                }
+                this.detachPending(pending, sequence, !(failure instanceof ReplicationUnavailableException));
+                if (failure instanceof ReplicationUnavailableException) {
+                    throw WriteRejectedException.afterRecordedAbort(
+                            "Aeron prepare failed and its ABORT was recorded", failure, abortPosition);
+                }
+                throw failure;
+            }
+            try {
+                CrashHook.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
+            } catch (final RuntimeException | Error hookFailure) {
+                failure.addSuppressed(hookFailure);
             }
             this.failPendingTransaction(pending, sequence);
             throw failure;
@@ -362,6 +404,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
     /// marker, the reserved sequence is released, and the publisher fails
     /// closed for the rest of the process.
     private void failPendingTransaction(final PreparedTransaction pending, final long sequence) {
+        this.detachPending(pending, sequence, true);
+    }
+
+    /// Detaches a finished preparation and optionally latches the publisher.
+    private void detachPending(
+            final PreparedTransaction pending, final long sequence, final boolean failClosed) {
         synchronized (this) {
             if (pending != null) {
                 pending.terminal = true;
@@ -369,7 +417,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
             }
             if (this.reservedSequence == sequence) this.reservedSequence = -1L;
             this.preparing = false;
-            this.failed = true;
+            if (failClosed) this.failed = true;
         }
     }
 
@@ -496,11 +544,11 @@ final class AeronReplicationPublisher implements AutoCloseable {
     synchronized TransactionMetadata transactionMetadata(final ByteBuffer[] dataBuffers, final int bufferCount) {
         final long length = totalRemaining(dataBuffers, bufferCount);
         if (length > this.configuration.maxTransactionBytes()) {
-            throw new IllegalArgumentException("Store transaction exceeds maxTransactionBytes");
+            throw new WriteRejectedException("Store transaction exceeds maxTransactionBytes");
         }
         final int dataLength = (int) length;
         return new TransactionMetadata(dataLength, this.chunkCount(dataLength),
-                EnvelopeFramer.computeDataCrc(dataBuffers, bufferCount, dataLength));
+                EnvelopeFramer.computeDataCrc(dataBuffers, bufferCount, dataLength, this.metadataCrc));
     }
 
         /// Returns the maximum combined dictionary and Store-binary size.

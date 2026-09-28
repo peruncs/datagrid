@@ -12,7 +12,7 @@ import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
-/// Replication transport for one Data Grid cluster instance.
+/// Replication transport for one PerunCS Cluster node.
 ///
 /// The transport supplies the publisher, reader, position, health, and
 /// retention implementations; [#noOp()] covers nodes with replication
