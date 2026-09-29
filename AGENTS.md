@@ -6,40 +6,41 @@ For code intelligence (symbols, call chains, architecture, impact), use the code
 
 ## General code rules - items to investigate or fix:
 
-1. Use all modern Java features for the java version specified in the build framework, including preview features such as: Virtual threads, Patern matching, ScopedValue, StructuredTaskScope, LazyConstant. Do not use ThreadLocal.
+1. Use all modern Java features for the java version specified in the build framework, including preview features such as: Virtual threads, Pattern matching (deconstruction)  in case statements, ifs, ScopedValue, StructuredTaskScope, LazyConstant. Do not use ThreadLocal.
 2. Follow good OOP design - map the Java entities map to expected APIs and domain concepts. Are Java entities and methods properly named, reflected
    on their purpose?
 3. Prefer java records, immutable entities, modern functional style java code. Use Optional only for method input params.
 4. Functional gaps and architectural design issues.
 5. Opportunities to further simplify both the design and the code, make it DRY, cleaner and re-use as much as possible!
-6. Signs of overengineering. Ask if this feature/code/functionality is really needed, remove or simplify it.
-7. Ask yourself - how would you have approached or implemented this differently - and pursue the better approach?
-8. Single-use methods that could be inlined. Java entities with 1-2 static methods that should be folded into stronger entities.
-9. Proper use of AutoClosable with try/catch resources managemnt in Java. Exceptiong handlig in genral, sallowed exceptions.
-10. Minimal Java entinties and methods visibility surface (do not use "public" without reason)
-11. Proper package structure -  naming, avoid unneccessry cross-package placement,  unnecessary public visibility. Add package-info.java javadocs. Do not throw everything in one big "god" package.
-12. Beware of Java "god" obects/interafaces/records. When possible, break them into smaller focused entities, that are easier to junit test and reason about.
-13. Avoid Java reflection unless absolutely necessary.
-14. Javadocs at all levels - module, package and individual Java entities. Use simple narrative suitable for humans, less jargon, first sentence is the most important.
-15. Avoid using fully qualified names FQN where sesnible imports can make the code more compact and better to read.
-16. Avoid methods with more than 5 arguments - consider replacing them Java record inputs, especially for public apis. But avoid watch out for GC pressure and memory unefficiencies, if the code is on the hot path!
-17. Conside Builder pattern for records and classes with complex structure and constructors,  and many fields, to make the code less error prone and more readable.
-18. An interface with staic methods only should be converted to a final class with private construtor and static methods.
-19. Any security gaps.
-20. Any performance issues.
-21. Any threading, races, deadlocks, TOCTOU and data corruption issues.
-22. Robustness in face of network issues, configurable retrys.
-23. Proper exception design, handling, propagation and reporting.
-24. Correct and informative javadocs, including javadocs for packages (package-info.java) and modules (module-info.java)
-25. Add ample well-documented junit test and simulation coverage.
-26. Have we looked at the Aeron examples and cookbook for best practices? Have you looked at the Eclipse Store /Serializer tests? Does the implementation follow them?
-27. Prefer use  of Agrona and Eclipse Serializer and Eclipse Store thread utils (LockedExecutor, StripeLockedExecutor) over synchronized.
-28. Cluster constraints are strictly obeyed: 1-writer/N-reader nodes. No node authentication features, no transport level encryption.
-29. Memory inefficiencies when packing data in Aeron and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want to avoid allocating objects (even temporary) on the JVM heap.
-30. Avoid using unsafe/internal jdk apis for accessing off-the-heap memory. 
-31. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
-32. Correctness of the  cluster code
-33. Cluster performance - liveliness, throughput, threading.
+6. Remove unnecessary layers, abstractions and wrappers.
+7. Signs of overengineering. Ask if this feature/code/functionality is really needed, remove or simplify it.
+8. Ask yourself - how would you have approached or implemented this differently - and pursue the better approach?
+9. Single-use methods that could be inlined. Java entities with 1-2 static methods that should be folded into stronger entities.
+10. Proper use of AutoClosable with try/catch resources managemnt in Java. Exceptiong handlig in genral - unnecessary wrapping,  swallowed exceptions.
+11. Minimal Java entinties and methods visibility surface (do not use "public" without reason)
+12. Proper package structure -  naming, avoid unneccessry cross-package placement,  unnecessary public visibility. Add package-info.java javadocs. Do not throw everything in one big "god" package.
+13. Beware of Java "god" obects/interafaces/records. When possible, break them into smaller focused entities, that are easier to junit test and reason about.
+14. Avoid Java reflection unless absolutely necessary.
+15. Javadocs at all levels - module, package and individual Java entities. Use simple narrative suitable for humans, less jargon, first sentence is the most important.
+16. Avoid using fully qualified names FQN where sesnible imports can make the code more compact and better to read.
+17. Avoid methods with more than 5 arguments - consider replacing them Java record inputs, especially for public apis. But avoid watch out for GC pressure and memory unefficiencies, if the code is on the hot path!
+18. Conside Builder pattern for records and classes with complex structure and constructors,  and many fields, to make the code less error prone and more readable.
+19. An interface with staic methods only should be converted to a final class with private construtor and static methods.
+20. Any security gaps.
+21. Any performance issues.
+22. Any threading, races, deadlocks, TOCTOU and data corruption issues.
+23. Robustness in face of network issues, configurable retrys.
+24. Proper exception design, handling, propagation and reporting.
+25. Correct and informative javadocs, including javadocs for packages (package-info.java) and modules (module-info.java)
+26. Add ample well-documented junit test and simulation coverage.
+27. Have we looked at the Aeron examples and cookbook for best practices? Have you looked at the Eclipse Store /Serializer tests? Does the implementation follow them?
+28. Prefer use  of Agrona and Eclipse Serializer and Eclipse Store thread utils (LockedExecutor, StripeLockedExecutor) over synchronized.
+29. Cluster constraints are strictly obeyed: 1-writer/N-reader nodes. No node authentication features, no transport level encryption.
+30. Memory inefficiencies when packing data in Aeron and Eclipse Serializer. Both formats use memory mapped files/ off-the-heap apis, so we want to avoid allocating objects (even temporary) on the JVM heap.
+31. Avoid using unsafe/internal jdk apis for accessing off-the-heap memory. 
+32. Make sure embedded Lucene and JVector indexes are tested and part of the implementation.
+33. Correctness of the  cluster code
+34. Cluster performance - liveliness, throughput, threading.
 
 
 ### If asked for review only
